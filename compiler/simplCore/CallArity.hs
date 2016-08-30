@@ -11,6 +11,8 @@ import VarSet
 import VarEnv
 import DynFlags ( DynFlags )
 
+import Data.List (mapAccumL, mapAccumR)
+
 import BasicTypes
 import CoreSyn
 import Id
@@ -400,23 +402,29 @@ the case for Core!
 -- Main entry point
 
 callArityAnalProgram :: DynFlags -> CoreProgram -> CoreProgram
-callArityAnalProgram _dflags binds = binds'
-  where
-    (_, binds') = callArityTopLvl [] emptyVarSet binds
+callArityAnalProgram _dflags binds = callArityTopLvl binds
 
 -- See Note [Analysing top-level-binds]
-callArityTopLvl :: [Var] -> VarSet -> [CoreBind] -> (CallArityRes, [CoreBind])
-callArityTopLvl exported _ []
-    = ( calledMultipleTimes $ (emptyUnVarGraph, mkVarEnv $ [(v, 0) | v <- exported])
-      , [] )
-callArityTopLvl exported int1 (b:bs)
-    = (ae2, b':bs')
+callArityTopLvl :: [CoreBind] -> [CoreBind]
+callArityTopLvl binds
+    = snd $ mapAccumR analyseBind exportedArityResult annotatedBinds
   where
-    int2 = bindersOf b
-    exported' = filter isExportedId int2 ++ exported
-    int' = int1 `addInterestingBinds` b
-    (ae1, bs') = callArityTopLvl exported' int' bs
-    (ae2, b')  = callArityBind (boringBinds b) ae1 int1 b
+    exported :: [Var]
+    annotatedBinds :: [(VarSet, CoreBind)]
+    ((exported, _), annotatedBinds) = mapAccumL annotate ([], emptyVarSet) binds
+
+    annotate :: ([Var], VarSet) -> CoreBind -> (([Var], VarSet), (VarSet, CoreBind))
+    annotate (exported, interesting) b =
+      ( (filter isExportedId (bindersOf b) ++ exported, addInterestingBinds interesting b)
+      , (interesting, b) )
+
+    exportedArityResult :: CallArityRes
+    exportedArityResult =
+      calledMultipleTimes (emptyUnVarGraph, mkVarEnv [(v, 0) | v <- exported])
+
+    analyseBind :: CallArityRes -> (VarSet, CoreBind) -> (CallArityRes, CoreBind)
+    analyseBind ae (interesting, b) =
+      callArityBind (boringBinds b) ae interesting b
 
 
 callArityRHS :: CoreExpr -> CoreExpr
