@@ -401,12 +401,9 @@ the case for Core!
 
 -- Main entry point
 
-callArityAnalProgram :: DynFlags -> CoreProgram -> CoreProgram
-callArityAnalProgram _dflags binds = callArityTopLvl binds
-
 -- See Note [Analysing top-level-binds]
-callArityTopLvl :: [CoreBind] -> [CoreBind]
-callArityTopLvl binds
+callArityAnalProgram :: DynFlags -> CoreProgram -> CoreProgram
+callArityAnalProgram _dflags binds
     = snd $ mapAccumR analyseBind exportedArityResult annotatedBinds
   where
     exported :: [Var]
