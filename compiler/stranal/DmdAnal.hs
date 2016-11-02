@@ -1000,22 +1000,42 @@ type DFunFlag = Bool  -- indicates if the lambda being considered is in the
 notArgOfDfun :: DFunFlag
 notArgOfDfun = False
 
+-- ^ Holds all (mostly read-only) state of the analysis.
 data AnalEnv
   = AE { ae_dflags :: DynFlags
+       -- ^ Compiler flags
        , ae_sigs   :: SigEnv
-       , ae_virgin :: Bool    -- True on first iteration only
-                              -- See Note [Initialising strictness]
+       -- ^ @SigEnv@ storing signatures and top-level information for all
+       --   currently visible free function variables, according to the LetDn
+       --   rule. This contains the actual state of the analysis!
+       , ae_virgin :: Bool
+       -- ^ True on first iteration only
+       --   See Note [Initialising strictness]
        , ae_rec_tc :: RecTcChecker
+       -- ^ Used to track recursive product types when trying to unbox.
+       --   As such we have to carry it around and update it as we go, but it's
+       --   rather unimportant to the implementation.
+       --   See Note [Expanding newtypes and products] in types/TyCon.hs
        , ae_fam_envs :: FamInstEnvs
+       -- ^ See @FamInst@. Unimportant for comprehension.
+       --   Related to type families, exclusively needed for
+       --   calls to @deepSplitProductType_maybe@ and @findTypeShape@, which is
+       --   worker/wrapper related.
  }
 
-        -- We use the se_env to tell us whether to
-        -- record info about a variable in the DmdEnv
-        -- We do so if it's a LocalId, but not top-level
-        --
-        -- The DmdEnv gives the demand on the free vars of the function
-        -- when it is given enough args to satisfy the strictness signature
+{-| Stores a @StrictSig@ per @Var@ (which represent functions).
 
+If the the @StrictSig@ of a function is satisfied (e.g. if the function is given
+enough args), it gives
+
+    * the demand on free vars of the function in the @DmdEnv@
+
+    * the demand on its arguments as a @[Demand]@
+
+    * the @DmdResult@ of that call
+
+See also all notes and comments above the definition of @StrictSig@.
+-}
 type SigEnv = VarEnv (StrictSig, TopLevelFlag)
 
 instance Outputable AnalEnv where
