@@ -415,14 +415,13 @@ Call Arity considers everything that is not cheap (`exprIsCheap`) as a thunk.
 -- See Note [Analysing top-level-binds]
 callArityAnalProgram :: DynFlags -> CoreProgram -> CoreProgram
 callArityAnalProgram _dflags binds
-    = snd $ mapAccumR analyse_bind exp_arity_result tagged_binds
+    = snd $ mapAccumR analyse_bind (emptyUnVarGraph, mkVarEnv []) tagged_binds
   where
     -- In the following left fold, we identify @exported@ binders and @tag@ each
     -- binder with an @AnalEnv@ just prepared with interesting vars from outer
     -- binding groups.
-    exported :: [Var]
     tagged_binds :: [(AnalEnv, CoreBind)]
-    ((exported, _), tagged_binds) = mapAccumL tag ([], emptyAnalEnv) binds
+    tagged_binds = snd (mapAccumL tag emptyAnalEnv binds)
 
     -- This is more complicated than it needs to be, because we must not include
     -- the binding group itself as interesting. Why not actually?!
@@ -431,20 +430,11 @@ callArityAnalProgram _dflags binds
     --   be referenced. The boringness check relies on them however and in the
     --   recursive case, the binders are also interesting. Seems like a micro
     --   optimization.
-    tag :: ([Var], AnalEnv) -> CoreBind -> (([Var], AnalEnv), (AnalEnv, CoreBind))
-    tag (exported, env) b =
-        ( (filter isExportedId (bindersOf b) ++ exported, env_body)
-        , (env_body, b) )
+    tag :: AnalEnv -> CoreBind -> (AnalEnv, (AnalEnv, CoreBind))
+    tag env b =
+        (env_body, (env_body, b))
       where
         env_body = addInterestingBinds b env
-
-    -- We start with the assumption that all exported identifiers
-    -- call each other, including itself.
-    -- Is this necessary? Wouldn't it be enough to concentrate on interesting
-    -- variables?
-    exp_arity_result:: CallArityRes
-    exp_arity_result =
-      calledMultipleTimes (emptyUnVarGraph, mkVarEnv [(v, 0) | v <- exported])
 
     analyse_bind :: CallArityRes -> (AnalEnv, CoreBind) -> (CallArityRes, CoreBind)
     analyse_bind ae (env, b) =
@@ -582,7 +572,15 @@ callArityBind env ae_body (NonRec v rhs)
     -- See Note [Trimming arity]
     trimmed_arity = trimArity v safe_arity
 
-    (ae_rhs, rhs') = callArityAnal env trimmed_arity rhs
+    -- Mud
+    (binders, rhs_body) = collectBinders rhs
+    ((cocalled, arities), rhs_body') = callArityAnal env (length binders) rhs_body
+    ca_sig = CAS cocalled arities binders
+    env' = extendAnalEnv v' ca_sig env
+    -- /Mud
+
+    (ae_rhs, rhs') = pprTrace "callArityBind:NonRec:sig" (text "id:" <+> ppr v <+> text "sig:" <+> ppr ca_sig) $
+        callArityAnal env trimmed_arity rhs
 
 
     ae_rhs'| called_once     = ae_rhs
@@ -603,8 +601,22 @@ callArityBind env ae_body b@(Rec binds)
   = --(if True then
     --pprTrace "callArityBind:Rec"
     --         (vcat [ppr (Rec binds'), ppr ae_body, ppr (ae_interesting env), ppr ae_rhs]) else id) $
+    pprTrace "callArityBind:Rec:sigs"
+             (vcat (map (\(b, sig) -> text "id:" <+> ppr b <+> text "sig:" <+> ppr sig) sigs)) $
     (final_ae, Rec binds')
   where
+
+    -- Mud
+    sigs = map mk_sig binds
+
+    mk_sig (v, rhs) = (v, ca_sig)
+      where
+        (binders, rhs_body) = collectBinders rhs
+        ((cocalled, arities), rhs_body') = callArityAnal env (length binders) rhs_body
+        ca_sig = CAS cocalled arities binders
+        env' = extendAnalEnv v ca_sig env
+    -- /Mud
+
     -- See Note [Taking boring variables into account]
     any_boring = any (not . flip elemInteresting env) [ i | (i, _) <- binds]
 
@@ -728,11 +740,21 @@ data CallAritySig
   , cas_args :: [Var]
   }
 
+instance Outputable CallAritySig where
+  ppr (CAS cocalled arities args) =
+    text "args:" <+> ppr args
+    <+> text "co-calls:" <+> ppr cocalled
+    <+> text "arities:" <+> ppr arities
+
 emptyAnalEnv :: AnalEnv
 emptyAnalEnv = AE { ae_sigs = emptyVarEnv, ae_interesting = emptyVarSet }
 
 emptyArityRes :: CallArityRes
 emptyArityRes = (emptyUnVarGraph, emptyVarEnv)
+
+extendAnalEnv :: Id -> CallAritySig -> AnalEnv -> AnalEnv
+extendAnalEnv v sig env
+  = env { ae_sigs = extendVarEnv (ae_sigs env) v sig }
 
 setUninteresting :: Var -> AnalEnv -> AnalEnv
 setUninteresting v env
@@ -752,9 +774,6 @@ resDel v (g, ae) = (g `delNode` v, ae `delVarEnv` v)
 
 domRes :: CallArityRes -> UnVarSet
 domRes (_, ae) = varEnvDom ae
-
-extendSigsWithLam :: CallArityRes -> Id -> CallArityRes
-extendSigsWithLam = undefined
 
 -- In the result, find out the minimum arity and whether the variable is called
 -- at most once.
