@@ -404,13 +404,24 @@ the case for Core!
 -- See Note [Analysing top-level-binds]
 callArityAnalProgram :: DynFlags -> CoreProgram -> CoreProgram
 callArityAnalProgram _dflags binds
-    = snd $ mapAccumR analyse_bind (emptyUnVarGraph, mkVarEnv []) tagged_binds
+    = snd $ mapAccumR analyse_bind exp_arity_result tagged_binds
   where
+    -- Represents the fact that a CoreProgram is like a sequence of
+    -- nested lets, where the exports are returned in the inner-most let
+    -- as a tuple. As a result, all exported identifiers are handled as called
+    -- with each other, with arity 0.
+    -- Note that we could unify this with @callArityAnal@ by simply transforming
+    -- a @CoreProgram@ to said sequence of let-bindings.
+    exp_arity_result :: CallArityRes
+    exp_arity_result = calledMultipleTimes (emptyUnVarGraph, mkVarEnv [(v, 0) | v <- exportedVars])
+      where
+        exportedVars = binds >>= filter isExportedId . bindersOf
+
     -- In the following left fold, we identify @exported@ binders and @tag@ each
     -- binder with an @AnalEnv@ just prepared with interesting vars from outer
     -- binding groups.
     tagged_binds :: [(AnalEnv, CoreBind)]
-    tagged_binds = snd (mapAccumL tag emptyAnalEnv binds)
+    tagged_binds = tail (scanl tag (emptyAnalEnv, error "tagged_binds: unused") binds)
 
     -- This is more complicated than it needs to be, because we must not include
     -- the binding group itself as interesting. Why not actually?!
@@ -419,11 +430,9 @@ callArityAnalProgram _dflags binds
     --   be referenced. The boringness check relies on them however and in the
     --   recursive case, the binders are also interesting. Seems like a micro
     --   optimization.
-    tag :: AnalEnv -> CoreBind -> (AnalEnv, (AnalEnv, CoreBind))
-    tag env b =
-        (env_body, (env_body, b))
-      where
-        env_body = addInterestingBinds b env
+    --
+    tag :: (AnalEnv, CoreBind) -> CoreBind -> (AnalEnv, CoreBind)
+    tag (env, _) b = (addInterestingVars (bindersOf b) env, b)
 
     analyse_bind :: CallArityRes -> (AnalEnv, CoreBind) -> (CallArityRes, CoreBind)
     analyse_bind ae (env, b) =
@@ -514,7 +523,7 @@ callArityAnal env arity (Let bind e)
     --          (vcat [ppr v, ppr arity, ppr n, ppr final_ae ])
     (final_ae, Let bind' e')
   where
-    env_body = addInterestingBinds bind env
+    env_body = addInterestingVars (bindersOf bind) env
     (ae_body, e') = callArityAnal env_body arity e
     (final_ae, bind') = callArityBind env_body ae_body bind
 
@@ -523,18 +532,12 @@ callArityAnal env arity (Let bind e)
 isInteresting :: Var -> Bool
 isInteresting v = not $ null (typeArity (idType v))
 
-interestingBinds :: CoreBind -> [Var]
-interestingBinds = filter isInteresting . bindersOf
-
-boringBinds :: CoreBind -> VarSet
-boringBinds = mkVarSet . filter (not . isInteresting) . bindersOf
-
-addInterestingBinds :: CoreBind -> AnalEnv -> AnalEnv
-addInterestingBinds bind env
+addInterestingVars :: [Var] -> AnalEnv -> AnalEnv
+addInterestingVars vars env
     = env
     { ae_interesting = ae_interesting env
-        `delVarSetList` bindersOf bind -- Possible shadowing
-        `extendVarSetList` interestingBinds bind
+        `delVarSetList` vars -- Possible shadowing
+        `extendVarSetList` filter isInteresting vars
     }
 
 -- Used for both local and top-level binds
@@ -562,13 +565,18 @@ callArityBind env ae_body (NonRec v rhs)
     trimmed_arity = trimArity v safe_arity
 
     -- Mud
-    (binders, rhs_body) = collectBinders rhs
-    ((cocalled, arities), rhs_body') = callArityAnal env (length binders) rhs_body
-    ca_sig = CAS cocalled arities binders
-    env' = extendAnalEnv v' ca_sig env
+    mk_sig k v rhs = ca_sig
+      where
+        (binders, rhs_body) = collectBinders rhs
+        ((cocalled, arities), rhs_body') =
+            callArityAnal (addInterestingVars binders env) (length binders + k) rhs_body
+        ca_sig = CAS cocalled arities binders
+        env' = extendAnalEnv v ca_sig env
+
     -- /Mud
 
-    (ae_rhs, rhs') = pprTrace "callArityBind:NonRec:sig" (text "id:" <+> ppr v <+> text "sig:" <+> ppr ca_sig) $
+    (ae_rhs, rhs') = pprTrace "callArityBind:NonRec:sig"
+        (text "id:" <+> ppr v <+> text "sig0:" <+> ppr (mk_sig 0 v rhs) <+> text "sig1:" <+> ppr (mk_sig 1 v rhs)) $
         callArityAnal env trimmed_arity rhs
 
 
@@ -596,12 +604,13 @@ callArityBind env ae_body b@(Rec binds)
   where
 
     -- Mud
-    sigs = map mk_sig binds
+    sigs = map (uncurry (mk_sig 1)) binds
 
-    mk_sig (v, rhs) = (v, ca_sig)
+    mk_sig k v rhs = (v, ca_sig)
       where
         (binders, rhs_body) = collectBinders rhs
-        ((cocalled, arities), rhs_body') = callArityAnal env (length binders) rhs_body
+        ((cocalled, arities), rhs_body') =
+            callArityAnal env_body (length binders + k) rhs_body
         ca_sig = CAS cocalled arities binders
         env' = extendAnalEnv v ca_sig env
     -- /Mud
@@ -609,7 +618,7 @@ callArityBind env ae_body b@(Rec binds)
     -- See Note [Taking boring variables into account]
     any_boring = any (not . flip elemInteresting env) [ i | (i, _) <- binds]
 
-    env_body = addInterestingBinds b env
+    env_body = addInterestingVars (bindersOf b) env
     (ae_rhs, binds') = fix initial_binds
     final_ae = bindersOf b `resDelList` ae_rhs
 
@@ -795,3 +804,12 @@ lubArityEnv = plusVarEnv_C min
 
 lubRess :: [CallArityRes] -> CallArityRes
 lubRess = foldl lubRes emptyArityRes
+
+memoize :: (Int -> a) -> Int -> Int -> Maybe a
+memoize f min = lookup
+  where
+    cache = [f n | n <- [start..]]
+
+    lookup n
+      | n < min = Nothing
+      | otherwise = Just (cache ! n - start)
