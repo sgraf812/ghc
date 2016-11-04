@@ -414,8 +414,7 @@ Call Arity considers everything that is not cheap (`exprIsCheap`) as a thunk.
 
 -- See Note [Analysing top-level-binds]
 callArityAnalProgram :: DynFlags -> CoreProgram -> CoreProgram
-callArityAnalProgram _dflags binds
-    = snd $ mapAccumR analyse_bind exp_arity_result tagged_binds
+callArityAnalProgram _dflags binds = snd (go emptyAnalEnv binds)
   where
     -- Represents the fact that a CoreProgram is like a sequence of
     -- nested lets, where the exports are returned in the inner-most let
@@ -426,37 +425,45 @@ callArityAnalProgram _dflags binds
     exp_arity_result :: CallArityRes
     exp_arity_result = calledMultipleTimes (emptyUnVarGraph, mkVarEnv [(v, 0) | v <- exportedVars])
       where
+        -- we could even filter out @v@ that @not (isInteresting v)@
         exportedVars = binds >>= filter isExportedId . bindersOf
 
-    -- In the following left fold, we identify @exported@ binders and @tag@ each
-    -- binder with an @AnalEnv@ just prepared with interesting vars from outer
-    -- binding groups.
-    tagged_binds :: [(AnalEnv, CoreBind)]
-    tagged_binds = tail (scanl tag (emptyAnalEnv, error "tagged_binds: unused") binds)
+    -- think @ReaderT AnalEnv (State CoreProgram CallArityRes)
+    -- actually giving it that type would do no good, because we
+    -- repeatedly have to unwrap the state.
+    go :: AnalEnv -> CoreProgram -> (CallArityRes, CoreProgram)
+    go env [] = (exp_arity_result, [])
+    go env (b:bs) = (res', b':bs')
+      where
+        -- 1. prepare the environment for the body
+        --    TODO: differentiate between thunks and non-thunks
+        --          thunks will not unleash any demand via their sigs,
+        --          but will when the RHS is analyzed, whereas
+        --          lambdas will unleash demands via sigs, but not when
+        --          analyzed.
+        env' = env
+        -- 2. analyse the body, get back a demand on free vars
+        (res, bs') = go env' bs
+        -- 3. analyse the RHS according to that demand
+        --    If the RHS is a thunk, we have to lub with the resulting demand,
+        --    otherwise we don't.
+        --    For now, we have to pass @env'@, because of the interesting var
+        --    mechanism
+        (res', b') = callArityBind env' res b
 
-    -- This is more complicated than it needs to be, because we must not include
-    -- the binding group itself as interesting. Why not actually?!
-    -- TODO: I'm doing this. Let's see if it works
-    --   I think it's mostly because in the non-rec case, the identifier will
-    --   be referenced. The boringness check relies on them however and in the
-    --   recursive case, the binders are also interesting. Seems like a micro
-    --   optimization.
-    --
-    tag :: (AnalEnv, CoreBind) -> CoreBind -> (AnalEnv, CoreBind)
-    tag (env, _) b = (addInterestingVars (bindersOf b) env, b)
+useLetUp :: CoreExpr -> Bool
+useLetUp = isThunk
 
-    analyse_bind :: CallArityRes -> (AnalEnv, CoreBind) -> (CallArityRes, CoreBind)
-    analyse_bind ae (env, b) =
-      callArityBind env ae b
-
+isThunk :: CoreExpr -> Bool
+isThunk = not . exprIsHNF
 
 callArityRHS :: CoreExpr -> CoreExpr
-callArityRHS = snd . callArityAnal emptyAnalEnv 0
+callArityRHS = snd . callArityAnal 0 emptyAnalEnv
 
 -- The main analysis function. See Note [Analysis type signature]
 callArityAnal ::
-    AnalEnv -> -- analysis environment
     Arity ->  -- The arity this expression is called with
+    AnalEnv -> -- analysis environment
     CoreExpr ->  -- The expression to analyse
     (CallArityRes, CoreExpr)
         -- How this expression uses its interesting variables
@@ -470,44 +477,44 @@ callArityAnal _     _   e@(Type _)
 callArityAnal _     _   e@(Coercion _)
     = (emptyArityRes, e)
 -- The transparent cases
-callArityAnal env arity (Tick t e)
-    = second (Tick t) $ callArityAnal env arity e
-callArityAnal env arity (Cast e co)
-    = second (\e -> Cast e co) $ callArityAnal env arity e
+callArityAnal arity env (Tick t e)
+    = second (Tick t) $ callArityAnal arity env e
+callArityAnal arity env (Cast e co)
+    = second (\e -> Cast e co) $ callArityAnal arity env e
 
 -- The interesting case: Variables, Lambdas, Lets, Applications, Cases
-callArityAnal env arity e@(Var v)
-    | v `elemVarSet` ae_interesting env
+callArityAnal arity env e@(Var v)
+    | isInteresting v
     = (unitArityRes v arity, e)
     | otherwise
     = (emptyArityRes, e)
 
 -- Non-value lambdas are ignored
-callArityAnal env arity (Lam v e) | not (isId v)
-    = second (Lam v) $ callArityAnal (setUninteresting v env) arity e
+callArityAnal arity env (Lam v e) | not (isId v)
+    = second (Lam v) $ callArityAnal arity env e
 
 -- We have a lambda that may be called multiple times, so its free variables
 -- can all be co-called.
-callArityAnal env 0     (Lam v e)
+callArityAnal 0     env (Lam v e)
     = (ae', Lam v e')
   where
-    (ae, e') = callArityAnal (setUninteresting v env) 0 e
+    (ae, e') = callArityAnal 0 env e
     ae' = calledMultipleTimes ae
 -- We have a lambda that we are calling. decrease arity.
-callArityAnal env arity (Lam v e)
+callArityAnal arity env (Lam v e)
     = (ae, Lam v e')
   where
-    (ae, e') = callArityAnal (setUninteresting v env) (arity - 1) e
+    (ae, e') = callArityAnal (arity - 1) env e
 
 -- Application. Increase arity for the called expression, nothing to know about
 -- the second
-callArityAnal env arity (App e (Type t))
-    = second (\e -> App e (Type t)) $ callArityAnal env arity e
-callArityAnal env arity (App e1 e2)
+callArityAnal arity env (App e (Type t))
+    = second (\e -> App e (Type t)) $ callArityAnal arity env e
+callArityAnal arity env (App e1 e2)
     = (final_ae, App e1' e2')
   where
-    (ae1, e1') = callArityAnal env (arity + 1) e1
-    (ae2, e2') = callArityAnal env 0           e2
+    (ae1, e1') = callArityAnal (arity + 1) env e1
+    (ae2, e2') = callArityAnal 0           env e2
     -- If the argument is trivial (e.g. a variable), then it will _not_ be
     -- let-bound in the Core to STG transformation (CorePrep actually),
     -- so no sharing will happen here, and we have to assume many calls.
@@ -516,40 +523,32 @@ callArityAnal env arity (App e1 e2)
     final_ae = ae1 `both` ae2'
 
 -- Case expression.
-callArityAnal env arity (Case scrut bndr ty alts)
+callArityAnal arity env (Case scrut bndr ty alts)
     = -- pprTrace "callArityAnal:Case"
       --          (vcat [ppr scrut, ppr final_ae])
       (final_ae, Case scrut' bndr ty alts')
   where
     (alt_aes, alts') = unzip $ map go alts
-    go (dc, bndrs, e) = let (ae, e') = callArityAnal env arity e
+    go (dc, bndrs, e) = let (ae, e') = callArityAnal arity env e
                         in  (ae, (dc, bndrs, e'))
     alt_ae = lubRess alt_aes
-    (scrut_ae, scrut') = callArityAnal env 0 scrut
+    (scrut_ae, scrut') = callArityAnal 0 env scrut
     final_ae = scrut_ae `both` alt_ae
 
 -- For lets, use callArityBind
-callArityAnal env arity (Let bind e)
+callArityAnal arity env (Let bind e)
   = -- pprTrace "callArityAnal:Let"
     --          (vcat [ppr v, ppr arity, ppr n, ppr final_ae ])
     (final_ae, Let bind' e')
   where
-    env_body = addInterestingVars (bindersOf bind) env
-    (ae_body, e') = callArityAnal env_body arity e
+    env_body = env
+    (ae_body, e') = callArityAnal arity env_body e
     (final_ae, bind') = callArityBind env_body ae_body bind
 
 -- Which bindings should we look at?
 -- See Note [Which variables are interesting]
 isInteresting :: Var -> Bool
 isInteresting v = not $ null (typeArity (idType v))
-
-addInterestingVars :: [Var] -> AnalEnv -> AnalEnv
-addInterestingVars vars env
-    = env
-    { ae_interesting = ae_interesting env
-        `delVarSetList` vars -- Possible shadowing
-        `extendVarSetList` filter isInteresting vars
-    }
 
 -- Used for both local and top-level binds
 -- Second argument is the demand from the body
@@ -558,12 +557,12 @@ callArityBind :: AnalEnv -> CallArityRes -> CoreBind -> (CallArityRes, CoreBind)
 callArityBind env ae_body (NonRec v rhs)
   | otherwise
   = --pprTrace "callArityBind:NonRec"
-    --        (vcat [ppr v, ppr ae_body, ppr (ae_interesting env), ppr ae_rhs, ppr safe_arity])
+    --        (vcat [ppr v, ppr ae_body, ppr ae_rhs, ppr safe_arity])
     (final_ae, NonRec v' rhs')
   where
     is_thunk = not (exprIsCheap rhs) -- see note [What is a thunk]
     -- If v is boring, we will not find it in ae_body, but always assume (0, False)
-    boring = not (elemInteresting v env)
+    boring = not (isInteresting v)
 
     (arity, called_once)
         | boring    = (0, False) -- See Note [Taking boring variables into account]
@@ -580,15 +579,14 @@ callArityBind env ae_body (NonRec v rhs)
       where
         (binders, rhs_body) = collectBinders rhs
         ((cocalled, arities), rhs_body') =
-            callArityAnal (addInterestingVars binders env) (length binders + k) rhs_body
+            callArityAnal (length binders + k) env rhs_body
         ca_sig = CAS cocalled arities binders
-        env' = extendAnalEnv v ca_sig env
 
     -- /Mud
 
     (ae_rhs, rhs') = pprTrace "callArityBind:NonRec:sig"
         (text "id:" <+> ppr v <+> text "sig0:" <+> ppr (mk_sig 0 v rhs) <+> text "sig1:" <+> ppr (mk_sig 1 v rhs)) $
-        callArityAnal env trimmed_arity rhs
+        callArityAnal trimmed_arity env rhs
 
 
     ae_rhs'| called_once     = ae_rhs
@@ -608,7 +606,7 @@ callArityBind env ae_body (NonRec v rhs)
 callArityBind env ae_body b@(Rec binds)
   = --(if True then
     --pprTrace "callArityBind:Rec"
-    --         (vcat [ppr (Rec binds'), ppr ae_body, ppr (ae_interesting env), ppr ae_rhs]) else id) $
+    --         (vcat [ppr (Rec binds'), ppr ae_body, ppr ae_rhs]) else id) $
     pprTrace "callArityBind:Rec:sigs"
              (vcat (map (\(b, sig) -> text "id:" <+> ppr b <+> text "sig:" <+> ppr sig) sigs)) $
     (final_ae, Rec binds')
@@ -621,15 +619,14 @@ callArityBind env ae_body b@(Rec binds)
       where
         (binders, rhs_body) = collectBinders rhs
         ((cocalled, arities), rhs_body') =
-            callArityAnal env_body (length binders + k) rhs_body
+            callArityAnal (length binders + k) env_body rhs_body
         ca_sig = CAS cocalled arities binders
-        env' = extendAnalEnv v ca_sig env
     -- /Mud
 
     -- See Note [Taking boring variables into account]
-    any_boring = any (not . flip elemInteresting env) [ i | (i, _) <- binds]
+    any_boring = any (not . isInteresting) [ i | (i, _) <- binds]
 
-    env_body = addInterestingVars (bindersOf b) env
+    env_body = env
     (ae_rhs, binds') = fix initial_binds
     final_ae = bindersOf b `resDelList` ae_rhs
 
@@ -647,7 +644,7 @@ callArityBind env ae_body b@(Rec binds)
         ae = callArityRecEnv any_boring aes_old ae_body
 
         rerun (i, mbLastRun, rhs)
-            | i `elemInteresting` env_body && not (i `elemUnVarSet` domRes ae)
+            | isInteresting i && not (i `elemUnVarSet` domRes ae)
             -- No call to this yet, so do nothing
             = (False, (i, Nothing, rhs))
 
@@ -667,7 +664,7 @@ callArityBind env ae_body b@(Rec binds)
                   -- See Note [Trimming arity]
                   trimmed_arity = trimArity i safe_arity
 
-                  (ae_rhs, rhs') = callArityAnal env_body trimmed_arity rhs
+                  (ae_rhs, rhs') = callArityAnal trimmed_arity env_body rhs
 
                   ae_rhs' | called_once     = ae_rhs
                           | safe_arity == 0 = ae_rhs -- If it is not a function, its body is evaluated only once
@@ -676,7 +673,7 @@ callArityBind env ae_body b@(Rec binds)
               in (True, (i `setIdCallArity` trimmed_arity, Just (called_once, new_arity, ae_rhs'), rhs'))
           where
             -- See Note [Taking boring variables into account]
-            (new_arity, called_once) | not (elemInteresting i env) = (0, False)
+            (new_arity, called_once) | not (isInteresting i) = (0, False)
                                      | otherwise                   = lookupCallArityRes ae i
 
         (changes, ann_binds') = unzip $ map rerun ann_binds
@@ -738,8 +735,7 @@ type CallArityRes = (UnVarGraph, VarEnv Arity)
 
 data AnalEnv
   = AE
-  { ae_sigs :: VarEnv CallAritySig
-  , ae_interesting :: VarSet
+  { ae_sigs :: VarEnv (Int -> CallAritySig)
   }
 
 data CallAritySig
@@ -756,21 +752,14 @@ instance Outputable CallAritySig where
     <+> text "arities:" <+> ppr arities
 
 emptyAnalEnv :: AnalEnv
-emptyAnalEnv = AE { ae_sigs = emptyVarEnv, ae_interesting = emptyVarSet }
+emptyAnalEnv = AE { ae_sigs = emptyVarEnv }
 
 emptyArityRes :: CallArityRes
 emptyArityRes = (emptyUnVarGraph, emptyVarEnv)
 
-extendAnalEnv :: Id -> CallAritySig -> AnalEnv -> AnalEnv
+extendAnalEnv :: Id -> (Int -> CallAritySig) -> AnalEnv -> AnalEnv
 extendAnalEnv v sig env
   = env { ae_sigs = extendVarEnv (ae_sigs env) v sig }
-
-setUninteresting :: Var -> AnalEnv -> AnalEnv
-setUninteresting v env
-  = env { ae_interesting = delVarSet (ae_interesting env) v }
-
-elemInteresting :: Var -> AnalEnv -> Bool
-elemInteresting v env = elemVarSet v (ae_interesting env)
 
 unitArityRes :: Var -> Arity -> CallArityRes
 unitArityRes v arity = (emptyUnVarGraph, unitVarEnv v arity)
@@ -817,10 +806,10 @@ lubRess :: [CallArityRes] -> CallArityRes
 lubRess = foldl lubRes emptyArityRes
 
 memoize :: (Int -> a) -> Int -> Int -> Maybe a
-memoize f min = lookup
+memoize f start = lookup
   where
     cache = [f n | n <- [start..]]
 
     lookup n
-      | n < min = Nothing
-      | otherwise = Just (cache ! n - start)
+      | n < start = Nothing
+      | otherwise = Just (cache !! (n - start))
