@@ -318,7 +318,7 @@ Note [Taking boring variables into account]
 If we decide that the variable bound in `let x = e1 in e2` is not interesting,
 the analysis of `e2` will not report anything about `x`. To ensure that
 `callArityBind` does still do the right thing we have to take that into account
-everytime we would be lookup up `x` in the analysis result of `e2`.
+everytime we look up up `x` in the analysis result of `e2`.
   * Instead of calling lookupCallArityRes, we return (0, True), indicating
     that this variable might be called many times with no arguments.
   * Instead of checking `calledWith x`, we assume that everything can be called
@@ -560,7 +560,6 @@ callArityBind env ae_body (NonRec v rhs)
     --        (vcat [ppr v, ppr ae_body, ppr ae_rhs, ppr safe_arity])
     (final_ae, NonRec v' rhs')
   where
-    is_thunk = not (exprIsCheap rhs) -- see note [What is a thunk]
     -- If v is boring, we will not find it in ae_body, but always assume (0, False)
     boring = not (isInteresting v)
 
@@ -568,7 +567,7 @@ callArityBind env ae_body (NonRec v rhs)
         | boring    = (0, False) -- See Note [Taking boring variables into account]
         | otherwise = lookupCallArityRes ae_body v
     safe_arity | called_once = arity
-               | is_thunk    = 0      -- A thunk! Do not eta-expand
+               | isThunk rhs = 0      -- A thunk! Do not eta-expand
                | otherwise   = arity
 
     -- See Note [Trimming arity]
@@ -607,22 +606,8 @@ callArityBind env ae_body b@(Rec binds)
   = --(if True then
     --pprTrace "callArityBind:Rec"
     --         (vcat [ppr (Rec binds'), ppr ae_body, ppr ae_rhs]) else id) $
-    pprTrace "callArityBind:Rec:sigs"
-             (vcat (map (\(b, sig) -> text "id:" <+> ppr b <+> text "sig:" <+> ppr sig) sigs)) $
     (final_ae, Rec binds')
   where
-
-    -- Mud
-    sigs = map (uncurry (mk_sig 1)) binds
-
-    mk_sig k v rhs = (v, ca_sig)
-      where
-        (binders, rhs_body) = collectBinders rhs
-        ((cocalled, arities), rhs_body') =
-            callArityAnal (length binders + k) env_body rhs_body
-        ca_sig = CAS cocalled arities binders
-    -- /Mud
-
     -- See Note [Taking boring variables into account]
     any_boring = any (not . isInteresting) [ i | (i, _) <- binds]
 
@@ -630,6 +615,10 @@ callArityBind env ae_body b@(Rec binds)
     (ae_rhs, binds') = fix initial_binds
     final_ae = bindersOf b `resDelList` ae_rhs
 
+    -- The Maybe signifies that the expression was not yet called.
+    -- If it were, we had the called_once information, the call arity and
+    -- the arity result after analysing i.
+    initial_binds :: [(Id, Maybe (Bool, Arity, CallArityRes), CoreExpr)]
     initial_binds = [(i,Nothing,e) | (i,e) <- binds]
 
     fix :: [(Id, Maybe (Bool, Arity, CallArityRes), CoreExpr)] -> (CallArityRes, [(Id, CoreExpr)])
@@ -643,6 +632,7 @@ callArityBind env ae_body b@(Rec binds)
         aes_old = [ (i,ae) | (i, Just (_,_,ae), _) <- ann_binds ]
         ae = callArityRecEnv any_boring aes_old ae_body
 
+        -- iterates a single binding
         rerun (i, mbLastRun, rhs)
             | isInteresting i && not (i `elemUnVarSet` domRes ae)
             -- No call to this yet, so do nothing
@@ -655,10 +645,8 @@ callArityBind env ae_body b@(Rec binds)
             = (False, (i, mbLastRun, rhs))
 
             | otherwise
-            -- We previously analyzed this with a different arity (or not at all)
-            = let is_thunk = not (exprIsCheap rhs) -- see note [What is a thunk]
-
-                  safe_arity | is_thunk    = 0  -- See Note [Thunks in recursive groups]
+            -- We previously analized this with a different arity (or not at all)
+            = let safe_arity | isThunk rhs = 0  -- See Note [Thunks in recursive groups]
                              | otherwise   = new_arity
 
                   -- See Note [Trimming arity]
