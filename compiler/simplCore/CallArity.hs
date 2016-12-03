@@ -442,26 +442,6 @@ callArityAnalProgram _dflags binds = snd (evalState emptyAnalEnv (go binds))
       = do
         (ca_type, b', bs') <- callArityBind b (go bs)
         return (ca_type, b':bs')
-        do
-        -- 1. prepare the environment for the body, adding
-        --    a potential signature for every possible arity.
-        --    Which is computed lazily and memoized.
-        --    For each binding we will *either* do LetUp
-        --    *or* LetDown, depending on whether rhs is a thunk or not.
-        extendAnalEnv v (\arity -> callArityLetDown arity v rhs)
-        -- 1. analyse the body, get back a demand on free vars
-        (ca_type, bs') <- go bs
-        -- 2. analyse the RHS according to that demand with the LetUp rule.
-        --    This will extend the demand with that posed by the body of the
-        --    thunk. It will also annotate the binder with the right arity.
-        (ca_type', v', rhs') <- callArityLetUp ca_type v rhs
-        return (ca_type', (NonRec v' rhs'):bs')
-      | otherwise
-      = (res', b':bs')
-      where
-        extendEnvWithBindingGroup :: CoreBind -> State AnalEnv ()
-        extendEnvWithBindingGroup (NonRec v rhs) =
-          extendAnalEnv v (\arity -> callArityBind )
 
 callArityBind' :: CoreBind -> (State AnalEnv (CallArityType, a)) -> State AnalEnv (CallArityType, CoreBind, a)
 callArityLetUp :: CallArityType -> Id -> CoreExpr -> State AnalEnv (CallArityType, Id, CoreExpr)
@@ -519,23 +499,24 @@ callArityAnal 0     (Lam v e)
 callArityAnal arity (Lam v e)
   = do
     (ca_type, e') <- callArityAnal (arity - 1) e
+    -- regardless of the variable not being interesting,
+    -- we have to add the var as an argument.
     return (addArgToType v ca_type, e')
 
 -- Application. Increase arity for the called expression, nothing to know about
 -- the second
-callArityAnal arity (App e (Type t))
-    = second (\e -> App e (Type t)) <$> callArityAnal arity e
-callArityAnal arity env (App e1 e2)
-    = (final_ae, App e1' e2')
-  where
-    (ae1, e1') = callArityAnal (arity + 1) env e1
-    (ae2, e2') = callArityAnal 0           env e2
-    -- If the argument is trivial (e.g. a variable), then it will _not_ be
-    -- let-bound in the Core to STG transformation (CorePrep actually),
-    -- so no sharing will happen here, and we have to assume many calls.
-    ae2' | exprIsTrivial e2 = calledMultipleTimes ae2
-         | otherwise        = ae2
-    final_ae = ae1 `both` ae2'
+callArityAnal arity (App f (Type t))
+    = second (\f -> App f (Type t)) <$> callArityAnal arity e
+callArityAnal arity (App f a)
+    = do
+      (ca_f, f') <- callArityAnal (arity + 1) f
+      -- peel off one argument from the type
+      let (arg_arity, called_once, ca_f') = peelCallArityType ca_f
+      -- TODO: Actually use called with information instead of just called_once
+      (ca_a, a') <- callArityAnal arg_arity a
+      let ca_a' | called_once = ca_a
+                | otherwise   = calledMultipleTimes ca_a
+      return (ca_f' `both` ca_a', a')
 
 -- Case expression.
 callArityAnal arity (Case scrut bndr ty alts)
@@ -560,12 +541,32 @@ callArityAnal arity (Let bind e)
     (ae_body, e') = callArityAnal arity env_body e
     (final_ae, bind') = callArityBind env_body ae_body bind
 
+-- TODO: add the set of neighbors
+peelCallArityType :: CallArityType -> (Arity, Bool, CallArityType)
+peelCallArityType ca_type = case cat_args ca_type of
+  arg:args | isInteresting arg ->
+    -- TODO: not (exprIsTrivial a)?
+    let (arity, called_once) = lookupCallArityType ca_type arg
+        ca_type' = typeDel arg ca_type
+    in  (arity, called_once, ca_type')
+  arg:args -> (0, False, ca_type) -- See Note [Taking boring variables into account]
+  [] -> (0, not (exprIsTrivial a), ca_type)
+    -- the called function had no signature or has not
+    -- been analysed with high enough incoming arity
+    -- (e.g. when loading the signature from an imported id).
+    -- ca_f is rather useless for analysing a, so
+    -- be consersative assume incoming arity 0.
+    --
+    -- Also, if the argument is trivial (e.g. a variable), then it will _not_ be
+    -- let-bound in the Core to STG transformation (CorePrep actually),
+    -- so no sharing will happen here, and we have to assume many calls.
+
 -- Which bindings should we look at?
 -- See Note [Which variables are interesting]
 isInteresting :: Var -> Bool
 isInteresting v = not $ null (typeArity (idType v))
 
-callArityBind' :: CoreBind -> (State AnalEnv (CallArityType, a)) -> State AnalEnv (CallArityType, CoreBind, a)
+callArityBind' :: CoreBind -> State AnalEnv (CallArityType, a) -> State AnalEnv (CallArityType, CoreBind, a)
 callArityBind' (NonRec v rhs) anal_body
   = do
     -- 1. prepare the environment for the body, adding
@@ -581,7 +582,9 @@ callArityBind' (NonRec v rhs) anal_body
     --    This will extend the demand with that posed by the body of the
     --    thunk. It will also annotate the binder with the right arity.
     (ca_type', v', rhs') <- callArityLetUp ca_type v rhs
-    return (ca_type', (NonRec v' rhs'), a)
+    return (ca_type', NonRec v' rhs', a)
+callArityBind' (Rec pairs) anal_body
+  = do
 
 callArityLetDown :: Arity -> Id -> CoreExpr -> State AnalEnv LetDownResult
 callArityLetDown arity v rhs
@@ -942,3 +945,6 @@ lubArityEnv = plusVarEnv_C min
 
 lubTypes :: [CallArityType] -> CallArityType
 lubTypes = foldl lubType emptyArityType
+
+predecessors :: VarEnv (IntMap (VarEnv IntSet))
+predecessors = emptyVarEnv
