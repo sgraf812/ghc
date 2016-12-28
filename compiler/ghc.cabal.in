@@ -539,6 +539,7 @@ Library
         Vectorise.Env
         Vectorise.Exp
         Vectorise
+        Worklist
         Hoopl.Dataflow
         Hoopl
 --        CgInfoTbls used in ghci/DebuggerUtils
