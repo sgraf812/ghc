@@ -1,3 +1,4 @@
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 --
 -- Copyright (c) 2014 Joachim Breitner
 --
@@ -9,24 +10,32 @@ module CallArity
 
 import           DynFlags      (DynFlags)
 import           VarEnv
-import           VarSet
 
-import           Data.List     (mapAccumL, mapAccumR)
-import           Data.IntMap   (IntMap)
-import qualified Data.IntMap as IntMap
+import Control.Monad.Fix
+import Data.Monoid
+import           Data.List     (delete)
+import           Data.IntMap.Lazy (IntMap)
+import qualified Data.IntMap.Lazy as IntMap
+import           Data.Map.Strict   (Map)
+import qualified Data.Map.Strict as Map
+import Data.Maybe
+import qualified Data.Set as Set
 
 import           BasicTypes
 import           CoreArity     (typeArity)
 import           CoreSyn
 import           CoreUtils     (exprIsHNF, exprIsTrivial)
+import           MkCore
 import           Id
-import Outputable
+import Outputable hiding ((<>))
 import           Demand
 import           UnVarGraph
+import Worklist
+import Util
 
-import State
+import Control.Monad.Trans.State.Strict
 
-import           Control.Arrow (first, second)
+import           Control.Arrow (first)
 
 
 {-
@@ -403,142 +412,289 @@ the case for Core!
 
 -}
 
--- Main entry point
 
 -- See Note [Analysing top-level-binds]
-callArityAnalProgram :: DynFlags -> CoreProgram -> CoreProgram
-callArityAnalProgram _dflags binds = snd (evalState emptyAnalEnv (go binds))
+-- Represents the fact that a CoreProgram is like a sequence of
+-- nested lets, where the exports are returned in the inner-most let
+-- as a tuple. As a result, all exported identifiers are handled as called
+-- with each other, with arity 0.
+moduleToExpr :: CoreProgram -> CoreExpr
+moduleToExpr = impl []
   where
-    -- Represents the fact that a CoreProgram is like a sequence of
-    -- nested lets, where the exports are returned in the inner-most let
-    -- as a tuple. As a result, all exported identifiers are handled as called
-    -- with each other, with arity 0.
-    -- Note that we could unify this with @callArityAnal@ by simply transforming
-    -- a @CoreProgram@ to said sequence of let-bindings.
-    exp_arity_type :: CallArityType
-    exp_arity_type = calledMultipleTimes (CAT emptyUnVarGraph exported_vars_env [])
-      where
-        -- we could even filter out @v@ that @not (isInteresting v)@
-        exported_vars = binds >>= filter isExportedId . bindersOf
-        exported_vars_env = mkVarEnv [(v, 0) | v <- exported_vars]
+    impl exported [] = mkBigCoreTup (map Var exported)
+    impl exported (bind:prog) = Let bind (impl (filter isExportedId (bindersOf bind) ++ exported) prog)
 
-    -- think @ReaderT AnalEnv (State CoreProgram CallArityType)
-    -- actually giving it that type would do no good, because we
-    -- repeatedly have to unwrap the state.
-    go :: CoreProgram -> State AnalEnv (CallArityType, CoreProgram)
-    go [] = return (exp_arity_type, [])
-    go (b@(NonRec v rhs):bs)
-      = do
-        (ca_type, b', bs') <- callArityBind b (go bs)
-        return (ca_type, b':bs')
+exprToModule :: CoreExpr -> CoreProgram
+exprToModule (Let bind e) = bind : exprToModule e
+exprToModule _ = []
 
-callArityBind' :: CoreBind -> (State AnalEnv (CallArityType, a)) -> State AnalEnv (CallArityType, CoreBind, a)
-callArityLetUp :: CallArityType -> Id -> CoreExpr -> State AnalEnv (CallArityType, Id, CoreExpr)
-callArityLetDown :: Arity -> Id -> CoreExpr -> State AnalEnv LetDownResult
+-- Main entry point
+callArityAnalProgram :: DynFlags -> CoreProgram -> CoreProgram
+callArityAnalProgram _dflags = exprToModule . callArityRHS . moduleToExpr
 
-useLetUp :: CoreExpr -> Bool
-useLetUp = isThunk
+callArityRHS :: CoreExpr -> CoreExpr
+callArityRHS e = lookup_expr (runFramework fw (Set.singleton (node, 0)))
+  where
+    (node, fw) = buildFramework $
+      registerTransferFunction $ \node -> do
+        transfer <- callArityExpr emptyVarEnv e
+        return (node, (transfer, alwaysChangeDetector))
+
+    lookup_expr :: Map (FrameworkNode, Arity) AnalResult -> CoreExpr
+    lookup_expr result_map = case Map.lookup (node, 0) result_map of
+      Nothing -> pprPanic "callArityRHS" empty
+      Just (AR _ annotations) -> annotate annotations e
+
+newtype Annotations
+  = Annotations (VarEnv Arity)
+  deriving (Eq, Outputable)
+
+mkAnnotation :: Id -> Arity -> Annotations
+mkAnnotation id arity = Annotations (unitVarEnv id arity)
+
+lookupAnnotatedArity :: Annotations -> Id -> Arity
+lookupAnnotatedArity (Annotations ann) id = fromMaybe (idCallArity id) (lookupVarEnv ann id)
+
+instance Monoid Annotations where
+  mempty = Annotations mempty
+  mappend (Annotations a) (Annotations b)
+    = Annotations (plusVarEnv_C panicOnConflict a b)
+    where
+      panicOnConflict n m
+        | n == m    = n
+        | otherwise = pprPanic "CallArity.Annotations.mappend conflict" empty
+
+-- | How an expression uses its interesting variables
+-- and the arity annotations for local bindings
+data AnalResult = AR !CallArityType !Annotations
+
+unzipAnalResult :: [AnalResult] -> ([CallArityType], Annotations)
+unzipAnalResult ar = (map cat ar, foldMap ann ar)
+  where
+    cat (AR cat _) = cat
+    ann (AR _ ann) = ann
+
+newtype FrameworkNode
+  = FrameworkNode Int
+  deriving (Show, Eq, Ord)
+
+type TransferFunction' a = TransferFunction (FrameworkNode, Arity) AnalResult a
+type ChangeDetector' = ChangeDetector (FrameworkNode, Arity) AnalResult
+type DataFlowFramework' = DataFlowFramework (FrameworkNode, Arity) AnalResult
+
+newtype FrameworkBuilder a
+  = FB { unFB :: State (IntMap (Arity -> TransferFunction' AnalResult, ChangeDetector')) a }
+  deriving (Functor, Applicative, Monad)
+
+data LetAnalKind
+  = LetDown
+  | LetUp
+  deriving (Show, Eq, Ord)
+
+isLetUp :: LetAnalKind -> Bool
+isLetUp LetUp = True
+isLetUp LetDown = False
+
+buildFramework :: FrameworkBuilder a -> (a, DataFlowFramework')
+buildFramework (FB state) = (res, DFF dff)
+  where
+    (res, env) = runState state IntMap.empty
+    dff (FrameworkNode node, arity) = case IntMap.lookup node env of
+      Nothing -> pprPanic "CallArity.buildFramework" (ppr node)
+      Just (transfer, detectChange) -> (transfer arity, detectChange)
+
+registerTransferFunction
+  :: (FrameworkNode -> FrameworkBuilder (a, (Arity -> TransferFunction' AnalResult, ChangeDetector')))
+  -> FrameworkBuilder a
+registerTransferFunction f = FB $ do
+  node <- gets IntMap.size
+  (result, _) <- mfix $ \ ~(_, entry) -> do
+    -- Using mfix so that we can spare an unnecessary Int counter in the state
+    modify' (IntMap.insert node entry)
+    unFB (f (FrameworkNode node))
+  return result
+
+dependOn' :: FrameworkNode -> Arity -> TransferFunction' AnalResult
+dependOn' node arity = fromMaybe emptyAnalResult <$> dependOn (node, arity)
+
+callArityBind :: VarEnv LetAnalKind -> CoreBind -> FrameworkBuilder (VarEnv FrameworkNode)
+callArityBind let_anal_kinds = build_binds emptyVarEnv . flattenBinds . singleton
+  where
+    build_binds env [] = return env
+    build_binds env ((id, rhs):binds) = registerTransferFunction $ \node -> do
+      env' <- build_binds (extendVarEnv env id node) binds
+      transfer <- callArityExpr let_anal_kinds rhs
+      let transfer' arity = do
+            -- TODO: trim arity
+            AR cat_rhs ann_rhs <- transfer arity
+            return (AR cat_rhs (mkAnnotation id arity <> ann_rhs))
+      return (env', (transfer', alwaysChangeDetector))
+
+-- | The main analysis function. See Note [Analysis type signature]
+callArityExpr
+  :: VarEnv LetAnalKind
+  -> CoreExpr
+  -> FrameworkBuilder (Arity -> TransferFunction' AnalResult)
+
+callArityExprTrivial
+  :: FrameworkBuilder (Arity -> TransferFunction' AnalResult)
+callArityExprTrivial = return (\_ -> return emptyAnalResult)
+
+-- The trivial base cases
+callArityExpr _ (Lit _) = callArityExprTrivial
+callArityExpr _ (Type _) = callArityExprTrivial
+callArityExpr _ (Coercion _) = callArityExprTrivial
+
+-- The transparent cases
+callArityExpr let_anal_kinds (Tick _ e) = callArityExpr let_anal_kinds e
+callArityExpr let_anal_kinds (Cast e _) = callArityExpr let_anal_kinds e
+
+-- The interesting cases: Variables, Lambdas, Lets, Applications, Cases
+callArityExpr let_anal_kinds (Var v) = return transfer
+  where
+    transfer = case lookupVarEnv let_anal_kinds v of
+      Nothing | not (isInteresting v) -> \_ -> return emptyAnalResult -- v is boring
+      Nothing -> \_ -> return emptyAnalResult -- TODO: use an exported sig here
+      Just LetUp -> \arity -> return (AR (unitArityType v arity) mempty) -- the demand is unleashed later
+      Just LetDown -> \arity ->
+        -- unleash cat directly
+        dependOn' undefined arity
+
+-- Non-value lambdas are ignored
+callArityExpr let_anal_kinds (Lam v e)
+    | not (isId v)
+    = callArityExpr let_anal_kinds e
+
+callArityExpr let_anal_kinds (Lam v e) = transfer' <$> callArityExpr let_anal_kinds e
+  where
+    -- We have a lambda that may be called multiple times, so its free variables
+    -- can all be co-called.
+    -- Also regardless of the variable not being interesting,
+    -- we have to add the var as an argument.
+    transfer' transfer 0 = do
+      AR cat ann <- transfer 0
+      return (AR (addArgToType v (calledMultipleTimes cat)) ann)
+    -- We have a lambda that we are calling. decrease arity.
+    transfer' transfer arity = do
+      AR cat ann <- transfer (arity - 1)
+      return (AR (addArgToType v cat) ann)
+
+callArityExpr let_anal_kinds (App f (Type _)) = callArityExpr let_anal_kinds f
+
+-- Application. Increase arity for the called expression, nothing to know about
+-- the second
+callArityExpr let_anal_kinds (App f a) = do
+  transfer_f <- callArityExpr let_anal_kinds f
+  transfer_a <- callArityExpr let_anal_kinds a
+  return $ \arity -> do
+    AR ca_f ann_f <- transfer_f (arity + 1)
+    -- peel off one argument from the type
+    let (arg_arity, called_once, ca_f') = peelCallArityType a ca_f
+    -- TODO: Actually use called with information instead of just called_once
+    --       Maybe this is enough for higher-order signature information?
+    AR ca_a ann_a <- transfer_a arg_arity
+    let ca_a' | called_once    = ca_a
+              | arg_arity == 0 = ca_a
+              | otherwise      = calledMultipleTimes ca_a
+    return (AR (ca_f' `both` ca_a') (ann_f <> ann_a))
+
+-- Case expression.
+callArityExpr let_anal_kinds (Case scrut bndr ty alts) = do
+  transfer_scrut <- callArityExpr let_anal_kinds scrut
+    -- TODO: Do we have to do something special with bndr?
+  transfer_alts <- mapM (\(dc, bndrs, e) -> callArityExpr let_anal_kinds e) alts
+  return $ \arity -> do
+    AR cat_scrut ann_scrut <- transfer_scrut 0
+    (cat_alts, ann_alts) <- unzipAnalResult <$> mapM ($ arity) transfer_alts
+    let cat = cat_scrut `both` lubTypes cat_alts
+    -- pprTrace "callArityExpr:Case"
+    --          (vcat [ppr scrut, ppr cat])
+    return (AR cat (ann_scrut <> ann_alts))
+
+callArityExpr let_anal_kinds (Let bind e) = do
+  let add_let_kind (id, rhs) env
+        | isInteresting id = extendVarEnv env id (determineLetAnalKind rhs)
+        | otherwise = env
+  let binds = flattenBinds [bind]
+  let let_anal_kinds' = foldr add_let_kind let_anal_kinds binds
+
+  nodes <- callArityBind let_anal_kinds' bind
+  transfer_body <- callArityExpr let_anal_kinds' e
+
+  node <- registerTransferFunction $ \node -> do
+    let transfer arity = do
+          ar_body@(AR cat_body ann_body) <- transfer_body arity
+          case bind of
+            -- TODO: handle LetDown. Probably just return emptyArityType in unleashCalls?
+            NonRec id rhs -> do
+              -- We don't need to use cat_old here, because only the let body can
+              -- call id.
+              AR cat ann_bind <- unleashCalls nodes False cat_body (id, rhs)
+              let cat_final = callArityLetEnv (not (isInteresting id)) ann_body [(id, cat)] cat_body
+              return (AR cat_final (ann_body <> ann_bind))
+            Rec pairs -> do
+              AR cat_old ann_old <- fromMaybe ar_body <$> dependOn (node, arity)
+              (cat_rhss, ann_rhss) <- unzipAnalResult <$> mapM (unleashCalls nodes True cat_old) pairs
+              let ids = map fst pairs
+              let any_boring = any (not . isInteresting) ids
+              let cat_final = callArityLetEnv any_boring ann_old (zip ids cat_rhss) cat_body
+              return (AR cat_final (ann_body <> ann_rhss))
+
+    let changeDetector changedRefs (AR old _) (AR new _) =
+          map fst (Set.toList changedRefs) /= [node]
+          || any (\id -> lookupCallArityType old id /= lookupCallArityType new id) (map fst binds)
+
+    return (node, (transfer, changeDetector))
+
+  return $ \arity -> do
+    AR cat ann <- dependOn' node arity
+    return (AR (typeDelList (bindersOf bind) cat) ann)
+
+
+unleashCalls :: VarEnv FrameworkNode -> Bool -> CallArityType -> (Id, CoreExpr) -> TransferFunction' AnalResult
+unleashCalls nodes is_recursive cat_usage (id, rhs) = do
+  let boring = not (isInteresting id)
+      -- If v is boring, we will not find it in cat_usage, but always assume (0, False)
+      (arity, called_once)
+          | boring    = (0, False) -- See Note [Taking boring variables into account]
+          | otherwise = lookupCallArityType cat_usage id
+
+      -- See Note [Thunks in recursive groups]
+      safe_arity
+          | isThunk rhs && (is_recursive || not called_once) = 0 -- A thunk was called multiple times! Do not eta-expand
+          | otherwise = arity -- in the other cases it's safe to expand
+
+      -- See Note [Trimming arity]
+      trimmed_arity = trimArity id safe_arity
+
+      node = fromMaybe (pprPanic "CallArity.unleashCalls" (ppr id)) (lookupVarEnv nodes id)
+
+  -- TODO: Find out if (where) we need the trimmed_arity here or not
+  -- We probably want to analyze with arity und annotate trimmed_arity.
+  -- Although CA analyzes with trimmed_arity, so we do that for now
+  AR cat_rhs ann_rhs <- dependOn' node trimmed_arity
+  let cat_rhs' | called_once || safe_arity == 0 = cat_rhs
+               | otherwise = calledMultipleTimes cat_rhs
+  return (AR cat_rhs' (mkAnnotation id trimmed_arity <> ann_rhs) )
+
+determineLetAnalKind :: CoreExpr -> LetAnalKind
+determineLetAnalKind rhs
+  | isThunk rhs || True = LetUp
+  | otherwise = LetDown
 
 isThunk :: CoreExpr -> Bool
 isThunk = not . exprIsHNF
 
-callArityRHS :: CoreExpr -> CoreExpr
-callArityRHS = snd . callArityAnal 0 emptyAnalEnv
-
--- | The main analysis function. See Note [Analysis type signature]
-callArityAnal
-  :: Arity    -- ^ The arity this expression is called with
-  -> CoreExpr -- ^ The expression to analyse
-  -> State AnalEnv (CallArityType, CoreExpr)
-        -- ^ How this expression uses its interesting variables
-        -- and the expression with IdInfo updated
-
--- The trivial base cases
-callArityAnal _     e@(Lit _)
-    = return (emptyArityType, e)
-callArityAnal _     e@(Type _)
-    = return (emptyArityType, e)
-callArityAnal _     e@(Coercion _)
-    = return (emptyArityType, e)
--- The transparent cases
-callArityAnal arity (Tick t e)
-    = second (Tick t) <$> callArityAnal arity e
-callArityAnal arity (Cast e co)
-    = second (\e -> Cast e co) <$> callArityAnal arity e
-
--- The interesting case: Variables, Lambdas, Lets, Applications, Cases
-callArityAnal arity e@(Var v)
-    | isInteresting v
-    = return (unitArityType v arity, e)
-    | otherwise
-    = return (emptyArityType, e)
-
--- Non-value lambdas are ignored
-callArityAnal arity (Lam v e) | not (isId v)
-    = second (Lam v) <$> callArityAnal arity e
-
--- We have a lambda that may be called multiple times, so its free variables
--- can all be co-called.
-callArityAnal 0     (Lam v e)
-    = do
-      (ca_type, e') <- callArityAnal 0 e
-      return (calledMultipleTimes ca_type, Lam v e')
-
--- We have a lambda that we are calling. decrease arity.
-callArityAnal arity (Lam v e)
-  = do
-    (ca_type, e') <- callArityAnal (arity - 1) e
-    -- regardless of the variable not being interesting,
-    -- we have to add the var as an argument.
-    return (addArgToType v ca_type, e')
-
--- Application. Increase arity for the called expresion, nothing to know about
--- the second
-callArityAnal arity (App f (Type t))
-    = second (\f -> App f (Type t)) <$> callArityAnal arity e
-callArityAnal arity (App f a)
-    = do
-      (ca_f, f') <- callArityAnal (arity + 1) f
-      -- peel off one argument from the type
-      let (arg_arity, called_once, ca_f') = peelCallArityType ca_f
-      -- TODO: Actually use called with information instead of just called_once
-      (ca_a, a') <- callArityAnal arg_arity a
-      let ca_a' | called_once = ca_a
-                | otherwise   = calledMultipleTimes ca_a
-      return (ca_f' `both` ca_a', a')
-
--- Case expression.
-callArityAnal arity (Case scrut bndr ty alts)
-    = -- pprTrace "callArityAnal:Case"
-      --          (vcat [ppr scrut, ppr final_ae])
-      (final_ae, Case scrut' bndr ty alts')
-  where
-    (alt_aes, alts') = unzip $ map go alts
-    go (dc, bndrs, e) = let (ae, e') = callArityAnal arity env e
-                        in  (ae, (dc, bndrs, e'))
-    alt_ae = lubTypes alt_aes
-    (scrut_ae, scrut') = callArityAnal 0 env scrut
-    final_ae = scrut_ae `both` alt_ae
-
--- For lets, use callArityBind
-callArityAnal arity (Let bind e)
-  = -- pprTrace "callArityAnal:Let"
-    --          (vcat [ppr v, ppr arity, ppr n, ppr final_ae ])
-    (final_ae, Let bind' e')
-  where
-    env_body = env
-    (ae_body, e') = callArityAnal arity env_body e
-    (final_ae, bind') = callArityBind env_body ae_body bind
-
 -- TODO: add the set of neighbors
-peelCallArityType :: CallArityType -> (Arity, Bool, CallArityType)
-peelCallArityType ca_type = case cat_args ca_type of
-  arg:args | isInteresting arg ->
+peelCallArityType :: CoreExpr -> CallArityType -> (Arity, Bool, CallArityType)
+peelCallArityType a ca_type = case cat_args ca_type of
+  arg:_ | isInteresting arg ->
     -- TODO: not (exprIsTrivial a)?
+    -- TODO: called_once when arity = 0?
     let (arity, called_once) = lookupCallArityType ca_type arg
         ca_type' = typeDel arg ca_type
     in  (arity, called_once, ca_type')
-  arg:args -> (0, False, ca_type) -- See Note [Taking boring variables into account]
+  _:_ -> (0, False, ca_type) -- See Note [Taking boring variables into account]
   [] -> (0, not (exprIsTrivial a), ca_type)
     -- the called function had no signature or has not
     -- been analysed with high enough incoming arity
@@ -555,230 +711,55 @@ peelCallArityType ca_type = case cat_args ca_type of
 isInteresting :: Var -> Bool
 isInteresting v = not $ null (typeArity (idType v))
 
-callArityBind' :: CoreBind -> State AnalEnv (CallArityType, a) -> State AnalEnv (CallArityType, CoreBind, a)
-callArityBind' (NonRec v rhs) anal_body
-  = do
-    -- 1. prepare the environment for the body, adding
-    --    a potential signature for every possible arity.
-    --    Which is computed lazily and memoized.
-    --    For each binding we will *either* do LetUp
-    --    *or* LetDown, depending on whether rhs is a thunk or not.
-    extendAnalEnv v (\arity -> callArityLetDown arity v rhs)
-    -- 2. analyse the body, get back a demand on free vars to be handled with
-    --    LetUp
-    (ca_type, a) <- anal_body
-    -- 3. analyse the RHS according to that demand with the LetUp rule.
-    --    This will extend the demand with that posed by the body of the
-    --    thunk. It will also annotate the binder with the right arity.
-    (ca_type', v', rhs') <- callArityLetUp ca_type v rhs
-    return (ca_type', NonRec v' rhs', a)
-callArityBind' (Rec pairs) anal_body
-  = do
-
-callArityLetDown :: Arity -> Id -> CoreExpr -> State AnalEnv LetDownResult
-callArityLetDown arity v rhs
-  = do
-    (ca_type, rhs') <- callArityAnal arity rhs
-    let ret = (ca_type, v `setIdCallArity` arity, rhs')
-    -- Remember that we have to save the result (along with all results
-    -- computed in callArityAnal) in the SigCache.
-    cacheSig v arity ret
-    return ret
-
-callArityLetUp :: CallArityType -> Id -> CoreExpr -> State AnalEnv (CallArityType, Id, CoreExpr)
-callArityLetUp ca_body v rhs
-  = do
-    -- If v is boring, we will not find it in ae_body, but always assume (0, False)
-    let boring = not (isInteresting v)
-
-        (arity, called_once)
-            | boring    = (0, False) -- See Note [Taking boring variables into account]
-            | otherwise = lookupCallArityType ca_body v
-
-        safe_arity
-            | isThunk rhs && not called_once = 0 -- A thunk was called multiple times! Do not eta-expand
-            | otherwise = arity -- in the other cases it's safe to expand
-
-        -- See Note [Trimming arity]
-        trimmed_arity = trimArity v safe_arity
-
-    lookupResult <- lookupCachedSig v trimmed_arity >>= alwaysRetrieve
-    case lookupResult of
-        Nothing -> do
-            -- This is to be analyzed now with trimmed_arity.
-            -- trimmed_arity took into account the called_once information
-            -- so it will only expand thunks if they are called once.
-            -- Since rhs should never be a function, we can be sure rhs is
-            -- only evaluated once, regardless of the called_once information.
-            --
-            -- Precondition to this branch: called_once || safe_arity == 0
-            --
-            -- There's one edge case that's unfortunate: Suppose the thunk
-            -- is called with more than zero arguments. Then we can't propagate
-            -- demands to the arguments, since we have no signature available
-            -- for the rhs (rightly so, we must not duplicate the thunk part),
-            -- so we have to be conservative and assume the argument to be called
-            -- with all other free vars.
-            -- TODO: how handle the args in the graph?!
-            (ca_rhs, rhs') <- callArityAnal trimmed_arity rhs
-            -- following is the substitution procedure for any variable
-            -- 1. add cross calls between all vars cocalled with v in rhs to
-            --    all vars cocalled with v in the body, connecting calls
-            --    in the body with calls in the rhs
-            -- 2. lub with the all calls from the body, so that transitive
-            --    calls are made visible
-            let called_by_v = domRes ca_rhs
-            let called_with_v
-                    | boring = domRes ca_body -- See Note [Taking boring variables into account]
-                    -- This will also weed out unreachable calls, in which case
-                    -- called_with_v will be empty.
-                    | otherwise = calledWith ca_body v `delUnVarSet` v
-            let ca_final =
-                    lubType (addCrossCoCalls called_by_v called_with_v ca_rhs) (typeDel v ca_body)
-            return (ca_final, v `setIdCallArity` trimmed_arity, rhs')
-        Just (_, v', rhs') -> do
-            -- Call demands were unleashed while analyzing the body.
-            -- Don't unleash the sig again, just return the annotated binder.
-            return (typeDel v ca_body, v', rhs')
-
-
--- Used for both local and top-level binds
--- Second argument is the demand from the body
-callArityBind :: AnalEnv -> CallArityType -> CoreBind -> (CallArityType, CoreBind)
--- Non-recursive let
-callArityBind env ae_body (NonRec v rhs)
-  | otherwise
-  = --pprTrace "callArityBind:NonRec"
-    --        (vcat [ppr v, ppr ae_body, ppr ae_rhs, ppr safe_arity])
-    (final_ae, NonRec v' rhs')
-  where
-    -- If v is boring, we will not find it in ae_body, but always assume (0, False)
-    boring = not (isInteresting v)
-
-    (arity, called_once)
-        | boring    = (0, False) -- See Note [Taking boring variables into account]
-        | otherwise = lookupCallArityType ae_body v
-    safe_arity | called_once = arity
-               | isThunk rhs = 0      -- A thunk! Do not eta-expand
-               | otherwise   = arity
-
-    -- See Note [Trimming arity]
-    trimmed_arity = trimArity v safe_arity
-
-    (ae_rhs, rhs') = callArityAnal trimmed_arity env rhs
-
-    ae_rhs'| called_once     = ae_rhs
-           | safe_arity == 0 = ae_rhs -- If it is not a function, its body is evaluated only once
-           | otherwise       = calledMultipleTimes ae_rhs
-
-    called_by_v = domRes ae_rhs'
-    called_with_v
-        | boring    = domRes ae_body
-        | otherwise = calledWith ae_body v `delUnVarSet` v
-    final_ae = addCrossCoCalls called_by_v called_with_v $ ae_rhs' `lubType` typeDel v ae_body
-
-    v' = v `setIdCallArity` trimmed_arity
-
-
--- Recursive let. See Note [Recursion and fixpointing]
-callArityBind env ae_body b@(Rec binds)
-  = --(if True then
-    --pprTrace "callArityBind:Rec"
-    --         (vcat [ppr (Rec binds'), ppr ae_body, ppr ae_rhs]) else id) $
-    (final_ae, Rec binds')
-  where
-    -- See Note [Taking boring variables into account]
-    any_boring = any (not . isInteresting) [ i | (i, _) <- binds]
-
-    env_body = env
-    (ae_rhs, binds') = fix initial_binds
-    final_ae = bindersOf b `typeDelList` ae_rhs
-
-    -- The Maybe signifies that the expression was not yet called.
-    -- If it were, we had the called_once information, the call arity and
-    -- the arity result after analysing i.
-    initial_binds :: [(Id, Maybe (Bool, Arity, CallArityType), CoreExpr)]
-    initial_binds = [(i,Nothing,e) | (i,e) <- binds]
-
-    fix :: [(Id, Maybe (Bool, Arity, CallArityType), CoreExpr)] -> (CallArityType, [(Id, CoreExpr)])
-    fix ann_binds
-        | -- pprTrace "callArityBind:fix" (vcat [ppr ann_binds, ppr any_change, ppr ae]) $
-          any_change
-        = fix ann_binds'
-        | otherwise
-        = (ae, map (\(i, _, e) -> (i, e)) ann_binds')
-      where
-        aes_old = [ (i,ae) | (i, Just (_,_,ae), _) <- ann_binds ]
-        ae = callArityRecEnv any_boring aes_old ae_body
-
-        -- iterates a single binding
-        rerun (i, mbLastRun, rhs)
-            | isInteresting i && not (i `elemUnVarSet` domRes ae)
-            -- No call to this yet, so do nothing
-            = (False, (i, Nothing, rhs))
-
-            | Just (old_called_once, old_arity, _) <- mbLastRun
-            , called_once == old_called_once
-            , new_arity == old_arity
-            -- No change, no need to re-analize
-            = (False, (i, mbLastRun, rhs))
-
-            | otherwise
-            -- We previously analized this with a different arity (or not at all)
-            = let safe_arity | isThunk rhs = 0  -- See Note [Thunks in recursive groups]
-                             | otherwise   = new_arity
-
-                  -- See Note [Trimming arity]
-                  trimmed_arity = trimArity i safe_arity
-
-                  (ae_rhs, rhs') = callArityAnal trimmed_arity env_body rhs
-
-                  ae_rhs' | called_once     = ae_rhs
-                          | safe_arity == 0 = ae_rhs -- If it is not a function, its body is evaluated only once
-                          | otherwise       = calledMultipleTimes ae_rhs
-
-              in (True, (i `setIdCallArity` trimmed_arity, Just (called_once, new_arity, ae_rhs'), rhs'))
-          where
-            -- See Note [Taking boring variables into account]
-            (new_arity, called_once) | not (isInteresting i) = (0, False)
-                                     | otherwise                   = lookupCallArityType ae i
-
-        (changes, ann_binds') = unzip $ map rerun ann_binds
-        any_change = or changes
-
--- Combining the results from body and rhs, (mutually) recursive case
+-- Combining the results from body and rhs of a let binding
 -- See Note [Analysis II: The Co-Called analysis]
-callArityRecEnv :: Bool -> [(Var, CallArityType)] -> CallArityType -> CallArityType
-callArityRecEnv any_boring ae_rhss ae_body
-    = -- (if length ae_rhss > 300 then pprTrace "callArityRecEnv" (vcat [ppr ae_rhss, ppr ae_body, ppr ae_new]) else id) $
-      ae_new
+callArityLetEnv
+  :: Bool
+  -> Annotations
+  -> [(Var, CallArityType)]
+  -> CallArityType
+  -> CallArityType
+callArityLetEnv any_boring ann_old cat_rhss cat_body
+    = -- (if length ae_rhss > 300 then pprTrace "callArityLetEnv" (vcat [ppr ae_rhss, ppr ae_body, ppr ae_new]) else id) $
+      cat_new
   where
-    vars = map fst ae_rhss
+    vars = map fst cat_rhss
 
-    ae_combined = lubTypes (map snd ae_rhss) `lubType` ae_body
+    -- This is already the complete type, but with references from the current
+    -- binding group not resolved.
+    -- For the non-recursive case, at least cat_body may refer to some bound var
+    -- which we have to handle, for the recursive case even any of cat_rhss may.
+    -- This is why we have to union in appropriate cross_calls, which basically
+    -- perform substitution of Id to CallArityType.
+    cat_combined = lubTypes (map snd cat_rhss) `lubType` cat_body
 
     cross_calls
         -- See Note [Taking boring variables into account]
-        | any_boring          = completeGraph (domRes ae_combined)
+        | any_boring          = completeGraph (domType cat_combined)
         -- Also, calculating cross_calls is expensive. Simply be conservative
         -- if the mutually recursive group becomes too large.
-        | length ae_rhss > 25 = completeGraph (domRes ae_combined)
-        | otherwise           = unionUnVarGraphs $ map cross_call ae_rhss
-    cross_call (v, ae_rhs) = completeBipartiteGraph called_by_v called_with_v
+        | length cat_rhss > 25 = completeGraph (domType cat_combined)
+        | otherwise           = unionUnVarGraphs $ map cross_call cat_rhss
+    cross_call (v, cat_rhs) = completeBipartiteGraph called_by_v called_with_v
       where
-        is_thunk = idCallArity v == 0
+        is_thunk = lookupAnnotatedArity ann_old v == 0
+        -- We only add self cross calls if we really can recurse into ourselves.
+        -- This is not the case for thunks (and non-recursive bindings, but
+        -- then there won't be any mention of v in the rhs).
+        -- A thunk is not evaluated more than once, so the only
+        -- relevant calls are from other bindings or the body.
         -- What rhs are relevant as happening before (or after) calling v?
-        --    If v is a thunk, everything from all the _other_ variables
-        --    If v is not a thunk, everything can happen.
-        ae_before_v | is_thunk  = lubTypes (map snd $ filter ((/= v) . fst) ae_rhss) `lubType` ae_body
-                    | otherwise = ae_combined
+        --    If v doesn't recurse into itself, everything from all the _other_ variables
+        --    If v is self-recursive, everything can happen.
+        cat_before_v
+            | is_thunk  = lubTypes (map snd $ filter ((/= v) . fst) cat_rhss) `lubType` cat_body
+            | otherwise = cat_combined
         -- What do we want to know from these?
         -- Which calls can happen next to any recursive call.
-        called_with_v
-            = unionUnVarSets $ map (calledWith ae_before_v) vars
-        called_by_v = domRes ae_rhs
+        called_with_v = unionUnVarSets $ map (calledWith cat_before_v) vars
+        called_by_v = domType cat_rhs
 
-    ae_new = first (cross_calls `unionUnVarGraph`) ae_combined
+    cat_new = modifyCoCalls (cross_calls `unionUnVarGraph`) cat_combined
 
 -- See Note [Trimming arity]
 trimArity :: Id -> Arity -> Arity
@@ -791,6 +772,24 @@ trimArity v a = minimum [a, max_arity_by_type, max_arity_by_strsig]
 
     (demands, result_info) = splitStrictSig (idStrictness v)
 
+annotate :: Annotations -> CoreExpr -> CoreExpr
+annotate _ e@(Lit _) = e
+annotate _ e@(Type _) = e
+annotate _ e@(Coercion _) = e
+annotate _ e@(Var _) = e
+annotate ann (Tick t e) = Tick t (annotate ann e)
+annotate ann (Cast e co) = Cast (annotate ann e) co
+annotate ann (Lam v e) = Lam v (annotate ann e)
+annotate ann (App f a) = App (annotate ann f) (annotate ann a)
+annotate ann (Let (NonRec id rhs) e) = Let (NonRec (annotateId ann id) rhs) e
+annotate ann (Let (Rec pairs) e) = Let (Rec (map (first (annotateId ann)) pairs)) e
+annotate ann (Case scrut bndr ty alts) = Case (annotate ann scrut) bndr ty (map annotate_alt alts)
+  where
+    annotate_alt (dc, bndrs, e) = (dc, bndrs, annotate ann e)
+
+annotateId :: Annotations -> Id -> Id
+annotateId ann id = id `setIdCallArity` lookupAnnotatedArity ann id
+
 ---------------------------------------
 -- Functions related to CallArityType --
 ---------------------------------------
@@ -798,29 +797,6 @@ trimArity v a = minimum [a, max_arity_by_type, max_arity_by_strsig]
 -- Result type for the two analyses.
 -- See Note [Analysis I: The arity analyis]
 -- and Note [Analysis II: The Co-Called analysis]
-data AnalEnv
-  = AE
-  { ae_sigs :: VarEnv SigCache
-  }
-
-type LetDownResult = (CallAritySig, Id, CoreExpr)
-
-data SigCache = SigCache !(Arity -> State LetDownResult) !(IntMap LetDownResult)
-
-{-| @Left (ret, cache')@ means that we had a cache miss, so that we had to
-    compute @ret@ by a call to the function wrapped in @SigCache@, thereby
-    updating the cache to @cache'@.
-
-    @Right ret@ means that we hit a cached value @ret@ without the need to
-    execute the wrapped function.
--}
-data CacheLookupResult
-  = NotFound
-  | CacheHit LetDownResult
-  | CacheMiss (State AnalEnv LetDownResult)
-
--- TODO: Separate Sig and Type like in DmdAnal
-type CallAritySig = CallArityType
 data CallArityType
   = CAT
   { cat_cocalled :: UnVarGraph
@@ -834,52 +810,11 @@ instance Outputable CallArityType where
     <+> text "co-calls:" <+> ppr cocalled
     <+> text "arities:" <+> ppr arities
 
-emptyAnalEnv :: AnalEnv
-emptyAnalEnv = AE { ae_sigs = emptyVarEnv }
-
 emptyArityType :: CallArityType
 emptyArityType = CAT emptyUnVarGraph emptyVarEnv []
 
-overSigs :: (VarEnv SigCache -> VarEnv SigCache) -> AnalEnv -> AnalEnv
-overSigs modifier env = AE { ae_sigs = modifier (ae_sigs env) }
-
-extendAnalEnv :: Id -> (Arity -> State AnalEnv ()) -> State AnalEnv ()
-extendAnalEnv id sig
-  = modify . overSigs $ \sigs -> extendVarEnv sigs v (SigCache f IntMap.empty)
-
-lookupCachedSig :: Id -> Arity -> State AnalEnv CacheLookupResult
-lookupCachedSig id arity = do
-  sigs <- gets ae_sigs
-  case lookupVarEnv sigs id of
-    Nothing -> return NotFound
-    Just (SigCache f cache) -> do
-      maybe_sig <- IntMap.lookup arity cache
-      case maybe_sig of
-        Just sig -> return (CacheHit sig)
-        Nothing -> return (CacheMiss retrieve)
-      where
-        retrieve :: State AnalEnv CallAritySig
-        retrieve = do
-          f arity -- f is obliged to at least save the sig for @id@
-          caches <- gets ae_sigs
-          maybe
-            (error "lookupSigCache: f didn't save the sig like it ought to")
-            return $ do
-              -- we should still find the cache in the env
-              SigCache _ cache <- lookupVarEnv caches id
-              -- also the signature for the appropriate arity should have been cached
-              IntMap.lookup n cache
-
-alwaysRetrieve :: CacheLookupResult -> State AnalEnv (Maybe LetDownResult)
-alwaysRetrieve NotFound = return Nothing
-alwaysRetrieve (CacheHit sig) = return (Just sig)
-alwaysRetrieve (CacheMiss retrieve) = fmap Just retrieve
-
-cacheSig :: Id -> Arity -> LetDownResult -> State AnalEnv ()
-cacheSig id arity res = modify . overSigs $ \sigs -> modifyVarEnv modifier sigs id
-  where
-    modifier (SigCache f cache) =
-      SigCache f (IntMap.insert arity res cache)
+emptyAnalResult :: AnalResult
+emptyAnalResult = AR emptyArityType mempty
 
 unitArityType :: Var -> Arity -> CallArityType
 unitArityType v arity = CAT emptyUnVarGraph (unitVarEnv v arity) []
@@ -888,8 +823,9 @@ typeDelList :: [Var] -> CallArityType -> CallArityType
 typeDelList vs ae = foldr typeDel ae vs
 
 -- TODO: args handling
+-- TODO: What about transitive co-call relationships over v?
 typeDel :: Var -> CallArityType -> CallArityType
-typeDel v (CAT g ae args) = CAT (g `delNode` v) (ae `delVarEnv` v) (args \\ v)
+typeDel v (CAT g ae args) = CAT (g `delNode` v) (ae `delVarEnv` v) (delete v args)
 
 domType :: CallArityType -> UnVarSet
 domType ca_type = varEnvDom (cat_arities ca_type)
@@ -902,7 +838,7 @@ addArgToType id ca_type = ca_type { cat_args = id : cat_args ca_type }
 lookupCallArityType :: CallArityType -> Var -> (Arity, Bool)
 lookupCallArityType (CAT g ae _) v
     = case lookupVarEnv ae v of
-        Just a -> (a, not (v `elemUnVarSet` (neighbors g v)))
+        Just a -> (a, not (v `elemUnVarSet` neighbors g v))
         Nothing -> (0, False)
 
 calledWith :: CallArityType -> Var -> UnVarSet
@@ -910,7 +846,7 @@ calledWith ca_type v = neighbors (cat_cocalled ca_type) v
 
 modifyCoCalls :: (UnVarGraph -> UnVarGraph) -> CallArityType -> CallArityType
 modifyCoCalls modifier ca_type
-  = ca_type { cat_cocalls = modifier (cat_cocalls ca_type) }
+  = ca_type { cat_cocalled = modifier (cat_cocalled ca_type) }
 
 addCrossCoCalls :: UnVarSet -> UnVarSet -> CallArityType -> CallArityType
 addCrossCoCalls set1 set2
@@ -918,11 +854,11 @@ addCrossCoCalls set1 set2
 
 -- Replaces the co-call graph by a complete graph (i.e. no information)
 calledMultipleTimes :: CallArityType -> CallArityType
-calledMultipleTimes res = modifyCoCalls (const (completeGraph (domRes res))) res
+calledMultipleTimes res = modifyCoCalls (const (completeGraph (domType res))) res
 
 -- Used for application and cases
 both :: CallArityType -> CallArityType -> CallArityType
-both r1 r2 = addCrossCoCalls (domRes r1) (domRes r2) (r1 `lubType` r2)
+both r1 r2 = addCrossCoCalls (domType r1) (domType r2) (r1 `lubType` r2)
 
 -- Used when combining results from alternative cases; take the minimum
 lubType :: CallArityType -> CallArityType -> CallArityType
@@ -934,6 +870,3 @@ lubArityEnv = plusVarEnv_C min
 
 lubTypes :: [CallArityType] -> CallArityType
 lubTypes = foldl lubType emptyArityType
-
-predecessors :: VarEnv (IntMap (VarEnv IntSet))
-predecessors = emptyVarEnv
