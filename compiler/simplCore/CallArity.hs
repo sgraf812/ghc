@@ -8,34 +8,34 @@ module CallArity
     , callArityRHS -- for testing
     ) where
 
-import           DynFlags      (DynFlags)
-import           VarEnv
+import DynFlags      (DynFlags)
+import VarEnv
 
-import Control.Monad.Fix
 import Data.Monoid
-import           Data.List     (delete)
-import           Data.IntMap.Lazy (IntMap)
+import Data.List     (delete)
+import Data.IntMap.Lazy (IntMap)
 import qualified Data.IntMap.Lazy as IntMap
-import           Data.Map.Strict   (Map)
+import Data.Map.Strict   (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe
 import qualified Data.Set as Set
 
-import           BasicTypes
-import           CoreArity     (typeArity)
-import           CoreSyn
-import           CoreUtils     (exprIsHNF, exprIsTrivial)
-import           MkCore
-import           Id
+import BasicTypes
+import CoreArity     (typeArity)
+import CoreSyn
+import CoreUtils     (exprIsHNF, exprIsTrivial)
+import MkCore
+import Id
 import Outputable hiding ((<>))
-import           Demand
-import           UnVarGraph
+import Demand
+import UnVarGraph
 import Worklist
 import Util
-
+import Control.Monad
+import Control.Monad.Fix
 import Control.Monad.Trans.State.Strict
 
-import           Control.Arrow (first)
+import Control.Arrow ((***), first)
 
 
 {-
@@ -449,6 +449,8 @@ callArityRHS e = lookup_expr (runFramework fw (Set.singleton (node, 0)))
     (node, fw) = buildFramework $
       registerTransferFunction $ \node -> do
         transfer <- callArityExpr emptyVarEnv e
+        -- We only get away with using alwaysChangeDetector because this won't
+        -- introduce a cycle.
         return (node, (transfer, alwaysChangeDetector))
 
     lookup_expr :: Map (FrameworkNode, Arity) AnalResult -> CoreExpr
@@ -473,11 +475,15 @@ instance Monoid Annotations where
     where
       panicOnConflict n m
         | n == m    = n
-        | otherwise = pprPanic "CallArity.Annotations.mappend conflict" empty
+        | otherwise = pprPanic "CallArity.Annotations.mappend conflict"
+                               (vcat [ppr n <+> text "vs" <+> ppr m, ppr a, ppr b])
 
 -- | How an expression uses its interesting variables
 -- and the arity annotations for local bindings
 data AnalResult = AR !CallArityType !Annotations
+
+instance Outputable AnalResult where
+  ppr (AR cat ann) = vcat [text "type:" <+> ppr cat, text "annotations:" <+> ppr ann]
 
 unzipAnalResult :: [AnalResult] -> ([CallArityType], Annotations)
 unzipAnalResult ar = (map cat ar, foldMap ann ar)
@@ -487,7 +493,7 @@ unzipAnalResult ar = (map cat ar, foldMap ann ar)
 
 newtype FrameworkNode
   = FrameworkNode Int
-  deriving (Show, Eq, Ord)
+  deriving (Show, Eq, Ord, Outputable)
 
 type TransferFunction' a = TransferFunction (FrameworkNode, Arity) AnalResult a
 type ChangeDetector' = ChangeDetector (FrameworkNode, Arity) AnalResult
@@ -528,19 +534,6 @@ registerTransferFunction f = FB $ do
 dependOn' :: FrameworkNode -> Arity -> TransferFunction' AnalResult
 dependOn' node arity = fromMaybe emptyAnalResult <$> dependOn (node, arity)
 
-callArityBind :: VarEnv LetAnalKind -> CoreBind -> FrameworkBuilder (VarEnv FrameworkNode)
-callArityBind let_anal_kinds = build_binds emptyVarEnv . flattenBinds . singleton
-  where
-    build_binds env [] = return env
-    build_binds env ((id, rhs):binds) = registerTransferFunction $ \node -> do
-      env' <- build_binds (extendVarEnv env id node) binds
-      transfer <- callArityExpr let_anal_kinds rhs
-      let transfer' arity = do
-            -- TODO: trim arity
-            AR cat_rhs ann_rhs <- transfer arity
-            return (AR cat_rhs (mkAnnotation id arity <> ann_rhs))
-      return (env', (transfer', alwaysChangeDetector))
-
 -- | The main analysis function. See Note [Analysis type signature]
 callArityExpr
   :: VarEnv LetAnalKind
@@ -565,7 +558,7 @@ callArityExpr let_anal_kinds (Var v) = return transfer
   where
     transfer = case lookupVarEnv let_anal_kinds v of
       Nothing | not (isInteresting v) -> \_ -> return emptyAnalResult -- v is boring
-      Nothing -> \_ -> return emptyAnalResult -- TODO: use an exported sig here
+      Nothing -> \arity -> return (AR (unitArityType v arity) mempty) -- TODO: use an exported sig here
       Just LetUp -> \arity -> return (AR (unitArityType v arity) mempty) -- the demand is unleashed later
       Just LetDown -> \arity ->
         -- unleash cat directly
@@ -607,7 +600,7 @@ callArityExpr let_anal_kinds (App f a) = do
     let ca_a' | called_once    = ca_a
               | arg_arity == 0 = ca_a
               | otherwise      = calledMultipleTimes ca_a
-    return (AR (ca_f' `both` ca_a') (ann_f <> ann_a))
+    return (AR (ca_f' `both` ca_a') (pprTrace "ann_f" empty ann_f <> pprTrace "ann_a" empty ann_a))
 
 -- Case expression.
 callArityExpr let_anal_kinds (Case scrut bndr ty alts) = do
@@ -620,7 +613,7 @@ callArityExpr let_anal_kinds (Case scrut bndr ty alts) = do
     let cat = cat_scrut `both` lubTypes cat_alts
     -- pprTrace "callArityExpr:Case"
     --          (vcat [ppr scrut, ppr cat])
-    return (AR cat (ann_scrut <> ann_alts))
+    return (AR cat (pprTrace "ann_scrut" empty ann_scrut <> ann_alts))
 
 callArityExpr let_anal_kinds (Let bind e) = do
   let add_let_kind (id, rhs) env
@@ -629,64 +622,80 @@ callArityExpr let_anal_kinds (Let bind e) = do
   let binds = flattenBinds [bind]
   let let_anal_kinds' = foldr add_let_kind let_anal_kinds binds
 
-  nodes <- callArityBind let_anal_kinds' bind
+  -- The order in which we call callArityExpr here is important: This makes sure
+  -- we first stabilize bindings before analyzing the body.
+  transferred_binds <- forM binds $ \(id, rhs) -> do
+    transfer_rhs <- callArityExpr let_anal_kinds' rhs
+    return (id, rhs, transfer_rhs)
   transfer_body <- callArityExpr let_anal_kinds' e
 
-  node <- registerTransferFunction $ \node -> do
-    let transfer arity = do
-          ar_body@(AR cat_body ann_body) <- transfer_body arity
-          case bind of
-            -- TODO: handle LetDown. Probably just return emptyArityType in unleashCalls?
-            NonRec id rhs -> do
-              -- We don't need to use cat_old here, because only the let body can
-              -- call id.
-              AR cat ann_bind <- unleashCalls nodes False cat_body (id, rhs)
-              let cat_final = callArityLetEnv (not (isInteresting id)) ann_body [(id, cat)] cat_body
-              return (AR cat_final (ann_body <> ann_bind))
-            Rec pairs -> do
-              AR cat_old ann_old <- fromMaybe ar_body <$> dependOn (node, arity)
-              (cat_rhss, ann_rhss) <- unzipAnalResult <$> mapM (unleashCalls nodes True cat_old) pairs
-              let ids = map fst pairs
-              let any_boring = any (not . isInteresting) ids
-              let cat_final = callArityLetEnv any_boring ann_old (zip ids cat_rhss) cat_body
-              return (AR cat_final (ann_body <> ann_rhss))
+  case bind of
+    NonRec _ _ ->
+      -- We don't need to dependOn ourselves here, because only the let body can
+      -- call id.
+      return $ \arity -> do
+        ar_body <- transfer_body arity
+        AR cat ann <- unleashLet False transferred_binds ar_body ar_body
+        return (AR (typeDelList (bindersOf bind) cat) ann)
+    Rec _ -> do
+      -- This is a little more complicated, as we'll introduce a new FrameworkNode
+      -- which we'll depend on ourselves.
+      node <- registerTransferFunction $ \node -> do
+        let transfer arity = do
+              ar_body <- transfer_body arity
+              -- This is the actual fixed-point iteration: we depend on usage
+              -- results from the previous iteration, defaulting to just the body.
+              ar_usage <- fromMaybe ar_body <$> dependOn (node, arity)
+              unleashLet True transferred_binds ar_usage ar_body
 
-    let changeDetector changedRefs (AR old _) (AR new _) =
-          map fst (Set.toList changedRefs) /= [node]
-          || any (\id -> lookupCallArityType old id /= lookupCallArityType new id) (map fst binds)
+        let changeDetector changedRefs (AR old _) (AR new _) =
+              -- since we only care for arity and called once information of the
+              -- previous iteration, we cann efficiently test for changes.
+              map fst (Set.toList changedRefs) /= [node]
+              || any (\id -> lookupCallArityType old id /= lookupCallArityType new id) (map fst binds)
 
-    return (node, (transfer, changeDetector))
+        return (node, (transfer, changeDetector))
 
-  return $ \arity -> do
-    AR cat ann <- dependOn' node arity
-    return (AR (typeDelList (bindersOf bind) cat) ann)
+      -- Now for the actual TransferFunction of this expr...
+      return $ \arity -> do
+        AR cat ann <- dependOn' node arity
+        return (AR (typeDelList (bindersOf bind) cat) ann)
 
+unleashLet :: Bool -> [(Id, CoreExpr, Arity -> TransferFunction' AnalResult)] -> AnalResult -> AnalResult -> TransferFunction' AnalResult
+unleashLet is_recursive transferred_binds (AR cat_usage ann_usage) (AR cat_body ann_body) = do
+  (cat_rhss, ann_rhss) <- unzipAnalResult <$> mapM (unleashCall is_recursive cat_usage) transferred_binds
+  let ids = map (\(id, _, _) -> id) transferred_binds
+  let cat_final = callArityLetEnv ann_usage (zip ids cat_rhss) cat_body
+  return (AR cat_final (pprTraceIt "ann_body" ann_body <> pprTraceIt "ann_rhss" ann_rhss))
 
-unleashCalls :: VarEnv FrameworkNode -> Bool -> CallArityType -> (Id, CoreExpr) -> TransferFunction' AnalResult
-unleashCalls nodes is_recursive cat_usage (id, rhs) = do
-  let boring = not (isInteresting id)
-      -- If v is boring, we will not find it in cat_usage, but always assume (0, False)
-      (arity, called_once)
-          | boring    = (0, False) -- See Note [Taking boring variables into account]
-          | otherwise = lookupCallArityType cat_usage id
+unleashCall :: Bool -> CallArityType -> (Id, CoreExpr, Arity -> TransferFunction' AnalResult) -> TransferFunction' AnalResult
+unleashCall is_recursive cat_usage (id, rhs, transfer_rhs)
+  | isInteresting id && not (id `elemUnVarSet` domType cat_usage)
+  = return emptyAnalResult -- No call to `id` (yet)
+  | otherwise
+  = do
+    let boring = not (isInteresting id)
+        -- If v is boring, we will not find it in cat_usage, but always assume (0, False)
+        (arity, called_once)
+            | boring    = (0, False) -- See Note [Taking boring variables into account]
+            | otherwise = --pprTrace "CallArity.unleashCalls" (ppr id <+> ppr (lookupCallArityType cat_usage id)) $
+                          lookupCallArityType cat_usage id
 
-      -- See Note [Thunks in recursive groups]
-      safe_arity
-          | isThunk rhs && (is_recursive || not called_once) = 0 -- A thunk was called multiple times! Do not eta-expand
-          | otherwise = arity -- in the other cases it's safe to expand
+        -- See Note [Thunks in recursive groups]
+        safe_arity
+            | isThunk rhs && (is_recursive || not called_once) = 0 -- A thunk was called multiple times! Do not eta-expand
+            | otherwise = arity -- in the other cases it's safe to expand
 
-      -- See Note [Trimming arity]
-      trimmed_arity = trimArity id safe_arity
+        -- See Note [Trimming arity]
+        trimmed_arity = trimArity id safe_arity
 
-      node = fromMaybe (pprPanic "CallArity.unleashCalls" (ppr id)) (lookupVarEnv nodes id)
-
-  -- TODO: Find out if (where) we need the trimmed_arity here or not
-  -- We probably want to analyze with arity und annotate trimmed_arity.
-  -- Although CA analyzes with trimmed_arity, so we do that for now
-  AR cat_rhs ann_rhs <- dependOn' node trimmed_arity
-  let cat_rhs' | called_once || safe_arity == 0 = cat_rhs
-               | otherwise = calledMultipleTimes cat_rhs
-  return (AR cat_rhs' (mkAnnotation id trimmed_arity <> ann_rhs) )
+    -- TODO: Find out if (where) we need the trimmed_arity here or not
+    -- We probably want to analyze with arity und annotate trimmed_arity.
+    -- Although CA analyzes with trimmed_arity, so we do that for now
+    AR cat_rhs ann_rhs <- transfer_rhs trimmed_arity
+    let cat_rhs' | called_once || safe_arity == 0 = cat_rhs
+                 | otherwise = calledMultipleTimes cat_rhs
+    return (AR cat_rhs' ((pprTrace "annotating" (ppr id <+> ppr trimmed_arity) mkAnnotation id trimmed_arity) <> ann_rhs))
 
 determineLetAnalKind :: CoreExpr -> LetAnalKind
 determineLetAnalKind rhs
@@ -725,12 +734,11 @@ isInteresting v = not $ null (typeArity (idType v))
 -- Combining the results from body and rhs of a let binding
 -- See Note [Analysis II: The Co-Called analysis]
 callArityLetEnv
-  :: Bool
-  -> Annotations
+  :: Annotations
   -> [(Var, CallArityType)]
   -> CallArityType
   -> CallArityType
-callArityLetEnv any_boring ann_old cat_rhss cat_body
+callArityLetEnv ann_old cat_rhss cat_body
     = -- (if length ae_rhss > 300 then pprTrace "callArityLetEnv" (vcat [ppr ae_rhss, ppr ae_body, ppr ae_new]) else id) $
       cat_new
   where
@@ -745,12 +753,10 @@ callArityLetEnv any_boring ann_old cat_rhss cat_body
     cat_combined = lubTypes (map snd cat_rhss) `lubType` cat_body
 
     cross_calls
-        -- See Note [Taking boring variables into account]
-        | any_boring          = completeGraph (domType cat_combined)
-        -- Also, calculating cross_calls is expensive. Simply be conservative
+        -- Calculating cross_calls is expensive. Simply be conservative
         -- if the mutually recursive group becomes too large.
         | length cat_rhss > 25 = completeGraph (domType cat_combined)
-        | otherwise           = unionUnVarGraphs $ map cross_call cat_rhss
+        | otherwise            = unionUnVarGraphs $ map cross_call cat_rhss
     cross_call (v, cat_rhs) = completeBipartiteGraph called_by_v called_with_v
       where
         is_thunk = lookupAnnotatedArity ann_old v == 0
@@ -784,19 +790,20 @@ trimArity v a = minimum [a, max_arity_by_type, max_arity_by_strsig]
     (demands, result_info) = splitStrictSig (idStrictness v)
 
 annotate :: Annotations -> CoreExpr -> CoreExpr
-annotate _ e@(Lit _) = e
-annotate _ e@(Type _) = e
-annotate _ e@(Coercion _) = e
-annotate _ e@(Var _) = e
-annotate ann (Tick t e) = Tick t (annotate ann e)
-annotate ann (Cast e co) = Cast (annotate ann e) co
-annotate ann (Lam v e) = Lam v (annotate ann e)
-annotate ann (App f a) = App (annotate ann f) (annotate ann a)
-annotate ann (Let (NonRec id rhs) e) = Let (NonRec (annotateId ann id) rhs) e
-annotate ann (Let (Rec pairs) e) = Let (Rec (map (first (annotateId ann)) pairs)) e
-annotate ann (Case scrut bndr ty alts) = Case (annotate ann scrut) bndr ty (map annotate_alt alts)
-  where
-    annotate_alt (dc, bndrs, e) = (dc, bndrs, annotate ann e)
+annotate ann e = case e of
+  Lit _ -> e
+  Type _ -> e
+  Coercion _ -> e
+  Var _ -> e
+  Tick t e -> Tick t (annotate ann e)
+  Cast e co -> Cast (annotate ann e) co
+  Lam v e -> Lam v (annotate ann e) -- TODO: Also annotate v? Seems important for LetDown
+  App f a -> App (annotate ann f) (annotate ann a)
+  Let (NonRec id rhs) e -> Let (NonRec (annotateId ann id) (annotate ann rhs)) (annotate ann e)
+  Let (Rec pairs) e -> Let (Rec (map (annotateId ann *** annotate ann) pairs)) (annotate ann e)
+  Case scrut bndr ty alts -> Case (annotate ann scrut) bndr ty (map annotate_alt alts)
+    where
+      annotate_alt (dc, bndrs, e) = (dc, bndrs, annotate ann e)
 
 annotateId :: Annotations -> Id -> Id
 annotateId ann id = id `setIdCallArity` lookupAnnotatedArity ann id
@@ -853,7 +860,11 @@ lookupCallArityType (CAT g ae _) v
         Nothing -> (0, False)
 
 calledWith :: CallArityType -> Var -> UnVarSet
-calledWith ca_type v = neighbors (cat_cocalled ca_type) v
+calledWith ca_type v
+  | isInteresting v
+  = neighbors (cat_cocalled ca_type) v
+  | otherwise
+  = domType ca_type
 
 modifyCoCalls :: (UnVarGraph -> UnVarGraph) -> CallArityType -> CallArityType
 modifyCoCalls modifier ca_type

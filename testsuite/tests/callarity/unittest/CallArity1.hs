@@ -41,7 +41,7 @@ go, go2, x, d, n, y, z, scrutf, scruta :: Id
 
 exprs :: [(String, CoreExpr)]
 exprs =
-  [ ("go2",) $
+  [ ("go2",) $ -- pprTraceIt "go2" $
      mkRFun go [x]
         (mkNrLet d (mkACase (Var go `mkVarApps` [x])
                           (mkLams [y] $ Var y)
@@ -142,10 +142,10 @@ exprs =
     mkNrLet d (f `mkLApps` [0]) $
         mkNrLet n (Var f `mkApps` [d `mkLApps` [1]]) $
             mkLams [x] $ Var n `mkVarApps` [x]
-  , ("a thunk (non-function-type), in mutual recursion, still calls once (d 1 would be good)",) $
+  , ("a thunk (non-function-type), in mutual recursion, still calls once (d 0 would be bad)",) $
     mkNrLet d (f `mkLApps` [0]) $
         Let (Rec [ (x, Var d `mkApps` [go `mkLApps` [1,2]])
-                 , (go, mkLams [x] $ mkACase (mkLams [z] $ Var x) (Var go `mkVarApps` [x]) ) ]) $
+                 , (go, mkLams [y] $ mkACase (mkLams [z] $ Var x) (Var go `mkVarApps` [x]) ) ]) $
             Var go `mkApps` [mkLit 0, go `mkLApps` [0,1]]
   , ("a thunk (non-function-type), in mutual recursion, causes many calls (d 1 would be bad)",) $
     mkNrLet d (f `mkLApps` [0]) $
@@ -222,4 +222,3 @@ allBoundIds (Lam _ e)  = allBoundIds e
 allBoundIds (Tick _ e) = allBoundIds e
 allBoundIds (Cast e _) = allBoundIds e
 allBoundIds _ = emptyVarSet
-
