@@ -546,7 +546,7 @@ callArityExpr let_anal_kinds e@(Var v) = return transfer
 -- Non-value lambdas are ignored
 callArityExpr let_anal_kinds (Lam v e)
   | not (isId v)
-  = callArityExpr let_anal_kinds e
+  = callArityExprTransparent let_anal_kinds (Lam v) e
   | otherwise
   = transfer' <$> callArityExpr let_anal_kinds e
   where
