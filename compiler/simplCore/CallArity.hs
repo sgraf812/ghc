@@ -445,7 +445,7 @@ callArityRHS e = lookup_expr (runFramework fw (Set.singleton (node, 0)))
   where
     (node, fw) = buildFramework $
       registerTransferFunction $ \node -> do
-        transfer <- callArityExpr emptyVarEnv e
+        transfer <- callArityExpr e
         -- We only get away with using alwaysChangeDetector because this won't
         -- introduce a cycle.
         return (node, (transfer, alwaysChangeDetector))
@@ -471,15 +471,6 @@ newtype FrameworkBuilder a
   = FB { unFB :: State (IntMap (Arity -> TransferFunction' AnalResult, ChangeDetector')) a }
   deriving (Functor, Applicative, Monad)
 
-data LetAnalKind
-  = LetDown
-  | LetUp
-  deriving (Show, Eq, Ord)
-
-isLetUp :: LetAnalKind -> Bool
-isLetUp LetUp = True
-isLetUp LetDown = False
-
 buildFramework :: FrameworkBuilder a -> (a, DataFlowFramework')
 buildFramework (FB state) = (res, DFF dff)
   where
@@ -501,8 +492,7 @@ registerTransferFunction f = FB $ do
 
 -- | The main analysis function. See Note [Analysis type signature]
 callArityExpr
-  :: VarEnv LetAnalKind
-  -> CoreExpr
+  :: CoreExpr
   -> FrameworkBuilder (Arity -> TransferFunction' AnalResult)
 
 callArityExprTrivial
@@ -512,43 +502,36 @@ callArityExprTrivial e
   = return (\_ -> return (emptyArityType, e))
 
 callArityExprTransparent
-  :: VarEnv LetAnalKind
-  -> (CoreExpr -> a)
+  :: (CoreExpr -> a)
   -> CoreExpr
   -> FrameworkBuilder (Arity -> TransferFunction' (CallArityType, a))
-callArityExprTransparent let_anal_kinds f e
-  = transfer' <$> callArityExpr let_anal_kinds e
+callArityExprTransparent f e
+  = transfer' <$> callArityExpr e
   where
     transfer' transfer arity = do
       (cat, e') <- transfer arity
       return (cat, f e')
 
 -- The trivial base cases
-callArityExpr _ e@(Lit _) = callArityExprTrivial e
-callArityExpr _ e@(Type _) = callArityExprTrivial e
-callArityExpr _ e@(Coercion _) = callArityExprTrivial e
+callArityExpr e@(Lit _) = callArityExprTrivial e
+callArityExpr e@(Type _) = callArityExprTrivial e
+callArityExpr e@(Coercion _) = callArityExprTrivial e
 
 -- The transparent cases
-callArityExpr let_anal_kinds (Tick t e)
-  = callArityExprTransparent let_anal_kinds (Tick t) e
-callArityExpr let_anal_kinds (Cast e c)
-  = callArityExprTransparent let_anal_kinds (flip Cast c) e
+callArityExpr (Tick t e) = callArityExprTransparent (Tick t) e
+callArityExpr (Cast e c) = callArityExprTransparent (flip Cast c) e
 
 -- The interesting cases: Variables, Lambdas, Lets, Applications, Cases
-callArityExpr let_anal_kinds e@(Var v) = return transfer
+callArityExpr e@(Var v) = return transfer
   where
-    transfer = case lookupVarEnv let_anal_kinds v of
-      Nothing | not (isInteresting v) -> \_ -> return (emptyArityType, e) -- v is boring
-      Nothing -> \arity -> return (unitArityType v arity, e) -- TODO: use an exported sig here
-      Just LetUp -> \arity -> return (unitArityType v arity, e) -- the demand is unleashed later
-      Just LetDown -> error "not implemented" -- unleash cat directly
+    transfer
+      | isInteresting v = \arity -> return (unitArityType v arity, e)
+      | otherwise       = \_ -> return (emptyArityType, e)
 
 -- Non-value lambdas are ignored
-callArityExpr let_anal_kinds (Lam v e)
-  | not (isId v)
-  = callArityExprTransparent let_anal_kinds (Lam v) e
-  | otherwise
-  = transfer' <$> callArityExpr let_anal_kinds e
+callArityExpr (Lam v e)
+  | not (isId v) = callArityExprTransparent (Lam v) e
+  | otherwise    = transfer' <$> callArityExpr e
   where
     -- We have a lambda that may be called multiple times, so its free variables
     -- can all be co-called.
@@ -562,14 +545,13 @@ callArityExpr let_anal_kinds (Lam v e)
       (cat, e') <- transfer (arity - 1)
       return (addArgToType v cat, Lam v e')
 
-callArityExpr let_anal_kinds (App f (Type t))
-  = callArityExprTransparent let_anal_kinds (flip App (Type t)) f
+callArityExpr (App f (Type t)) = callArityExprTransparent (flip App (Type t)) f
 
 -- Application. Increase arity for the called expression, nothing to know about
 -- the second
-callArityExpr let_anal_kinds (App f a) = do
-  transfer_f <- callArityExpr let_anal_kinds f
-  transfer_a <- callArityExpr let_anal_kinds a
+callArityExpr (App f a) = do
+  transfer_f <- callArityExpr f
+  transfer_a <- callArityExpr a
   return $ \arity -> do
     (cat_f, f') <- transfer_f (arity + 1)
     -- peel off one argument from the type
@@ -583,11 +565,11 @@ callArityExpr let_anal_kinds (App f a) = do
     return (cat_f' `both` cat_a', App f' a')
 
 -- Case expression.
-callArityExpr let_anal_kinds (Case scrut bndr ty alts) = do
-  transfer_scrut <- callArityExpr let_anal_kinds scrut
+callArityExpr (Case scrut bndr ty alts) = do
+  transfer_scrut <- callArityExpr scrut
     -- TODO: Do we have to do something special with bndr?
   transfer_alts <- forM alts $ \(dc, bndrs, e) ->
-    callArityExprTransparent let_anal_kinds (dc, bndrs,) e
+    callArityExprTransparent (dc, bndrs,) e
   return $ \arity -> do
     (cat_scrut, scrut') <- transfer_scrut 0
     (cat_alts, alts') <- unzip <$> mapM ($ arity) transfer_alts
@@ -596,17 +578,12 @@ callArityExpr let_anal_kinds (Case scrut bndr ty alts) = do
     --          (vcat [ppr scrut, ppr cat])
     return (cat, Case scrut' bndr ty alts')
 
-callArityExpr let_anal_kinds (Let bind e) = do
-  let add_let_kind (id, rhs) env
-        | isInteresting id = extendVarEnv env id (determineLetAnalKind rhs)
-        | otherwise = env
+callArityExpr (Let bind e) = do
   let binds = flattenBinds [bind]
-  let let_anal_kinds' = foldr add_let_kind let_anal_kinds binds
-
   -- The order in which we call callArityExpr here is important: This makes sure
-  -- we first stabilize bindings before analyzing the body.
-  transfer_rhss <- mapM (callArityExpr let_anal_kinds' . snd) binds
-  transfer_body <- callArityExpr let_anal_kinds' e
+  -- the FP iteration will first stabilize bindings before analyzing the body.
+  transfer_rhss <- mapM (callArityExpr . snd) binds
+  transfer_body <- callArityExpr e
 
   let zip213 = zipWith (\(a, b) c -> (a, b, c))
 
@@ -689,11 +666,6 @@ unleashCall is_recursive cat_usage (id, rhs, transfer_rhs)
     let cat_rhs' | called_once || safe_arity == 0 = cat_rhs
                  | otherwise = calledMultipleTimes cat_rhs
     return (cat_rhs', (id `setIdCallArity` trimmed_arity, rhs'))
-
-determineLetAnalKind :: CoreExpr -> LetAnalKind
-determineLetAnalKind rhs
-  | isThunk rhs || True = LetUp
-  | otherwise = LetDown
 
 isThunk :: CoreExpr -> Bool
 isThunk = not . exprIsHNF
