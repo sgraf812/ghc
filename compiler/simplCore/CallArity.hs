@@ -12,7 +12,6 @@ module CallArity
 import DynFlags      (DynFlags)
 import VarEnv
 
-import Data.List     (delete)
 import Data.IntMap.Lazy (IntMap)
 import qualified Data.IntMap.Lazy as IntMap
 import Data.Map.Strict   (Map)
@@ -434,7 +433,7 @@ callArityRHS e = lookup_expr (runFramework fw (Set.singleton (node, 0)))
   where
     (node, fw) = buildFramework $
       registerTransferFunction $ \node -> do
-        transfer <- callArityExpr e
+        transfer <- callArityExpr emptyVarEnv e
         -- We only get away with using alwaysChangeDetector because this won't
         -- introduce a cycle.
         return (node, (transfer, alwaysChangeDetector))
@@ -481,7 +480,8 @@ registerTransferFunction f = FB $ do
 
 -- | The main analysis function. See Note [Analysis type signature]
 callArityExpr
-  :: CoreExpr
+  :: VarEnv FrameworkNode
+  -> CoreExpr
   -> FrameworkBuilder (Arity -> TransferFunction' AnalResult)
 
 callArityExprTrivial
@@ -491,36 +491,46 @@ callArityExprTrivial e
   = return (\_ -> return (emptyArityType, e))
 
 callArityExprTransparent
-  :: (CoreExpr -> a)
+  :: VarEnv FrameworkNode
+  -> (CoreExpr -> a)
   -> CoreExpr
   -> FrameworkBuilder (Arity -> TransferFunction' (CallArityType, a))
-callArityExprTransparent f e
-  = transfer' <$> callArityExpr e
+callArityExprTransparent nodes f e
+  = transfer' <$> callArityExpr nodes e
   where
     transfer' transfer arity = do
       (cat, e') <- transfer arity
       return (cat, f e')
 
 -- The trivial base cases
-callArityExpr e@(Lit _) = callArityExprTrivial e
-callArityExpr e@(Type _) = callArityExprTrivial e
-callArityExpr e@(Coercion _) = callArityExprTrivial e
+callArityExpr _ e@(Lit _) = callArityExprTrivial e
+callArityExpr _ e@(Type _) = callArityExprTrivial e
+callArityExpr _ e@(Coercion _) = callArityExprTrivial e
 
 -- The transparent cases
-callArityExpr (Tick t e) = callArityExprTransparent (Tick t) e
-callArityExpr (Cast e c) = callArityExprTransparent (flip Cast c) e
+callArityExpr nodes (Tick t e) = callArityExprTransparent nodes (Tick t) e
+callArityExpr nodes (Cast e c) = callArityExprTransparent nodes (flip Cast c) e
 
 -- The interesting cases: Variables, Lambdas, Lets, Applications, Cases
-callArityExpr e@(Var v) = return transfer
+callArityExpr nodes e@(Var v) = return transfer
   where
-    transfer
-      | isInteresting v = \arity -> return (unitArityType v arity, e)
-      | otherwise       = \_ -> return (emptyArityType, e)
+    transfer arity
+      | isInteresting v
+      , Just node <- lookupVarEnv nodes v
+      = do
+        (cat_callee, _) <- fromMaybe (unusedArgsArityType arity, e) <$> dependOn (node, arity)
+        return ((unitArityType v arity) { cat_args = cat_args cat_callee }, e)
+
+      | isInteresting v
+      = return (unitArityType v arity, e) -- TODO: lookup sig if present
+
+      | otherwise
+      = return (emptyArityType, e)
 
 -- Non-value lambdas are ignored
-callArityExpr (Lam v e)
-  | not (isId v) = callArityExprTransparent (Lam v) e
-  | otherwise    = transfer' <$> callArityExpr e
+callArityExpr nodes (Lam v e)
+  | not (isId v) = callArityExprTransparent nodes (Lam v) e
+  | otherwise    = transfer' <$> callArityExpr nodes e
   where
     -- We have a lambda that may be called multiple times, so its free variables
     -- can all be co-called.
@@ -528,37 +538,37 @@ callArityExpr (Lam v e)
     -- we have to add the var as an argument.
     transfer' transfer 0 = do
       (cat, e') <- transfer 0
-      return (addArgToType v (calledMultipleTimes cat), Lam v e')
+      return (makeIdArg v (calledMultipleTimes cat), Lam v e')
     -- We have a lambda that we are calling. decrease arity.
     transfer' transfer arity = do
       (cat, e') <- transfer (arity - 1)
-      return (addArgToType v cat, Lam v e')
+      return (makeIdArg v cat, Lam v e')
 
-callArityExpr (App f (Type t)) = callArityExprTransparent (flip App (Type t)) f
+callArityExpr nodes (App f (Type t)) = callArityExprTransparent nodes (flip App (Type t)) f
 
 -- Application. Increase arity for the called expression, nothing to know about
 -- the second
-callArityExpr (App f a) = do
-  transfer_f <- callArityExpr f
-  transfer_a <- callArityExpr a
+callArityExpr nodes (App f a) = do
+  transfer_f <- callArityExpr nodes f
+  transfer_a <- callArityExpr nodes a
   return $ \arity -> do
     (cat_f, f') <- transfer_f (arity + 1)
     -- peel off one argument from the type
-    let (arg_arity, called_once, cat_f') = peelCallArityType a cat_f
-    -- TODO: Actually use called with information instead of just called_once
-    --       Maybe this is enough for higher-order signature information?
-    (cat_a, a') <- transfer_a arg_arity
-    let cat_a' | called_once    = cat_a
-               | arg_arity == 0 = cat_a
-               | otherwise      = calledMultipleTimes cat_a
-    return (cat_f' `both` cat_a', App f' a')
+    case peelCallArityType a cat_f of
+      (Nothing, cat_f') -> return (cat_f', App f' a) -- TODO: Visit a, too? Seems unnecessary, wasn't called at all
+      (Just (arg_arity, called_once), cat_f') -> do
+        (cat_a, a') <- transfer_a arg_arity
+        let cat_a' | called_once    = cat_a
+                   | arg_arity == 0 = cat_a
+                   | otherwise      = calledMultipleTimes cat_a
+        return (cat_f' `both` cat_a', App f' a')
 
 -- Case expression.
-callArityExpr (Case scrut bndr ty alts) = do
-  transfer_scrut <- callArityExpr scrut
+callArityExpr nodes (Case scrut bndr ty alts) = do
+  transfer_scrut <- callArityExpr nodes scrut
     -- TODO: Do we have to do something special with bndr?
   transfer_alts <- forM alts $ \(dc, bndrs, e) ->
-    callArityExprTransparent (dc, bndrs,) e
+    callArityExprTransparent nodes (dc, bndrs,) e
   return $ \arity -> do
     (cat_scrut, scrut') <- transfer_scrut 0
     (cat_alts, alts') <- unzip <$> mapM ($ arity) transfer_alts
@@ -567,12 +577,15 @@ callArityExpr (Case scrut bndr ty alts) = do
     --          (vcat [ppr scrut, ppr cat])
     return (cat, Case scrut' bndr ty alts')
 
-callArityExpr (Let bind e) = do
+callArityExpr letdown_nodes (Let bind e) = do
   let binds = flattenBinds [bind]
   -- The order in which we call callArityExpr here is important: This makes sure
   -- the FP iteration will first stabilize bindings before analyzing the body.
-  transfer_rhss <- mapM (callArityExpr . snd) binds
-  transfer_body <- callArityExpr e
+  (letdown_nodes', letup_nodes) <- callArityBind letdown_nodes binds
+  let transfer_rhs (id, rhs) arity =
+        fromMaybe (unusedArgsArityType arity, rhs) <$> dependOn (fromJust (lookupVarEnv letup_nodes id), arity)
+  let transfer_rhss = map transfer_rhs binds
+  transfer_body <- callArityExpr letdown_nodes' e
 
   let zip213 = zipWith (\(a, b) c -> (a, b, c))
 
@@ -598,18 +611,47 @@ callArityExpr (Let bind e) = do
               (cat, bind') <- unleashLet True bind_with_transfer cat_usage cat_body
               return (cat, Let (Rec bind') e')
 
-        let changeDetector changedRefs (old, _) (new, _) =
+        let change_detector changed_refs (old, _) (new, _) =
               -- since we only care for arity and called once information of the
               -- previous iteration, we cann efficiently test for changes.
-              map fst (Set.toList changedRefs) /= [node]
+              map fst (Set.toList changed_refs) /= [node]
               || any (\id -> lookupCallArityType old id /= lookupCallArityType new id) (map fst binds)
 
-        return (node, (transfer, changeDetector))
+        return (node, (transfer, change_detector))
 
       -- Now for the actual TransferFunction of this expr...
       return $ \arity -> do
         (cat, let') <- fromMaybe (emptyArityType, Let bind e) <$> dependOn (node, arity)
         return (typeDelList (bindersOf bind) cat, let')
+
+callArityBind
+  :: VarEnv FrameworkNode
+  -> [(Id, CoreExpr)]
+  -> FrameworkBuilder (VarEnv FrameworkNode, VarEnv FrameworkNode)
+callArityBind letdown_nodes = go letdown_nodes emptyVarEnv
+  where
+    go letdown_nodes letup_nodes [] = return (letdown_nodes, letup_nodes)
+    go letdown_nodes letup_nodes ((id, rhs):binds) =
+      registerTransferFunction $ \letup_node ->
+        registerTransferFunction $ \letdown_node -> do
+          (letdown_nodes', letup_nodes') <- go
+            (extendVarEnv letdown_nodes id letdown_node)
+            (extendVarEnv letup_nodes id letup_node)
+            binds
+          transfer_up <- callArityExpr letdown_nodes' rhs
+          let transfer_down arity = fromMaybe (unusedArgsArityType arity, rhs) <$> dependOn (letup_node, arity)
+          let change_detector_down _ (old, _) (new, _) =
+                -- The only reason we split the transfer fuctions up is cheap
+                -- change detection for the LetDown case. This implies that
+                -- use sites of the LetDown component may only use the cat_args
+                -- component!
+                -- FIXME: Encode this in the FrameworkNode type somehow, but I
+                -- don't think it's worth the trouble.
+                cat_args old /= cat_args new
+          let ret = (letdown_nodes', letup_nodes') -- What we return from callArityBind
+          let letup = (transfer_up, alwaysChangeDetector) -- What we register for letup_node
+          let letdown = (transfer_down, change_detector_down) -- What we register for letdown_node
+          return ((ret, letup), letdown) -- registerTransferFunction  will peel `snd`s away for registration
 
 unleashLet
   :: Bool
@@ -659,10 +701,12 @@ unleashCall is_recursive cat_usage (id, rhs, transfer_rhs)
 isThunk :: CoreExpr -> Bool
 isThunk = not . exprIsHNF
 
--- TODO: add the set of neighbors
-peelCallArityType :: CoreExpr -> CallArityType -> (Arity, Bool, CallArityType)
+peelCallArityType :: CoreExpr -> CallArityType -> (Maybe (Arity, Bool), CallArityType)
 peelCallArityType a ca_type = case cat_args ca_type of
-  arg:_ | isInteresting arg ->
+  arg:args -> (arg, ca_type { cat_args = args })
+  _ -> (Just (0, False), ca_type)
+  {- TODO: worry about this later
+  arg:args | isInteresting arg ->
     -- TODO: not (exprIsTrivial a)?
     -- TODO: called_once when arity = 0?
     let (arity, called_once) = lookupCallArityType ca_type arg
@@ -679,6 +723,7 @@ peelCallArityType a ca_type = case cat_args ca_type of
     -- Also, if the argument is trivial (e.g. a variable), then it will _not_ be
     -- let-bound in the Core to STG transformation (CorePrep actually),
     -- so no sharing will happen here, and we have to assume many calls.
+    -}
 
 -- Which bindings should we look at?
 -- See Note [Which variables are interesting]
@@ -708,7 +753,8 @@ callArityLetEnv cat_rhss cat_body
     cross_calls
         -- Calculating cross_calls is expensive. Simply be conservative
         -- if the mutually recursive group becomes too large.
-        | length cat_rhss > 25 = completeGraph (domType cat_combined)
+        -- TODO: I *think* 5 is enough here, but this used to be 25.
+        | length cat_rhss > 5 = completeGraph (domType cat_combined)
         | otherwise            = unionUnVarGraphs $ map cross_call cat_rhss
     cross_call (v, cat_rhs) = completeBipartiteGraph called_by_v called_with_v
       where
@@ -753,12 +799,12 @@ data CallArityType
   = CAT
   { cat_cocalled :: UnVarGraph
   , cat_arities :: VarEnv Arity
-  , cat_args :: [Var]
+  , cat_args :: [Maybe (Arity, Bool)]
   }
 
 instance Outputable CallArityType where
   ppr (CAT cocalled arities args) =
-    text "args:" <+> ppr args
+    text "arg demands:" <+> ppr args
     <+> text "co-calls:" <+> ppr cocalled
     <+> text "arities:" <+> ppr arities
 
@@ -766,21 +812,23 @@ emptyArityType :: CallArityType
 emptyArityType = CAT emptyUnVarGraph emptyVarEnv []
 
 unitArityType :: Var -> Arity -> CallArityType
-unitArityType v arity = CAT emptyUnVarGraph (unitVarEnv v arity) []
+unitArityType v arity = emptyArityType { cat_arities = unitVarEnv v arity }
+
+unusedArgsArityType :: Int -> CallArityType
+unusedArgsArityType arity = emptyArityType { cat_args = replicate arity Nothing }
 
 typeDelList :: [Var] -> CallArityType -> CallArityType
 typeDelList vs ae = foldr typeDel ae vs
 
--- TODO: args handling
--- TODO: What about transitive co-call relationships over v?
 typeDel :: Var -> CallArityType -> CallArityType
-typeDel v (CAT g ae args) = CAT (g `delNode` v) (ae `delVarEnv` v) (delete v args)
+typeDel v (CAT g ae args) = CAT (g `delNode` v) (ae `delVarEnv` v) args
 
 domType :: CallArityType -> UnVarSet
 domType ca_type = varEnvDom (cat_arities ca_type)
 
-addArgToType :: Id -> CallArityType -> CallArityType
-addArgToType id ca_type = ca_type { cat_args = id : cat_args ca_type }
+makeIdArg :: Id -> CallArityType -> CallArityType
+makeIdArg id ca_type = typeDel id ca_type
+  { cat_args = Just (lookupCallArityType ca_type id) : cat_args ca_type }
 
 -- In the result, find out the minimum arity and whether the variable is called
 -- at most once.
