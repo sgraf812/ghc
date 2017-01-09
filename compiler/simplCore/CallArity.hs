@@ -27,6 +27,7 @@ import MkCore
 import Id
 import Outputable
 import Demand
+import UniqFM
 import UnVarGraph
 import Worklist
 import Control.Monad
@@ -432,7 +433,7 @@ callArityRHS :: CoreExpr -> CoreExpr
 callArityRHS e = lookup_expr (runFramework fw (Set.singleton (node, 0)))
   where
     (node, fw) = buildFramework $
-      registerTransferFunction $ \node -> do
+      registerTransferFunction (LowerThan (FrameworkNode 0)) $ \node -> do
         transfer <- callArityExpr emptyVarEnv e
         -- We only get away with using alwaysChangeDetector because this won't
         -- introduce a cycle.
@@ -467,16 +468,33 @@ buildFramework (FB state) = (res, DFF dff)
       Nothing -> pprPanic "CallArity.buildFramework" (ppr node)
       Just (transfer, detectChange) -> (transfer arity, detectChange)
 
+data RequestedPriority
+  = LowerThan FrameworkNode
+  | HighestAvailable
+
 registerTransferFunction
-  :: (FrameworkNode -> FrameworkBuilder (a, (Arity -> TransferFunction' AnalResult, ChangeDetector')))
+  :: RequestedPriority
+  -> (FrameworkNode -> FrameworkBuilder (a, (Arity -> TransferFunction' AnalResult, ChangeDetector')))
   -> FrameworkBuilder a
-registerTransferFunction f = FB $ do
-  node <- gets IntMap.size
+registerTransferFunction prio f = FB $ do
+  nodes <- get
+  let node = case prio of
+        HighestAvailable -> 2 * IntMap.size nodes
+        LowerThan (FrameworkNode node)
+          | not (IntMap.member (node - 1) nodes) -> node - 1
+          | otherwise -> pprPanic "registerTransferFunction" (text "There was already a node registered with priority" <+> ppr (node - 1))
   (result, _) <- mfix $ \ ~(_, entry) -> do
     -- Using mfix so that we can spare an unnecessary Int counter in the state
     modify' (IntMap.insert node entry)
     unFB (f (FrameworkNode node))
   return result
+
+dependOn' :: (FrameworkNode, Arity) -> TransferFunction' (Maybe AnalResult)
+dependOn' (node, arity) = do
+  --pprTrace "dependOn':before" (text "node:" <+> ppr node <+> text "arity:" <+> ppr arity) $ return ()
+  res <- dependOn (node, arity)
+  --pprTrace "dependOn':after" (vcat [text "node:" <+> ppr node, text "arity:" <+> ppr arity, text "res:" <+> ppr res]) $ return ()
+  return res
 
 -- | The main analysis function. See Note [Analysis type signature]
 callArityExpr
@@ -518,8 +536,8 @@ callArityExpr nodes e@(Var v) = return transfer
       | isInteresting v
       , Just node <- lookupVarEnv nodes v
       = do
-        (cat_callee, _) <- fromMaybe (unusedArgsArityType arity, e) <$> dependOn (node, arity)
-        return ((unitArityType v arity) { cat_args = cat_args cat_callee }, e)
+        (cat_callee, _) <- fromMaybe (unusedArgsArityType arity, e) <$> dependOn' (node, arity)
+        return ((unitArityType v arity) { cat_args = cat_args cat_callee }, e)
 
       | isInteresting v
       = return (unitArityType v arity, e) -- TODO: lookup sig if present
@@ -553,11 +571,13 @@ callArityExpr nodes (App f a) = do
   transfer_a <- callArityExpr nodes a
   return $ \arity -> do
     (cat_f, f') <- transfer_f (arity + 1)
+    --pprTrace "App:f'" (ppr (cat_f, f')) $ return ()
     -- peel off one argument from the type
     case peelCallArityType a cat_f of
       (Nothing, cat_f') -> return (cat_f', App f' a) -- TODO: Visit a, too? Seems unnecessary, wasn't called at all
       (Just (arg_arity, called_once), cat_f') -> do
         (cat_a, a') <- transfer_a arg_arity
+        --pprTrace "App:a'" (ppr (cat_a, a')) $ return ()
         let cat_a' | called_once    = cat_a
                    | arg_arity == 0 = cat_a
                    | otherwise      = calledMultipleTimes cat_a
@@ -572,9 +592,10 @@ callArityExpr nodes (Case scrut bndr ty alts) = do
   return $ \arity -> do
     (cat_scrut, scrut') <- transfer_scrut 0
     (cat_alts, alts') <- unzip <$> mapM ($ arity) transfer_alts
-    let cat = cat_scrut `both` lubTypes cat_alts
+    let cat = lubTypes cat_alts `both` cat_scrut
     -- pprTrace "callArityExpr:Case"
     --          (vcat [ppr scrut, ppr cat])
+    --pprTrace "Case" (vcat [text "cat_scrut:" <+> ppr cat_scrut, text "cat_alts:" <+> ppr cat_alts, text "cat:" <+> ppr cat]) (return ())
     return (cat, Case scrut' bndr ty alts')
 
 callArityExpr letdown_nodes (Let bind e) = do
@@ -583,7 +604,7 @@ callArityExpr letdown_nodes (Let bind e) = do
   -- the FP iteration will first stabilize bindings before analyzing the body.
   (letdown_nodes', letup_nodes) <- callArityBind letdown_nodes binds
   let transfer_rhs (id, rhs) arity =
-        fromMaybe (unusedArgsArityType arity, rhs) <$> dependOn (fromJust (lookupVarEnv letup_nodes id), arity)
+        fromMaybe (unusedArgsArityType arity, rhs) <$> dependOn' (fromJust (lookupVarEnv letup_nodes id), arity)
   let transfer_rhss = map transfer_rhs binds
   transfer_body <- callArityExpr letdown_nodes' e
 
@@ -601,12 +622,12 @@ callArityExpr letdown_nodes (Let bind e) = do
     Rec _ -> do
       -- This is a little more complicated, as we'll introduce a new FrameworkNode
       -- which we'll depend on ourselves.
-      node <- registerTransferFunction $ \node -> do
+      node <- registerTransferFunction (LowerThan (minimum (eltsUFM letup_nodes))) $ \node -> do
         let transfer arity = do
               (cat_body, e') <- transfer_body arity
               -- This is the actual fixed-point iteration: we depend on usage
               -- results from the previous iteration, defaulting to just the body.
-              (cat_usage, Let (Rec old_bind) _) <- fromMaybe (cat_body, Let bind e') <$> dependOn (node, arity)
+              (cat_usage, Let (Rec old_bind) _) <- fromMaybe (cat_body, Let bind e') <$> dependOn' (node, arity)
               let bind_with_transfer = zip213 old_bind transfer_rhss
               (cat, bind') <- unleashLet True bind_with_transfer cat_usage cat_body
               return (cat, Let (Rec bind') e')
@@ -614,6 +635,7 @@ callArityExpr letdown_nodes (Let bind e) = do
         let change_detector changed_refs (old, _) (new, _) =
               -- since we only care for arity and called once information of the
               -- previous iteration, we cann efficiently test for changes.
+              --pprTrace "change_detector" (vcat[ppr node, ppr changed_refs, ppr old, ppr new])
               map fst (Set.toList changed_refs) /= [node]
               || any (\id -> lookupCallArityType old id /= lookupCallArityType new id) (map fst binds)
 
@@ -621,7 +643,8 @@ callArityExpr letdown_nodes (Let bind e) = do
 
       -- Now for the actual TransferFunction of this expr...
       return $ \arity -> do
-        (cat, let') <- fromMaybe (emptyArityType, Let bind e) <$> dependOn (node, arity)
+        (cat, let') <- fromMaybe (emptyArityType, Let bind e) <$> dependOn' (node, arity)
+        --pprTrace "Let" (ppr (cat, let')) $ return ()
         return (typeDelList (bindersOf bind) cat, let')
 
 callArityBind
@@ -632,14 +655,19 @@ callArityBind letdown_nodes = go letdown_nodes emptyVarEnv
   where
     go letdown_nodes letup_nodes [] = return (letdown_nodes, letup_nodes)
     go letdown_nodes letup_nodes ((id, rhs):binds) =
-      registerTransferFunction $ \letup_node ->
-        registerTransferFunction $ \letdown_node -> do
+      registerTransferFunction HighestAvailable $ \letup_node ->
+        registerTransferFunction HighestAvailable $ \letdown_node -> do
           (letdown_nodes', letup_nodes') <- go
             (extendVarEnv letdown_nodes id letdown_node)
             (extendVarEnv letup_nodes id letup_node)
             binds
-          transfer_up <- callArityExpr letdown_nodes' rhs
-          let transfer_down arity = fromMaybe (unusedArgsArityType arity, rhs) <$> dependOn (letup_node, arity)
+          transfer_up' <- callArityExpr letdown_nodes' rhs
+          let transfer_up arity = do
+                --pprTrace "Bind:Before" (text "id:" <+> ppr id <+> text "arity:" <+> ppr arity) $ return ()
+                res <- transfer_up' arity
+                --pprTrace "Bind:Finished" (ppr res) $ return ()
+                return res
+          let transfer_down arity = fromMaybe (unusedArgsArityType arity, rhs) <$> dependOn' (letup_node, arity)
           let change_detector_down _ (old, _) (new, _) =
                 -- The only reason we split the transfer fuctions up is cheap
                 -- change detection for the LetDown case. This implies that
@@ -647,6 +675,7 @@ callArityBind letdown_nodes = go letdown_nodes emptyVarEnv
                 -- component!
                 -- FIXME: Encode this in the FrameworkNode type somehow, but I
                 -- don't think it's worth the trouble.
+                --pprTrace "change_detector_down" (ppr (cat_args old) <+> ppr (cat_args new) <+> ppr (cat_args old /= cat_args new)) $ 
                 cat_args old /= cat_args new
           let ret = (letdown_nodes', letup_nodes') -- What we return from callArityBind
           let letup = (transfer_up, alwaysChangeDetector) -- What we register for letup_node
@@ -748,7 +777,7 @@ callArityLetEnv cat_rhss cat_body
     -- which we have to handle, for the recursive case even any of cat_rhss may.
     -- This is why we have to union in appropriate cross_calls, which basically
     -- perform substitution of Id to CallArityType.
-    cat_combined = lubTypes (map snd cat_rhss) `lubType` cat_body
+    cat_combined = lubTypes (cat_body : map (unusedArgs . snd) cat_rhss)
 
     cross_calls
         -- Calculating cross_calls is expensive. Simply be conservative
@@ -768,7 +797,7 @@ callArityLetEnv cat_rhss cat_body
         --    If v doesn't recurse into itself, everything from all the _other_ variables
         --    If v is self-recursive, everything can happen.
         cat_before_v
-            | is_thunk  = lubTypes (map snd $ filter ((/= v) . fst) cat_rhss) `lubType` cat_body
+            | is_thunk  = lubTypes (cat_body : map (unusedArgs . snd) (filter ((/= v) . fst) cat_rhss))
             | otherwise = cat_combined
         -- What do we want to know from these?
         -- Which calls can happen next to any recursive call.
@@ -817,6 +846,9 @@ unitArityType v arity = emptyArityType { cat_arities = unitVarEnv v arity }
 unusedArgsArityType :: Int -> CallArityType
 unusedArgsArityType arity = emptyArityType { cat_args = replicate arity Nothing }
 
+unusedArgs :: CallArityType -> CallArityType
+unusedArgs cat = cat { cat_args = repeat Nothing }
+
 typeDelList :: [Var] -> CallArityType -> CallArityType
 typeDelList vs ae = foldr typeDel ae vs
 
@@ -859,15 +891,19 @@ calledMultipleTimes res = modifyCoCalls (const (completeGraph (domType res))) re
 
 -- Used for application and cases
 both :: CallArityType -> CallArityType -> CallArityType
-both r1 r2 = addCrossCoCalls (domType r1) (domType r2) (r1 `lubType` r2)
+both r1 r2 = addCrossCoCalls (domType r1) (domType r2) ((r1 `lubType` r2) { cat_args = cat_args r1 })
 
 -- Used when combining results from alternative cases; take the minimum
 lubType :: CallArityType -> CallArityType -> CallArityType
-lubType (CAT g1 ae1 args) (CAT g2 ae2 _) -- both args should really be the same
-  = CAT (g1 `unionUnVarGraph` g2) (ae1 `lubArityEnv` ae2) args
+lubType (CAT g1 ae1 args1) (CAT g2 ae2 args2) -- both args should really be the same
+  = CAT (g1 `unionUnVarGraph` g2) (ae1 `lubArityEnv` ae2) (zipWith lubArg args1 args2)
+  where
+    lubArg Nothing b = b
+    lubArg a Nothing = a
+    lubArg (Just (arity1, _)) (Just (arity2, _)) = Just (min arity1 arity2, False)
 
 lubArityEnv :: VarEnv Arity -> VarEnv Arity -> VarEnv Arity
 lubArityEnv = plusVarEnv_C min
 
 lubTypes :: [CallArityType] -> CallArityType
-lubTypes = foldl lubType emptyArityType
+lubTypes = foldl lubType (unusedArgs emptyArityType)
