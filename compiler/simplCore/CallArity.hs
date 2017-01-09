@@ -587,8 +587,16 @@ callArityExpr nodes (App f a) = do
     case peelCallArityType a cat_f of
       (Nothing, cat_f') -> return (cat_f', App f' a) -- TODO: Visit a, too? Seems unnecessary, wasn't called at all
       (Just (arg_arity, called_once), cat_f') -> do
-        (cat_a, a') <- transfer_a arg_arity
-        --pprTrace "App:a'" (ppr (cat_a, a')) $ return ()
+        -- a' might be a thunk, in which case we may only eta-expand if it's called once.
+        -- We could look at the called expression to tell if it returns a thunk...
+        -- But for now let's just assume it is.
+        -- So: TODO: recognize if a' is a thunk.
+        -- How? collectBinder? Do we actually win something?
+        -- This has some parallels to `let cache = f x in cache 1 + cache 2`, where
+        -- we also check if `cache` is a thunk (in which case we don't expand) or not.
+        let safe_arity = if called_once then arg_arity else 0
+        (cat_a, a') <- transfer_a safe_arity
+        --pprTrace "App:a'" (text "safe_arity:" <+> ppr safe_arity <+> ppr (cat_a, a')) $ return ()
         let cat_a' | called_once    = cat_a
                    | arg_arity == 0 = cat_a
                    | otherwise      = calledMultipleTimes cat_a
@@ -686,7 +694,7 @@ callArityBind letdown_nodes = go letdown_nodes emptyVarEnv
                 -- component!
                 -- FIXME: Encode this in the FrameworkNode type somehow, but I
                 -- don't think it's worth the trouble.
-                --pprTrace "change_detector_down" (ppr (cat_args old) <+> ppr (cat_args new) <+> ppr (cat_args old /= cat_args new)) $ 
+                --pprTrace "change_detector_down" (ppr (cat_args old) <+> ppr (cat_args new) <+> ppr (cat_args old /= cat_args new)) $
                 cat_args old /= cat_args new
           let ret = (letdown_nodes', letup_nodes') -- What we return from callArityBind
           let letup = (transfer_up, alwaysChangeDetector) -- What we register for letup_node
