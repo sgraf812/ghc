@@ -607,12 +607,16 @@ callArityExpr nodes (App f a) = do
 callArityExpr nodes (Case scrut bndr ty alts) = do
   transfer_scrut <- callArityExpr nodes scrut
     -- TODO: Do we have to do something special with bndr?
+    --       Don't think so, we can't make use of the information.
+    --       We also shouldn't track them to the co call graph (they are boring)
   transfer_alts <- forM alts $ \(dc, bndrs, e) ->
     callArityExprTransparent nodes (dc, bndrs,) e
   return $ \arity -> do
     (cat_scrut, scrut') <- transfer_scrut 0
     (cat_alts, alts') <- unzip <$> mapM ($ arity) transfer_alts
-    let cat = lubTypes cat_alts `both` cat_scrut
+    let cat = trimArgs arity (lubTypes cat_alts) `both` cat_scrut
+    -- TODO: Think harder about the diverging case (e.g. matching on `undefined`).
+    --       In that case we will declare all arguments as unused from the alts.
     -- pprTrace "callArityExpr:Case"
     --          (vcat [ppr scrut, ppr cat])
     --pprTrace "Case" (vcat [text "cat_scrut:" <+> ppr cat_scrut, text "cat_alts:" <+> ppr cat_alts, text "cat:" <+> ppr cat]) (return ())
@@ -861,10 +865,13 @@ unitArityType :: Var -> Arity -> CallArityType
 unitArityType v arity = emptyArityType { cat_arities = unitVarEnv v arity }
 
 unusedArgsArityType :: Int -> CallArityType
-unusedArgsArityType arity = emptyArityType { cat_args = replicate arity Nothing }
+unusedArgsArityType arity = trimArgs arity (unusedArgs emptyArityType)
 
 unusedArgs :: CallArityType -> CallArityType
 unusedArgs cat = cat { cat_args = repeat Nothing }
+
+trimArgs :: Int -> CallArityType -> CallArityType
+trimArgs arity cat = cat { cat_args = take arity (cat_args cat) }
 
 typeDelList :: [Var] -> CallArityType -> CallArityType
 typeDelList vs ae = foldr typeDel ae vs
@@ -923,4 +930,4 @@ lubArityEnv :: VarEnv Arity -> VarEnv Arity -> VarEnv Arity
 lubArityEnv = plusVarEnv_C min
 
 lubTypes :: [CallArityType] -> CallArityType
-lubTypes = foldl lubType (unusedArgs emptyArityType)
+lubTypes = foldl lubType (unusedArgs emptyArityType) -- note that this isn't safe for empty input, because of unusedArgs.
