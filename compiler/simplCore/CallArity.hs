@@ -591,10 +591,10 @@ callArityExpr nodes (App f a) = do
         -- We could look at the called expression to tell if it returns a thunk...
         -- But for now let's just assume it is.
         -- So: TODO: recognize if a' is a thunk.
-        -- How? collectBinder? Do we actually win something?
+        -- How? collectBinder? Do we actually win something? Yes, foldr's higher-order argument
         -- This has some parallels to `let cache = f x in cache 1 + cache 2`, where
         -- we also check if `cache` is a thunk (in which case we don't expand) or not.
-        let safe_arity = if called_once then arg_arity else 0
+        let safe_arity = if called_once || exprIsCheap a then arg_arity else 0
         (cat_a, a') <- transfer_a safe_arity
         --pprTrace "App:a'" (text "safe_arity:" <+> ppr safe_arity <+> ppr (cat_a, a')) $ return ()
         let cat_a' | called_once    = cat_a
@@ -625,6 +625,7 @@ callArityExpr letdown_nodes (Let bind e) = do
   let binds = flattenBinds [bind]
   -- The order in which we call callArityExpr here is important: This makes sure
   -- the FP iteration will first stabilize bindings before analyzing the body.
+  -- Nope, in fact it does exactly the opposite!
   (letdown_nodes', letup_nodes) <- callArityBind letdown_nodes binds
   let transfer_rhs (id, rhs) arity =
         fromMaybe (unusedArgsArityType arity, rhs) <$> dependOn' (fromJust (lookupVarEnv letup_nodes id), arity)
