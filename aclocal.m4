@@ -509,12 +509,14 @@ AC_DEFUN([FP_SETTINGS],
 
     SettingsCCompilerFlags="$CONF_CC_OPTS_STAGE2"
     SettingsCCompilerLinkFlags="$CONF_GCC_LINKER_OPTS_STAGE2"
+    SettingsCCompilerSupportsNoPie="$CONF_GCC_SUPPORTS_NO_PIE"
     SettingsLdFlags="$CONF_LD_LINKER_OPTS_STAGE2"
     AC_SUBST(SettingsCCompilerCommand)
     AC_SUBST(SettingsHaskellCPPCommand)
     AC_SUBST(SettingsHaskellCPPFlags)
     AC_SUBST(SettingsCCompilerFlags)
     AC_SUBST(SettingsCCompilerLinkFlags)
+    AC_SUBST(SettingsCCompilerSupportsNoPie)
     AC_SUBST(SettingsLdCommand)
     AC_SUBST(SettingsLdFlags)
     AC_SUBST(SettingsArCommand)
@@ -651,6 +653,13 @@ AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
         $3="$$3 -D_THREAD_SAFE -Wl,-bnotextro"
         $4="$$4 -bnotextro"
         $5="$$5 -D_THREAD_SAFE"
+        ;;
+
+    x86_64-*-openbsd*)
+        # We need -z wxneeded at least to link ghc-stage2 to workaround
+        # W^X issue in GHCi on OpenBSD current (as of Aug 2016)
+        $3="$$3 -Wl,-z,wxneeded"
+        $4="$$4 -z wxneeded"
         ;;
 
     esac
@@ -1313,6 +1322,26 @@ fi
 AC_SUBST(GccIsClang)
 
 rm -f conftest.txt
+])
+
+# FP_GCC_SUPPORTS_NO_PIE
+# ----------------------
+# Does gcc support the -no-pie option? If so we should pass it to gcc when
+# joining objects since -pie may be enabled by default.
+AC_DEFUN([FP_GCC_SUPPORTS_NO_PIE],
+[
+   AC_REQUIRE([AC_PROG_CC])
+   AC_MSG_CHECKING([whether GCC supports -no-pie])
+   echo 'int main() { return 0; }' > conftest.c
+   # Some GCC versions only warn when passed an unrecognized flag.
+   if $CC -no-pie -x c /dev/null -dM -E > conftest.txt 2>&1 && ! grep -i unrecognized conftest.txt > /dev/null 2>&1; then
+       CONF_GCC_SUPPORTS_NO_PIE=YES
+       AC_MSG_RESULT([yes])
+   else
+       CONF_GCC_SUPPORTS_NO_PIE=NO
+       AC_MSG_RESULT([no])
+   fi
+   rm -f conftest.c conftest.o conftest
 ])
 
 dnl Small feature test for perl version. Assumes PerlCmd

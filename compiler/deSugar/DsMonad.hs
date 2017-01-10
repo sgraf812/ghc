@@ -90,6 +90,9 @@ data DsMatchContext
   = DsMatchContext (HsMatchContext Name) SrcSpan
   deriving ()
 
+instance Outputable DsMatchContext where
+  ppr (DsMatchContext hs_match ss) = ppr ss <+> pprMatchContext hs_match
+
 data EquationInfo
   = EqnInfo { eqn_pats :: [Pat Id],     -- The patterns for an eqn
               eqn_rhs  :: MatchResult } -- What to do after match
@@ -263,6 +266,7 @@ mkDsEnvs dflags mod rdr_env type_env fam_inst_env msg_var pmvar
   = let if_genv = IfGblEnv { if_doc       = text "mkDsEnvs",
                              if_rec_types = Just (mod, return type_env) }
         if_lenv = mkIfLclEnv mod (text "GHC error in desugarer lookup in" <+> ppr mod)
+                             False -- not boot!
         real_span = realSrcLocSpan (mkRealSrcLoc (moduleNameFS (moduleName mod)) 1 1)
         gbl_env = DsGblEnv { ds_mod     = mod
                            , ds_fam_inst_env = fam_inst_env
@@ -358,7 +362,7 @@ addTmCsDs tm_cs
 
 -- | Increase the counter for elapsed pattern match check iterations.
 -- If the current counter is already over the limit, fail
-incrCheckPmIterDs :: DsM ()
+incrCheckPmIterDs :: DsM Int
 incrCheckPmIterDs = do
   env <- getLclEnv
   cnt <- readTcRef (dsl_pm_iter env)
@@ -366,6 +370,7 @@ incrCheckPmIterDs = do
   if cnt >= max_iters
     then failM
     else updTcRef (dsl_pm_iter env) (+1)
+  return cnt
 
 -- | Reset the counter for pattern match check iterations to zero
 resetPmIterDs :: DsM ()

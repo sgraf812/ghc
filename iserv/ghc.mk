@@ -24,6 +24,20 @@ iserv_stage2_MORE_HC_OPTS += -threaded
 iserv_stage2_p_MORE_HC_OPTS += -threaded
 iserv_stage2_dyn_MORE_HC_OPTS += -threaded
 
+# Add -Wl,--export-dynamic enables GHCi to load dynamic objects that
+# refer to the RTS.  This is harmless if you don't use it (adds a bit
+# of overhead to startup and increases the binary sizes) but if you
+# need it there's no alternative.
+ifeq "$(TargetElf)" "YES"
+ifneq "$(TargetOS_CPP)" "solaris2"
+# The Solaris linker does not support --export-dynamic option. It also
+# does not need it since it exports all dynamic symbols by default
+iserv_stage2_MORE_HC_OPTS += -optl-Wl,--export-dynamic
+iserv_stage2_p_MORE_HC_OPTS += -optl-Wl,--export-dynamic
+iserv_stage2_dyn_MORE_HC_OPTS += -optl-Wl,--export-dynamic
+endif
+endif
+
 # Override the default way, because we want a specific version of this
 # program for each way.  Note that it's important to do this even for
 # the vanilla version, otherwise we get a dynamic executable when

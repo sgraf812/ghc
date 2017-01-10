@@ -14,7 +14,7 @@ module Kind (
 
         classifiesTypeWithValues,
         isStarKind, isStarKindSynonymTyCon,
-        isRuntimeRepPolymorphic
+        isLevityPolymorphic
        ) where
 
 #include "HsVersions.h"
@@ -25,7 +25,6 @@ import TyCoRep
 import TyCon
 import VarSet ( isEmptyVarSet )
 import PrelNames
-import Util  ( (<&&>) )
 
 {-
 ************************************************************************
@@ -78,19 +77,21 @@ returnsTyCon _  _                  = False
 returnsConstraintKind :: Kind -> Bool
 returnsConstraintKind = returnsTyCon constraintKindTyConKey
 
--- | Tests whether the given type (which should look like "TYPE ...") has any
--- free variables
-isRuntimeRepPolymorphic :: Kind -> Bool
-isRuntimeRepPolymorphic k
+-- | Tests whether the given kind (which should look like "TYPE ...")
+-- has any free variables
+isLevityPolymorphic :: Kind -> Bool
+isLevityPolymorphic k
   = not $ isEmptyVarSet $ tyCoVarsOfType k
 
 --------------------------------------------
 --            Kinding for arrow (->)
 -- Says when a kind is acceptable on lhs or rhs of an arrow
 --     arg -> res
+--
+-- See Note [Levity polymorphism]
 
 okArrowArgKind, okArrowResultKind :: Kind -> Bool
-okArrowArgKind = classifiesTypeWithValues <&&> (not . isRuntimeRepPolymorphic)
+okArrowArgKind    = classifiesTypeWithValues
 okArrowResultKind = classifiesTypeWithValues
 
 -----------------------------------------
@@ -120,3 +121,31 @@ isStarKind _ = False
 -- | Is the tycon @Constraint@?
 isStarKindSynonymTyCon :: TyCon -> Bool
 isStarKindSynonymTyCon tc = tc `hasKey` constraintKindTyConKey
+
+
+{- Note [Levity polymorphism]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Is this type legal?
+   (a :: TYPE rep) -> Int
+   where 'rep :: RuntimeRep'
+
+You might think not, because no lambda can have a
+runtime-rep-polymorphic binder.  So no lambda has the
+above type.  BUT here's a way it can be useful (taken from
+Trac #12708):
+
+  data T rep (a :: TYPE rep)
+     = MkT (a -> Int)
+
+  x1 :: T LiftedPtrRep Int
+  x1 =  MkT LiftedPtrRep Int  (\x::Int -> 3)
+
+  x2 :: T IntRep Int#
+  x2 = MkT IntRep Int# (\x:Int# -> 3)
+
+Note that the lambdas are just fine!
+
+Hence, okArrowArgKind and okArrowResultKind both just
+check that the type is of the form (TYPE r) for some
+representation type r.
+-}

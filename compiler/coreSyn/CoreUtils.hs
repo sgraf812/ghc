@@ -357,7 +357,7 @@ stripTicksTop p = go []
         go ts other            = (reverse ts, other)
 
 -- | Strip ticks satisfying a predicate from top of an expression,
--- returning the remaining expresion
+-- returning the remaining expression
 stripTicksTopE :: (Tickish Id -> Bool) -> Expr b -> Expr b
 stripTicksTopE p = go
   where go (Tick t e) | p t = go e
@@ -803,10 +803,10 @@ exprIsTrivial (Type _)         = True
 exprIsTrivial (Coercion _)     = True
 exprIsTrivial (Lit lit)        = litIsTrivial lit
 exprIsTrivial (App e arg)      = not (isRuntimeArg arg) && exprIsTrivial e
+exprIsTrivial (Lam b e)        = not (isRuntimeVar b) && exprIsTrivial e
 exprIsTrivial (Tick t e)       = not (tickishIsCode t) && exprIsTrivial e
                                  -- See Note [Tick trivial]
 exprIsTrivial (Cast e _)       = exprIsTrivial e
-exprIsTrivial (Lam b body)     = not (isRuntimeVar b) && exprIsTrivial body
 exprIsTrivial (Case e _ _ [])  = exprIsTrivial e  -- See Note [Empty case is trivial]
 exprIsTrivial _                = False
 
@@ -1836,6 +1836,7 @@ diffIdInfo env bndr1 bndr2
 -- redundant, and can lead to an exponential blow-up in complexity.
 diffUnfold :: RnEnv2 -> Unfolding -> Unfolding -> [SDoc]
 diffUnfold _   NoUnfolding    NoUnfolding                 = []
+diffUnfold _   BootUnfolding  BootUnfolding               = []
 diffUnfold _   (OtherCon cs1) (OtherCon cs2) | cs1 == cs2 = []
 diffUnfold env (DFunUnfolding bs1 c1 a1)
                (DFunUnfolding bs2 c2 a2)
@@ -2090,7 +2091,7 @@ rhsIsStatic :: Platform
 --
 -- (ii) We treat partial applications as redexes, because in fact we
 --      make a thunk for them that runs and builds a PAP
---      at run-time.  The only appliations that are treated as
+--      at run-time.  The only applications that are treated as
 --      static are *saturated* applications of constructors.
 
 -- We used to try to be clever with nested structures like this:

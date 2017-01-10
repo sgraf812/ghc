@@ -20,7 +20,7 @@ you will screw up the layout where they are used in case expressions!
  * ghcconfig.h, because that will include ghcplatform.h which has the
  * wrong platform settings for the compiler (it has the platform
  * settings for the target plat instead). */
-#include "../includes/ghcautoconf.h"
+#include "ghcautoconf.h"
 
 #define GLOBAL_VAR(name,value,ty)  \
 {-# NOINLINE name #-};             \
@@ -31,6 +31,22 @@ name = Util.global (value);
 {-# NOINLINE name #-};              \
 name :: IORef (ty);                 \
 name = Util.globalM (value);
+
+
+#define SHARED_GLOBAL_VAR(name,accessor,saccessor,value,ty) \
+{-# NOINLINE name #-};                                      \
+name :: IORef (ty);                                         \
+name = Util.sharedGlobal (value) (accessor);                \
+foreign import ccall unsafe saccessor                       \
+  accessor :: Ptr (IORef a) -> IO (Ptr (IORef a));
+
+#define SHARED_GLOBAL_VAR_M(name,accessor,saccessor,value,ty)  \
+{-# NOINLINE name #-};                                         \
+name :: IORef (ty);                                            \
+name = Util.sharedGlobalM (value) (accessor);                  \
+foreign import ccall unsafe saccessor                          \
+  accessor :: Ptr (IORef a) -> IO (Ptr (IORef a));
+
 
 #define ASSERT(e)      if debugIsOn && not (e) then (assertPanic __FILE__ __LINE__) else
 #define ASSERT2(e,msg) if debugIsOn && not (e) then (assertPprPanic __FILE__ __LINE__ (msg)) else

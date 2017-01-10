@@ -187,12 +187,12 @@ HaveLibDL = @HaveLibDL@
 # includes/stg/SMP.h
 ifeq "$(TargetArch_CPP)" "arm"
 # We don't support load/store barriers pre-ARMv7. See #10433.
-ArchSupportsSMP="$(if $(filter $(ARM_ISA),ARMv5 ARMv6),NO,YES)"
+ArchSupportsSMP=$(if $(filter $(ARM_ISA),ARMv5 ARMv6),NO,YES)
 else
 ArchSupportsSMP=$(strip $(patsubst $(TargetArch_CPP), YES, $(findstring $(TargetArch_CPP), i386 x86_64 sparc powerpc powerpc64 powerpc64le aarch64)))
 endif
 
-# The THREADED_RTS requites `BaseReg` to be in a register and the
+# The THREADED_RTS requires `BaseReg` to be in a register and the
 # `GhcUnregisterised` mode doesn't allow that.
 GhcWithSMP := $(strip $(if $(filter YESNO, $(ArchSupportsSMP)$(GhcUnregisterised)),YES,NO))
 
@@ -339,8 +339,12 @@ SupportsSplitObjs := $(strip \
                                $(filter NO,$(GhcUnregisterised))),\
                           YES,NO))
 
-# By default, enable SplitObjs for the libraries if this build supports it
-SplitObjs=$(SupportsSplitObjs)
+# By default, enable SplitObjs for the libraries if this build supports it.
+# Unless SplitSections is enabled - then let that take precedence.
+SplitObjs = $(strip \
+    $(if $(and $(filter YES,$(SupportsSplitObjs)),\
+               $(filter NO,$(SplitSections))),\
+         YES,NO))
 
 # ----------------------------------------------------------------------------
 # Section splitting
@@ -349,9 +353,16 @@ SplitObjs=$(SupportsSplitObjs)
 # like SplitObjs, but doesn't require post-processing and splitting of object
 # files.
 #
-# Set SplitSections=YES in your build.mk to enable.
-
-SplitSections=NO
+# Set SplitSections=YES or NO in your build.mk to override the default.
+#
+# This is not supported on Darwin (where you can use subsections-via-symbols
+# instead) and Windows is not yet working. (See #11445 and related tickets.)
+OsSupportsSplitSections=$(strip $(if $(filter $(TargetOS_CPP),mingw32 darwin),NO,YES))
+SupportsSplitSections = $(strip \
+                    $(if $(and $(filter YES,$(OsSupportsSplitSections)),\
+                               $(filter YES,$(LdIsGNULd))),\
+                          YES,NO))
+SplitSections ?= $(SupportsSplitSections)
 
 # ----------------------------------------------------------------------------
 
@@ -395,21 +406,6 @@ GhcRtsWithLibdw=$(strip $(if $(filter $(TargetArch_CPP),i386 x86_64),@UseLibdw@,
 #		Paths (see paths.mk)
 #
 ################################################################################
-
-# Directory used by GHC (and possibly other tools) for storing
-# temporary files.  If your TMPDIR isn't big enough, either override
-# this in build.mk or set your environment variable "TMPDIR" to point
-# to somewhere with more space.  (TMPDIR=. is a good choice).
-
-# DEFAULT_TMPDIR isn't called TMPDIR because GNU make tends to
-# override an environment variable with the value of the make variable
-# of the same name (if it exists) when executing sub-processes, so
-# setting the TMPDIR env var would have no effect in the build tree.
-
-DEFAULT_TMPDIR		= /tmp
-ifeq "$(TARGETPLATFORM)" "i386-unknown-mingw32"
-DEFAULT_TMPDIR		= /C/TEMP
-endif
 
 BIN_DIST_NAME         = ghc-$(ProjectVersion)
 BIN_DIST_PREP_DIR     = bindistprep/$(BIN_DIST_NAME)
@@ -633,6 +629,9 @@ CONF_LD_LINKER_OPTS_STAGE2 = @CONF_LD_LINKER_OPTS_STAGE2@
 CONF_CPP_OPTS_STAGE0 = @CONF_CPP_OPTS_STAGE0@
 CONF_CPP_OPTS_STAGE1 = @CONF_CPP_OPTS_STAGE1@
 CONF_CPP_OPTS_STAGE2 = @CONF_CPP_OPTS_STAGE2@
+CONF_HC_OPTS_STAGE0 = @CONF_HC_OPTS_STAGE0@
+CONF_HC_OPTS_STAGE1 = @CONF_HC_OPTS_STAGE1@
+CONF_HC_OPTS_STAGE2 = @CONF_HC_OPTS_STAGE2@
 
 # The .hsc files aren't currently safe for cross-compilation on Windows:
 #     libraries\haskeline\.\System\Console\Haskeline\Backend\Win32.hsc:160

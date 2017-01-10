@@ -624,7 +624,7 @@ for instance, the 'specImports' call in 'specProgram'.
 
 Note [Disabling cross-module specialisation]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Since GHC 7.10 we have performed specialisation of INLINEABLE bindings living
+Since GHC 7.10 we have performed specialisation of INLINABLE bindings living
 in modules outside of the current module. This can sometimes uncover user code
 which explodes in size when aggressively optimized. The
 -fno-cross-module-specialise option was introduced to allow users to being
@@ -725,7 +725,7 @@ specImport dflags this_mod top_env done callers rb fn calls_for_fn
                             2 (vcat [ text "when specialising" <+> quotes (ppr caller)
                                     | caller <- callers])
                       , ifPprDebug (text "calls:" <+> vcat (map (pprCallInfo fn) calls_for_fn))
-                      , text "Probable fix: add INLINEABLE pragma on" <+> quotes (ppr fn) ])
+                      , text "Probable fix: add INLINABLE pragma on" <+> quotes (ppr fn) ])
        ; return ([], []) }
 
   | otherwise
@@ -748,6 +748,7 @@ wantSpecImport :: DynFlags -> Unfolding -> Bool
 wantSpecImport dflags unf
  = case unf of
      NoUnfolding      -> False
+     BootUnfolding    -> False
      OtherCon {}      -> False
      DFunUnfolding {} -> True
      CoreUnfolding { uf_src = src, uf_guidance = _guidance }
@@ -756,17 +757,17 @@ wantSpecImport dflags unf
                -- Specialise even INLINE things; it hasn't inlined yet,
                -- so perhaps it never will.  Moreover it may have calls
                -- inside it that we want to specialise
-       | otherwise -> False    -- Stable, not INLINE, hence INLINEABLE
+       | otherwise -> False    -- Stable, not INLINE, hence INLINABLE
 
 {- Note [Warning about missed specialisations]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Suppose
- * In module Lib, you carefully mark a function 'foo' INLINEABLE
+ * In module Lib, you carefully mark a function 'foo' INLINABLE
  * Import Lib(foo) into another module M
  * Call 'foo' at some specialised type in M
 Then you jolly well expect it to be specialised in M.  But what if
 'foo' calls another function 'Lib.bar'.  Then you'd like 'bar' to be
-specialised too.  But if 'bar' is not marked INLINEABLE it may well
+specialised too.  But if 'bar' is not marked INLINABLE it may well
 not be specialised.  The warning Opt_WarnMissedSpecs warns about this.
 
 It's more noisy to warning about a missed specialisation opportunity
@@ -1023,7 +1024,8 @@ to substitute sc -> sc_flt in the RHS
 -}
 
 specBind :: SpecEnv                     -- Use this for RHSs
-         -> CoreBind
+         -> CoreBind                    -- Binders are already cloned by cloneBindSM,
+                                        -- but RHSs are un-processed
          -> UsageDetails                -- Info on how the scope of the binding
          -> SpecM ([CoreBind],          -- New bindings
                    UsageDetails)        -- And info to pass upstream
@@ -1092,9 +1094,9 @@ specBind rhs_env (Rec pairs) body_uds
 ---------------------------
 specDefns :: SpecEnv
           -> UsageDetails               -- Info on how it is used in its scope
-          -> [(Id,CoreExpr)]            -- The things being bound and their un-processed RHS
-          -> SpecM ([Id],               -- Original Ids with RULES added
-                    [(Id,CoreExpr)],    -- Extra, specialised bindings
+          -> [(OutId,InExpr)]           -- The things being bound and their un-processed RHS
+          -> SpecM ([OutId],            -- Original Ids with RULES added
+                    [(OutId,OutExpr)],  -- Extra, specialised bindings
                     UsageDetails)       -- Stuff to fling upwards from the specialised versions
 
 -- Specialise a list of bindings (the contents of a Rec), but flowing usages
@@ -1113,7 +1115,7 @@ specDefns env uds ((bndr,rhs):pairs)
 ---------------------------
 specDefn :: SpecEnv
          -> UsageDetails                -- Info on how it is used in its scope
-         -> Id -> CoreExpr              -- The thing being bound and its un-processed RHS
+         -> OutId -> InExpr             -- The thing being bound and its un-processed RHS
          -> SpecM (Id,                  -- Original Id with added RULES
                    [(Id,CoreExpr)],     -- Extra, specialised bindings
                    UsageDetails)        -- Stuff to fling upwards from the specialised versions
@@ -1139,7 +1141,7 @@ specCalls :: Maybe Module      -- Just this_mod  =>  specialising imported fn
           -> SpecEnv
           -> [CoreRule]                 -- Existing RULES for the fn
           -> [CallInfo]
-          -> Id -> CoreExpr
+          -> OutId -> InExpr
           -> SpecM ([CoreRule],         -- New RULES for the fn
                     [(Id,CoreExpr)],    -- Extra, specialised bindings
                     UsageDetails)       -- New usage details from the specialised RHSs
@@ -1316,17 +1318,11 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
                   = (inl_prag { inl_inline = EmptyInlineSpec }, noUnfolding)
 
                   | otherwise
-                  = (inl_prag, specUnfolding dflags spec_unf_subst poly_tyvars
-                                             spec_unf_args fn_unf)
+                  = (inl_prag, specUnfolding poly_tyvars spec_app
+                                             arity_decrease fn_unf)
 
-                spec_unf_args  = ty_args ++ spec_dict_args
-                spec_unf_subst = CoreSubst.setInScope (se_subst env)
-                                    (CoreSubst.substInScope (se_subst rhs_env2))
-                  -- Extend the in-scope set to satisfy the precondition of
-                  -- specUnfolding, namely that in-scope(unf_subst) includes
-                  -- the free vars of spec_unf_args.  The in-scope set of rhs_env2
-                  -- is just the ticket; but the actual substitution we want is
-                  -- the same old one from 'env'
+                arity_decrease = length spec_dict_args
+                spec_app e = (e `mkApps` ty_args) `mkApps` spec_dict_args
 
                 --------------------------------------
                 -- Adding arity information just propagates it a bit faster
@@ -1361,7 +1357,7 @@ complicated Refl coercions with Refl pretty aggressively.
 
 Note [Orphans and auto-generated rules]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-When we specialise an INLINEABLE function, or when we have
+When we specialise an INLINABLE function, or when we have
 -fspecialise-aggressively, we auto-generate RULES that are orphans.
 We don't want to warn about these, or we'd generate a lot of warnings.
 Thus, we only warn about user-specified orphan rules.
@@ -1686,7 +1682,7 @@ all they should be inlined, right?  Two reasons:
    This particular example had a huge effect on the call to replicateM_
    in nofib/shootout/n-body.
 
-Why (b): discard INLINEABLE pragmas? See Trac #4874 for persuasive examples.
+Why (b): discard INLINABLE pragmas? See Trac #4874 for persuasive examples.
 Suppose we have
     {-# INLINABLE f #-}
     f :: Ord a => [a] -> Int

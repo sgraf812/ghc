@@ -14,6 +14,7 @@ import Vectorise.Generic.Description
 import Vectorise.Utils
 import Vectorise.Env( GlobalEnv( global_fam_inst_env ) )
 
+import BasicTypes ( SourceText(..) )
 import BuildTyCl
 import DataCon
 import TyCon
@@ -44,7 +45,7 @@ buildDataFamInst :: Name -> TyCon -> TyCon -> AlgTyConRhs -> VM FamInst
 buildDataFamInst name' fam_tc vect_tc rhs
  = do { axiom_name <- mkDerivedName mkInstTyCoOcc name'
 
-      ; (_, tyvars') <- liftDs $ tcInstSigTyVars (getSrcSpan name') tyvars
+      ; (_, tyvars') <- liftDs $ freshenTyVarBndrs tyvars
       ; let ax       = mkSingleCoAxiom Representational axiom_name tyvars' [] fam_tc pat_tys rep_ty
             tys'     = mkTyVarTys tyvars'
             rep_ty   = mkTyConApp rep_tc tys'
@@ -89,7 +90,7 @@ buildPDataDataCon orig_name vect_tc repr_tc repr
                             (mkFamilyTyConApp repr_tc (mkTyVarTys tvs))
                             repr_tc
   where
-    no_bang = HsSrcBang Nothing NoSrcUnpack NoSrcStrict
+    no_bang = HsSrcBang NoSourceText NoSrcUnpack NoSrcStrict
 
 
 -- buildPDatasTyCon -----------------------------------------------------------
@@ -133,7 +134,7 @@ buildPDatasDataCon orig_name vect_tc repr_tc repr
                             (mkFamilyTyConApp repr_tc (mkTyVarTys tvs))
                             repr_tc
   where
-     no_bang = HsSrcBang Nothing NoSrcUnpack NoSrcStrict
+     no_bang = HsSrcBang NoSourceText NoSrcUnpack NoSrcStrict
 
 
 -- Utils ----------------------------------------------------------------------

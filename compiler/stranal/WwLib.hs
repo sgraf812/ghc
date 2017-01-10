@@ -8,6 +8,7 @@
 
 module WwLib ( mkWwBodies, mkWWstr, mkWorkerArgs
              , deepSplitProductType_maybe, findTypeShape
+             , isWorkerSmallEnough
  ) where
 
 #include "HsVersions.h"
@@ -23,6 +24,7 @@ import MkId             ( voidArgId, voidPrimId )
 import TysPrim          ( voidPrimTy )
 import TysWiredIn       ( tupleDataCon )
 import VarEnv           ( mkInScopeSet )
+import VarSet           ( VarSet )
 import Type
 import RepType          ( isVoidTy )
 import Coercion
@@ -108,14 +110,19 @@ the unusable strictness-info into the interfaces.
 @mkWwBodies@ is called when doing the worker\/wrapper split inside a module.
 -}
 
+type WwResult
+  = ([Demand],              -- Demands for worker (value) args
+     Id -> CoreExpr,        -- Wrapper body, lacking only the worker Id
+     CoreExpr -> CoreExpr)  -- Worker body, lacking the original function rhs
+
 mkWwBodies :: DynFlags
            -> FamInstEnvs
-           -> Type                                  -- Type of original function
-           -> [Demand]                              -- Strictness of original function
-           -> DmdResult                             -- Info about function result
-           -> UniqSM (Maybe ([Demand],              -- Demands for worker (value) args
-                             Id -> CoreExpr,        -- Wrapper body, lacking only the worker Id
-                             CoreExpr -> CoreExpr)) -- Worker body, lacking the original function rhs
+           -> VarSet         -- Free vars of RHS
+                             -- See Note [Freshen WW arguments]
+           -> Type           -- Type of original function
+           -> [Demand]       -- Strictness of original function
+           -> DmdResult      -- Info about function result
+           -> UniqSM (Maybe WwResult)
 
 -- wrap_fn_args E       = \x y -> E
 -- work_fn_args E       = E x y
@@ -128,8 +135,9 @@ mkWwBodies :: DynFlags
 --                        let x = (a,b) in
 --                        E
 
-mkWwBodies dflags fam_envs fun_ty demands res_info
-  = do  { let empty_subst = mkEmptyTCvSubst (mkInScopeSet (tyCoVarsOfType fun_ty))
+mkWwBodies dflags fam_envs rhs_fvs fun_ty demands res_info
+  = do  { let empty_subst = mkEmptyTCvSubst (mkInScopeSet rhs_fvs)
+                -- See Note [Freshen WW arguments]
 
         ; (wrap_args, wrap_fn_args, work_fn_args, res_ty) <- mkWWargs empty_subst fun_ty demands
         ; (useful1, work_args, wrap_fn_str, work_fn_str) <- mkWWstr dflags fam_envs wrap_args
@@ -143,7 +151,8 @@ mkWwBodies dflags fam_envs fun_ty demands res_info
               wrapper_body = wrap_fn_args . wrap_fn_cpr . wrap_fn_str . applyToVars work_call_args . Var
               worker_body = mkLams work_lam_args. work_fn_str . work_fn_cpr . work_fn_args
 
-        ; if useful1 && not only_one_void_argument || useful2
+        ; if isWorkerSmallEnough dflags work_args
+             && (useful1 && not only_one_void_argument || useful2)
           then return (Just (worker_args_dmds, wrapper_body, worker_body))
           else return Nothing
         }
@@ -164,6 +173,12 @@ mkWwBodies dflags fam_envs fun_ty demands res_info
       | otherwise
       = False
 
+-- See Note [Limit w/w arity]
+isWorkerSmallEnough :: DynFlags -> [Var] -> Bool
+isWorkerSmallEnough dflags vars = count isId vars <= maxWorkerArgs dflags
+    -- We count only Free variables (isId) to skip Type, Kind
+    -- variables which have no runtime representation.
+
 {-
 Note [Always do CPR w/w]
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -177,6 +192,30 @@ a disaster, because then the enclosing function might say it has the CPR
 property, but now doesn't and there a cascade of disaster.  A good example
 is Trac #5920.
 
+Note [Limit w/w arity]
+~~~~~~~~~~~~~~~~~~~~~~~~
+Guard against high worker arity as it generates a lot of stack traffic.
+A simplified example is Trac #11565#comment:6
+
+Current strategy is very simple: don't perform w/w transformation at all
+if the result produces a wrapper with arity higher than -fmax-worker-args=.
+
+It is a bit all or nothing, consider
+
+        f (x,y) (a,b,c,d,e ... , z) = rhs
+
+Currently we will remove all w/w ness entirely. But actually we could
+w/w on the (x,y) pair... it's the huge product that is the problem.
+
+Could we instead refrain from w/w on an arg-by-arg basis? Yes, that'd
+solve f. But we can get a lot of args from deeply-nested products:
+
+        g (a, (b, (c, (d, ...)))) = rhs
+
+This is harder to spot on an arg-by-arg basis. Previously mkWwStr was
+given some "fuel" saying how many arguments it could add; when we ran
+out of fuel it would stop w/wing.
+Still not very clever because it had a left-right bias.
 
 ************************************************************************
 *                                                                      *
@@ -264,7 +303,7 @@ the \x to get what we want.
 -- and keeps repeating that until it's satisfied the supplied arity
 
 mkWWargs :: TCvSubst            -- Freshening substitution to apply to the type
-                                --   See Note [Freshen type variables]
+                                --   See Note [Freshen WW arguments]
          -> Type                -- The type of the function
          -> [Demand]     -- Demands and one-shot info for value arguments
          -> UniqSM  ([Var],            -- Wrapper args
@@ -289,9 +328,9 @@ mkWWargs subst fun_ty demands
                   res_ty) }
 
   | Just (tv, fun_ty') <- splitForAllTy_maybe fun_ty
-  = do  { let (subst', tv') = substTyVarBndr subst tv
-                -- This substTyVarBndr clones the type variable when necy
-                -- See Note [Freshen type variables]
+  = do  { uniq <- getUniqueM
+        ; let (subst', tv') = cloneTyVarBndr subst tv uniq
+                -- See Note [Freshen WW arguments]
         ; (wrap_args, wrap_fn_args, work_fn_args, res_ty)
              <- mkWWargs subst' fun_ty' demands
         ; return (tv' : wrap_args,
@@ -310,9 +349,10 @@ mkWWargs subst fun_ty demands
 
   = do { (wrap_args, wrap_fn_args, work_fn_args, res_ty)
             <-  mkWWargs subst rep_ty demands
-        ; return (wrap_args,
-                  \e -> Cast (wrap_fn_args e) (mkSymCo co),
-                  \e -> work_fn_args (Cast e co),
+       ; let co' = substCo subst co
+       ; return (wrap_args,
+                  \e -> Cast (wrap_fn_args e) (mkSymCo co'),
+                  \e -> work_fn_args (Cast e co'),
                   res_ty) }
 
   | otherwise
@@ -327,17 +367,35 @@ mk_wrap_arg uniq ty dmd
   = mkSysLocalOrCoVar (fsLit "w") uniq ty
        `setIdDemandInfo` dmd
 
-{-
-Note [Freshen type variables]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Wen we do a worker/wrapper split, we must not use shadowed names,
-else we'll get
-   f = /\ a /\a. fw a a
-which is obviously wrong.  Type variables can can in principle shadow,
-within a type (e.g. forall a. a -> forall a. a->a).  But type
-variables *are* mentioned in <blah>, so we must substitute.
+{- Note [Freshen WW arguments]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Wen we do a worker/wrapper split, we must not in-scope names as the arguments
+of the worker, else we'll get name capture.  E.g.
 
-That's why we carry the TCvSubst through mkWWargs
+   -- y1 is in scope from further out
+   f x = ..y1..
+
+If we accidentally choose y1 as a worker argument disaster results:
+
+   fww y1 y2 = let x = (y1,y2) in ...y1...
+
+To avoid this:
+
+  * We use a fresh unique for both type-variable and term-variable binders
+    Originally we lacked this freshness for type variables, and that led
+    to the very obscure Trac #12562.  (A type varaible in the worker shadowed
+    an outer term-variable binding.)
+
+  * Because of this cloning we have to substitute in the type/kind of the
+    new binders.  That's why we carry the TCvSubst through mkWWargs.
+
+    So we need a decent in-scope set, just in case that type/kind
+    itself has foralls.  We get this from the free vars of the RHS of the
+    function since those are the only variables that might be captured.
+    It's a lazy thunk, which will only be poked if the type/kind has a forall.
+
+    Another tricky case was when f :: forall a. a -> forall a. a->a
+    (i.e. with shadowing), and then the worker used the same 'a' twice.
 
 ************************************************************************
 *                                                                      *
@@ -709,7 +767,7 @@ every primitive type, so the function is partial.
 mk_absent_let :: DynFlags -> Id -> Maybe (CoreExpr -> CoreExpr)
 mk_absent_let dflags arg
   | not (isUnliftedType arg_ty)
-  = Just (Let (NonRec arg abs_rhs))
+  = Just (Let (NonRec lifted_arg abs_rhs))
   | Just tc <- tyConAppTyCon_maybe arg_ty
   , Just lit <- absentLiteralOf tc
   = Just (Let (NonRec arg (Lit lit)))
@@ -719,10 +777,14 @@ mk_absent_let dflags arg
   = WARN( True, text "No absent value for" <+> ppr arg_ty )
     Nothing
   where
-    arg_ty  = idType arg
-    abs_rhs = mkRuntimeErrorApp aBSENT_ERROR_ID arg_ty msg
-    msg     = showSDoc (gopt_set dflags Opt_SuppressUniques)
-                       (ppr arg <+> ppr (idType arg))
+    arg_ty     = idType arg
+    abs_rhs    = mkRuntimeErrorApp aBSENT_ERROR_ID arg_ty msg
+    lifted_arg = arg `setIdStrictness` exnSig
+              -- Note in strictness signature that this is bottoming
+              -- (for the sake of the "empty case scrutinee not known to
+              -- diverge for sure lint" warning)
+    msg        = showSDoc (gopt_set dflags Opt_SuppressUniques)
+                          (ppr arg <+> ppr (idType arg))
               -- We need to suppress uniques here because otherwise they'd
               -- end up in the generated code as strings. This is bad for
               -- determinism, because with different uniques the strings

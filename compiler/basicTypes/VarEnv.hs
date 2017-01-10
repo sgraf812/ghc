@@ -12,7 +12,8 @@ module VarEnv (
         elemVarEnv,
         extendVarEnv, extendVarEnv_C, extendVarEnv_Acc, extendVarEnv_Directly,
         extendVarEnvList,
-        plusVarEnv, plusVarEnv_C, plusVarEnv_CD, alterVarEnv,
+        plusVarEnv, plusVarEnv_C, plusVarEnv_CD, plusVarEnvList,
+        alterVarEnv,
         delVarEnvList, delVarEnv, delVarEnv_Directly,
         minusVarEnv, intersectsVarEnv,
         lookupVarEnv, lookupVarEnv_NF, lookupWithDefaultVarEnv,
@@ -31,7 +32,7 @@ module VarEnv (
         dVarEnvElts,
         extendDVarEnv, extendDVarEnv_C,
         extendDVarEnvList,
-        lookupDVarEnv,
+        lookupDVarEnv, elemDVarEnv,
         isEmptyDVarEnv, foldDVarEnv,
         mapDVarEnv,
         modifyDVarEnv,
@@ -435,6 +436,7 @@ extendVarEnv_C    :: (a->a->a) -> VarEnv a -> Var -> a -> VarEnv a
 extendVarEnv_Acc  :: (a->b->b) -> (a->b) -> VarEnv b -> Var -> a -> VarEnv b
 extendVarEnv_Directly :: VarEnv a -> Unique -> a -> VarEnv a
 plusVarEnv        :: VarEnv a -> VarEnv a -> VarEnv a
+plusVarEnvList    :: [VarEnv a] -> VarEnv a
 extendVarEnvList  :: VarEnv a -> [(Var, a)] -> VarEnv a
 
 lookupVarEnv_Directly :: VarEnv a -> Unique -> Maybe a
@@ -474,6 +476,7 @@ delVarEnv        = delFromUFM
 minusVarEnv      = minusUFM
 intersectsVarEnv e1 e2 = not (isEmptyVarEnv (e1 `intersectUFM` e2))
 plusVarEnv       = plusUFM
+plusVarEnvList   = plusUFMList
 lookupVarEnv     = lookupUFM
 filterVarEnv     = filterUFM
 lookupWithDefaultVarEnv = lookupWithDefaultUFM
@@ -567,6 +570,9 @@ delDVarEnvList = delListFromUDFM
 
 isEmptyDVarEnv :: DVarEnv a -> Bool
 isEmptyDVarEnv = isNullUDFM
+
+elemDVarEnv :: Var -> DVarEnv a -> Bool
+elemDVarEnv = elemUDFM
 
 extendDVarEnv_C :: (a -> a -> a) -> DVarEnv a -> Var -> a -> DVarEnv a
 extendDVarEnv_C = addToUDFM_C

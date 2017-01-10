@@ -14,7 +14,7 @@ module RnEnv (
         lookupLocalOccThLvl_maybe,
         lookupTypeOccRn, lookupKindOccRn,
         lookupGlobalOccRn, lookupGlobalOccRn_maybe,
-        lookupOccRn_overloaded, lookupGlobalOccRn_overloaded,
+        lookupOccRn_overloaded, lookupGlobalOccRn_overloaded, lookupExactOcc,
         reportUnboundName, unknownNameSuggestions,
         addNameClashErrRn,
 
@@ -25,7 +25,8 @@ module RnEnv (
         lookupFieldFixityRn, lookupTyFixityRn,
         lookupInstDeclBndr, lookupRecFieldOcc, lookupFamInstName,
         lookupConstructorFields,
-        lookupSyntaxName, lookupSyntaxNames, lookupIfThenElse,
+        lookupSyntaxName, lookupSyntaxName', lookupSyntaxNames,
+        lookupIfThenElse,
         lookupGreAvailRn,
         getLookupOccRn,mkUnboundName, mkUnboundNameRdr, isUnboundName,
         addUsedGRE, addUsedGREs, addUsedDataCons,
@@ -74,7 +75,8 @@ import DataCon
 import TyCon
 import PrelNames        ( mkUnboundName, isUnboundName, rOOT_MAIN, forall_tv_RDR )
 import ErrUtils         ( MsgDoc )
-import BasicTypes       ( Fixity(..), FixityDirection(..), minPrecedence, defaultFixity )
+import BasicTypes       ( Fixity(..), FixityDirection(..), minPrecedence,
+                          defaultFixity, pprWarningTxtForMsg, SourceText(..) )
 import SrcLoc
 import Outputable
 import Util
@@ -207,40 +209,16 @@ newTopSrcBinder (L loc rdr_name)
                 -- module name, we we get a confusing "M.T is not in scope" error later
 
         ; stage <- getStage
-        ; env <- getGblEnv
         ; if isBrackStage stage then
                 -- We are inside a TH bracket, so make an *Internal* name
                 -- See Note [Top-level Names in Template Haskell decl quotes] in RnNames
              do { uniq <- newUnique
                 ; return (mkInternalName uniq (rdrNameOcc rdr_name) loc) }
-          else case tcg_impl_rdr_env env of
-            Just gr ->
-                -- We're compiling --sig-of, so resolve with respect to this
-                -- module.
-                -- See Note [Signature parameters in TcGblEnv and DynFlags]
-             do { case lookupGlobalRdrEnv gr (rdrNameOcc rdr_name) of
-                    -- Be sure to override the loc so that we get accurate
-                    -- information later
-                    [GRE{ gre_name = n }] -> do
-                      -- NB: Just adding this line will not work:
-                      --    addUsedGRE True gre
-                      -- see Note [Signature lazy interface loading] for
-                      -- more details.
-                      return (setNameLoc n loc)
-                    _ -> do
-                      { -- NB: cannot use reportUnboundName rdr_name
-                        -- because it looks up in the wrong RdrEnv
-                        -- ToDo: more helpful error messages
-                      ; addErr (unknownNameErr (pprNonVarNameSpace
-                            (occNameSpace (rdrNameOcc rdr_name))) rdr_name)
-                      ; return (mkUnboundNameRdr rdr_name)
-                      }
-                }
-            Nothing ->
-                -- Normal case
+          else
              do { this_mod <- getModule
-                ; traceRn (text "newTopSrcBinder" <+> (ppr this_mod $$ ppr rdr_name $$ ppr loc))
-                ; newGlobalBinder this_mod (rdrNameOcc rdr_name) loc } }
+                ; traceRn "newTopSrcBinder" (ppr this_mod $$ ppr rdr_name $$ ppr loc)
+                ; newGlobalBinder this_mod (rdrNameOcc rdr_name) loc }
+        }
 
 {-
 *********************************************************
@@ -268,7 +246,7 @@ lookupTopBndrRn :: RdrName -> RnM Name
 lookupTopBndrRn n = do nopt <- lookupTopBndrRn_maybe n
                        case nopt of
                          Just n' -> return n'
-                         Nothing -> do traceRn $ (text "lookupTopBndrRn fail" <+> ppr n)
+                         Nothing -> do traceRn "lookupTopBndrRn fail" (ppr n)
                                        unboundName WL_LocalTop n
 
 lookupLocatedTopBndrRn :: Located RdrName -> RnM (Located Name)
@@ -363,16 +341,12 @@ lookupExactOcc_either name
                        ; if name `inLocalRdrEnvScope` lcl_env
                          then return (Right name)
                          else
-#ifdef GHCI
                          do { th_topnames_var <- fmap tcg_th_topnames getGblEnv
                             ; th_topnames <- readTcRef th_topnames_var
                             ; if name `elemNameSet` th_topnames
                               then return (Right name)
                               else return (Left exact_nm_err)
                             }
-#else /* !GHCI */
-                         return (Left exact_nm_err)
-#endif /* !GHCI */
                        }
            gres -> return (Left (sameNameErr gres))   -- Ugh!  See Note [Template Haskell ambiguity]
        }
@@ -461,9 +435,9 @@ lookupConstructorFields con_name
              ; traceTc "lookupCF" (ppr con_name $$ ppr (lookupNameEnv field_env con_name) $$ ppr field_env)
              ; return (lookupNameEnv field_env con_name `orElse` []) }
           else
-          do { con <- tcLookupDataCon con_name
+          do { con <- tcLookupConLike con_name
              ; traceTc "lookupCF 2" (ppr con)
-             ; return (dataConFieldLabels con) } }
+             ; return (conLikeFieldLabels con) } }
 
 -----------------------------------------------
 -- Used for record construction and pattern matching
@@ -520,7 +494,9 @@ lookupSubBndrOcc warn_if_deprec the_parent doc rdr_name
                 -- NB: lookupGlobalRdrEnv, not lookupGRE_RdrName!
                 --     The latter does pickGREs, but we want to allow 'x'
                 --     even if only 'M.x' is in scope
-       ; traceRn (text "lookupSubBndrOcc" <+> vcat [ppr the_parent, ppr rdr_name, ppr gres, ppr (pick_gres rdr_name gres)])
+       ; traceRn "lookupSubBndrOcc"
+            (vcat [ ppr the_parent, ppr rdr_name
+                  , ppr gres, ppr (pick_gres rdr_name gres)])
        ; case pick_gres rdr_name gres of
             (gre:_) -> do { addUsedGRE warn_if_deprec gre
                             -- Add a usage; this is an *occurrence* site
@@ -718,6 +694,9 @@ lookupOccRn rdr_name
 lookupKindOccRn :: RdrName -> RnM Name
 -- Looking up a name occurring in a kind
 lookupKindOccRn rdr_name
+  | isVarOcc (rdrNameOcc rdr_name)  -- See Note [Promoted variables in types]
+  = badVarInType rdr_name
+  | otherwise
   = do { typeintype <- xoptM LangExt.TypeInType
        ; if | typeintype           -> lookupTypeOccRn rdr_name
       -- With -XNoTypeInType, treat any usage of * in kinds as in scope
@@ -730,6 +709,9 @@ lookupKindOccRn rdr_name
 lookupTypeOccRn :: RdrName -> RnM Name
 -- see Note [Demotion]
 lookupTypeOccRn rdr_name
+  | isVarOcc (rdrNameOcc rdr_name)  -- See Note [Promoted variables in types]
+  = badVarInType rdr_name
+  | otherwise
   = do { mb_name <- lookupOccRn_maybe rdr_name
        ; case mb_name of {
              Just name -> return name ;
@@ -779,7 +761,25 @@ is_star, is_uni_star :: RdrName -> Bool
 is_star     = (fsLit "*" ==) . occNameFS . rdrNameOcc
 is_uni_star = (fsLit "★" ==) . occNameFS . rdrNameOcc
 
-{-
+badVarInType :: RdrName -> RnM Name
+badVarInType rdr_name
+  = do { addErr (text "Illegal promoted term variable in a type:"
+                 <+> ppr rdr_name)
+       ; return (mkUnboundNameRdr rdr_name) }
+
+{- Note [Promoted variables in types]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider this (Trac #12686):
+   x = True
+   data Bad = Bad 'x
+
+The parser treats the quote in 'x as saying "use the term
+namespace", so we'll get (Bad x{v}), with 'x' in the
+VarName namespace.  If we don't test for this, the renamer
+will happily rename it to the x bound at top level, and then
+the typecheck falls over because it doesn't have 'x' in scope
+when kind-checking.
+
 Note [Demotion]
 ~~~~~~~~~~~~~~~
 When the user writes:
@@ -855,7 +855,7 @@ lookupGlobalOccRn rdr_name
   = do { mb_name <- lookupGlobalOccRn_maybe rdr_name
        ; case mb_name of
            Just n  -> return n
-           Nothing -> do { traceRn (text "lookupGlobalOccRn" <+> ppr rdr_name)
+           Nothing -> do { traceRn "lookupGlobalOccRn" (ppr rdr_name)
                          ; unboundName WL_Global rdr_name } }
 
 lookupInfoOccRn :: RdrName -> RnM [Name]
@@ -956,7 +956,8 @@ lookupGreRn_maybe rdr_name
             [gre] -> do { addUsedGRE True gre
                         ; return (Just gre) }
             gres  -> do { addNameClashErrRn rdr_name gres
-                        ; traceRn (text "name clash" <+> (ppr rdr_name $$ ppr gres $$ ppr env))
+                        ; traceRn "lookupGreRn:name clash"
+                            (ppr rdr_name $$ ppr gres $$ ppr env)
                         ; return (Just (head gres)) } }
 
 lookupGreRn2_maybe :: RdrName -> RnM (Maybe GlobalRdrElt)
@@ -973,7 +974,8 @@ lookupGreRn2_maybe rdr_name
             [gre] -> do { addUsedGRE True gre
                         ; return (Just gre) }
             gres  -> do { addNameClashErrRn rdr_name gres
-                        ; traceRn (text "name clash" <+> (ppr rdr_name $$ ppr gres $$ ppr env))
+                        ; traceRn "lookupGreRn_maybe:name clash"
+                            (ppr rdr_name $$ ppr gres $$ ppr env)
                         ; return Nothing } }
 
 lookupGreAvailRn :: RdrName -> RnM (Name, AvailInfo)
@@ -985,7 +987,7 @@ lookupGreAvailRn rdr_name
         ; case mb_gre of {
             Just gre -> return (gre_name gre, availFromGRE gre) ;
             Nothing  ->
-    do  { traceRn (text "lookupGreRn" <+> ppr rdr_name)
+    do  { traceRn "lookupGreAvailRn" (ppr rdr_name)
         ; let name = mkUnboundNameRdr rdr_name
         ; return (name, avail name) } } }
 
@@ -1027,7 +1029,7 @@ addUsedGRE warn_if_deprec gre
   = do { when warn_if_deprec (warnIfDeprecated gre)
        ; unless (isLocalGRE gre) $
          do { env <- getGblEnv
-            ; traceRn (text "addUsedGRE" <+> ppr gre)
+            ; traceRn "addUsedGRE" (ppr gre)
             ; updMutVar (tcg_used_gres env) (gre :) } }
 
 addUsedGREs :: [GlobalRdrElt] -> RnM ()
@@ -1037,7 +1039,7 @@ addUsedGREs :: [GlobalRdrElt] -> RnM ()
 addUsedGREs gres
   | null imp_gres = return ()
   | otherwise     = do { env <- getGblEnv
-                       ; traceRn (text "addUsedGREs" <+> ppr imp_gres)
+                       ; traceRn "addUsedGREs" (ppr imp_gres)
                        ; updMutVar (tcg_used_gres env) (imp_gres ++) }
   where
     imp_gres = filterOut isLocalGRE gres
@@ -1067,7 +1069,7 @@ warnIfDeprecated gre@(GRE { gre_name = name, gre_imp = iss })
                     <+> pprNonVarNameSpace (occNameSpace occ)
                     <+> quotes (ppr occ)
                   , parens imp_msg <> colon ]
-            , ppr txt ]
+            , pprWarningTxtForMsg txt ]
       where
         imp_mod  = importSpecModule imp_spec
         imp_msg  = text "imported from" <+> ppr imp_mod <> extra
@@ -1081,7 +1083,6 @@ lookupImpDeprec iface gre
        ParentIs  p              -> mi_warn_fn iface (nameOccName p)
        FldParent { par_is = p } -> mi_warn_fn iface (nameOccName p)
        NoParent                 -> Nothing
-       PatternSynonym           -> Nothing
 
 {-
 Note [Used names with interface not loaded]
@@ -1150,11 +1151,11 @@ lookupQualifiedNameGHCi rdr_name
 
                 _ -> -- Either we couldn't load the interface, or
                      -- we could but we didn't find the name in it
-                     do { traceRn (text "lookupQualifiedNameGHCi" <+> ppr rdr_name)
+                     do { traceRn "lookupQualifiedNameGHCi" (ppr rdr_name)
                         ; return [] } }
 
       | otherwise
-      = do { traceRn (text "lookupQualifedNameGHCi: off" <+> ppr rdr_name)
+      = do { traceRn "lookupQualifedNameGHCi: off" (ppr rdr_name)
            ; return [] }
 
     doc = text "Need to find" <+> ppr rdr_name
@@ -1214,6 +1215,14 @@ data HsSigCtxt
   | HsBootCtxt NameSet       -- Top level of a hs-boot file, binding these names
   | RoleAnnotCtxt NameSet    -- A role annotation, with the names of all types
                              -- in the group
+
+instance Outputable HsSigCtxt where
+    ppr (TopSigCtxt ns) = text "TopSigCtxt" <+> ppr ns
+    ppr (LocalBindCtxt ns) = text "LocalBindCtxt" <+> ppr ns
+    ppr (ClsDeclCtxt n) = text "ClsDeclCtxt" <+> ppr n
+    ppr (InstDeclCtxt ns) = text "InstDeclCtxt" <+> ppr ns
+    ppr (HsBootCtxt ns) = text "HsBootCtxt" <+> ppr ns
+    ppr (RoleAnnotCtxt ns) = text "RoleAnnotCtxt" <+> ppr ns
 
 lookupSigOccRn :: HsSigCtxt
                -> Sig RdrName
@@ -1397,7 +1406,7 @@ lookupFixity is a bit strange.
 * Nested local fixity decls are put in the local fixity env, which we
   find with getFixtyEnv
 
-* Imported fixities are found in the HIT or PIT
+* Imported fixities are found in the PIT
 
 * Top-level fixity decls in this module may be for Names that are
     either  Global         (constructors, class operations)
@@ -1426,7 +1435,7 @@ lookupFixityRn_help' :: Name
                      -> RnM (Bool, Fixity)
 lookupFixityRn_help' name occ
   | isUnboundName name
-  = return (False, Fixity (show minPrecedence) minPrecedence InfixL)
+  = return (False, Fixity NoSourceText minPrecedence InfixL)
     -- Minimise errors from ubound names; eg
     --    a>0 `foo` b>0
     -- where 'foo' is not in scope, should not give an error (Trac #7937)
@@ -1471,7 +1480,7 @@ lookupFixityRn_help' name occ
                             Just f ->
                                   text "looking up name in iface and found:"
                               <+> vcat [ppr name, ppr f]
-           ; traceRn (text "lookupFixityRn_either:" <+> msg)
+           ; traceRn "lookupFixityRn_either:" msg
            ; return (maybe (False, defaultFixity) (\f -> (True, f)) mb_fix)  }
 
     doc = text "Checking fixity for" <+> ppr name
@@ -1492,7 +1501,7 @@ lookupFieldFixityRn (Ambiguous   (L _ rdr) _) = get_ambiguous_fixity rdr
   where
     get_ambiguous_fixity :: RdrName -> RnM Fixity
     get_ambiguous_fixity rdr_name = do
-      traceRn $ text "get_ambiguous_fixity" <+> ppr rdr_name
+      traceRn "get_ambiguous_fixity" (ppr rdr_name)
       rdr_env <- getGlobalRdrEnv
       let elts =  lookupGRE_RdrName rdr_name rdr_env
 
@@ -1505,7 +1514,7 @@ lookupFieldFixityRn (Ambiguous   (L _ rdr) _) = get_ambiguous_fixity rdr
         [] -> panic "get_ambiguous_fixity: no candidates for a given RdrName"
         [ (_, fix):_ ] -> return fix
         ambigs -> addErr (ambiguous_fixity_err rdr_name ambigs)
-                  >> return (Fixity(show minPrecedence) minPrecedence InfixL)
+                  >> return (Fixity NoSourceText minPrecedence InfixL)
 
     lookup_gre_fixity gre = lookupFixityRn' (gre_name gre) (greOccName gre)
 
@@ -1584,7 +1593,7 @@ respectively.  Initially, we just store the "standard" name (PrelNames.fromInteg
 fromRationalName etc), but the renamer changes this to the appropriate user
 name if Opt_NoImplicitPrelude is on.  That is what lookupSyntaxName does.
 
-We treat the orignal (standard) names as free-vars too, because the type checker
+We treat the original (standard) names as free-vars too, because the type checker
 checks the type of the user thing against the type of the standard thing.
 -}
 
@@ -1599,6 +1608,16 @@ lookupIfThenElse
          else do { ite <- lookupOccRn (mkVarUnqual (fsLit "ifThenElse"))
                  ; return ( Just (mkRnSyntaxExpr ite)
                           , unitFV ite ) } }
+
+lookupSyntaxName' :: Name          -- ^ The standard name
+                  -> RnM Name      -- ^ Possibly a non-standard name
+lookupSyntaxName' std_name
+  = do { rebindable_on <- xoptM LangExt.RebindableSyntax
+       ; if not rebindable_on then
+           return std_name
+         else
+            -- Get the similarly named thing from the local environment
+           lookupOccRn (mkRdrUnqual (nameOccName std_name)) }
 
 lookupSyntaxName :: Name                                -- The standard name
                  -> RnM (SyntaxExpr Name, FreeVars)     -- Possibly a non-standard name
@@ -1735,7 +1754,7 @@ checkShadowedOccs :: (GlobalRdrEnv, LocalRdrEnv)
                   -> [a] -> RnM ()
 checkShadowedOccs (global_env,local_env) get_loc_occ ns
   = whenWOptM Opt_WarnNameShadowing $
-    do  { traceRn (text "shadow" <+> ppr (map get_loc_occ ns))
+    do  { traceRn "checkShadowedOccs:shadow" (ppr (map get_loc_occ ns))
         ; mapM_ check_shadow ns }
   where
     check_shadow n
@@ -2099,7 +2118,6 @@ warnUnusedTopBinds gres
          let isBoot = tcg_src env == HsBootFile
          let noParent gre = case gre_par gre of
                             NoParent -> True
-                            PatternSynonym -> True
                             _        -> False
              -- Don't warn about unused bindings with parents in
              -- .hs-boot files, as you are sometimes required to give
@@ -2134,7 +2152,7 @@ warnUnused flag names = do
 
 warnUnused1 :: WarningFlag -> NameEnv (FieldLabelString, Name) -> Name -> RnM ()
 warnUnused1 flag fld_env name
-  = when (reportable name) $
+  = when (reportable name occ) $
     addUnusedWarning flag
                      occ (nameSrcSpan name)
                      (text "Defined but not used")
@@ -2147,7 +2165,7 @@ warnUnusedGRE :: GlobalRdrElt -> RnM ()
 warnUnusedGRE gre@(GRE { gre_name = name, gre_lcl = lcl, gre_imp = is })
   | lcl       = do fld_env <- mkFieldEnv <$> getGlobalRdrEnv
                    warnUnused1 Opt_WarnUnusedTopBinds fld_env name
-  | otherwise = when (reportable name) (mapM_ warn is)
+  | otherwise = when (reportable name occ) (mapM_ warn is)
   where
     occ = greOccName gre
     warn spec = addUnusedWarning Opt_WarnUnusedTopBinds occ span msg
@@ -2165,12 +2183,15 @@ mkFieldEnv rdr_env = mkNameEnv [ (gre_name gre, (lbl, par_is (gre_par gre)))
                                , Just lbl <- [greLabel gre]
                                ]
 
-reportable :: Name -> Bool
-reportable name
+-- | Should we report the fact that this 'Name' is unused? The
+-- 'OccName' may differ from 'nameOccName' due to
+-- DuplicateRecordFields.
+reportable :: Name -> OccName -> Bool
+reportable name occ
   | isWiredInName name = False    -- Don't report unused wired-in names
                                   -- Otherwise we get a zillion warnings
                                   -- from Data.Tuple
-  | otherwise = not (startsWithUnderscore (nameOccName name))
+  | otherwise = not (startsWithUnderscore occ)
 
 addUnusedWarning :: WarningFlag -> OccName -> SrcSpan -> SDoc -> RnM ()
 addUnusedWarning flag occ span msg

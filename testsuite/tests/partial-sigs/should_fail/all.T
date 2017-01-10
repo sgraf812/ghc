@@ -62,4 +62,5 @@ test('T11122', normal, compile, [''])
 test('T11976', normal, compile_fail, [''])
 test('PatBind3', normal, compile_fail, [''])
 test('T12039', normal, compile_fail, [''])
-
+test('T12634', normal, compile_fail, [''])
+test('T12732', normal, compile_fail, ['-fobject-code -fdefer-typed-holes'])

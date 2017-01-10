@@ -97,7 +97,7 @@ mkPrelImports :: ModuleName
               -> SrcSpan    -- Attribute the "import Prelude" to this location
               -> Bool -> [LImportDecl RdrName]
               -> [LImportDecl RdrName]
--- Consruct the implicit declaration "import Prelude" (or not)
+-- Construct the implicit declaration "import Prelude" (or not)
 --
 -- NB: opt_NoImplicitPrelude is slightly different to import Prelude ();
 -- because the former doesn't even look at Prelude.hi for instance
@@ -117,7 +117,7 @@ mkPrelImports this_mod loc implicit_prelude import_decls
 
       preludeImportDecl :: LImportDecl RdrName
       preludeImportDecl
-        = L loc $ ImportDecl { ideclSourceSrc = Nothing,
+        = L loc $ ImportDecl { ideclSourceSrc = NoSourceText,
                                ideclName      = L loc pRELUDE_NAME,
                                ideclPkgQual   = Nothing,
                                ideclSource    = False,

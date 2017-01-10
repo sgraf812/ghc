@@ -115,7 +115,7 @@ list.
 
     :default: on
 
-    Merge immediately-nested case expressions that scrutinse the same variable.
+    Merge immediately-nested case expressions that scrutinise the same variable.
     For example, ::
 
           case x of
@@ -130,6 +130,25 @@ list.
              Red -> e1
              Blue -> e2
              Green -> e2
+
+.. ghc-flag:: -fcase-folding
+
+    :default: on
+
+    Allow constant folding in case expressions that scrutinise some primops:
+    For example, ::
+
+          case x `minusWord#` 10## of
+             10## -> e1
+             20## -> e2
+             v    -> e3
+
+    Is transformed to, ::
+
+          case x of
+             20## -> e1
+             30## -> e2
+             _    -> let v = x `minusWord#` 10## in e3
 
 .. ghc-flag:: -fcall-arity
 
@@ -166,6 +185,14 @@ list.
     Enables the common-sub-expression elimination
     optimisation. Switching this off can be useful if you have some
     ``unsafePerformIO`` expressions that you don't want commoned-up.
+
+.. ghc-flag:: -fstg-cse
+
+    :default: on
+
+    Enables the common-sub-expression elimination optimisation on the STG
+    intermediate language, where it is able to common up some subexpressions
+    that differ in their types, but not their represetation.
 
 .. ghc-flag:: -fdicts-cheap
 

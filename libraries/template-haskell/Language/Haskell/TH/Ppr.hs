@@ -10,8 +10,9 @@ import Text.PrettyPrint (render)
 import Language.Haskell.TH.PprLib
 import Language.Haskell.TH.Syntax
 import Data.Word ( Word8 )
-import Data.Char ( toLower, chr, ord, isSymbol )
+import Data.Char ( toLower, chr)
 import GHC.Show  ( showMultiLineString )
+import GHC.Lexeme( startsVarSym )
 import Data.Ratio ( numerator, denominator )
 
 nestDepth :: Int
@@ -114,11 +115,8 @@ isSymOcc :: Name -> Bool
 isSymOcc n
   = case nameBase n of
       []    -> True  -- Empty name; weird
-      (c:_) -> isSymbolASCII c || (ord c > 0x7f && isSymbol c)
+      (c:_) -> startsVarSym c
                    -- c.f. OccName.startsVarSym in GHC itself
-
-isSymbolASCII :: Char -> Bool
-isSymbolASCII c = c `elem` "!#$%&*+./<=>?@\\^|~-"
 
 pprInfixExp :: Exp -> Doc
 pprInfixExp (VarE v) = pprName' Infix v
@@ -131,6 +129,8 @@ pprExp _ (ConE c)     = pprName' Applied c
 pprExp i (LitE l)     = pprLit i l
 pprExp i (AppE e1 e2) = parensIf (i >= appPrec) $ pprExp opPrec e1
                                               <+> pprExp appPrec e2
+pprExp i (AppTypeE e t)
+ = parensIf (i >= appPrec) $ pprExp opPrec e <+> char '@' <> pprParendType t
 pprExp _ (ParensE e)  = parens (pprExp noPrec e)
 pprExp i (UInfixE e1 op e2)
  = parensIf (i > unopPrec) $ pprExp unopPrec e1
@@ -149,6 +149,7 @@ pprExp i (LamCaseE ms) = parensIf (i > noPrec)
                        $ text "\\case" $$ nest nestDepth (ppr ms)
 pprExp _ (TupE es) = parens (commaSep es)
 pprExp _ (UnboxedTupE es) = hashParens (commaSep es)
+pprExp _ (UnboxedSumE e alt arity) = unboxedSumBars (ppr e) alt arity
 -- Nesting in Cond is to avoid potential problems in do statments
 pprExp i (CondE guard true false)
  = parensIf (i > noPrec) $ sep [text "if"   <+> ppr guard,
@@ -178,12 +179,17 @@ pprExp i (DoE ss_) = parensIf (i > noPrec) $ text "do" <+> pprStms ss_
 
 pprExp _ (CompE []) = text "<<Empty CompExp>>"
 -- This will probably break with fixity declarations - would need a ';'
-pprExp _ (CompE ss) = text "[" <> ppr s
-                  <+> text "|"
-                  <+> commaSep ss'
-                   <> text "]"
-    where s = last ss
-          ss' = init ss
+pprExp _ (CompE ss) =
+    if null ss'
+       -- If there are no statements in a list comprehension besides the last
+       -- one, we simply treat it like a normal list.
+       then text "[" <> ppr s <> text "]"
+       else text "[" <> ppr s
+        <+> bar
+        <+> commaSep ss'
+         <> text "]"
+  where s = last ss
+        ss' = init ss
 pprExp _ (ArithSeqE d) = ppr d
 pprExp _ (ListE es) = brackets (commaSep es)
 pprExp i (SigE e t) = parensIf (i > noPrec) $ ppr e <+> dcolon <+> ppr t
@@ -205,7 +211,7 @@ instance Ppr Stmt where
     ppr (BindS p e) = ppr p <+> text "<-" <+> ppr e
     ppr (LetS ds) = text "let" <+> (braces (semiSep ds))
     ppr (NoBindS e) = ppr e
-    ppr (ParS sss) = sep $ punctuate (text "|")
+    ppr (ParS sss) = sep $ punctuate bar
                          $ map commaSep sss
 
 ------------------------------
@@ -216,8 +222,8 @@ instance Ppr Match where
 ------------------------------
 pprGuarded :: Doc -> (Guard, Exp) -> Doc
 pprGuarded eqDoc (guard, expr) = case guard of
-  NormalG guardExpr -> char '|' <+> ppr guardExpr <+> eqDoc <+> ppr expr
-  PatG    stmts     -> char '|' <+> vcat (punctuate comma $ map ppr stmts) $$
+  NormalG guardExpr -> bar <+> ppr guardExpr <+> eqDoc <+> ppr expr
+  PatG    stmts     -> bar <+> vcat (punctuate comma $ map ppr stmts) $$
                          nest nestDepth (eqDoc <+> ppr expr)
 
 ------------------------------
@@ -266,6 +272,7 @@ pprPat i (LitP l)     = pprLit i l
 pprPat _ (VarP v)     = pprName' Applied v
 pprPat _ (TupP ps)    = parens (commaSep ps)
 pprPat _ (UnboxedTupP ps) = hashParens (commaSep ps)
+pprPat _ (UnboxedSumP p alt arity) = unboxedSumBars (ppr p) alt arity
 pprPat i (ConP s ps)  = parensIf (i >= appPrec) $ pprName' Applied s
                                               <+> sep (map (pprPat appPrec) ps)
 pprPat _ (ParensP p)  = parens $ pprPat noPrec p
@@ -351,8 +358,12 @@ ppr_dec _ (ClosedTypeFamilyD tfhead@(TypeFamilyHead tc _ _ _) eqns)
       = ppr tc <+> sep (map pprParendType lhs) <+> text "=" <+> ppr rhs
 ppr_dec _ (RoleAnnotD name roles)
   = hsep [ text "type role", ppr name ] <+> hsep (map ppr roles)
-ppr_dec _ (StandaloneDerivD cxt ty)
-  = hsep [ text "deriving instance", pprCxt cxt, ppr ty ]
+ppr_dec _ (StandaloneDerivD ds cxt ty)
+  = hsep [ text "deriving"
+         , maybe empty ppr_deriv_strategy ds
+         , text "instance"
+         , pprCxt cxt
+         , ppr ty ]
 ppr_dec _ (DefaultSigD n ty)
   = hsep [ text "default", pprPrefixOcc n, dcolon, ppr ty ]
 ppr_dec _ (PatSynD name args dir pat)
@@ -366,6 +377,12 @@ ppr_dec _ (PatSynD name args dir pat)
 ppr_dec _ (PatSynSigD name ty)
   = pprPatSynSig name ty
 
+ppr_deriv_strategy :: DerivStrategy -> Doc
+ppr_deriv_strategy ds = text $
+  case ds of
+    StockStrategy    -> "stock"
+    AnyclassStrategy -> "anyclass"
+    NewtypeStrategy  -> "newtype"
 
 ppr_overlap :: Overlap -> Doc
 ppr_overlap o = text $
@@ -375,7 +392,8 @@ ppr_overlap o = text $
     Overlapping   -> "{-# OVERLAPPING #-}"
     Incoherent    -> "{-# INCOHERENT #-}"
 
-ppr_data :: Doc -> Cxt -> Name -> Doc -> Maybe Kind -> [Con] -> Cxt -> Doc
+ppr_data :: Doc -> Cxt -> Name -> Doc -> Maybe Kind -> [Con] -> [DerivClause]
+         -> Doc
 ppr_data maybeInst ctxt t argsDoc ksig cs decs
   = sep [text "data" <+> maybeInst
             <+> pprCxt ctxt
@@ -384,12 +402,12 @@ ppr_data maybeInst ctxt t argsDoc ksig cs decs
          if null decs
            then empty
            else nest nestDepth
-              $ text "deriving" <+> ppr_cxt_preds decs]
+              $ vcat $ map ppr_deriv_clause decs]
   where
     pref :: [Doc] -> [Doc]
     pref xs | isGadtDecl = xs
     pref []              = []      -- No constructors; can't happen in H98
-    pref (d:ds)          = (char '=' <+> d):map (char '|' <+>) ds
+    pref (d:ds)          = (char '=' <+> d):map (bar <+>) ds
 
     maybeWhere :: Doc
     maybeWhere | isGadtDecl = text "where"
@@ -406,7 +424,8 @@ ppr_data maybeInst ctxt t argsDoc ksig cs decs
                 Nothing -> empty
                 Just k  -> dcolon <+> ppr k
 
-ppr_newtype :: Doc -> Cxt -> Name -> Doc -> Maybe Kind -> Con -> Cxt -> Doc
+ppr_newtype :: Doc -> Cxt -> Name -> Doc -> Maybe Kind -> Con -> [DerivClause]
+            -> Doc
 ppr_newtype maybeInst ctxt t argsDoc ksig c decs
   = sep [text "newtype" <+> maybeInst
             <+> pprCxt ctxt
@@ -415,11 +434,16 @@ ppr_newtype maybeInst ctxt t argsDoc ksig c decs
          if null decs
            then empty
            else nest nestDepth
-                $ text "deriving" <+> ppr_cxt_preds decs]
+                $ vcat $ map ppr_deriv_clause decs]
   where
     ksigDoc = case ksig of
                 Nothing -> empty
                 Just k  -> dcolon <+> ppr k
+
+ppr_deriv_clause :: DerivClause -> Doc
+ppr_deriv_clause (DerivClause ds ctxt)
+  = text "deriving" <+> maybe empty ppr_deriv_strategy ds
+                    <+> ppr_cxt_preds ctxt
 
 ppr_tySyn :: Doc -> Name -> Doc -> Type -> Doc
 ppr_tySyn maybeInst t argsDoc rhs
@@ -436,7 +460,7 @@ ppr_tf_head (TypeFamilyHead tc tvs res inj)
 instance Ppr FunDep where
     ppr (FunDep xs ys) = hsep (map ppr xs) <+> text "->" <+> hsep (map ppr ys)
     ppr_list [] = empty
-    ppr_list xs = char '|' <+> commaSep xs
+    ppr_list xs = bar <+> commaSep xs
 
 ------------------------------
 instance Ppr FamFlavour where
@@ -452,7 +476,7 @@ instance Ppr FamilyResultSig where
 ------------------------------
 instance Ppr InjectivityAnn where
     ppr (InjectivityAnn lhs rhs) =
-        char '|' <+> ppr lhs <+> text "->" <+> hsep (map ppr rhs)
+        bar <+> ppr lhs <+> text "->" <+> hsep (map ppr rhs)
 
 ------------------------------
 instance Ppr Foreign where
@@ -655,6 +679,7 @@ pprParendType (ConT c)            = ppr c
 pprParendType (TupleT 0)          = text "()"
 pprParendType (TupleT n)          = parens (hcat (replicate (n-1) comma))
 pprParendType (UnboxedTupleT n)   = hashParens $ hcat $ replicate (n-1) comma
+pprParendType (UnboxedSumT arity) = hashParens $ hcat $ replicate (arity-1) bar
 pprParendType ArrowT              = parens (text "->")
 pprParendType ListT               = text "[]"
 pprParendType (LitT l)            = pprTyLit l
@@ -795,3 +820,15 @@ commaSepWith pprFun = sep . punctuate comma . map pprFun
 -- followed by space.
 semiSep :: Ppr a => [a] -> Doc
 semiSep = sep . punctuate semi . map ppr
+
+-- Prints out the series of vertical bars that wraps an expression or pattern
+-- used in an unboxed sum.
+unboxedSumBars :: Doc -> SumAlt -> SumArity -> Doc
+unboxedSumBars d alt arity = hashParens $
+    bars (alt-1) <> d <> bars (arity - alt)
+  where
+    bars i = hsep (replicate i bar)
+
+-- Text containing the vertical bar character.
+bar :: Doc
+bar = char '|'

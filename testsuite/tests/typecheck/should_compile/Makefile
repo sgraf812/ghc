@@ -36,3 +36,17 @@ T7171:
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c T7171a.hs
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c T7171.hs
 
+# I got this one from a infinite loop during validate
+tc266:
+	$(RM) -f Tc266.hi-boot Tc266.o-boot Tc266a.hi Tc266a.o Tc266.hi Tc266.o
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c Tc266.hs-boot
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c Tc266a.hs
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c Tc266.hs
+
+Tc267:
+	$(RM) -f Tc267a.hi-boot Tc267a.o-boot Tc267b.hi-boot Tc267b.o-boot
+	$(RM) -f Tc267a.hi Tc267a.o Tc267b.hi Tc267b.o
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c Tc267a.hs-boot
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c Tc267b.hs-boot
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c Tc267a.hs
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c Tc267b.hs

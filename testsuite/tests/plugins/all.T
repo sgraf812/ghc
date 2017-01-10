@@ -48,8 +48,7 @@ test('T10420',
 
 test('T10294',
      [pre_cmd('$MAKE -s --no-print-directory -C annotation-plugin package.T10294 TOP={top}'),
-      clean_cmd('$MAKE -s --no-print-directory -C annotation-plugin clean.T10294'),
-      unless(have_dynamic(),expect_broken(10301))],
+      clean_cmd('$MAKE -s --no-print-directory -C annotation-plugin clean.T10294')],
      run_command,
      ['$MAKE -s --no-print-directory T10294'])
 
@@ -70,3 +69,9 @@ test('T11244',
       clean_cmd('$MAKE -s --no-print-directory -C rule-defining-plugin clean.T11244')],
      run_command,
      ['$MAKE -s --no-print-directory T11244'])
+
+test('T12567a',
+     [pre_cmd('$MAKE -s --no-print-directory -C simple-plugin package.T12567a TOP={top}'),
+      clean_cmd('$MAKE -s --no-print-directory -C simple-plugin clean.T12567a')],
+     run_command,
+     ['$MAKE -s --no-print-directory T12567a'])

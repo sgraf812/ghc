@@ -39,7 +39,6 @@ import TyCon
 -- others:
 import HsSyn            -- HsType
 import TcRnMonad        -- TcType, amongst others
-import TcHsSyn     ( checkForRepresentationPolymorphism )
 import TcEnv       ( tcGetInstEnvs )
 import FunDeps
 import InstEnv     ( ClsInst, lookupInstEnv, isOverlappable )
@@ -206,7 +205,7 @@ checkAmbiguity ctxt ty
        ; allow_ambiguous <- xoptM LangExt.AllowAmbiguousTypes
        ; (_wrap, wanted) <- addErrCtxt (mk_msg allow_ambiguous) $
                             captureConstraints $
-                            tcSubType_NC ctxt ty (mkCheckExpType ty)
+                            tcSubType_NC ctxt ty ty
        ; simplifyAmbiguityCheck ty wanted
 
        ; traceTc "Done ambiguity check for" (ppr ty) }
@@ -342,6 +341,7 @@ checkValidType ctxt ty
                  InfSigCtxt _   -> ArbitraryRank        -- Inferred type
                  ConArgCtxt _   -> rank1 -- We are given the type of the entire
                                          -- constructor, hence rank 1
+                 PatSynCtxt _   -> rank1
 
                  ForSigCtxt _   -> rank1
                  SpecInstCtxt   -> rank1
@@ -441,35 +441,7 @@ forAllAllowed ArbitraryRank             = True
 forAllAllowed (LimitedRank forall_ok _) = forall_ok
 forAllAllowed _                         = False
 
--- The zonker issues errors if it zonks a representation-polymorphic binder
--- But sometimes it's nice to check a little more eagerly, trying to report
--- errors earlier.
-representationPolymorphismForbidden :: UserTypeCtxt -> Bool
-representationPolymorphismForbidden = go
-  where
-    go (ConArgCtxt _) = True     -- A rep-polymorphic datacon won't be useful
-    go (PatSynCtxt _) = True     -- Similar to previous case
-    go _              = False    -- Other cases are caught by zonker
-
 ----------------------------------------
--- | Fail with error message if the type is unlifted
-check_lifted :: Type -> TcM ()
-check_lifted _ = return ()
-
-{- ------ Legacy comment ---------
-The check_unlifted function seems entirely redundant.  The
-kind system should check for uses of unlifted types.  So I've
-removed the check.  See Trac #11120 comment:19.
-
-check_lifted ty
-  = do { env <- tcInitOpenTidyEnv (tyCoVarsOfTypeList ty)
-       ; checkTcM (not (isUnliftedType ty)) (unliftedArgErr env ty) }
-
-unliftedArgErr :: TidyEnv -> Type -> (TidyEnv, SDoc)
-unliftedArgErr env ty = (env, sep [text "Illegal unlifted type:", ppr_tidy env ty])
------- End of legacy comment --------- -}
-
-
 check_type :: TidyEnv -> UserTypeCtxt -> Rank -> Type -> TcM ()
 -- The args say what the *type context* requires, independent
 -- of *flag* settings.  You test the flag settings at usage sites.
@@ -505,8 +477,6 @@ check_type _ _ _ (TyVarTy _) = return ()
 
 check_type env ctxt rank (FunTy arg_ty res_ty)
   = do  { check_type env ctxt arg_rank arg_ty
-        ; when (representationPolymorphismForbidden ctxt) $
-          checkForRepresentationPolymorphism empty arg_ty
         ; check_type env ctxt res_rank res_ty }
   where
     (arg_rank, res_rank) = funArgResRank rank
@@ -610,12 +580,7 @@ check_arg_type env ctxt rank ty
                         --    (Ord (forall a.a)) => a -> a
                         -- and so that if it Must be a monotype, we check that it is!
 
-        ; check_type env ctxt rank' ty
-        ; check_lifted ty }
-             -- NB the isUnliftedType test also checks for
-             --    T State#
-             -- where there is an illegal partial application of State# (which has
-             -- kind * -> #); see Note [The kind invariant] in TyCoRep
+        ; check_type env ctxt rank' ty }
 
 ----------------------------------------
 forAllTyErr :: TidyEnv -> Rank -> Type -> (TidyEnv, SDoc)
@@ -1628,7 +1593,6 @@ checkValidTyFamEqn mb_clsinfo fam_tc tvs cvs typats rhs loc
          --             type instance F Int              = Int#
          -- See Trac #9357
        ; checkValidMonoType rhs
-       ; check_lifted rhs
 
          -- We have a decidable instance unless otherwise permitted
        ; undecidable_ok <- xoptM LangExt.UndecidableInstances
@@ -1701,9 +1665,7 @@ checkValidTypePat pat_ty
 
           -- Ensure that no type family instances occur a type pattern
        ; checkTc (isTyFamFree pat_ty) $
-         tyFamInstIllegalErr pat_ty
-
-      ; check_lifted pat_ty }
+         tyFamInstIllegalErr pat_ty }
 
 isTyFamFree :: Type -> Bool
 -- ^ Check that a type does not contain any type family applications.
@@ -1816,7 +1778,7 @@ checkZonkValidTelescope hs_tvs orig_tvs extra
          addErr $
          vcat [ hang (text "These kind and type variables:" <+> hs_tvs $$
                       text "are out of dependency order. Perhaps try this ordering:")
-                   2 (sep (map pprTvBndr sorted_tidied_tvs))
+                   2 (sep (map pprTyVar sorted_tidied_tvs))
               , extra ]
        ; return orig_tvs }
 

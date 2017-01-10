@@ -7,13 +7,13 @@ module TcEvidence (
   -- HsWrapper
   HsWrapper(..),
   (<.>), mkWpTyApps, mkWpEvApps, mkWpEvVarApps, mkWpTyLams,
-  mkWpLams, mkWpLet, mkWpCastN, mkWpCastR,
+  mkWpLams, mkWpLet, mkWpCastN, mkWpCastR, collectHsWrapBinders,
   mkWpFun, mkWpFuns, idHsWrapper, isIdHsWrapper, pprHsWrapper,
 
   -- Evidence bindings
   TcEvBinds(..), EvBindsVar(..),
   EvBindMap(..), emptyEvBindMap, extendEvBinds,
-  lookupEvBind, evBindMapBinds, foldEvBindMap,
+  lookupEvBind, evBindMapBinds, foldEvBindMap, isEmptyEvBindMap,
   EvBind(..), emptyTcEvBinds, isEmptyTcEvBinds, mkGivenEvBind, mkWantedEvBind,
   sccEvBinds, evBindVar,
   EvTerm(..), mkEvCast, evVarsOfTerm, mkEvScSelectors,
@@ -267,6 +267,23 @@ isIdHsWrapper :: HsWrapper -> Bool
 isIdHsWrapper WpHole = True
 isIdHsWrapper _      = False
 
+collectHsWrapBinders :: HsWrapper -> ([Var], HsWrapper)
+-- Collect the outer lambda binders of a HsWrapper,
+-- stopping as soon as you get to a non-lambda binder
+collectHsWrapBinders wrap = go wrap []
+  where
+    -- go w ws = collectHsWrapBinders (w <.> w1 <.> ... <.> wn)
+    go :: HsWrapper -> [HsWrapper] -> ([Var], HsWrapper)
+    go (WpEvLam v)       wraps = add_lam v (gos wraps)
+    go (WpTyLam v)       wraps = add_lam v (gos wraps)
+    go (WpCompose w1 w2) wraps = go w1 (w2:wraps)
+    go wrap              wraps = ([], foldl (<.>) wrap wraps)
+
+    gos []     = ([], WpHole)
+    gos (w:ws) = go w ws
+
+    add_lam v (vs,w) = (v:vs, w)
+
 {-
 ************************************************************************
 *                                                                      *
@@ -283,8 +300,24 @@ data TcEvBinds
   | EvBinds             -- Immutable after zonking
        (Bag EvBind)
 
-data EvBindsVar = EvBindsVar (IORef EvBindMap) Unique
-     -- The Unique is for debug printing only
+data EvBindsVar
+  = EvBindsVar {
+      ebv_uniq :: Unique,
+         -- The Unique is for debug printing only
+
+      ebv_binds :: IORef EvBindMap,
+      -- The main payload: the value-level evidence bindings
+      --     (dictionaries etc)
+
+      ebv_tcvs :: IORef CoVarSet
+      -- The free coercion vars of the (rhss of) the coercion bindings
+      --
+      -- Coercions don't actually have bindings
+      -- because we plug them in-place (via a mutable
+      -- variable); but we keep their free variables
+      -- so that we can report unused given constraints
+      -- See Note [Tracking redundant constraints] in TcSimplify
+    }
 
 instance Data.Data TcEvBinds where
   -- Placeholder; we can't travers into TcEvBinds
@@ -325,6 +358,9 @@ extendEvBinds bs ev_bind
                                                (eb_lhs ev_bind)
                                                ev_bind }
 
+isEmptyEvBindMap :: EvBindMap -> Bool
+isEmptyEvBindMap (EvBindMap m) = isEmptyDVarEnv m
+
 lookupEvBind :: EvBindMap -> EvVar -> Maybe EvBind
 lookupEvBind bs = lookupDVarEnv (ev_bind_varenv bs)
 
@@ -333,6 +369,9 @@ evBindMapBinds = foldEvBindMap consBag emptyBag
 
 foldEvBindMap :: (EvBind -> a -> a) -> a -> EvBindMap -> a
 foldEvBindMap k z bs = foldDVarEnv k z (ev_bind_varenv bs)
+
+instance Outputable EvBindMap where
+  ppr (EvBindMap m) = ppr m
 
 -----------------
 -- All evidence is bound by EvBinds; no side effects
@@ -761,10 +800,11 @@ instance Outputable TcEvBinds where
   ppr (EvBinds bs)  = text "EvBinds" <> braces (vcat (map ppr (bagToList bs)))
 
 instance Outputable EvBindsVar where
-  ppr (EvBindsVar _ u) = text "EvBindsVar" <> angleBrackets (ppr u)
+  ppr (EvBindsVar { ebv_uniq = u })
+     = text "EvBindsVar" <> angleBrackets (ppr u)
 
 instance Uniquable EvBindsVar where
-  getUnique (EvBindsVar _ u) = u
+  getUnique (EvBindsVar { ebv_uniq = u }) = u
 
 instance Outputable EvBind where
   ppr (EvBind { eb_lhs = v, eb_rhs = e, eb_is_given = is_given })

@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, RecordWildCards, MultiParamTypeClasses #-}
+{-# LANGUAGE CPP, RecordWildCards, FlexibleInstances, MultiParamTypeClasses #-}
 
 -- |
 -- Package configuration information: essentially the interface to Cabal, with
@@ -11,6 +11,9 @@ module PackageConfig (
 
         -- * UnitId
         packageConfigId,
+        expandedPackageConfigId,
+        definitePackageConfigId,
+        installedPackageConfigId,
 
         -- * The PackageConfig type: information about a package
         PackageConfig,
@@ -40,8 +43,10 @@ import Unique
 -- which is similar to a subset of the InstalledPackageInfo type from Cabal.
 
 type PackageConfig = InstalledPackageInfo
+                       ComponentId
                        SourcePackageId
                        PackageName
+                       Module.InstalledUnitId
                        Module.UnitId
                        Module.ModuleName
                        Module.Module
@@ -50,13 +55,8 @@ type PackageConfig = InstalledPackageInfo
 --       feature, but ghc doesn't currently have convenient support for any
 --       other compact string types, e.g. plain ByteString or Text.
 
-newtype ComponentId = ComponentId FastString deriving (Eq, Ord)
 newtype SourcePackageId    = SourcePackageId    FastString deriving (Eq, Ord)
 newtype PackageName        = PackageName        FastString deriving (Eq, Ord)
-
-instance BinaryStringRep ComponentId where
-  fromStringRep = ComponentId . mkFastStringByteString
-  toStringRep (ComponentId s) = fastStringToByteString s
 
 instance BinaryStringRep SourcePackageId where
   fromStringRep = SourcePackageId . mkFastStringByteString
@@ -66,17 +66,11 @@ instance BinaryStringRep PackageName where
   fromStringRep = PackageName . mkFastStringByteString
   toStringRep (PackageName s) = fastStringToByteString s
 
-instance Uniquable ComponentId where
-  getUnique (ComponentId n) = getUnique n
-
 instance Uniquable SourcePackageId where
   getUnique (SourcePackageId n) = getUnique n
 
 instance Uniquable PackageName where
   getUnique (PackageName n) = getUnique n
-
-instance Outputable ComponentId where
-  ppr (ComponentId str) = ftext str
 
 instance Outputable SourcePackageId where
   ppr (SourcePackageId str) = ftext str
@@ -109,6 +103,7 @@ pprPackageConfig InstalledPackageInfo {..} =
       field "trusted"              (ppr trusted),
       field "import-dirs"          (fsep (map text importDirs)),
       field "library-dirs"         (fsep (map text libraryDirs)),
+      field "dynamic-library-dirs" (fsep (map text libraryDynDirs)),
       field "hs-libraries"         (fsep (map text hsLibraries)),
       field "extra-libraries"      (fsep (map text extraLibraries)),
       field "extra-ghci-libraries" (fsep (map text extraGHCiLibraries)),
@@ -125,7 +120,6 @@ pprPackageConfig InstalledPackageInfo {..} =
   where
     field name body = text name <> colon <+> nest 4 body
 
-
 -- -----------------------------------------------------------------------------
 -- UnitId (package names, versions and dep hash)
 
@@ -138,5 +132,21 @@ pprPackageConfig InstalledPackageInfo {..} =
 -- version is, so these are handled specially; see #wired_in_packages#.
 
 -- | Get the GHC 'UnitId' right out of a Cabalish 'PackageConfig'
+installedPackageConfigId :: PackageConfig -> InstalledUnitId
+installedPackageConfigId = unitId
+
 packageConfigId :: PackageConfig -> UnitId
-packageConfigId = unitId
+packageConfigId p =
+    if indefinite p
+        then newUnitId (componentId p) (instantiatedWith p)
+        else DefiniteUnitId (DefUnitId (unitId p))
+
+expandedPackageConfigId :: PackageConfig -> UnitId
+expandedPackageConfigId p =
+    newUnitId (componentId p) (instantiatedWith p)
+
+definitePackageConfigId :: PackageConfig -> Maybe DefUnitId
+definitePackageConfigId p =
+    case packageConfigId p of
+        DefiniteUnitId def_uid -> Just def_uid
+        _ -> Nothing

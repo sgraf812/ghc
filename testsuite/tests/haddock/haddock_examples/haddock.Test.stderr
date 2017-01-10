@@ -1,17 +1,17 @@
-[1 of 3] Compiling Visible          ( Visible.hs, Visible.o )
-
-==================== Parser ====================
-module Visible where
-visible :: Int -> Int
-visible a = a
-
-
-[2 of 3] Compiling Hidden           ( Hidden.hs, Hidden.o )
+[1 of 3] Compiling Hidden           ( Hidden.hs, Hidden.o )
 
 ==================== Parser ====================
 module Hidden where
 hidden :: Int -> Int
 hidden a = a
+
+
+[2 of 3] Compiling Visible          ( Visible.hs, Visible.o )
+
+==================== Parser ====================
+module Visible where
+visible :: Int -> Int
+visible a = a
 
 
 [3 of 3] Compiling Test             ( Test.hs, Test.o )
@@ -127,7 +127,7 @@ data R1
 <document comment>
 f :: C a => a -> Int
 <document comment>
-foreign import ccall safe "static header.h g" g :: Int -> IO CInt
+foreign import ccall safe "header.h" g :: Int -> IO CInt
 <document comment>
 h :: Int
 h = 42
@@ -169,7 +169,7 @@ newn ::
   -> N1 ()  one of the arguments -> IO Int
 newn = undefined
 <document comment>
-foreign import ccall unsafe "static header.h o" o
+foreign import ccall unsafe "header.h" o
   :: Float  The input float -> IO Float  The output float
 <document comment>
 newp :: Int

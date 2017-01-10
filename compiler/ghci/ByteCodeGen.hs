@@ -66,7 +66,11 @@ import qualified Data.Map as Map
 import qualified Data.IntMap as IntMap
 import qualified FiniteMap as Map
 import Data.Ord
+#if MIN_VERSION_base(4,9,0)
 import GHC.Stack.CCS
+#else
+import GHC.Stack as GHC.Stack.CCS
+#endif
 
 -- -----------------------------------------------------------------------------
 -- Generating byte code for a complete module
@@ -433,7 +437,7 @@ schemeE d s p (AnnLet (AnnNonRec x (_,rhs)) (_,body))
      Just data_con <- isDataConWorkId_maybe v,
      dataConRepArity data_con == length args_r_to_l
    = do -- Special case for a non-recursive let whose RHS is a
-        -- saturatred constructor application.
+        -- saturated constructor application.
         -- Just allocate the constructor and carry on
         alloc_code <- mkConAppCode d s p data_con args_r_to_l
         body_code <- schemeE (d+1) s (Map.insert x d p) body

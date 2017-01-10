@@ -10,6 +10,7 @@ module WorkWrap ( wwTopBinds ) where
 import CoreSyn
 import CoreUnfold       ( certainlyWillInline, mkWwInlineRule, mkWorkerUnfolding )
 import CoreUtils        ( exprType, exprIsHNF )
+import CoreFVs          ( exprFreeVars )
 import Var
 import Id
 import IdInfo
@@ -288,12 +289,10 @@ tryWW dflags fam_envs is_rec fn_id rhs
         -- being inlined at a call site.
   = return [ (new_fn_id, rhs) ]
 
-  | not loop_breaker
-  , Just stable_unf <- certainlyWillInline dflags fn_unf
+  | Just stable_unf <- certainlyWillInline dflags fn_info
   = return [ (fn_id `setIdUnfolding` stable_unf, rhs) ]
-        -- Note [Don't w/w inline small non-loop-breaker, or INLINE, things]
-        -- NB: use idUnfolding because we don't want to apply
-        --     this criterion to a loop breaker!
+        -- See Note [Don't w/w INLINE things]
+        -- See Note [Don't w/w inline small non-loop-breaker things]
 
   | is_fun
   = splitFun dflags fam_envs new_fn_id fn_info wrap_dmds res_info rhs
@@ -305,10 +304,8 @@ tryWW dflags fam_envs is_rec fn_id rhs
   = return [ (new_fn_id, rhs) ]
 
   where
-    loop_breaker = isStrongLoopBreaker (occInfo fn_info)
     fn_info      = idInfo fn_id
     inline_act   = inlinePragmaActivation (inlinePragInfo fn_info)
-    fn_unf       = unfoldingInfo fn_info
     (wrap_dmds, res_info) = splitStrictSig (strictnessInfo fn_info)
 
     new_fn_id = zapIdUsedOnceInfo (zapIdUsageEnvInfo fn_id)
@@ -365,12 +362,12 @@ splitFun :: DynFlags -> FamInstEnvs -> Id -> IdInfo -> [Demand] -> DmdResult -> 
 splitFun dflags fam_envs fn_id fn_info wrap_dmds res_info rhs
   = WARN( not (wrap_dmds `lengthIs` arity), ppr fn_id <+> (ppr arity $$ ppr wrap_dmds $$ ppr res_info) ) do
     -- The arity should match the signature
-    stuff <- mkWwBodies dflags fam_envs fun_ty wrap_dmds res_info
+    stuff <- mkWwBodies dflags fam_envs rhs_fvs fun_ty wrap_dmds res_info
     case stuff of
       Just (work_demands, wrap_fn, work_fn) -> do
         work_uniq <- getUniqueM
         let work_rhs = work_fn rhs
-            work_prag = InlinePragma { inl_src = "{-# INLINE"
+            work_prag = InlinePragma { inl_src = SourceText "{-# INLINE"
                                      , inl_inline = inl_inline inl_prag
                                      , inl_sat    = Nothing
                                      , inl_act    = wrap_act
@@ -409,9 +406,9 @@ splitFun dflags fam_envs fn_id fn_info wrap_dmds res_info rhs
 
                                 -- arity is consistent with the demand type goes through
 
-            wrap_act  = ActiveAfter "0" 0
+            wrap_act  = ActiveAfter NoSourceText 0
             wrap_rhs  = wrap_fn work_id
-            wrap_prag = InlinePragma { inl_src = "{-# INLINE"
+            wrap_prag = InlinePragma { inl_src = SourceText "{-# INLINE"
                                      , inl_inline = Inline
                                      , inl_sat    = Nothing
                                      , inl_act    = wrap_act
@@ -432,6 +429,7 @@ splitFun dflags fam_envs fn_id fn_info wrap_dmds res_info rhs
 
       Nothing -> return [(fn_id, rhs)]
   where
+    rhs_fvs         = exprFreeVars rhs
     fun_ty          = idType fn_id
     inl_prag        = inlinePragInfo fn_info
     rule_match_info = inlinePragmaRuleMatchInfo inl_prag

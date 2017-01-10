@@ -251,6 +251,7 @@ initSysTools mbMinusB
        -- to make that possible, so for now you can't.
        gcc_prog <- getSetting "C compiler command"
        gcc_args_str <- getSetting "C compiler flags"
+       gccSupportsNoPie <- getBooleanSetting "C compiler supports -no-pie"
        cpp_prog <- getSetting "Haskell CPP command"
        cpp_args_str <- getSetting "Haskell CPP flags"
        let unreg_gcc_args = if targetUnregisterised
@@ -343,6 +344,7 @@ initSysTools mbMinusB
                     sLdSupportsBuildId       = ldSupportsBuildId,
                     sLdSupportsFilelist      = ldSupportsFilelist,
                     sLdIsGnuLd               = ldIsGnuLd,
+                    sGccSupportsNoPie        = gccSupportsNoPie,
                     sProgramName             = "ghc",
                     sProjectVersion          = cProjectVersion,
                     sPgm_L   = unlit_path,
@@ -403,9 +405,8 @@ runCpp :: DynFlags -> [Option] -> IO ()
 runCpp dflags args =   do
   let (p,args0) = pgm_P dflags
       args1 = map Option (getOpts dflags opt_P)
-      args2 = if gopt Opt_WarnIsError dflags
-                 then [Option "-Werror"]
-                 else []
+      args2 = [Option "-Werror" | gopt Opt_WarnIsError dflags]
+                ++ [Option "-Wundef" | wopt Opt_WarnCPPUndef dflags]
   mb_env <- getGccEnv args2
   runSomethingFiltered dflags id  "C pre-processor" p
                        (args0 ++ args1 ++ args2 ++ args) mb_env
@@ -644,7 +645,7 @@ figureLlvmVersion dflags = do
 
 {- Note [Windows stack usage]
 
-See: Trac #8870 (and #8834 for related info)
+See: Trac #8870 (and #8834 for related info) and #12186
 
 On Windows, occasionally we need to grow the stack. In order to do
 this, we would normally just bump the stack pointer - but there's a
@@ -665,17 +666,11 @@ stack space in GHC itself. In the x86 codegen, we needed approximately
 ~12kb of stack space in one go, which caused the process to segfault,
 as the intervening pages were not committed.
 
-In the future, we should do the same thing, to make the problem
-completely go away. In the mean time, we're using a workaround: we
-instruct the linker to specify the generated PE as having an initial
-reserved stack size of 8mb, as well as a initial *committed* stack
-size of 8mb. The default committed size was previously only 4k.
+GCC can emit such a check for us automatically but only when the flag
+-fstack-check is used.
 
-Theoretically it's possible to still hit this problem if you request a
-stack bump of more than 8mb in one go. But the amount of code
-necessary is quite large, and 8mb "should be more than enough for
-anyone" right now (he said, before millions of lines of code cried out
-in terror).
+See https://gcc.gnu.org/onlinedocs/gnat_ugn/Stack-Overflow-Checking.html
+for more information.
 
 -}
 
@@ -828,11 +823,12 @@ getLinkerInfo' dflags = do
                    [ -- Reduce ld memory usage
                      "-Wl,--hash-size=31"
                    , "-Wl,--reduce-memory-overheads"
-                     -- Increase default stack, see
+                     -- Emit gcc stack checks
                      -- Note [Windows stack usage]
+                   , "-fstack-check"
                      -- Force static linking of libGCC
                      -- Note [Windows static libGCC]
-                   , "-Xlinker", "--stack=0x800000,0x800000", "-static-libgcc" ]
+                   , "-static-libgcc" ]
                _ -> do
                  -- In practice, we use the compiler as the linker here. Pass
                  -- -Wl,--version to get linker version info.
@@ -916,26 +912,9 @@ runLink dflags args = do
   let (p,args0) = pgm_l dflags
       args1     = map Option (getOpts dflags opt_l)
       args2     = args0 ++ linkargs ++ args1 ++ args
-      args3     = argFixup args2 []
-  mb_env <- getGccEnv args3
-  runSomethingResponseFile dflags ld_filter "Linker" p args3 mb_env
+  mb_env <- getGccEnv args2
+  runSomethingResponseFile dflags ld_filter "Linker" p args2 mb_env
   where
-    testLib lib = "-l" `isPrefixOf` lib || ".a" `isSuffixOf` lib
-    {- GHC is just blindly appending linker arguments from libraries and
-       the commandline together. This results in very problematic link orders
-       which will cause incorrect linking. Since we're changing the link
-       arguments anyway, let's just make sure libraries are last.
-       This functions moves libraries on the link all the way back
-       but keeps the order amongst them the same. -}
-    argFixup []                        r = [] ++ r
-    -- retain any lib in "-o" position.
-    argFixup (o@(Option "-o"):o'@(FileOption _ _):xs) r = o:o':argFixup xs r
-    argFixup (o@(Option       opt):xs) r = if testLib opt
-                                              then argFixup xs (r ++ [o])
-                                              else o:argFixup xs r
-    argFixup (o@(FileOption _ opt):xs) r = if testLib opt
-                                              then argFixup xs (r ++ [o])
-                                              else o:argFixup xs r
     ld_filter = case (platformOS (targetPlatform dflags)) of
                   OSSolaris2 -> sunos_ld_filter
                   _ -> id
@@ -1569,7 +1548,16 @@ linesPlatform xs =
 
 #endif
 
-linkDynLib :: DynFlags -> [String] -> [UnitId] -> IO ()
+{-
+Note [No PIE eating while linking]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+As of 2016 some Linux distributions (e.g. Debian) have started enabling -pie by
+default in their gcc builds. This is incompatible with -r as it implies that we
+are producing an executable. Consequently, we must manually pass -no-pie to gcc
+when joining object files or linking dynamic libraries. See #12759.
+-}
+
+linkDynLib :: DynFlags -> [String] -> [InstalledUnitId] -> IO ()
 linkDynLib dflags0 o_files dep_packages
  = do
     let -- This is a rather ugly hack to fix dynamically linked
@@ -1589,7 +1577,7 @@ linkDynLib dflags0 o_files dep_packages
 
     pkgs <- getPreloadPackagesAnd dflags dep_packages
 
-    let pkg_lib_paths = collectLibraryPaths pkgs
+    let pkg_lib_paths = collectLibraryPaths dflags pkgs
     let pkg_lib_path_opts = concatMap get_pkg_lib_path_opts pkg_lib_paths
         get_pkg_lib_path_opts l
          | ( osElfTarget (platformOS (targetPlatform dflags)) ||
@@ -1734,6 +1722,10 @@ linkDynLib dflags0 o_files dep_packages
                  ++ [ Option "-o"
                     , FileOption "" output_fn
                     ]
+                    -- See Note [No PIE eating when linking]
+                 ++ (if sGccSupportsNoPie (settings dflags)
+                     then [Option "-no-pie"]
+                     else [])
                  ++ map Option o_files
                  ++ [ Option "-shared" ]
                  ++ map Option bsymbolicFlag
@@ -1746,7 +1738,7 @@ linkDynLib dflags0 o_files dep_packages
                  ++ map Option pkg_link_opts
               )
 
-getPkgFrameworkOpts :: DynFlags -> Platform -> [UnitId] -> IO [String]
+getPkgFrameworkOpts :: DynFlags -> Platform -> [InstalledUnitId] -> IO [String]
 getPkgFrameworkOpts dflags platform dep_packages
   | platformUsesFrameworks platform = do
     pkg_framework_path_opts <- do

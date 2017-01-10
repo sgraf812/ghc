@@ -52,6 +52,7 @@ module RdrName (
         -- * GlobalRdrElts
         gresFromAvails, gresFromAvail, localGREsFromAvail, availFromGRE,
         greUsedRdrName, greRdrNames, greSrcSpan, greQualModName,
+        gresToAvailInfo,
 
         -- ** Global 'RdrName' mapping elements: 'GlobalRdrElt', 'Provenance', 'ImportSpec'
         GlobalRdrElt(..), isLocalGRE, isRecFldGRE, greLabel,
@@ -77,9 +78,10 @@ import Unique
 import UniqFM
 import Util
 import StaticFlags( opt_PprStyle_Debug )
+import NameEnv
 
 import Data.Data
-import Data.List( sortBy )
+import Data.List( sortBy, foldl', nub )
 
 {-
 ************************************************************************
@@ -453,7 +455,7 @@ data GlobalRdrElt
         , gre_par  :: Parent
         , gre_lcl :: Bool          -- ^ True <=> the thing was defined locally
         , gre_imp :: [ImportSpec]  -- ^ In scope through these imports
-    } deriving Data
+    } deriving (Data, Eq)
          -- INVARIANT: either gre_lcl = True or gre_imp is non-empty
          -- See Note [GlobalRdrElt provenance]
 
@@ -463,15 +465,13 @@ data Parent = NoParent
             | ParentIs  { par_is :: Name }
             | FldParent { par_is :: Name, par_lbl :: Maybe FieldLabelString }
               -- ^ See Note [Parents for record fields]
-            | PatternSynonym
-            deriving (Eq, Data)
+            deriving (Eq, Data, Typeable)
 
 instance Outputable Parent where
    ppr NoParent        = empty
    ppr (ParentIs n)    = text "parent:" <> ppr n
    ppr (FldParent n f) = text "fldparent:"
                              <> ppr n <> colon <> ppr f
-   ppr (PatternSynonym) = text "pattern synonym"
 
 plusParent :: Parent -> Parent -> Parent
 -- See Note [Combining parents]
@@ -479,7 +479,6 @@ plusParent p1@(ParentIs _)    p2 = hasParent p1 p2
 plusParent p1@(FldParent _ _) p2 = hasParent p1 p2
 plusParent p1 p2@(ParentIs _)    = hasParent p2 p1
 plusParent p1 p2@(FldParent _ _) = hasParent p2 p1
-plusParent PatternSynonym PatternSynonym = PatternSynonym
 plusParent _ _                   = NoParent
 
 hasParent :: Parent -> Parent -> Parent
@@ -530,19 +529,12 @@ Note [Parents]
   class C          Class operations
                    Associated type constructors
 
-The `PatternSynonym` constructor is so called as pattern synonyms can be
-bundled with any type constructor (during renaming). In other words, they can
-have any parent.
-
 ~~~~~~~~~~~~~~~~~~~~~~~~~
  Constructor      Meaning
  ~~~~~~~~~~~~~~~~~~~~~~~~
   NoParent        Can not be bundled with a type constructor.
   ParentIs n      Can be bundled with the type constructor corresponding to
                   n.
-  PatternSynonym  Can be bundled with any type constructor. It is so called
-                  because only pattern synonyms can be bundled with any type
-                  constructor.
   FldParent       See Note [Parents for record fields]
 
 
@@ -572,6 +564,16 @@ entry looks like this:
 Note that the OccName used when adding a GRE to the environment
 (greOccName) now depends on the parent field: for FldParent it is the
 field label, if present, rather than the selector name.
+
+~~
+
+Record pattern synonym selectors are treated differently. Their parent
+information is `NoParent` in the module in which they are defined. This is because
+a pattern synonym `P` has no parent constructor either.
+
+However, if `f` is bundled with a type constructor `T` then whenever `f` is
+imported the parent will use the `Parent` constructor so the parent of `f` is
+now `T`.
 
 
 Note [Combining parents]
@@ -683,21 +685,64 @@ greSrcSpan gre@(GRE { gre_name = name, gre_lcl = lcl, gre_imp = iss } )
   | otherwise     = pprPanic "greSrcSpan" (ppr gre)
 
 mkParent :: Name -> AvailInfo -> Parent
-mkParent _ (Avail NotPatSyn _)           = NoParent
-mkParent _ (Avail IsPatSyn  _)           = PatternSynonym
+mkParent _ (Avail _)           = NoParent
 mkParent n (AvailTC m _ _) | n == m    = NoParent
                          | otherwise = ParentIs m
+
+greParentName :: GlobalRdrElt -> Maybe Name
+greParentName gre = case gre_par gre of
+                      NoParent -> Nothing
+                      ParentIs n -> Just n
+                      FldParent n _ -> Just n
+
+-- | Takes a list of distinct GREs and folds them
+-- into AvailInfos. This is more efficient than mapping each individual
+-- GRE to an AvailInfo and the folding using `plusAvail` but needs the
+-- uniqueness assumption.
+gresToAvailInfo :: [GlobalRdrElt] -> [AvailInfo]
+gresToAvailInfo gres
+  = ASSERT( nub gres == gres ) nameEnvElts avail_env
+  where
+    avail_env :: NameEnv AvailInfo -- keyed by the parent
+    avail_env = foldl' add emptyNameEnv gres
+
+    add :: NameEnv AvailInfo -> GlobalRdrElt -> NameEnv AvailInfo
+    add env gre = extendNameEnv_Acc comb availFromGRE env
+                    (fromMaybe (gre_name gre)
+                               (greParentName gre)) gre
+
+      where
+        -- We want to insert the child `k` into a list of children but
+        -- need to maintain the invariant that the parent is first.
+        --
+        -- We also use the invariant that `k` is not already in `ns`.
+        insertChildIntoChildren :: Name -> [Name] -> Name -> [Name]
+        insertChildIntoChildren _ [] k = [k]
+        insertChildIntoChildren p (n:ns) k
+          | p == k = k:n:ns
+          | otherwise = n:k:ns
+
+        comb :: GlobalRdrElt -> AvailInfo -> AvailInfo
+        comb _ (Avail n) = Avail n -- Duplicated name
+        comb gre (AvailTC m ns fls) =
+          let n = gre_name gre
+          in case gre_par gre of
+              NoParent -> AvailTC m (n:ns) fls -- Not sure this ever happens
+              ParentIs {} -> AvailTC m (insertChildIntoChildren m ns n) fls
+              FldParent _ mb_lbl ->  AvailTC m ns (mkFieldLabel n mb_lbl : fls)
 
 availFromGRE :: GlobalRdrElt -> AvailInfo
 availFromGRE (GRE { gre_name = me, gre_par = parent })
   = case parent of
-      PatternSynonym              -> patSynAvail me
       ParentIs p                  -> AvailTC p [me] []
       NoParent   | isTyConName me -> AvailTC me [me] []
                  | otherwise      -> avail   me
-      FldParent p mb_lbl -> AvailTC p [] [fld]
+      FldParent p mb_lbl -> AvailTC p [] [mkFieldLabel me mb_lbl]
         where
-         fld = case mb_lbl of
+
+mkFieldLabel :: Name -> Maybe FastString -> FieldLabel
+mkFieldLabel me mb_lbl =
+          case mb_lbl of
                  Nothing  -> FieldLabel { flLabel = occNameFS (nameOccName me)
                                         , flIsOverloaded = False
                                         , flSelector = me }
@@ -1092,7 +1137,12 @@ instance Eq ImpItemSpec where
   p1 == p2 = case p1 `compare` p2 of EQ -> True; _ -> False
 
 instance Ord ImpItemSpec where
-   compare is1 is2 = is_iloc is1 `compare` is_iloc is2
+   compare is1 is2 =
+    case (is1, is2) of
+      (ImpAll, ImpAll) -> EQ
+      (ImpAll, _)      -> GT
+      (_, ImpAll)      -> LT
+      (ImpSome _ l1, ImpSome _ l2) -> l1 `compare` l2
 
 
 bestImport :: [ImportSpec] -> ImportSpec

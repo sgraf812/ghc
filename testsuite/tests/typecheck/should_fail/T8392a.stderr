@@ -1,9 +1,4 @@
 
-T8392a.hs:6:8: error:
-    • Couldn't match type ‘Int’ with ‘Bool’
-      Inaccessible code in
-        the type signature for:
-          foo :: Int ~ Bool => a -> a
-    • In the ambiguity check for ‘foo’
-      In the type signature:
-        foo :: (Int ~ Bool) => a -> a
+T8392a.hs:11:1: warning: [-Woverlapping-patterns (in -Wdefault)]
+    Pattern match is redundant
+    In an equation for ‘foo’: foo x = ...

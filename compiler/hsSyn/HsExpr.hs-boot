@@ -10,6 +10,7 @@ module HsExpr where
 import SrcLoc     ( Located )
 import Outputable ( SDoc, Outputable )
 import {-# SOURCE #-} HsPat  ( LPat )
+import BasicTypes ( SpliceExplicitFlag(..))
 import PlaceHolder ( DataId, OutputableBndrId )
 import Data.Data hiding ( Fixity )
 
@@ -44,8 +45,12 @@ pprExpr :: (OutputableBndrId id) => HsExpr id -> SDoc
 
 pprSplice :: (OutputableBndrId id) => HsSplice id -> SDoc
 
+pprSpliceDecl ::  (OutputableBndrId id)
+          => HsSplice id -> SpliceExplicitFlag -> SDoc
+
 pprPatBind :: (OutputableBndrId bndr,
-               OutputableBndrId id, Outputable body)
+               OutputableBndrId id,
+               Outputable body)
            => LPat bndr -> GRHSs id body -> SDoc
 
 pprFunBind :: (OutputableBndrId idR, Outputable body)

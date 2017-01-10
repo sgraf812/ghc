@@ -4,10 +4,112 @@
 
 {-# LANGUAGE CPP #-}
 
-module Language.Haskell.TH.Lib where
+module Language.Haskell.TH.Lib (
     -- All of the exports from this module should
     -- be "public" functions.  The main module TH
     -- re-exports them all.
+
+    -- * Library functions
+    -- ** Abbreviations
+        InfoQ, ExpQ, TExpQ, DecQ, DecsQ, ConQ, TypeQ, TyLitQ, CxtQ, PredQ,
+        DerivClauseQ, MatchQ, ClauseQ, BodyQ, GuardQ, StmtQ, RangeQ,
+        SourceStrictnessQ, SourceUnpackednessQ, BangQ, BangTypeQ, VarBangTypeQ,
+        StrictTypeQ, VarStrictTypeQ, FieldExpQ, PatQ, FieldPatQ, RuleBndrQ,
+        TySynEqnQ, PatSynDirQ, PatSynArgsQ,
+
+    -- ** Constructors lifted to 'Q'
+    -- *** Literals
+        intPrimL, wordPrimL, floatPrimL, doublePrimL, integerL, rationalL,
+        charL, stringL, stringPrimL, charPrimL,
+    -- *** Patterns
+        litP, varP, tupP, unboxedTupP, unboxedSumP, conP, uInfixP, parensP,
+        infixP, tildeP, bangP, asP, wildP, recP,
+        listP, sigP, viewP,
+        fieldPat,
+
+    -- *** Pattern Guards
+        normalB, guardedB, normalG, normalGE, patG, patGE, match, clause,
+
+    -- *** Expressions
+        dyn, varE, unboundVarE, conE, litE, appE, appTypeE, uInfixE, parensE,
+        staticE, infixE, infixApp, sectionL, sectionR,
+        lamE, lam1E, lamCaseE, tupE, unboxedTupE, unboxedSumE, condE, multiIfE,
+        letE, caseE, appsE, listE, sigE, recConE, recUpdE, stringE, fieldExp,
+    -- **** Ranges
+    fromE, fromThenE, fromToE, fromThenToE,
+
+    -- ***** Ranges with more indirection
+    arithSeqE,
+    fromR, fromThenR, fromToR, fromThenToR,
+    -- **** Statements
+    doE, compE,
+    bindS, letS, noBindS, parS,
+
+    -- *** Types
+        forallT, varT, conT, appT, arrowT, infixT, uInfixT, parensT, equalityT,
+        listT, tupleT, unboxedTupleT, unboxedSumT, sigT, litT, wildCardT,
+        promotedT, promotedTupleT, promotedNilT, promotedConsT,
+    -- **** Type literals
+    numTyLit, strTyLit,
+    -- **** Strictness
+    noSourceUnpackedness, sourceNoUnpack, sourceUnpack,
+    noSourceStrictness, sourceLazy, sourceStrict,
+    isStrict, notStrict, unpacked,
+    bang, bangType, varBangType, strictType, varStrictType,
+    -- **** Class Contexts
+    cxt, classP, equalP,
+    -- **** Constructors
+    normalC, recC, infixC, forallC, gadtC, recGadtC,
+
+    -- *** Kinds
+    varK, conK, tupleK, arrowK, listK, appK, starK, constraintK,
+
+    -- *** Type variable binders
+    plainTV, kindedTV,
+
+    -- *** Roles
+    nominalR, representationalR, phantomR, inferR,
+
+    -- *** Top Level Declarations
+    -- **** Data
+    valD, funD, tySynD, dataD, newtypeD,
+    derivClause, DerivClause(..), DerivStrategy(..),
+    -- **** Class
+    classD, instanceD, instanceWithOverlapD, Overlap(..),
+    sigD, standaloneDerivD, standaloneDerivWithStrategyD, defaultSigD,
+
+    -- **** Role annotations
+    roleAnnotD,
+    -- **** Type Family / Data Family
+    dataFamilyD, openTypeFamilyD, closedTypeFamilyD, dataInstD,
+    familyNoKindD, familyKindD, closedTypeFamilyNoKindD, closedTypeFamilyKindD,
+    newtypeInstD, tySynInstD,
+    typeFam, dataFam, tySynEqn, injectivityAnn, noSig, kindSig, tyVarSig,
+
+    -- **** Fixity
+    infixLD, infixRD, infixND,
+
+    -- **** Foreign Function Interface (FFI)
+    cCall, stdCall, cApi, prim, javaScript,
+    unsafe, safe, interruptible, forImpD,
+
+    -- **** Functional dependencies
+    funDep,
+
+    -- **** Pragmas
+    ruleVar, typedRuleVar,
+    valueAnnotation, typeAnnotation, moduleAnnotation,
+    pragInlD, pragSpecD, pragSpecInlD, pragSpecInstD, pragRuleD, pragAnnD,
+    pragLineD,
+
+    -- **** Pattern Synonyms
+    patSynD, patSynSigD, unidir, implBidir, explBidir, prefixPatSyn,
+    infixPatSyn, recordPatSyn,
+
+    -- ** Reify
+    thisModule
+
+   ) where
 
 import Language.Haskell.TH.Syntax hiding (Role, InjectivityAnn)
 import qualified Language.Haskell.TH.Syntax as TH
@@ -30,6 +132,7 @@ type TypeQ               = Q Type
 type TyLitQ              = Q TyLit
 type CxtQ                = Q Cxt
 type PredQ               = Q Pred
+type DerivClauseQ        = Q DerivClause
 type MatchQ              = Q Match
 type ClauseQ             = Q Clause
 type BodyQ               = Q Body
@@ -80,12 +183,19 @@ rationalL   = RationalL
 
 litP :: Lit -> PatQ
 litP l = return (LitP l)
+
 varP :: Name -> PatQ
 varP v = return (VarP v)
+
 tupP :: [PatQ] -> PatQ
 tupP ps = do { ps1 <- sequence ps; return (TupP ps1)}
+
 unboxedTupP :: [PatQ] -> PatQ
 unboxedTupP ps = do { ps1 <- sequence ps; return (UnboxedTupP ps1)}
+
+unboxedSumP :: PatQ -> SumAlt -> SumArity -> PatQ
+unboxedSumP p alt arity = do { p1 <- p; return (UnboxedSumP p1 alt arity) }
+
 conP :: Name -> [PatQ] -> PatQ
 conP n ps = do ps' <- sequence ps
                return (ConP n ps')
@@ -225,6 +335,9 @@ litE c = return (LitE c)
 appE :: ExpQ -> ExpQ -> ExpQ
 appE x y = do { a <- x; b <- y; return (AppE a b)}
 
+appTypeE :: ExpQ -> TypeQ -> ExpQ
+appTypeE x t = do { a <- x; s <- t; return (AppTypeE a s) }
+
 parensE :: ExpQ -> ExpQ
 parensE x = do { x' <- x; return (ParensE x') }
 
@@ -265,6 +378,9 @@ tupE es = do { es1 <- sequence es; return (TupE es1)}
 
 unboxedTupE :: [ExpQ] -> ExpQ
 unboxedTupE es = do { es1 <- sequence es; return (UnboxedTupE es1)}
+
+unboxedSumE :: ExpQ -> SumAlt -> SumArity -> ExpQ
+unboxedSumE e alt arity = do { e1 <- e; return (UnboxedSumE e1 alt arity) }
 
 condE :: ExpQ -> ExpQ -> ExpQ -> ExpQ
 condE x y z =  do { a <- x; b <- y; c <- z; return (CondE a b c)}
@@ -347,20 +463,22 @@ funD nm cs =
 tySynD :: Name -> [TyVarBndr] -> TypeQ -> DecQ
 tySynD tc tvs rhs = do { rhs1 <- rhs; return (TySynD tc tvs rhs1) }
 
-dataD :: CxtQ -> Name -> [TyVarBndr] -> Maybe Kind -> [ConQ] -> CxtQ -> DecQ
+dataD :: CxtQ -> Name -> [TyVarBndr] -> Maybe Kind -> [ConQ] -> [DerivClauseQ]
+      -> DecQ
 dataD ctxt tc tvs ksig cons derivs =
   do
     ctxt1 <- ctxt
     cons1 <- sequence cons
-    derivs1 <- derivs
+    derivs1 <- sequence derivs
     return (DataD ctxt1 tc tvs ksig cons1 derivs1)
 
-newtypeD :: CxtQ -> Name -> [TyVarBndr] -> Maybe Kind -> ConQ -> CxtQ -> DecQ
+newtypeD :: CxtQ -> Name -> [TyVarBndr] -> Maybe Kind -> ConQ -> [DerivClauseQ]
+         -> DecQ
 newtypeD ctxt tc tvs ksig con derivs =
   do
     ctxt1 <- ctxt
     con1 <- con
-    derivs1 <- derivs
+    derivs1 <- sequence derivs
     return (NewtypeD ctxt1 tc tvs ksig con1 derivs1)
 
 classD :: CxtQ -> Name -> [TyVarBndr] -> [FunDep] -> [DecQ] -> DecQ
@@ -439,22 +557,24 @@ pragAnnD target expr
 pragLineD :: Int -> String -> DecQ
 pragLineD line file = return $ PragmaD $ LineP line file
 
-dataInstD :: CxtQ -> Name -> [TypeQ] -> Maybe Kind -> [ConQ] -> CxtQ -> DecQ
+dataInstD :: CxtQ -> Name -> [TypeQ] -> Maybe Kind -> [ConQ] -> [DerivClauseQ]
+          -> DecQ
 dataInstD ctxt tc tys ksig cons derivs =
   do
     ctxt1 <- ctxt
     tys1  <- sequence tys
     cons1 <- sequence cons
-    derivs1 <- derivs
+    derivs1 <- sequence derivs
     return (DataInstD ctxt1 tc tys1 ksig cons1 derivs1)
 
-newtypeInstD :: CxtQ -> Name -> [TypeQ] -> Maybe Kind -> ConQ -> CxtQ -> DecQ
+newtypeInstD :: CxtQ -> Name -> [TypeQ] -> Maybe Kind -> ConQ -> [DerivClauseQ]
+             -> DecQ
 newtypeInstD ctxt tc tys ksig con derivs =
   do
     ctxt1 <- ctxt
     tys1  <- sequence tys
     con1  <- con
-    derivs1 <- derivs
+    derivs1 <- sequence derivs
     return (NewtypeInstD ctxt1 tc tys1 ksig con1 derivs1)
 
 tySynInstD :: Name -> TySynEqnQ -> DecQ
@@ -521,11 +641,14 @@ roleAnnotD :: Name -> [Role] -> DecQ
 roleAnnotD name roles = return $ RoleAnnotD name roles
 
 standaloneDerivD :: CxtQ -> TypeQ -> DecQ
-standaloneDerivD ctxtq tyq =
+standaloneDerivD = standaloneDerivWithStrategyD Nothing
+
+standaloneDerivWithStrategyD :: Maybe DerivStrategy -> CxtQ -> TypeQ -> DecQ
+standaloneDerivWithStrategyD ds ctxtq tyq =
   do
     ctxt <- ctxtq
     ty   <- tyq
-    return $ StandaloneDerivD ctxt ty
+    return $ StandaloneDerivD ds ctxt ty
 
 defaultSigD :: Name -> TypeQ -> DecQ
 defaultSigD n tyq =
@@ -556,6 +679,10 @@ tySynEqn lhs rhs =
 
 cxt :: [PredQ] -> CxtQ
 cxt = sequence
+
+derivClause :: Maybe DerivStrategy -> [PredQ] -> DerivClauseQ
+derivClause ds p = do p' <- cxt p
+                      return $ DerivClause ds p'
 
 normalC :: Name -> [BangTypeQ] -> ConQ
 normalC con strtys = liftM (NormalC con) $ sequence strtys
@@ -626,6 +753,9 @@ tupleT i = return (TupleT i)
 
 unboxedTupleT :: Int -> TypeQ
 unboxedTupleT i = return (UnboxedTupleT i)
+
+unboxedSumT :: SumArity -> TypeQ
+unboxedSumT arity = return (UnboxedSumT arity)
 
 sigT :: TypeQ -> Kind -> TypeQ
 sigT t k

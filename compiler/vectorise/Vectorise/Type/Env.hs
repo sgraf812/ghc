@@ -330,7 +330,7 @@ vectTypeEnv tycons vectTypeDecls vectClassDecls
         }
 
     -- Add a mapping from the original to vectorised type constructor to the vectorisation map.
-    -- Unless the type constructor is abstract, also mappings from the orignal's data constructors
+    -- Unless the type constructor is abstract, also mappings from the original's data constructors
     -- to the vectorised type's data constructors.
     --
     -- We have three cases: (1) original and vectorised type constructor are the same, (2) the
@@ -360,7 +360,7 @@ vectTypeEnv tycons vectTypeDecls vectClassDecls
         origName  = tyConName origTyCon
         vectName  = tyConName vectTyCon
 
-        mkSyn canonName ty = mkSynonymTyCon canonName [] (typeKind ty) [] ty
+        mkSyn canonName ty = buildSynTyCon canonName [] (typeKind ty) [] ty
 
         defDataCons
           | isAbstract = return ()

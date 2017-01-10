@@ -81,11 +81,13 @@ test('lazy-bs-alloc',
 
 test('T876',
      [stats_num_field('bytes allocated',
-          [(platform('x86_64-unknown-mingw32'), 71904, 5),
+          [(platform('x86_64-unknown-mingw32'), 66928, 5),
               # 2015-04-03: 71904 (amd64/Windows, unknown cause)
-           (wordsize(64), 63216 , 5),
+              # 2016-11-27: 66928 (amd64/Windows, unknown cause)
+           (wordsize(64), 58128, 5),
               # 2013-02-14: 1263712 (x86_64/Linux)
               # 2014-02-10:   63216 (x86_64/Linux), call arity analysis
+              # 2016-11-11:   58128 (x86_64/Linux), it's not clear
 
            (wordsize(32), 53156, 5) ]),
               # some date:  663712  (Windows, 64-bit machine)
@@ -116,8 +118,9 @@ test('T3736',
      ['$MAKE -s --no-print-directory T3736'])
 test('T3738',
      [extra_clean(['T3738a.hi', 'T3738a.o']),
-      stats_num_field('peak_megabytes_allocated', (1, 0)),
-                                 # expected value: 1 (amd64/Linux)
+      stats_num_field('peak_megabytes_allocated', (2, 0)),
+                    # expected value: 1 (amd64/Linux)
+                    # 2016-08-31:     2 (allocation area size bumped to 1MB)
       stats_num_field('bytes allocated',
                       [(wordsize(32), 45648, 5),
                     # expected value: 50520 (x86/Linux)
@@ -132,8 +135,9 @@ test('T3738',
      ['-O'])
 
 test('MethSharing',
-     [stats_num_field('peak_megabytes_allocated', (1, 0)),
-                                 # expected value: 1 (amd64/Linux)
+     [stats_num_field('peak_megabytes_allocated', (2, 0)),
+                    # expected value: 1 (amd64/Linux)
+                    # 2016-08-31:     2 (allocation area size bumped to 1MB)
       stats_num_field('bytes allocated',
                       [(wordsize(32), 360940756, 5),
                     # expected value: 2685858140 (x86/OS X)
@@ -187,12 +191,17 @@ test('T5205',
      [stats_num_field('bytes allocated',
                       [(wordsize(32), 47088, 5),
                     # expected value: 47088 (x86/Darwin)
-                       (wordsize(64), 56208, 7)]),
+
+                       (platform('x86_64-unknown-mingw32'), 52264, 5),
+                    # 2016-12-14: 52264 (Separate out Windows results)
+
+                       (wordsize(64), 56208, 5)]),
                     # expected value: 51320 (amd64/Linux)
                     # 2014-07-17:     52600 (amd64/Linux) general round of updates
                     # 2015-04-03: Widen 5->7% (amd64/Windows was doing better)
                     # 2015-08-15: 50648 (Windows too good. avg of Windows&Linux)
                     # 2015-10-30: 56208 (D757: Emit Typeable at definition site)
+                    # 2016-12-14: Narrow 7->5% (Separate out Windows results)
       only_ways(['normal', 'optasm'])
       ],
      compile_and_run,
@@ -433,6 +442,13 @@ test('T9339',
                       , (wordsize(64),    80050760, 5) ]),
                       # w/o fusing last: 320005080
                       # 2014-07-22:       80050760
+      only_ways(['normal'])],
+     compile_and_run,
+     ['-O2'])
+
+test('T12996',
+     [stats_num_field('bytes allocated',
+                      [ (wordsize(64),    76776, 5) ]),
       only_ways(['normal'])],
      compile_and_run,
      ['-O2'])

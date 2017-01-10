@@ -37,6 +37,10 @@ module Var (
         Var, CoVar, Id, NcId, DictId, DFunId, EvVar, EqVar, EvId, IpId,
         TyVar, TypeVar, KindVar, TKVar, TyCoVar,
 
+        -- * In and Out variants
+        InVar,  InCoVar,  InId,  InTyVar,
+        OutVar, OutCoVar, OutId, OutTyVar,
+
         -- ** Taking 'Var's apart
         varName, varUnique, varType,
 
@@ -51,7 +55,7 @@ module Var (
         setIdExported, setIdNotExported,
 
         -- ** Predicates
-        isId, isTKVar, isTyVar, isTcTyVar,
+        isId, isTyVar, isTcTyVar,
         isLocalVar, isLocalId, isCoVar, isNonCoVarId, isTyCoVar,
         isGlobalId, isExportedId,
         mustHaveLocalBinding,
@@ -149,6 +153,21 @@ type EqVar  = EvId      -- Boxed equality evidence
 -- | Type or Coercion Variable
 type TyCoVar = Id       -- Type, *or* coercion variable
                         --   predicate: isTyCoVar
+
+
+{- Many passes apply a substitution, and it's very handy to have type
+   synonyms to remind us whether or not the subsitution has been applied -}
+
+type InVar      = Var
+type InTyVar    = TyVar
+type InCoVar    = CoVar
+type InId       = Id
+type OutVar     = Var
+type OutTyVar   = TyVar
+type OutCoVar   = CoVar
+type OutId      = Id
+
+
 
 {- Note [Evidence: EvIds and CoVars]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -316,6 +335,9 @@ instance Data Var where
   gunfold _ _  = error "gunfold"
   dataTypeOf _ = mkNoRepType "Var"
 
+instance HasOccName Var where
+  occName = nameOccName . varName
+
 varUnique :: Var -> Unique
 varUnique var = mkUniqueGrimily (realUnique var)
 
@@ -452,6 +474,7 @@ mkTcTyVar name kind details
         }
 
 tcTyVarDetails :: TyVar -> TcTyVarDetails
+-- See Note [TcTyVars in the typechecker] in TcType
 tcTyVarDetails (TcTyVar { tc_tv_details = details }) = details
 tcTyVarDetails (TyVar {})                            = vanillaSkolemTv
 tcTyVarDetails var = pprPanic "tcTyVarDetails" (ppr var <+> dcolon <+> pprKind (tyVarKind var))
@@ -563,15 +586,12 @@ setIdNotExported id = ASSERT( isLocalId id )
 ************************************************************************
 -}
 
-isTyVar :: Var -> Bool
-isTyVar = isTKVar     -- Historical
+isTyVar :: Var -> Bool        -- True of both TyVar and TcTyVar
+isTyVar (TyVar {})   = True
+isTyVar (TcTyVar {}) = True
+isTyVar _            = False
 
-isTKVar :: Var -> Bool  -- True of both type and kind variables
-isTKVar (TyVar {})   = True
-isTKVar (TcTyVar {}) = True
-isTKVar _            = False
-
-isTcTyVar :: Var -> Bool
+isTcTyVar :: Var -> Bool      -- True of TcTyVar only
 isTcTyVar (TcTyVar {}) = True
 isTcTyVar _            = False
 

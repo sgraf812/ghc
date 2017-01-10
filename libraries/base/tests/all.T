@@ -190,9 +190,7 @@ test('T9681', normal, compile_fail, [''])
 #   make an educated guess how long it needs to be guaranteed to reach the C
 #   call."
 test('T8089',
-     [exit_code(99), run_timeout_multiplier(0.01),
-      when(opsys('mingw32'),
-           expect_broken_for(7325, ['normal', 'hpc', 'optasm', 'profasm']))],
+     [exit_code(99), run_timeout_multiplier(0.01)],
      compile_and_run, [''])
 test('T9826',normal, compile_and_run,[''])
 test('T9848',
@@ -205,3 +203,4 @@ test('T9848',
 test('T10149', normal, compile_and_run, [''])
 test('T11334a', normal, compile_and_run, [''])
 test('T11555', normal, compile_and_run, [''])
+test('T12852', when(opsys('mingw32'), skip), compile_and_run, [''])

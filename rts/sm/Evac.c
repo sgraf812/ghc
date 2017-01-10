@@ -26,6 +26,7 @@
 #include "Trace.h"
 #include "LdvProfile.h"
 #include "CNF.h"
+#include "Scav.h"
 
 #if defined(PROF_SPIN) && defined(THREADED_RTS) && defined(PARALLEL_GC)
 StgWord64 whitehole_spin = 0;
@@ -45,7 +46,7 @@ StgWord64 whitehole_spin = 0;
  */
 #define MAX_THUNK_SELECTOR_DEPTH 16
 
-static void eval_thunk_selector (StgClosure **q, StgSelector * p, rtsBool);
+static void eval_thunk_selector (StgClosure **q, StgSelector * p, bool);
 STATIC_INLINE void evacuate_large(StgPtr p);
 
 /* -----------------------------------------------------------------------------
@@ -67,7 +68,7 @@ alloc_for_copy (uint32_t size, uint32_t gen_no)
         if (gct->eager_promotion) {
             gen_no = gct->evac_gen_no;
         } else {
-            gct->failed_to_evac = rtsTrue;
+            gct->failed_to_evac = true;
         }
     }
 
@@ -182,7 +183,7 @@ copy_tag_nolock(StgClosure **p, const StgInfoTable *info,
  * pointer of an object, but reserve some padding after it.  This is
  * used to optimise evacuation of TSOs.
  */
-static rtsBool
+static bool
 copyPart(StgClosure **p, StgClosure *src, uint32_t size_to_reserve,
          uint32_t size_to_copy, uint32_t gen_no)
 {
@@ -202,7 +203,7 @@ spin:
     if (IS_FORWARDING_PTR(info)) {
         src->header.info = (const StgInfoTable *)info;
         evacuate(p); // does the failed_to_evac stuff
-        return rtsFalse;
+        return false;
     }
 #else
     info = (W_)src->header.info;
@@ -229,7 +230,7 @@ spin:
         LDV_FILL_SLOP(to + size_to_copy, (int)(size_to_reserve - size_to_copy));
 #endif
 
-    return rtsTrue;
+    return true;
 }
 
 
@@ -271,7 +272,7 @@ evacuate_large(StgPtr p)
      * the desired destination (see comments in evacuate()).
      */
     if (gen_no < gct->evac_gen_no) {
-        gct->failed_to_evac = rtsTrue;
+        gct->failed_to_evac = true;
         TICK_GC_FAILED_PROMOTION();
     }
     RELEASE_SPIN_LOCK(&gen->sync);
@@ -296,7 +297,7 @@ evacuate_large(StgPtr p)
       if (gct->eager_promotion) {
           new_gen_no = gct->evac_gen_no;
       } else {
-          gct->failed_to_evac = rtsTrue;
+          gct->failed_to_evac = true;
       }
   }
 
@@ -360,9 +361,9 @@ evacuate_static_object (StgClosure **link_field, StgClosure *q)
 /* ----------------------------------------------------------------------------
    Evacuate an object inside a CompactNFData
 
-   Don't actually evacuate the object. Instead, evacuate the structure
-   (which is a large object, so it is just relinked onto the new list
-   of large objects of the generation).
+   These are treated in a similar way to large objects.  We remove the block
+   from the compact_objects list of the generation it is on, and link it onto
+   the live_compact_objects list of the destination generation.
 
    It is assumed that objects in the struct live in the same generation
    as the struct itself all the time.
@@ -375,6 +376,9 @@ evacuate_compact (StgPtr p)
     generation *gen, *new_gen;
     uint32_t gen_no, new_gen_no;
 
+    // We need to find the Compact# corresponding to this pointer, because it
+    // will give us the first block in the compact chain, which is the one we
+    // that gets linked onto the compact_objects list.
     str = objectGetCompact((StgClosure*)p);
     ASSERT(get_itbl((StgClosure*)str)->type == COMPACT_NFDATA);
 
@@ -388,7 +392,7 @@ evacuate_compact (StgPtr p)
          * the desired destination (see comments in evacuate()).
          */
         if (gen_no < gct->evac_gen_no) {
-            gct->failed_to_evac = rtsTrue;
+            gct->failed_to_evac = true;
             TICK_GC_FAILED_PROMOTION();
         }
         return;
@@ -404,14 +408,14 @@ evacuate_compact (StgPtr p)
          * the desired destination (see comments in evacuate()).
          */
         if (gen_no < gct->evac_gen_no) {
-            gct->failed_to_evac = rtsTrue;
+            gct->failed_to_evac = true;
             TICK_GC_FAILED_PROMOTION();
         }
         RELEASE_SPIN_LOCK(&gen->sync);
         return;
     }
 
-    // remove from large_object list
+    // remove from compact_objects list
     if (bd->u.back) {
         bd->u.back->link = bd->link;
     } else { // first object in the list
@@ -429,7 +433,7 @@ evacuate_compact (StgPtr p)
         if (gct->eager_promotion) {
             new_gen_no = gct->evac_gen_no;
         } else {
-            gct->failed_to_evac = rtsTrue;
+            gct->failed_to_evac = true;
         }
     }
 
@@ -444,10 +448,16 @@ evacuate_compact (StgPtr p)
     bd->flags |= BF_EVACUATED;
     initBdescr(bd, new_gen, new_gen->to);
 
-    if (new_gen != gen) { ACQUIRE_SPIN_LOCK(&new_gen->sync); }
-    dbl_link_onto(bd, &new_gen->live_compact_objects);
-    new_gen->n_live_compact_blocks += str->totalW / BLOCK_SIZE_W;
-    if (new_gen != gen) { RELEASE_SPIN_LOCK(&new_gen->sync); }
+    if (str->hash) {
+        gen_workspace *ws = &gct->gens[new_gen_no];
+        bd->link = ws->todo_large_objects;
+        ws->todo_large_objects = bd;
+    } else {
+        if (new_gen != gen) { ACQUIRE_SPIN_LOCK(&new_gen->sync); }
+        dbl_link_onto(bd, &new_gen->live_compact_objects);
+        new_gen->n_live_compact_blocks += str->totalW / BLOCK_SIZE_W;
+        if (new_gen != gen) { RELEASE_SPIN_LOCK(&new_gen->sync); }
+    }
 
     RELEASE_SPIN_LOCK(&gen->sync);
 
@@ -548,11 +558,16 @@ loop:
           evacuate_static_object(IND_STATIC_LINK((StgClosure *)q), q);
           return;
 
-      case CONSTR_STATIC:
+      case CONSTR:
+      case CONSTR_1_0:
+      case CONSTR_2_0:
+      case CONSTR_1_1:
           evacuate_static_object(STATIC_LINK(info,(StgClosure *)q), q);
           return;
 
-      case CONSTR_NOCAF_STATIC:
+      case CONSTR_0_1:
+      case CONSTR_0_2:
+      case CONSTR_NOCAF:
           /* no need to put these on the static linked list, they don't need
            * to be scavenged.
            */
@@ -577,7 +592,7 @@ loop:
           // whether it is already in the target generation.  (this is
           // the write barrier).
           if (bd->gen_no < gct->evac_gen_no) {
-              gct->failed_to_evac = rtsTrue;
+              gct->failed_to_evac = true;
               TICK_GC_FAILED_PROMOTION();
           }
           return;
@@ -634,7 +649,7 @@ loop:
       *p = TAG_CLOSURE(tag,e);
       if (gen_no < gct->evac_gen_no) {  // optimisation
           if (Bdescr((P_)e)->gen_no < gct->evac_gen_no) {
-              gct->failed_to_evac = rtsTrue;
+              gct->failed_to_evac = true;
               TICK_GC_FAILED_PROMOTION();
           }
       }
@@ -716,6 +731,7 @@ loop:
 
   case FUN:
   case CONSTR:
+  case CONSTR_NOCAF:
       copy_tag_nolock(p,info,q,sizeW_fromITBL(INFO_PTR_TO_STRUCT(info)),gen_no,tag);
       return;
 
@@ -761,7 +777,7 @@ loop:
       return;
 
   case THUNK_SELECTOR:
-      eval_thunk_selector(p, (StgSelector *)q, rtsTrue);
+      eval_thunk_selector(p, (StgSelector *)q, true);
       return;
 
   case IND:
@@ -829,7 +845,7 @@ loop:
       {
           StgStack *new_stack;
           StgPtr r, s;
-          rtsBool mine;
+          bool mine;
 
           mine = copyPart(p,(StgClosure *)stack, stack_sizeW(stack),
                           sizeofW(StgStack), gen_no);
@@ -849,12 +865,6 @@ loop:
       copy(p,info,q,sizeofW(StgTRecChunk),gen_no);
       return;
 
-  case COMPACT_NFDATA:
-      // CompactNFData objects are at least one block plus the header
-      // so they are larger than the large_object_threshold (80% of
-      // block size) and never copied by value
-      barf("evacuate: compact nfdata is not large");
-      return;
   default:
     barf("evacuate: strange closure type %d", (int)(INFO_PTR_TO_STRUCT(info)->type));
   }
@@ -926,7 +936,7 @@ unchain_thunk_selectors(StgSelector *p, StgClosure *val)
 }
 
 static void
-eval_thunk_selector (StgClosure **q, StgSelector * p, rtsBool evac)
+eval_thunk_selector (StgClosure **q, StgSelector * p, bool evac)
                  // NB. for legacy reasons, p & q are swapped around :(
 {
     uint32_t field;
@@ -957,7 +967,7 @@ selector_chain:
             *q = (StgClosure *)p;
             // shortcut, behave as for:  if (evac) evacuate(q);
             if (evac && bd->gen_no < gct->evac_gen_no) {
-                gct->failed_to_evac = rtsTrue;
+                gct->failed_to_evac = true;
                 TICK_GC_FAILED_PROMOTION();
             }
             return;
@@ -969,7 +979,7 @@ selector_chain:
         // bit is very tricky to get right.  If you make changes
         // around here, test by compiling stage 3 with +RTS -c -RTS.
         if (bd->flags & BF_MARKED) {
-            // must call evacuate() to mark this closure if evac==rtsTrue
+            // must call evacuate() to mark this closure if evac==true
             *q = (StgClosure *)p;
             if (evac) evacuate(q);
             unchain_thunk_selectors(prev_thunk_selector, (StgClosure *)p);
@@ -1048,8 +1058,7 @@ selector_loop:
       case CONSTR_2_0:
       case CONSTR_1_1:
       case CONSTR_0_2:
-      case CONSTR_STATIC:
-      case CONSTR_NOCAF_STATIC:
+      case CONSTR_NOCAF:
           {
               // check that the size is in range
               ASSERT(field <  (StgWord32)(info->layout.payload.ptrs +
@@ -1159,10 +1168,10 @@ selector_loop:
           }
 
           gct->thunk_selector_depth++;
-          // rtsFalse says "don't evacuate the result".  It will,
+          // false says "don't evacuate the result".  It will,
           // however, update any THUNK_SELECTORs that are evaluated
           // along the way.
-          eval_thunk_selector(&val, (StgSelector*)selectee, rtsFalse);
+          eval_thunk_selector(&val, (StgSelector*)selectee, false);
           gct->thunk_selector_depth--;
 
           // did we actually manage to evaluate it?

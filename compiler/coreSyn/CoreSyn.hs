@@ -13,6 +13,12 @@ module CoreSyn (
         CoreProgram, CoreExpr, CoreAlt, CoreBind, CoreArg, CoreBndr,
         TaggedExpr, TaggedAlt, TaggedBind, TaggedArg, TaggedBndr(..), deTagExpr,
 
+        -- * In/Out type synonyms
+        InId, InBind, InExpr, InAlt, InArg, InType, InKind,
+               InBndr, InVar, InCoercion, InTyVar, InCoVar,
+        OutId, OutBind, OutExpr, OutAlt, OutArg, OutType, OutKind,
+               OutBndr, OutVar, OutCoercion, OutTyVar, OutCoVar,
+
         -- ** 'Expr' construction
         mkLets, mkLams,
         mkApps, mkTyApps, mkCoApps, mkVarApps,
@@ -40,6 +46,7 @@ module CoreSyn (
         isValArg, isTypeArg, isTyCoArg, valArgCount, valBndrCount,
         isRuntimeArg, isRuntimeVar,
 
+        -- * Tick-related functions
         tickishCounts, tickishScoped, tickishScopesLike, tickishFloatable,
         tickishCanSplit, mkNoCount, mkNoScope,
         tickishIsCode, tickishPlace,
@@ -49,7 +56,7 @@ module CoreSyn (
         Unfolding(..),  UnfoldingGuidance(..), UnfoldingSource(..),
 
         -- ** Constructing 'Unfolding's
-        noUnfolding, evaldUnfolding, mkOtherCon,
+        noUnfolding, bootUnfolding, evaldUnfolding, mkOtherCon,
         unSaturatedOk, needSaturated, boringCxtOk, boringCxtNotOk,
 
         -- ** Predicates and deconstruction on 'Unfolding'
@@ -57,8 +64,9 @@ module CoreSyn (
         maybeUnfoldingTemplate, otherCons,
         isValueUnfolding, isEvaldUnfolding, isCheapUnfolding,
         isExpandableUnfolding, isConLikeUnfolding, isCompulsoryUnfolding,
-        isStableUnfolding, hasStableCoreUnfolding_maybe,
+        isStableUnfolding,
         isClosedUnfolding, hasSomeUnfolding,
+        isBootUnfolding,
         canUnfold, neverUnfoldGuidance, isStableSource,
 
         -- * Annotated expression data types
@@ -168,10 +176,11 @@ These data types are the heart of the compiler
 -- *  Primitive literals
 --
 -- *  Applications: note that the argument may be a 'Type'.
---
---    See "CoreSyn#let_app_invariant" for another invariant
+--    See Note [CoreSyn let/app invariant]
+--    See Note [Levity polymorphism invariants]
 --
 -- *  Lambda abstraction
+--    See Note [Levity polymorphism invariants]
 --
 -- *  Recursive and non recursive @let@s. Operationally
 --    this corresponds to allocating a thunk for the things
@@ -185,6 +194,7 @@ These data types are the heart of the compiler
 --    the meaning of /lifted/ vs. /unlifted/).
 --
 --    See Note [CoreSyn let/app invariant]
+--    See Note [Levity polymorphism invariants]
 --
 --    #type_let#
 --    We allow a /non-recursive/ let to bind a type variable, thus:
@@ -198,7 +208,7 @@ These data types are the heart of the compiler
 --    in a Let expression, rather than at top level.  We may want to revist
 --    this choice.
 --
--- *  Case split. Operationally this corresponds to evaluating
+-- *  Case expression. Operationally this corresponds to evaluating
 --    the scrutinee (expression examined) to weak head normal form
 --    and then examining at most one level of resulting constructor (i.e. you
 --    cannot do nested pattern matching directly with this).
@@ -380,6 +390,19 @@ Note [CoreSyn case invariants]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 See #case_invariants#
 
+Note [Levity polymorphism invariants]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The levity-polymorphism invariants are these:
+
+* The type of a term-binder must not be levity-polymorphic
+* The type of the argument of an App must not be levity-polymorphic.
+
+A type (t::TYPE r) is "levity polymorphic" if 'r' has any free variables.
+
+For example
+  \(r::RuntimeRep). \(a::TYPE r). \(x::a). e
+is illegal because x's type has kind (TYPE r), which has 'r' free.
+
 Note [CoreSyn let goal]
 ~~~~~~~~~~~~~~~~~~~~~~~
 * The simplifier tries to ensure that if the RHS of a let is a constructor
@@ -444,6 +467,36 @@ this exhaustive list can be empty!
 
 
 ************************************************************************
+*                                                                      *
+            In/Out type synonyms
+*                                                                      *
+********************************************************************* -}
+
+{- Many passes apply a substitution, and it's very handy to have type
+   synonyms to remind us whether or not the subsitution has been applied -}
+
+-- Pre-cloning or substitution
+type InBndr     = CoreBndr
+type InType     = Type
+type InKind     = Kind
+type InBind     = CoreBind
+type InExpr     = CoreExpr
+type InAlt      = CoreAlt
+type InArg      = CoreArg
+type InCoercion = Coercion
+
+-- Post-cloning or substitution
+type OutBndr     = CoreBndr
+type OutType     = Type
+type OutKind     = Kind
+type OutCoercion = Coercion
+type OutBind     = CoreBind
+type OutExpr     = CoreExpr
+type OutAlt      = CoreAlt
+type OutArg      = CoreArg
+
+
+{- *********************************************************************
 *                                                                      *
               Ticks
 *                                                                      *
@@ -975,7 +1028,12 @@ The @Unfolding@ type is declared here to avoid numerous loops
 -- identifier would have if we substituted its definition in for the identifier.
 -- This type should be treated as abstract everywhere except in "CoreUnfold"
 data Unfolding
-  = NoUnfolding        -- ^ We have no information about the unfolding
+  = NoUnfolding        -- ^ We have no information about the unfolding.
+
+  | BootUnfolding      -- ^ We have no information about the unfolding, because
+                       -- this 'Id' came from an @hi-boot@ file.
+                       -- See Note [Inlining and hs-boot files] in ToIface
+                       -- for what this is used for.
 
   | OtherCon [AltCon]  -- ^ It ain't one of these constructors.
                        -- @OtherCon xs@ also indicates that something has been evaluated
@@ -1070,7 +1128,7 @@ data UnfoldingGuidance
                 -- Used (a) for small *and* cheap unfoldings
                 --      (b) for INLINE functions
                 -- See Note [INLINE for small functions] in CoreUnfold
-      ug_arity    :: Arity,             -- Number of value arguments expected
+      ug_arity    :: Arity,     -- Number of value arguments expected
 
       ug_unsat_ok  :: Bool,     -- True <=> ok to inline even if unsaturated
       ug_boring_ok :: Bool      -- True <=> ok to inline even if the context is boring
@@ -1160,6 +1218,11 @@ evaldUnfolding :: Unfolding
 noUnfolding    = NoUnfolding
 evaldUnfolding = OtherCon []
 
+-- | There is no known 'Unfolding', because this came from an
+-- hi-boot file.
+bootUnfolding :: Unfolding
+bootUnfolding = BootUnfolding
+
 mkOtherCon :: [AltCon] -> Unfolding
 mkOtherCon = OtherCon
 
@@ -1230,18 +1293,6 @@ expandUnfolding_maybe :: Unfolding -> Maybe CoreExpr
 expandUnfolding_maybe (CoreUnfolding { uf_expandable = True, uf_tmpl = rhs }) = Just rhs
 expandUnfolding_maybe _                                                       = Nothing
 
-hasStableCoreUnfolding_maybe :: Unfolding -> Maybe Bool
--- Just True  <=> has stable inlining, very keen to inline (eg. INLINE pragma)
--- Just False <=> has stable inlining, open to inlining it (eg. INLINEABLE pragma)
--- Nothing    <=> not stable, or cannot inline it anyway
-hasStableCoreUnfolding_maybe (CoreUnfolding { uf_src = src, uf_guidance = guide })
-   | isStableSource src
-   = case guide of
-       UnfWhen {}       -> Just True
-       UnfIfGoodArgs {} -> Just False
-       UnfNever         -> Nothing
-hasStableCoreUnfolding_maybe _ = Nothing
-
 isCompulsoryUnfolding :: Unfolding -> Bool
 isCompulsoryUnfolding (CoreUnfolding { uf_src = InlineCompulsory }) = True
 isCompulsoryUnfolding _                                             = False
@@ -1260,8 +1311,13 @@ isClosedUnfolding _                  = True
 
 -- | Only returns False if there is no unfolding information available at all
 hasSomeUnfolding :: Unfolding -> Bool
-hasSomeUnfolding NoUnfolding = False
-hasSomeUnfolding _           = True
+hasSomeUnfolding NoUnfolding   = False
+hasSomeUnfolding BootUnfolding = False
+hasSomeUnfolding _             = True
+
+isBootUnfolding :: Unfolding -> Bool
+isBootUnfolding BootUnfolding = True
+isBootUnfolding _             = False
 
 neverUnfoldGuidance :: UnfoldingGuidance -> Bool
 neverUnfoldGuidance UnfNever = True

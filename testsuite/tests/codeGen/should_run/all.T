@@ -119,6 +119,8 @@ test('T8256', normal, compile_and_run, ['-dcore-lint -O1'])
 test('T6084',normal, compile_and_run, ['-O2'])
 test('CgStaticPointers', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
      compile_and_run, [''])
+test('CgStaticPointersNoFullLazyness', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
+     compile_and_run, ['-O -fno-full-laziness'])
 test('StaticArraySize', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
      compile_and_run, ['-O2'])
 test('StaticByteArraySize', normal, compile_and_run, ['-O2'])
@@ -143,3 +145,10 @@ test('T10870', when(wordsize(32), skip), compile_and_run, [''])
 test('PopCnt', omit_ways(['ghci']), multi_compile_and_run,
                  ['PopCnt', [('PopCnt_cmm.cmm', '')], ''])
 test('T12059', normal, compile_and_run, [''])
+test('T12433', normal, compile_and_run, [''])
+test('T12757', normal, compile_and_run, [''])
+test('T12855', normal, compile_and_run, [''])
+test('T9577', [ unless(arch('x86_64') or arch('i386'),skip),
+                when(opsys('darwin'), expect_broken(12937)),
+                when(opsys('mingw32'), expect_broken(12965)),
+                only_ways(['normal']) ], compile_and_run, [''])

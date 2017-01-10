@@ -40,33 +40,39 @@ Flag stage3
     Default: False
     Manual: True
 
+Flag terminfo
+    Description: Build GHC with terminfo support on non-Windows platforms.
+    Default: True
+    Manual: True
+
 Library
     Default-Language: Haskell2010
     Exposed: False
 
     Build-Depends: base       >= 4   && < 5,
                    deepseq    >= 1.4 && < 1.5,
-                   directory  >= 1   && < 1.3,
+                   directory  >= 1   && < 1.4,
                    process    >= 1   && < 1.5,
                    bytestring >= 0.9 && < 0.11,
                    binary     == 0.8.*,
-                   time       >= 1.4 && < 1.7,
+                   time       >= 1.4 && < 1.8,
                    containers >= 0.5 && < 0.6,
                    array      >= 0.1 && < 0.6,
                    filepath   >= 1   && < 1.5,
-                   template-haskell == 2.11.*,
+                   template-haskell == 2.12.*,
                    hpc        == 0.6.*,
                    transformers == 0.5.*,
                    ghc-boot   == @ProjectVersionMunged@,
+                   ghc-boot-th == @ProjectVersionMunged@,
+                   ghci == @ProjectVersionMunged@,
                    hoopl      >= 3.10.2 && < 3.11
 
     if os(windows)
         Build-Depends: Win32  == 2.3.*
     else
+        if flag(terminfo)
+            Build-Depends: terminfo == 0.4.*
         Build-Depends: unix   == 2.7.*
-
-    if flag(ghci)
-        Build-Depends: ghci == @ProjectVersionMunged@
 
     GHC-Options: -Wall -fno-warn-name-shadowing
 
@@ -132,6 +138,7 @@ Library
         cbits/genSym.c
 
     hs-source-dirs:
+        backpack
         basicTypes
         cmm
         codeGen
@@ -158,6 +165,10 @@ Library
         vectorise
 
     Exposed-Modules:
+        DriverBkp
+        BkpSyn
+        NameShape
+        RnModIface
         Avail
         BasicTypes
         ConLike
@@ -192,6 +203,7 @@ Library
         NameSet
         OccName
         RdrName
+        NameCache
         SrcLoc
         UniqSupply
         Unique
@@ -302,10 +314,12 @@ Library
         HsTypes
         HsUtils
         BinIface
+        BinFingerprint
         BuildTyCl
         IfaceEnv
         IfaceSyn
         IfaceType
+        ToIface
         LoadIface
         MkIface
         TcIface
@@ -341,6 +355,7 @@ Library
         StaticFlags
         StaticPtrTable
         SysTools
+        SysTools.Terminal
         Elf
         TidyPgm
         Ctype
@@ -351,6 +366,7 @@ Library
         RdrHsSyn
         ApiAnnotation
         ForeignCall
+        KnownUniques
         PrelInfo
         PrelNames
         PrelRules
@@ -384,6 +400,7 @@ Library
         Simplify
         SimplStg
         StgStats
+        StgCse
         UnariseStg
         RepType
         Rules
@@ -405,10 +422,13 @@ Library
         TcClassDcl
         TcDefaults
         TcDeriv
+        TcDerivInfer
+        TcDerivUtils
         TcEnv
         TcExpr
         TcForeign
         TcGenDeriv
+        TcGenFunctor
         TcGenGenerics
         TcHsSyn
         TcHsType
@@ -419,6 +439,8 @@ Library
         TcPat
         TcPatSyn
         TcRnDriver
+        TcBackpack
+        TcRnExports
         TcRnMonad
         TcRnTypes
         TcRules
@@ -468,6 +490,7 @@ Library
         GraphPpr
         IOEnv
         ListSetOps
+        ListT
         Maybes
         MonadUtils
         OrdList
@@ -582,16 +605,6 @@ Library
             Dwarf
             Dwarf.Types
             Dwarf.Constants
-
-    if !flag(stage1)
-        -- ghc:Serialized moved to ghc-boot:GHC.Serialized.  So for
-        -- compatibility with GHC 7.10 and earlier, we reexport it
-        -- under the old name.
-        reexported-modules:
-            ghc-boot:GHC.Serialized as Serialized
-
-    if flag(ghci)
-        Exposed-Modules:
             Convert
             ByteCodeTypes
             ByteCodeAsm
@@ -604,3 +617,10 @@ Library
             RtClosureInspect
             DebuggerUtils
             GHCi
+
+    if !flag(stage1)
+        -- ghc:Serialized moved to ghc-boot:GHC.Serialized.  So for
+        -- compatibility with GHC 7.10 and earlier, we reexport it
+        -- under the old name.
+        reexported-modules:
+            ghc-boot:GHC.Serialized as Serialized

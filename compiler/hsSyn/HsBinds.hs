@@ -504,6 +504,10 @@ isEmptyLocalBinds (HsValBinds ds) = isEmptyValBinds ds
 isEmptyLocalBinds (HsIPBinds ds)  = isEmptyIPBinds ds
 isEmptyLocalBinds EmptyLocalBinds = True
 
+eqEmptyLocalBinds :: HsLocalBindsLR a b -> Bool
+eqEmptyLocalBinds EmptyLocalBinds = True
+eqEmptyLocalBinds _               = False
+
 isEmptyValBinds :: HsValBindsLR a b -> Bool
 isEmptyValBinds (ValBindsIn ds sigs)  = isEmptyLHsBinds ds && null sigs
 isEmptyValBinds (ValBindsOut ds sigs) = null ds && null sigs
@@ -593,6 +597,7 @@ ppr_monobind (AbsBinds { abs_tvs = tyvars, abs_ev_vars = dictvars
       pprLHsBinds val_binds
 ppr_monobind (AbsBindsSig { abs_tvs         = tyvars
                           , abs_ev_vars     = dictvars
+                          , abs_sig_export  = poly_id
                           , abs_sig_ev_bind = ev_bind
                           , abs_sig_bind    = bind })
   = sdocWithDynFlags $ \ dflags ->
@@ -600,7 +605,8 @@ ppr_monobind (AbsBindsSig { abs_tvs         = tyvars
       hang (text "AbsBindsSig" <+> brackets (interpp'SP tyvars)
                                <+> brackets (interpp'SP dictvars))
          2 $ braces $ vcat
-      [ text "Bind:"     <+> ppr bind
+      [ text "Exported type:" <+> pprBndr LetBind poly_id
+      , text "Bind:"     <+> ppr bind
       , text "Evidence:" <+> ppr ev_bind ]
     else
       ppr bind
@@ -683,11 +689,11 @@ data IPBind id
   = IPBind (Either (Located HsIPName) id) (LHsExpr id)
 deriving instance (DataId name) => Data (IPBind name)
 
-instance (OutputableBndrId id) => Outputable (HsIPBinds id) where
+instance (OutputableBndrId id ) => Outputable (HsIPBinds id) where
   ppr (IPBinds bs ds) = pprDeeperList vcat (map ppr bs)
                         $$ ifPprDebug (ppr ds)
 
-instance (OutputableBndrId id) => Outputable (IPBind id) where
+instance (OutputableBndrId id ) => Outputable (IPBind id) where
   ppr (IPBind lr rhs) = name <+> equals <+> pprExpr (unLoc rhs)
     where name = case lr of
                    Left (L _ ip) -> pprBndr LetBind ip
@@ -745,7 +751,7 @@ data Sig name
 
       -- | A signature for a class method
       --   False: ordinary class-method signature
-      --   True:  default class method signature
+      --   True:  generic-default class method signature
       -- e.g.   class C a where
       --          op :: a -> a                   -- Ordinary
       --          default op :: Eq a => a -> a   -- Generic default
@@ -944,28 +950,34 @@ signatures. Since some of the signatures contain a list of names, testing for
 equality is not enough -- we have to check if they overlap.
 -}
 
-instance (OutputableBndrId name) => Outputable (Sig name) where
+instance (OutputableBndrId name ) => Outputable (Sig name) where
     ppr sig = ppr_sig sig
 
-ppr_sig :: (OutputableBndrId name) => Sig name -> SDoc
+ppr_sig :: (OutputableBndrId name ) => Sig name -> SDoc
 ppr_sig (TypeSig vars ty)    = pprVarSig (map unLoc vars) (ppr ty)
 ppr_sig (ClassOpSig is_deflt vars ty)
   | is_deflt                 = text "default" <+> pprVarSig (map unLoc vars) (ppr ty)
   | otherwise                = pprVarSig (map unLoc vars) (ppr ty)
 ppr_sig (IdSig id)           = pprVarSig [id] (ppr (varType id))
 ppr_sig (FixSig fix_sig)     = ppr fix_sig
-ppr_sig (SpecSig var ty inl)
-  = pragBrackets (pprSpec (unLoc var) (interpp'SP ty) inl)
-ppr_sig (InlineSig var inl)       = pragBrackets (ppr inl <+> pprPrefixOcc (unLoc var))
-ppr_sig (SpecInstSig _ ty)
-  = pragBrackets (text "SPECIALIZE instance" <+> ppr ty)
-ppr_sig (MinimalSig _ bf)         = pragBrackets (pprMinimalSig bf)
+ppr_sig (SpecSig var ty inl@(InlinePragma { inl_inline = spec }))
+  = pragSrcBrackets (inl_src inl) pragmaSrc (pprSpec (unLoc var)
+                                             (interpp'SP ty) inl)
+    where
+      pragmaSrc = case spec of
+        EmptyInlineSpec -> "{-# SPECIALISE"
+        _               -> "{-# SPECIALISE_INLINE"
+ppr_sig (InlineSig var inl)
+  = pragSrcBrackets (inl_src inl) "{-# INLINE"  (pprInline inl
+                                   <+> pprPrefixOcc (unLoc var))
+ppr_sig (SpecInstSig src ty)
+  = pragSrcBrackets src "{-# SPECIALISE" (text "instance" <+> ppr ty)
+ppr_sig (MinimalSig src bf)
+  = pragSrcBrackets src "{-# MINIMAL" (pprMinimalSig bf)
 ppr_sig (PatSynSig names sig_ty)
   = text "pattern" <+> pprVarSig (map unLoc names) (ppr sig_ty)
-ppr_sig (SCCFunSig _ fn Nothing)
-  = pragBrackets (text "SCC" <+> ppr fn)
-ppr_sig (SCCFunSig _ fn (Just str))
-  = pragBrackets (text "SCC" <+> ppr fn <+> ppr (sl_st str))
+ppr_sig (SCCFunSig src fn mlabel)
+  = pragSrcBrackets src "{-# SCC" (ppr fn <+> maybe empty ppr mlabel )
 
 instance OutputableBndr name => Outputable (FixitySig name) where
   ppr (FixitySig names fixity) = sep [ppr fixity, pprops]
@@ -973,7 +985,13 @@ instance OutputableBndr name => Outputable (FixitySig name) where
       pprops = hsep $ punctuate comma (map (pprInfixOcc . unLoc) names)
 
 pragBrackets :: SDoc -> SDoc
-pragBrackets doc = text "{-#" <+> doc <+> ptext (sLit "#-}")
+pragBrackets doc = text "{-#" <+> doc <+> text "#-}"
+
+-- | Using SourceText in case the pragma was spelled differently or used mixed
+-- case
+pragSrcBrackets :: SourceText -> String -> SDoc -> SDoc
+pragSrcBrackets (SourceText src) _   doc = text src <+> doc <+> text "#-}"
+pragSrcBrackets NoSourceText     alt doc = text alt <+> doc <+> text "#-}"
 
 pprVarSig :: (OutputableBndr id) => [id] -> SDoc -> SDoc
 pprVarSig vars pp_ty = sep [pprvars <+> dcolon, nest 2 pp_ty]
@@ -981,20 +999,22 @@ pprVarSig vars pp_ty = sep [pprvars <+> dcolon, nest 2 pp_ty]
     pprvars = hsep $ punctuate comma (map pprPrefixOcc vars)
 
 pprSpec :: (OutputableBndr id) => id -> SDoc -> InlinePragma -> SDoc
-pprSpec var pp_ty inl = text "SPECIALIZE" <+> pp_inl <+> pprVarSig [var] pp_ty
+pprSpec var pp_ty inl = pp_inl <+> pprVarSig [var] pp_ty
   where
     pp_inl | isDefaultInlinePragma inl = empty
-           | otherwise = ppr inl
+           | otherwise = pprInline inl
 
 pprTcSpecPrags :: TcSpecPrags -> SDoc
 pprTcSpecPrags IsDefaultMethod = text "<default method>"
 pprTcSpecPrags (SpecPrags ps)  = vcat (map (ppr . unLoc) ps)
 
 instance Outputable TcSpecPrag where
-  ppr (SpecPrag var _ inl) = pprSpec var (text "<type>") inl
+  ppr (SpecPrag var _ inl)
+    = text "SPECIALIZE" <+> pprSpec var (text "<type>") inl
 
-pprMinimalSig :: OutputableBndr name => LBooleanFormula (Located name) -> SDoc
-pprMinimalSig (L _ bf) = text "MINIMAL" <+> ppr (fmap unLoc bf)
+pprMinimalSig :: (OutputableBndr name)
+              => LBooleanFormula (Located name) -> SDoc
+pprMinimalSig (L _ bf) = ppr (fmap unLoc bf)
 
 {-
 ************************************************************************

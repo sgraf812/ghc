@@ -29,6 +29,7 @@ import StgCmmProf ( costCentreFrom, curCCS )
 import DynFlags
 import Platform
 import BasicTypes
+import BlockId
 import MkGraph
 import StgSyn
 import Cmm
@@ -308,8 +309,11 @@ emitPrimOp _ [res] GetCurrentCCSOp [_dummy_arg]
 emitPrimOp dflags [res] ReadMutVarOp [mutv]
    = emitAssign (CmmLocal res) (cmmLoadIndexW dflags mutv (fixedHdrSizeW dflags) (gcWord dflags))
 
-emitPrimOp dflags [] WriteMutVarOp [mutv,var]
-   = do emitStore (cmmOffsetW dflags mutv (fixedHdrSizeW dflags)) var
+emitPrimOp dflags res@[] WriteMutVarOp [mutv,var]
+   = do -- Without this write barrier, other CPUs may see this pointer before
+        -- the writes for the closure it points to have occurred.
+        emitPrimCall res MO_WriteBarrier []
+        emitStore (cmmOffsetW dflags mutv (fixedHdrSizeW dflags)) var
         emitCCall
                 [{-no results-}]
                 (CmmLit (CmmLabel mkDirty_MUT_VAR_Label))
@@ -1347,6 +1351,10 @@ doWritePtrArrayOp :: CmmExpr
 doWritePtrArrayOp addr idx val
   = do dflags <- getDynFlags
        let ty = cmmExprType dflags val
+       -- This write barrier is to ensure that the heap writes to the object
+       -- referred to by val have happened before we write val into the array.
+       -- See #12469 for details.
+       emitPrimCall [] MO_WriteBarrier []
        mkBasicIndexedWrite (arrPtrsHdrSize dflags) Nothing addr ty idx val
        emit (setInfo addr (CmmLit (CmmLabel mkMAP_DIRTY_infoLabel)))
   -- the write barrier.  We must write a byte into the mark table:
@@ -1777,7 +1785,7 @@ doNewArrayOp res_r rep info payload n init = do
 
     -- Initialise all elements of the the array
     p <- assignTemp $ cmmOffsetB dflags (CmmReg arr) (hdrSize dflags rep)
-    for <- newLabelC
+    for <- newBlockId
     emitLabel for
     let loopBody =
             [ mkStore (CmmReg (CmmLocal p)) init

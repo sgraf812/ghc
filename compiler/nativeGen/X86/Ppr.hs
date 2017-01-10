@@ -32,7 +32,7 @@ import Reg
 import PprBase
 
 
-import BlockId
+import Hoopl
 import BasicTypes       (Alignment)
 import DynFlags
 import Cmm              hiding (topInfoTable)
@@ -44,10 +44,30 @@ import Outputable
 
 import Data.Word
 
+import Data.Char
+
 import Data.Bits
 
 -- -----------------------------------------------------------------------------
 -- Printing this stuff out
+--
+--
+-- Note [Subsections Via Symbols]
+--
+-- If we are using the .subsections_via_symbols directive
+-- (available on recent versions of Darwin),
+-- we have to make sure that there is some kind of reference
+-- from the entry code to a label on the _top_ of of the info table,
+-- so that the linker will not think it is unreferenced and dead-strip
+-- it. That's why the label is called a DeadStripPreventer (_dsp).
+--
+-- The LLVM code gen already creates `iTableSuf` symbols, where
+-- the X86 would generate the DeadStripPreventer (_dsp) symbol.
+-- Therefore all that is left for llvm code gen, is to ensure
+-- that all the `iTableSuf` symbols are marked as used.
+-- As of this writing the documentation regarding the
+-- .subsections_via_symbols and -dead_strip can be found at
+-- <https://developer.apple.com/library/mac/documentation/DeveloperTools/Reference/Assembler/040-Assembler_Directives/asm_directives.html#//apple_ref/doc/uid/TP30000823-TPXREF101>
 
 pprNatCmmDecl :: NatCmmDecl (Alignment, CmmStatics) Instr -> SDoc
 pprNatCmmDecl (CmmData section dats) =
@@ -96,7 +116,7 @@ pprSizeDecl lbl
    then text "\t.size" <+> ppr lbl <> ptext (sLit ", .-") <> ppr lbl
    else empty
 
-pprBasicBlock :: BlockEnv CmmStatics -> NatBasicBlock Instr -> SDoc
+pprBasicBlock :: LabelMap CmmStatics -> NatBasicBlock Instr -> SDoc
 pprBasicBlock info_env (BasicBlock blockid instrs)
   = sdocWithDynFlags $ \dflags ->
     maybe_infotable $$
@@ -122,10 +142,10 @@ pprBasicBlock info_env (BasicBlock blockid instrs)
 pprDatas :: (Alignment, CmmStatics) -> SDoc
 pprDatas (align, (Statics lbl dats))
  = vcat (pprAlign align : pprLabel lbl : map pprData dats)
- -- TODO: could remove if align == 1
 
 pprData :: CmmStatic -> SDoc
-pprData (CmmString str) = pprASCII str
+pprData (CmmString str)
+ = ptext (sLit "\t.asciz ") <> doubleQuotes (pprASCII str)
 
 pprData (CmmUninitialised bytes)
  = sdocWithPlatform $ \platform ->
@@ -154,10 +174,20 @@ pprLabel lbl = pprGloblDecl lbl
 
 pprASCII :: [Word8] -> SDoc
 pprASCII str
-  = vcat (map do1 str) $$ do1 0
+  = hcat (map (do1 . fromIntegral) str)
     where
-       do1 :: Word8 -> SDoc
-       do1 w = text "\t.byte\t" <> int (fromIntegral w)
+       do1 :: Int -> SDoc
+       do1 w | '\t' <- chr w = ptext (sLit "\\t")
+       do1 w | '\n' <- chr w = ptext (sLit "\\n")
+       do1 w | '"'  <- chr w = ptext (sLit "\\\"")
+       do1 w | '\\' <- chr w = ptext (sLit "\\\\")
+       do1 w | isPrint (chr w) = char (chr w)
+       do1 w | otherwise = char '\\' <> octal w
+
+       octal :: Int -> SDoc
+       octal w = int ((w `div` 64) `mod` 8)
+                  <> int ((w `div` 8) `mod` 8)
+                  <> int (w `mod` 8)
 
 pprAlign :: Int -> SDoc
 pprAlign bytes
@@ -400,10 +430,12 @@ pprAlignForSection seg =
        | target32Bit platform ->
           case seg of
            ReadOnlyData16    -> int 4
+           CString           -> int 1
            _                 -> int 2
        | otherwise ->
           case seg of
            ReadOnlyData16    -> int 4
+           CString           -> int 1
            _                 -> int 3
       -- Other: alignments are given as bytes.
       _
@@ -411,10 +443,12 @@ pprAlignForSection seg =
           case seg of
            Text              -> text "4,0x90"
            ReadOnlyData16    -> int 16
+           CString           -> int 1
            _                 -> int 4
        | otherwise ->
           case seg of
            ReadOnlyData16    -> int 16
+           CString           -> int 1
            _                 -> int 8
 
 pprDataItem :: CmmLit -> SDoc
@@ -454,8 +488,27 @@ pprDataItem' dflags lit
                   _ -> panic "X86.Ppr.ppr_item: no match for II64"
                | otherwise ->
                   [text "\t.quad\t" <> pprImm imm]
-
-              _ -> [text "\t.quad\t" <> pprImm imm]
+              _
+               | target32Bit platform ->
+                  [text "\t.quad\t" <> pprImm imm]
+               | otherwise ->
+                  -- x86_64: binutils can't handle the R_X86_64_PC64
+                  -- relocation type, which means we can't do
+                  -- pc-relative 64-bit addresses. Fortunately we're
+                  -- assuming the small memory model, in which all such
+                  -- offsets will fit into 32 bits, so we have to stick
+                  -- to 32-bit offset fields and modify the RTS
+                  -- appropriately
+                  --
+                  -- See Note [x86-64-relative] in includes/rts/storage/InfoTables.h
+                  --
+                  case lit of
+                  -- A relative relocation:
+                  CmmLabelDiffOff _ _ _ ->
+                      [text "\t.long\t" <> pprImm imm,
+                       text "\t.long\t0"]
+                  _ ->
+                      [text "\t.quad\t" <> pprImm imm]
 
         ppr_item _ _
                 = panic "X86.Ppr.ppr_item: no match"

@@ -118,6 +118,7 @@ import Instruction
 import Reg
 
 import BlockId
+import Hoopl
 import Cmm hiding (RegSet)
 
 import Digraph
@@ -234,7 +235,7 @@ linearRegAlloc'
 linearRegAlloc' dflags initFreeRegs entry_ids block_live sccs
  = do   us      <- getUniqueSupplyM
         let (_, stack, stats, blocks) =
-                runR dflags emptyBlockMap initFreeRegs emptyRegMap (emptyStackMap dflags) us
+                runR dflags mapEmpty initFreeRegs emptyRegMap (emptyStackMap dflags) us
                     $ linearRA_SCCs entry_ids block_live [] sccs
         return  (blocks, stats, getStackUse stack)
 

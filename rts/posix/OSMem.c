@@ -130,10 +130,10 @@ my_mmap (void *addr, W_ size, int operation)
     {
         if(addr)    // try to allocate at address
             err = vm_allocate(mach_task_self(),(vm_address_t*) &ret,
-                              size, FALSE);
+                              size, false);
         if(!addr || err)    // try to allocate anywhere
             err = vm_allocate(mach_task_self(),(vm_address_t*) &ret,
-                              size, TRUE);
+                              size, true);
     }
 
     if(err) {
@@ -145,7 +145,7 @@ my_mmap (void *addr, W_ size, int operation)
     }
 
     if(operation & MEM_COMMIT) {
-        vm_protect(mach_task_self(), (vm_address_t)ret, size, FALSE,
+        vm_protect(mach_task_self(), (vm_address_t)ret, size, false,
                    VM_PROT_READ|VM_PROT_WRITE);
     }
 
@@ -399,7 +399,7 @@ StgWord64 getPhysicalMemorySize (void)
     return physMemSize;
 }
 
-void setExecutable (void *p, W_ len, rtsBool exec)
+void setExecutable (void *p, W_ len, bool exec)
 {
     StgWord pageSize = getPageSize();
 
@@ -450,16 +450,18 @@ osTryReserveHeapMemory (W_ len, void *hint)
     return start;
 }
 
-void *osReserveHeapMemory(W_ *len)
+void *osReserveHeapMemory(void *startAddressPtr, W_ *len)
 {
     int attempt;
     void *at;
 
     /* We want to ensure the heap starts at least 8 GB inside the address space,
-       to make sure that any dynamically loaded code will be close enough to the
-       original code so that short relocations will work. This is in particular
-       important on Darwin/Mach-O, because object files not compiled as shared
-       libraries are position independent but cannot be loaded about 4GB.
+       since we want to reserve the address space below that address for code.
+       Specifically, we need to make sure that any dynamically loaded code will
+       be close enough to the original code so that short relocations will work.
+       This is in particular important on Darwin/Mach-O, because object files
+       not compiled as shared libraries are position independent but cannot be
+       loaded above 4GB.
 
        We do so with a hint to the mmap, and we verify the OS satisfied our
        hint. We loop, shifting our hint by 1 BLOCK_SIZE every time, in case
@@ -472,6 +474,19 @@ void *osReserveHeapMemory(W_ *len)
 
     */
 
+    W_ minimumAddress = (W_)8 * (1 << 30);
+    // We don't use minimumAddress (0x200000000) as default because we know
+    // it can clash with third-party libraries. See ticket #12573.
+    W_ startAddress = 0x4200000000;
+    if (startAddressPtr) {
+        startAddress = (W_)startAddressPtr;
+    }
+    if (startAddress < minimumAddress) {
+        errorBelch(
+            "Provided heap start address %p is lower than minimum address %p",
+            (void*)startAddress, (void*)minimumAddress);
+    }
+
     attempt = 0;
     while (1) {
         if (*len < MBLOCK_SIZE) {
@@ -479,7 +494,7 @@ void *osReserveHeapMemory(W_ *len)
             barf("osReserveHeapMemory: Failed to allocate heap storage");
         }
 
-        void *hint = (void*)((W_)8 * (1 << 30) + attempt * BLOCK_SIZE);
+        void *hint = (void*)(startAddress + attempt * BLOCK_SIZE);
         at = osTryReserveHeapMemory(*len, hint);
         if (at == NULL) {
             // This means that mmap failed which we take to mean that we asked
@@ -487,7 +502,7 @@ void *osReserveHeapMemory(W_ *len)
             // limits. In this case we reduce our allocation request by a factor
             // of two and try again.
             *len /= 2;
-        } else if ((W_)at >= ((W_)8 * (1 << 30))) {
+        } else if ((W_)at >= minimumAddress) {
             // Success! We were given a block of memory starting above the 8 GB
             // mark, which is what we were looking for.
             break;
@@ -498,6 +513,7 @@ void *osReserveHeapMemory(W_ *len)
                 sysErrorBelch("unable to release reserved heap");
             }
         }
+        attempt++;
     }
 
     return at;
@@ -525,11 +541,24 @@ void osDecommitMemory(void *at, W_ size)
 
 #ifdef MADV_FREE
     // Try MADV_FREE first, FreeBSD has both and MADV_DONTNEED
-    // just swaps memory out
+    // just swaps memory out. Linux >= 4.5 has both DONTNEED and FREE; either
+    // will work as they both allow the system to free anonymous pages.
+    // It is important that we try both methods as the kernel which we were
+    // built on may differ from the kernel we are now running on.
     r = madvise(at, size, MADV_FREE);
-#else
-    r = madvise(at, size, MADV_DONTNEED);
+    if(r < 0) {
+        if (errno == EINVAL) {
+            // Perhaps the system doesn't support MADV_FREE; fall-through and
+            // try MADV_DONTNEED.
+        } else {
+            sysErrorBelch("unable to decommit memory");
+        }
+    } else {
+        return;
+    }
 #endif
+
+    r = madvise(at, size, MADV_DONTNEED);
     if(r < 0)
         sysErrorBelch("unable to decommit memory");
 }
@@ -546,12 +575,12 @@ void osReleaseHeapMemory(void)
 
 #endif
 
-rtsBool osNumaAvailable(void)
+bool osNumaAvailable(void)
 {
 #if HAVE_LIBNUMA
     return (numa_available() != -1);
 #else
-    return rtsFalse;
+    return false;
 #endif
 }
 
@@ -564,13 +593,13 @@ uint32_t osNumaNodes(void)
 #endif
 }
 
-StgWord osNumaMask(void)
+uint64_t osNumaMask(void)
 {
 #if HAVE_LIBNUMA
     struct bitmask *mask;
     mask = numa_get_mems_allowed();
-    if (mask->size > sizeof(StgWord)*8) {
-        barf("Too many NUMA nodes");
+    if (osNumaNodes() > sizeof(StgWord)*8) {
+        barf("osNumaMask: too many NUMA nodes (%d)", osNumaNodes());
     }
     return mask->maskp[0];
 #else

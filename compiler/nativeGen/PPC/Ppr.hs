@@ -20,7 +20,7 @@ import RegClass
 import TargetReg
 
 import Cmm hiding (topInfoTable)
-import BlockId
+import Hoopl
 
 import CLabel
 
@@ -68,7 +68,7 @@ pprNatCmmDecl proc@(CmmProc top_info lbl _ (ListGraph blocks)) =
       -- elimination, it might be the target of a goto.
       (if platformHasSubsectionsViaSymbols platform
        then
-       -- See Note [Subsections Via Symbols]
+       -- See Note [Subsections Via Symbols] in X86/Ppr.hs
                 text "\t.long "
             <+> ppr info_lbl
             <+> char '-'
@@ -104,7 +104,7 @@ pprFunctionPrologue lab =  pprGloblDecl lab
                         $$ text "\t.localentry\t" <> ppr lab
                         <> text ",.-" <> ppr lab
 
-pprBasicBlock :: BlockEnv CmmStatics -> NatBasicBlock Instr -> SDoc
+pprBasicBlock :: LabelMap CmmStatics -> NatBasicBlock Instr -> SDoc
 pprBasicBlock info_env (BasicBlock blockid instrs)
   = maybe_infotable $$
     pprLabel (mkAsmTempLabel (getUnique blockid)) $$
@@ -348,6 +348,12 @@ pprAlignForSection seg =
        ReadOnlyData16
         | osDarwin       -> sLit ".align 4"
         | otherwise      -> sLit ".align 4"
+       -- TODO: This is copied from the ReadOnlyData case, but it can likely be
+       -- made more efficient.
+       CString
+        | osDarwin       -> sLit ".align 2"
+        | ppc64          -> sLit ".align 3"
+        | otherwise      -> sLit ".align 2"
        OtherSection _    -> panic "PprMach.pprSectionAlign: unknown section"
 
 pprDataItem :: CmmLit -> SDoc

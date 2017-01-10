@@ -28,12 +28,15 @@ module Id (
         -- * The main types
         Var, Id, isId,
 
+        -- * In and Out variants
+        InVar,  InId,
+        OutVar, OutId,
+
         -- ** Simple construction
         mkGlobalId, mkVanillaGlobal, mkVanillaGlobalWithInfo,
         mkLocalId, mkLocalCoVar, mkLocalIdOrCoVar,
         mkLocalIdOrCoVarWithInfo,
         mkLocalIdWithInfo, mkExportedLocalId, mkExportedVanillaId,
-        mkNonExportedLocalId,
         mkSysLocal, mkSysLocalM, mkSysLocalOrCoVar, mkSysLocalOrCoVarM,
         mkUserLocal, mkUserLocalOrCoVar,
         mkTemplateLocals, mkTemplateLocalsNum, mkTemplateLocal,
@@ -115,6 +118,8 @@ import BasicTypes
 
 -- Imported and re-exported
 import Var( Id, CoVar, DictId,
+            InId,  InVar,
+            OutId, OutVar,
             idInfo, idDetails, globaliseId, varType,
             isId, isLocalId, isGlobalId, isExportedId )
 import qualified Var
@@ -286,12 +291,6 @@ mkExportedLocalId :: IdDetails -> Name -> Type -> Id
 mkExportedLocalId details name ty = Var.mkExportedLocalVar details name ty vanillaIdInfo
         -- Note [Free type variables]
 
--- | Create a local 'Id' that is marked as not-exported.
--- These may be removed as dead code.
-mkNonExportedLocalId :: IdDetails -> Name -> Type -> Id
-mkNonExportedLocalId details name ty =
-  Var.mkLocalVar details name ty vanillaIdInfo
-
 mkExportedVanillaId :: Name -> Type -> Id
 mkExportedVanillaId name ty = Var.mkExportedLocalVar VanillaId name ty vanillaIdInfo
         -- Note [Free type variables]
@@ -338,7 +337,7 @@ mkWorkerId uniq unwrkr ty
 
 -- | Create a /template local/: a family of system local 'Id's in bijection with @Int@s, typically used in unfoldings
 mkTemplateLocal :: Int -> Type -> Id
-mkTemplateLocal i ty = mkSysLocalOrCoVar (fsLit "tpl") (mkBuiltinUnique i) ty
+mkTemplateLocal i ty = mkSysLocalOrCoVar (fsLit "v") (mkBuiltinUnique i) ty
 
 -- | Create a template local for a series of types
 mkTemplateLocals :: [Type] -> [Id]

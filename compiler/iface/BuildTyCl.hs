@@ -9,7 +9,6 @@ module BuildTyCl (
         buildDataCon, mkDataConUnivTyVarBinders,
         buildPatSyn,
         TcMethInfo, buildClass,
-        distinctAbstractTyConRhs, totallyAbstractTyConRhs,
         mkNewTyConRhs, mkDataTyConRhs,
         newImplicitBinder, newTyConRepName
     ) where
@@ -19,6 +18,7 @@ module BuildTyCl (
 import IfaceEnv
 import FamInstEnv( FamInstEnvs, mkNewTypeCoAxiom )
 import TysWiredIn( isCTupleTyConName )
+import TysPrim ( voidPrimTy )
 import DataCon
 import PatSyn
 import Var
@@ -38,10 +38,6 @@ import TcRnMonad
 import UniqSupply
 import Util
 import Outputable
-
-distinctAbstractTyConRhs, totallyAbstractTyConRhs :: AlgTyConRhs
-distinctAbstractTyConRhs = AbstractTyCon True
-totallyAbstractTyConRhs  = AbstractTyCon False
 
 mkDataTyConRhs :: [DataCon] -> AlgTyConRhs
 mkDataTyConRhs cons
@@ -252,7 +248,7 @@ buildPatSyn src_name declared_infix matcher@(matcher_id,_) builder
                  , pat_ty `eqType` substTy subst pat_ty1
                  , prov_theta `eqTypes` substTys subst prov_theta1
                  , req_theta `eqTypes` substTys subst req_theta1
-                 , arg_tys `eqTypes` substTys subst arg_tys1
+                 , compareArgTys arg_tys (substTys subst arg_tys1)
                  ])
             , (vcat [ ppr univ_tvs <+> twiddle <+> ppr univ_tvs1
                     , ppr ex_tvs <+> twiddle <+> ppr ex_tvs1
@@ -268,10 +264,18 @@ buildPatSyn src_name declared_infix matcher@(matcher_id,_) builder
     ((_:_:univ_tvs1), req_theta1, tau) = tcSplitSigmaTy $ idType matcher_id
     ([pat_ty1, cont_sigma, _], _)      = tcSplitFunTys tau
     (ex_tvs1, prov_theta1, cont_tau)   = tcSplitSigmaTy cont_sigma
-    (arg_tys1, _) = tcSplitFunTys cont_tau
+    (arg_tys1, _) = (tcSplitFunTys cont_tau)
     twiddle = char '~'
     subst = zipTvSubst (univ_tvs1 ++ ex_tvs1)
                        (mkTyVarTys (binderVars (univ_tvs ++ ex_tvs)))
+
+    -- For a nullary pattern synonym we add a single void argument to the
+    -- matcher to preserve laziness in the case of unlifted types.
+    -- See #12746
+    compareArgTys :: [Type] -> [Type] -> Bool
+    compareArgTys [] [x] = x `eqType` voidPrimTy
+    compareArgTys arg_tys matcher_arg_tys = arg_tys `eqTypes` matcher_arg_tys
+
 
 ------------------------------------------------------
 type TcMethInfo     -- A temporary intermediate, to communicate
@@ -386,7 +390,7 @@ buildClass tycon_name binders roles sc_theta
         ; traceIf (text "buildClass" <+> ppr tycon)
         ; return result }
   where
-    no_bang = HsSrcBang Nothing NoSrcUnpack NoSrcStrict
+    no_bang = HsSrcBang NoSourceText NoSrcUnpack NoSrcStrict
 
     mk_op_item :: Class -> TcMethInfo -> TcRnIf n m ClassOpItem
     mk_op_item rec_clas (op_name, _, dm_spec)
@@ -427,7 +431,7 @@ newImplicitBinder :: Name                       -- Base name
                   -> TcRnIf m n Name            -- Implicit name
 -- Called in BuildTyCl to allocate the implicit binders of type/class decls
 -- For source type/class decls, this is the first occurrence
--- For iface ones, the LoadIface has alrady allocated a suitable name in the cache
+-- For iface ones, the LoadIface has already allocated a suitable name in the cache
 newImplicitBinder base_name mk_sys_occ
   = newImplicitBinderLoc base_name mk_sys_occ (nameSrcSpan base_name)
 

@@ -1,6 +1,7 @@
 {-# LANGUAGE CPP, DeriveDataTypeable,
              DeriveGeneric, FlexibleInstances, DefaultSignatures,
-             RankNTypes, RoleAnnotations, ScopedTypeVariables #-}
+             RankNTypes, RoleAnnotations, ScopedTypeVariables,
+             Trustworthy #-}
 
 {-# OPTIONS_GHC -fno-warn-inline-rule-shadowing #-}
 
@@ -112,9 +113,8 @@ class Monad m => Quasi m where
 -----------------------------------------------------
 
 instance Quasi IO where
-  qNewName s = do { n <- readIORef counter
-                 ; writeIORef counter (n+1)
-                 ; return (mkNameU s n) }
+  qNewName s = do { n <- atomicModifyIORef' counter (\x -> (x + 1, x))
+                  ; pure (mkNameU s n) }
 
   qReport True  msg = hPutStrLn stderr ("Template Haskell error: " ++ msg)
   qReport False msg = hPutStrLn stderr ("Template Haskell error: " ++ msg)
@@ -465,11 +465,13 @@ addTopDecls ds = Q (qAddTopDecls ds)
 addModFinalizer :: Q () -> Q ()
 addModFinalizer act = Q (qAddModFinalizer (unQ act))
 
--- | Get state from the 'Q' monad.
+-- | Get state from the 'Q' monad. Note that the state is local to the
+-- Haskell module in which the Template Haskell expression is executed.
 getQ :: Typeable a => Q (Maybe a)
 getQ = Q qGetQ
 
--- | Replace the state in the 'Q' monad.
+-- | Replace the state in the 'Q' monad. Note that the state is local to the
+-- Haskell module in which the Template Haskell expression is executed.
 putQ :: Typeable a => a -> Q ()
 putQ x = Q (qPutQ x)
 
@@ -714,15 +716,12 @@ dataToQa mkCon mkLit appCon antiQ t =
                                           (NameG DataName
                                                 (mkPkgName "ghc-prim")
                                                 (mkModName "GHC.Tuple"))
-                      -- It is possible for a Data instance to be defined such
-                      -- that toConstr uses a Constr defined using a function,
-                      -- not a data constructor. In such a case, we must take
-                      -- care to build the Name using mkNameG_v (for values),
-                      -- not mkNameG_d (for data constructors).
-                      -- See Trac #10796.
+
+                      -- Tricky case: see Note [Data for non-algebraic types]
                       fun@(x:_)   | startsVarSym x || startsVarId x
                                   -> mkNameG_v tyconPkg tyconMod fun
                       con         -> mkNameG_d tyconPkg tyconMod con
+
                   where
                     tycon :: TyCon
                     tycon = (typeRepTyCon . typeOf) t
@@ -744,6 +743,34 @@ dataToQa mkCon mkLit appCon antiQ t =
           constr = toConstr t
 
       Just y -> y
+
+
+{- Note [Data for non-algebraic types]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Class Data was originally intended for algebraic data types.  But
+it is possible to use it for abstract types too.  For example, in
+package `text` we find
+
+  instance Data Text where
+    ...
+    toConstr _ = packConstr
+
+  packConstr :: Constr
+  packConstr = mkConstr textDataType "pack" [] Prefix
+
+Here `packConstr` isn't a real data constructor, it's an ordiary
+function.  Two complications
+
+* In such a case, we must take care to build the Name using
+  mkNameG_v (for values), not mkNameG_d (for data constructors).
+  See Trac #10796.
+
+* The pseudo-constructor is named only by its string, here "pack".
+  But 'dataToQa' needs the TyCon of its defining module, and has
+  to assume it's defined in the same module as the TyCon itself.
+  But nothing enforces that; Trac #12596 shows what goes wrong if
+  "pack" is defined in a different module than the data type "Text".
+  -}
 
 -- | 'dataToExpQ' converts a value to a 'Q Exp' representation of the
 -- same value, in the SYB style. It is generalized to take a function
@@ -1161,22 +1188,60 @@ unboxedTupleDataName :: Int -> Name
 -- | Unboxed tuple type constructor
 unboxedTupleTypeName :: Int -> Name
 
-unboxedTupleDataName 0 = error "unboxedTupleDataName 0"
-unboxedTupleDataName 1 = error "unboxedTupleDataName 1"
-unboxedTupleDataName n = mk_unboxed_tup_name (n-1) DataName
-
-unboxedTupleTypeName 0 = error "unboxedTupleTypeName 0"
-unboxedTupleTypeName 1 = error "unboxedTupleTypeName 1"
-unboxedTupleTypeName n = mk_unboxed_tup_name (n-1) TcClsName
+unboxedTupleDataName n = mk_unboxed_tup_name n DataName
+unboxedTupleTypeName n = mk_unboxed_tup_name n TcClsName
 
 mk_unboxed_tup_name :: Int -> NameSpace -> Name
-mk_unboxed_tup_name n_commas space
-  = Name occ (NameG space (mkPkgName "ghc-prim") tup_mod)
+mk_unboxed_tup_name n space
+  = Name (mkOccName tup_occ) (NameG space (mkPkgName "ghc-prim") tup_mod)
   where
-    occ = mkOccName ("(#" ++ replicate n_commas ',' ++ "#)")
-    tup_mod = mkModName "GHC.Tuple"
+    tup_occ | n == 1    = "Unit#" -- See Note [One-tuples] in TysWiredIn
+            | otherwise = "(#" ++ replicate n_commas ',' ++ "#)"
+    n_commas = n - 1
+    tup_mod  = mkModName "GHC.Tuple"
 
+-- Unboxed sum data and type constructors
+-- | Unboxed sum data constructor
+unboxedSumDataName :: SumAlt -> SumArity -> Name
+-- | Unboxed sum type constructor
+unboxedSumTypeName :: SumArity -> Name
 
+unboxedSumDataName alt arity
+  | alt > arity
+  = error $ prefix ++ "Index out of bounds." ++ debug_info
+
+  | alt <= 0
+  = error $ prefix ++ "Alt must be > 0." ++ debug_info
+
+  | arity < 2
+  = error $ prefix ++ "Arity must be >= 2." ++ debug_info
+
+  | otherwise
+  = Name (mkOccName sum_occ)
+         (NameG DataName (mkPkgName "ghc-prim") (mkModName "GHC.Prim"))
+
+  where
+    prefix     = "unboxedSumDataName: "
+    debug_info = " (alt: " ++ show alt ++ ", arity: " ++ show arity ++ ")"
+
+    -- Synced with the definition of mkSumDataConOcc in TysWiredIn
+    sum_occ = '(' : '#' : bars nbars_before ++ '_' : bars nbars_after ++ "#)"
+    bars i = replicate i '|'
+    nbars_before = alt - 1
+    nbars_after  = arity - alt
+
+unboxedSumTypeName arity
+  | arity < 2
+  = error $ "unboxedSumTypeName: Arity must be >= 2."
+         ++ " (arity: " ++ show arity ++ ")"
+
+  | otherwise
+  = Name (mkOccName sum_occ)
+         (NameG TcClsName (mkPkgName "ghc-prim") (mkModName "GHC.Prim"))
+
+  where
+    -- Synced with the definition of mkSumTyConOcc in TysWiredIn
+    sum_occ = '(' : '#' : replicate (arity - 1) '|' ++ "#)"
 
 -----------------------------------------------------
 --              Locations
@@ -1277,6 +1342,19 @@ data ModuleInfo =
 In 'ClassOpI' and 'DataConI', name of the parent class or type
 -}
 type ParentName = Name
+
+-- | In 'UnboxedSumE' and 'UnboxedSumP', the number associated with a
+-- particular data constructor. 'SumAlt's are one-indexed and should never
+-- exceed the value of its corresponding 'SumArity'. For example:
+--
+-- * @(\#_|\#)@ has 'SumAlt' 1 (out of a total 'SumArity' of 2)
+--
+-- * @(\#|_\#)@ has 'SumAlt' 2 (out of a total 'SumArity' of 2)
+type SumAlt = Int
+
+-- | In 'UnboxedSumE', 'UnboxedSumT', and 'UnboxedSumP', the total number of
+-- 'SumAlt's. For example, @(\#|\#)@ has a 'SumArity' of 2.
+type SumArity = Int
 
 -- | In 'PrimTyConI', arity of the type constructor
 type Arity = Int
@@ -1398,26 +1476,27 @@ data Lit = CharL Char
 
 -- | Pattern in Haskell given in @{}@
 data Pat
-  = LitP Lit                      -- ^ @{ 5 or \'c\' }@
-  | VarP Name                     -- ^ @{ x }@
-  | TupP [Pat]                    -- ^ @{ (p1,p2) }@
-  | UnboxedTupP [Pat]             -- ^ @{ (\# p1,p2 \#) }@
-  | ConP Name [Pat]               -- ^ @data T1 = C1 t1 t2; {C1 p1 p1} = e@
-  | InfixP Pat Name Pat           -- ^ @foo ({x :+ y}) = e@
-  | UInfixP Pat Name Pat          -- ^ @foo ({x :+ y}) = e@
-                                  --
-                                  -- See "Language.Haskell.TH.Syntax#infix"
-  | ParensP Pat                   -- ^ @{(p)}@
-                                  --
-                                  -- See "Language.Haskell.TH.Syntax#infix"
-  | TildeP Pat                    -- ^ @{ ~p }@
-  | BangP Pat                     -- ^ @{ !p }@
-  | AsP Name Pat                  -- ^ @{ x \@ p }@
-  | WildP                         -- ^ @{ _ }@
-  | RecP Name [FieldPat]          -- ^ @f (Pt { pointx = x }) = g x@
-  | ListP [ Pat ]                 -- ^ @{ [1,2,3] }@
-  | SigP Pat Type                 -- ^ @{ p :: t }@
-  | ViewP Exp Pat                 -- ^ @{ e -> p }@
+  = LitP Lit                        -- ^ @{ 5 or \'c\' }@
+  | VarP Name                       -- ^ @{ x }@
+  | TupP [Pat]                      -- ^ @{ (p1,p2) }@
+  | UnboxedTupP [Pat]               -- ^ @{ (\# p1,p2 \#) }@
+  | UnboxedSumP Pat SumAlt SumArity -- ^ @{ (\#|p|\#) }@
+  | ConP Name [Pat]                 -- ^ @data T1 = C1 t1 t2; {C1 p1 p1} = e@
+  | InfixP Pat Name Pat             -- ^ @foo ({x :+ y}) = e@
+  | UInfixP Pat Name Pat            -- ^ @foo ({x :+ y}) = e@
+                                    --
+                                    -- See "Language.Haskell.TH.Syntax#infix"
+  | ParensP Pat                     -- ^ @{(p)}@
+                                    --
+                                    -- See "Language.Haskell.TH.Syntax#infix"
+  | TildeP Pat                      -- ^ @{ ~p }@
+  | BangP Pat                       -- ^ @{ !p }@
+  | AsP Name Pat                    -- ^ @{ x \@ p }@
+  | WildP                           -- ^ @{ _ }@
+  | RecP Name [FieldPat]            -- ^ @f (Pt { pointx = x }) = g x@
+  | ListP [ Pat ]                   -- ^ @{ [1,2,3] }@
+  | SigP Pat Type                   -- ^ @{ p :: t }@
+  | ViewP Exp Pat                   -- ^ @{ e -> p }@
   deriving( Show, Eq, Ord, Data, Generic )
 
 type FieldPat = (Name,Pat)
@@ -1433,6 +1512,7 @@ data Exp
   | ConE Name                          -- ^ @data T1 = C1 t1 t2; p = {C1} e1 e2  @
   | LitE Lit                           -- ^ @{ 5 or \'c\'}@
   | AppE Exp Exp                       -- ^ @{ f x }@
+  | AppTypeE Exp Type                  -- ^ @{ f \@Int }
 
   | InfixE (Maybe Exp) Exp (Maybe Exp) -- ^ @{x + y} or {(x+)} or {(+ x)} or {(+)}@
 
@@ -1452,6 +1532,7 @@ data Exp
   | LamCaseE [Match]                   -- ^ @{ \\case m1; m2 }@
   | TupE [Exp]                         -- ^ @{ (e1,e2) }  @
   | UnboxedTupE [Exp]                  -- ^ @{ (\# e1,e2 \#) }  @
+  | UnboxedSumE Exp SumAlt SumArity    -- ^ @{ (\#|e|\#) }@
   | CondE Exp Exp Exp                  -- ^ @{ if e1 then e2 else e3 }@
   | MultiIfE [(Guard, Exp)]            -- ^ @{ if | g1 -> e1 | g2 -> e2 }@
   | LetE [Dec] Exp                     -- ^ @{ let x=e1;   y=e2 in e3 }@
@@ -1509,13 +1590,15 @@ data Dec
   | ValD Pat Body [Dec]           -- ^ @{ p = b where decs }@
   | DataD Cxt Name [TyVarBndr]
           (Maybe Kind)            -- Kind signature (allowed only for GADTs)
-          [Con] Cxt
+          [Con] [DerivClause]
                                   -- ^ @{ data Cxt x => T x = A x | B (T x)
-                                  --       deriving (Z,W)}@
+                                  --       deriving (Z,W)
+                                  --       deriving stock Eq }@
   | NewtypeD Cxt Name [TyVarBndr]
              (Maybe Kind)         -- Kind signature
-             Con Cxt              -- ^ @{ newtype Cxt x => T x = A (B x)
-                                  --       deriving (Z,W Q)}@
+             Con [DerivClause]    -- ^ @{ newtype Cxt x => T x = A (B x)
+                                  --       deriving (Z,W Q)
+                                  --       deriving stock Eq }@
   | TySynD Name [TyVarBndr] Type  -- ^ @{ type T x = (x,x) }@
   | ClassD Cxt Name [TyVarBndr]
          [FunDep] [Dec]           -- ^ @{ class Eq a => Ord a where ds }@
@@ -1538,14 +1621,18 @@ data Dec
 
   | DataInstD Cxt Name [Type]
              (Maybe Kind)         -- Kind signature
-             [Con] Cxt            -- ^ @{ data instance Cxt x => T [x]
-                                  --       = A x | B (T x) deriving (Z,W)}@
+             [Con] [DerivClause]  -- ^ @{ data instance Cxt x => T [x]
+                                  --       = A x | B (T x)
+                                  --       deriving (Z,W)
+                                  --       deriving stock Eq }@
 
   | NewtypeInstD Cxt Name [Type]
-                 (Maybe Kind)     -- Kind signature
-                 Con Cxt          -- ^ @{ newtype instance Cxt x => T [x]
-                                  --        = A (B x) deriving (Z,W)}@
-  | TySynInstD Name TySynEqn      -- ^ @{ type instance ... }@
+                 (Maybe Kind)      -- Kind signature
+                 Con [DerivClause] -- ^ @{ newtype instance Cxt x => T [x]
+                                   --        = A (B x)
+                                   --        deriving (Z,W)
+                                   --        deriving stock Eq }@
+  | TySynInstD Name TySynEqn       -- ^ @{ type instance ... }@
 
   -- | open type families (may also appear in [Dec] of 'ClassD' and 'InstanceD')
   | OpenTypeFamilyD TypeFamilyHead
@@ -1555,7 +1642,8 @@ data Dec
        -- ^ @{ type family F a b = (r :: *) | r -> a where ... }@
 
   | RoleAnnotD Name [Role]     -- ^ @{ type role T nominal representational }@
-  | StandaloneDerivD Cxt Type  -- ^ @{ deriving instance Ord a => Ord (Foo a) }@
+  | StandaloneDerivD (Maybe DerivStrategy) Cxt Type
+       -- ^ @{ deriving stock instance Ord a => Ord (Foo a) }@
   | DefaultSigD Name Type      -- ^ @{ default size :: Data a => a -> Int }@
 
   -- | Pattern Synonyms
@@ -1578,6 +1666,17 @@ data Overlap = Overlappable   -- ^ May be overlapped by more specific instances
              | Incoherent     -- ^ Both 'Overlappable' and 'Overlappable', and
                               -- pick an arbitrary one if multiple choices are
                               -- available.
+  deriving( Show, Eq, Ord, Data, Generic )
+
+-- | A single @deriving@ clause at the end of a datatype.
+data DerivClause = DerivClause (Maybe DerivStrategy) Cxt
+    -- ^ @{ deriving stock (Eq, Ord) }@
+  deriving( Show, Eq, Ord, Data, Generic )
+
+-- | What the user explicitly requests when deriving an instance.
+data DerivStrategy = StockStrategy    -- ^ A \"standard\" derived instance
+                   | AnyclassStrategy -- ^ @-XDeriveAnyClass@
+                   | NewtypeStrategy  -- ^ @-XGeneralizedNewtypeDeriving@
   deriving( Show, Eq, Ord, Data, Generic )
 
 -- | A Pattern synonym's type. Note that a pattern synonym's *fully*
@@ -1804,6 +1903,7 @@ data Type = ForallT [TyVarBndr] Cxt Type  -- ^ @forall \<vars\>. \<ctxt\> -> \<t
           -- See Note [Representing concrete syntax in types]
           | TupleT Int                    -- ^ @(,), (,,), etc.@
           | UnboxedTupleT Int             -- ^ @(\#,\#), (\#,,\#), etc.@
+          | UnboxedSumT SumArity          -- ^ @(\#|\#), (\#||\#), etc.@
           | ArrowT                        -- ^ @->@
           | EqualityT                     -- ^ @~@
           | ListT                         -- ^ @[]@

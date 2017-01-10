@@ -60,6 +60,8 @@ import Util
 import MonadUtils
 import Outputable
 import Pair
+import PrelRules
+import Literal
 
 import Control.Monad    ( when )
 
@@ -686,11 +688,12 @@ simplEnvForGHCi dflags
 updModeForStableUnfoldings :: Activation -> SimplifierMode -> SimplifierMode
 -- See Note [Simplifying inside stable unfoldings]
 updModeForStableUnfoldings inline_rule_act current_mode
-  = current_mode { sm_phase = phaseFromActivation inline_rule_act
-                 , sm_inline = True
+  = current_mode { sm_phase      = phaseFromActivation inline_rule_act
+                 , sm_inline     = True
                  , sm_eta_expand = False }
-                 -- For sm_rules, just inherit; sm_rules might be "off"
-                 -- because of -fno-enable-rewrite-rules
+                     -- sm_eta_expand: see Note [No eta expansion in stable unfoldings]
+       -- For sm_rules, just inherit; sm_rules might be "off"
+       -- because of -fno-enable-rewrite-rules
   where
     phaseFromActivation (ActiveAfter _ n) = Phase n
     phaseFromActivation _                 = InitialPhase
@@ -714,6 +717,25 @@ Ticks into the LHS, which makes matching trickier. Trac #10665, #10745.
 
 Doing this to either side confounds tools like HERMIT, which seek to reason
 about and apply the RULES as originally written. See Trac #10829.
+
+Note [No eta expansion in stable unfoldings]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+If we have a stable unfolding
+
+  f :: Ord a => a -> IO ()
+  -- Unfolding template
+  --    = /\a \(d:Ord a) (x:a). bla
+
+we do not want to eta-expand to
+
+  f :: Ord a => a -> IO ()
+  -- Unfolding template
+  --    = (/\a \(d:Ord a) (x:a) (eta:State#). bla eta) |> co
+
+because not specialisation of the overloading doesn't work properly
+(see Note [Specialisation shape] in Specialise), Trac #9509.
+
+So we disable eta-expansion in stable unfoldings.
 
 Note [Inlining in gentle mode]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1133,7 +1155,6 @@ postInlineUnconditionally dflags env top_lvl bndr occ_info rhs unfolding
   | not active                  = False
   | isWeakLoopBreaker occ_info  = False -- If it's a loop-breaker of any kind, don't inline
                                         -- because it might be referred to "earlier"
-  | isExportedId bndr           = False
   | isStableUnfolding unfolding = False -- Note [Stable unfoldings and postInlineUnconditionally]
   | isTopLevel top_lvl          = False -- Note [Top level and postInlineUnconditionally]
   | exprIsTrivial rhs           = True
@@ -1227,6 +1248,10 @@ ones that are trivial):
 
   * The inliner should inline trivial things at call sites anyway.
 
+  * The Id might be exported.  We could check for that separately,
+    but since we aren't going to postInlineUnconditionally /any/
+    top-level bindings, we don't need to test.
+
 Note [Stable unfoldings and postInlineUnconditionally]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Do not do postInlineUnconditionally if the Id has an stable unfolding,
@@ -1254,16 +1279,16 @@ won't inline because 'e' is too big.
 ************************************************************************
 -}
 
-mkLam :: [OutBndr] -> OutExpr -> SimplCont -> SimplM OutExpr
+mkLam :: SimplEnv -> [OutBndr] -> OutExpr -> SimplCont -> SimplM OutExpr
 -- mkLam tries three things
 --      a) eta reduction, if that gives a trivial expression
 --      b) eta expansion [only if there are some value lambdas]
 
-mkLam [] body _cont
+mkLam _env [] body _cont
   = return body
-mkLam bndrs body cont
-  = do  { dflags <- getDynFlags
-        ; mkLam' dflags bndrs body }
+mkLam env bndrs body cont
+  = do { dflags <- getDynFlags
+       ; mkLam' dflags bndrs body }
   where
     mkLam' :: DynFlags -> [OutBndr] -> OutExpr -> SimplM OutExpr
     mkLam' dflags bndrs (Cast body co)
@@ -1291,7 +1316,7 @@ mkLam bndrs body cont
            ; return etad_lam }
 
       | not (contIsRhs cont)   -- See Note [Eta-expanding lambdas]
-      , gopt Opt_DoLambdaEtaExpansion dflags
+      , sm_eta_expand (getMode env)
       , any isRuntimeVar bndrs
       , let body_arity = exprEtaExpandArity dflags body
       , body_arity > 0
@@ -1322,6 +1347,9 @@ However, when the lambda is let-bound, as the RHS of a let, we have a
 better eta-expander (in the form of tryEtaExpandRhs), so we don't
 bother to try expansion in mkLam in that case; hence the contIsRhs
 guard.
+
+NB: We check the SimplEnv (sm_eta_expand), not DynFlags.
+    See Note [No eta expansion in stable unfoldings]
 
 Note [Casts and lambdas]
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1752,9 +1780,46 @@ mkCase tries these things
                 False -> False
 
     and similar friends.
+
+3.  Scrutinee Constant Folding
+
+     case x op# k# of _ {  ===> case x of _ {
+        a1# -> e1                  (a1# inv_op# k#) -> e1
+        a2# -> e2                  (a2# inv_op# k#) -> e2
+        ...                        ...
+        DEFAULT -> ed              DEFAULT -> ed
+
+     where (x op# k#) inv_op# k# == x
+
+    And similarly for commuted arguments and for some unary operations.
+
+    The purpose of this transformation is not only to avoid an arithmetic
+    operation at runtime but to allow other transformations to apply in cascade.
+
+    Example with the "Merge Nested Cases" optimization (from #12877):
+
+          main = case t of t0
+             0##     -> ...
+             DEFAULT -> case t0 `minusWord#` 1## of t1
+                0##    -> ...
+                DEFAUT -> case t1 `minusWord#` 1## of t2
+                   0##     -> ...
+                   DEFAULT -> case t2 `minusWord#` 1## of _
+                      0##     -> ...
+                      DEFAULT -> ...
+
+      becomes:
+
+          main = case t of _
+          0##     -> ...
+          1##     -> ...
+          2##     -> ...
+          3##     -> ...
+          DEFAULT -> ...
+
 -}
 
-mkCase, mkCase1, mkCase2
+mkCase, mkCase1, mkCase2, mkCase3
    :: DynFlags
    -> OutExpr -> OutId
    -> OutType -> [OutAlt]               -- Alternatives in standard (increasing) order
@@ -1848,9 +1913,42 @@ mkCase1 _dflags scrut case_bndr _ alts@((_,_,rhs1) : _)      -- Identity case
 mkCase1 dflags scrut bndr alts_ty alts = mkCase2 dflags scrut bndr alts_ty alts
 
 --------------------------------------------------
+--      2. Scrutinee Constant Folding
+--------------------------------------------------
+
+mkCase2 dflags scrut bndr alts_ty alts
+  | gopt Opt_CaseFolding dflags
+  , Just (scrut',f) <- caseRules scrut
+  = mkCase3 dflags scrut' bndr alts_ty (map (mapAlt f) alts)
+  | otherwise
+  = mkCase3 dflags scrut bndr alts_ty alts
+  where
+    -- We need to keep the correct association between the scrutinee and its
+    -- binder if the latter isn't dead. Hence we wrap rhs of alternatives with
+    -- "let bndr = ... in":
+    --
+    --     case v + 10 of y        =====> case v of y
+    --        20      -> e1                 10      -> let y = 20     in e1
+    --        DEFAULT -> e2                 DEFAULT -> let y = v + 10 in e2
+    --
+    -- Other transformations give: =====> case v of y'
+    --                                      10      -> let y = 20      in e1
+    --                                      DEFAULT -> let y = y' + 10 in e2
+    --
+    wrap_rhs l rhs
+      | isDeadBinder bndr = rhs
+      | otherwise         = Let (NonRec bndr l) rhs
+
+    mapAlt f alt@(c,bs,e) = case c of
+      DEFAULT          -> (c, bs, wrap_rhs scrut e)
+      LitAlt l
+        | isLitValue l -> (LitAlt (mapLitValue f l), bs, wrap_rhs (Lit l) e)
+      _ -> pprPanic "Unexpected alternative (mkCase2)" (ppr alt)
+
+--------------------------------------------------
 --      Catch-all
 --------------------------------------------------
-mkCase2 _dflags scrut bndr alts_ty alts
+mkCase3 _dflags scrut bndr alts_ty alts
   = return (Case scrut bndr alts_ty alts)
 
 {-

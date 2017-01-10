@@ -194,7 +194,7 @@ void rts_disableThreadAllocationLimit(StgPtr tso)
    Fails fatally if the TSO is not on the queue.
    -------------------------------------------------------------------------- */
 
-rtsBool // returns True if we modified queue
+bool // returns true if we modified queue
 removeThreadFromQueue (Capability *cap, StgTSO **queue, StgTSO *tso)
 {
     StgTSO *t, *prev;
@@ -205,33 +205,33 @@ removeThreadFromQueue (Capability *cap, StgTSO **queue, StgTSO *tso)
             if (prev) {
                 setTSOLink(cap,prev,t->_link);
                 t->_link = END_TSO_QUEUE;
-                return rtsFalse;
+                return false;
             } else {
                 *queue = t->_link;
                 t->_link = END_TSO_QUEUE;
-                return rtsTrue;
+                return true;
             }
         }
     }
     barf("removeThreadFromQueue: not found");
 }
 
-rtsBool // returns True if we modified head or tail
+bool // returns true if we modified head or tail
 removeThreadFromDeQueue (Capability *cap,
                          StgTSO **head, StgTSO **tail, StgTSO *tso)
 {
     StgTSO *t, *prev;
-    rtsBool flag = rtsFalse;
+    bool flag = false;
 
     prev = NULL;
     for (t = *head; t != END_TSO_QUEUE; prev = t, t = t->_link) {
         if (t == tso) {
             if (prev) {
                 setTSOLink(cap,prev,t->_link);
-                flag = rtsFalse;
+                flag = false;
             } else {
                 *head = t->_link;
-                flag = rtsTrue;
+                flag = true;
             }
             t->_link = END_TSO_QUEUE;
             if (*tail == tso) {
@@ -240,7 +240,7 @@ removeThreadFromDeQueue (Capability *cap,
                 } else {
                     *tail = END_TSO_QUEUE;
                 }
-                return rtsTrue;
+                return true;
             } else {
                 return flag;
             }
@@ -503,7 +503,7 @@ isThreadBound(StgTSO* tso USED_IF_THREADS)
 #if defined(THREADED_RTS)
   return (tso->bound != NULL);
 #endif
-  return rtsFalse;
+  return false;
 }
 
 /* -----------------------------------------------------------------------------
@@ -741,6 +741,85 @@ threadStackUnderflow (Capability *cap, StgTSO *tso)
     dirty_STACK(cap, new_stack);
 
     return retvals;
+}
+
+/* ----------------------------------------------------------------------------
+   Implementation of tryPutMVar#
+
+   NOTE: this should be kept in sync with stg_tryPutMVarzh in PrimOps.cmm
+   ------------------------------------------------------------------------- */
+
+bool performTryPutMVar(Capability *cap, StgMVar *mvar, StgClosure *value)
+{
+    const StgInfoTable *info;
+    StgMVarTSOQueue *q;
+    StgTSO *tso;
+
+    info = lockClosure((StgClosure*)mvar);
+
+    if (mvar->value != &stg_END_TSO_QUEUE_closure) {
+#if defined(THREADED_RTS)
+        unlockClosure((StgClosure*)mvar, info);
+#endif
+        return false;
+    }
+
+    q = mvar->head;
+loop:
+    if (q == (StgMVarTSOQueue*)&stg_END_TSO_QUEUE_closure) {
+        /* No further takes, the MVar is now full. */
+        if (info == &stg_MVAR_CLEAN_info) {
+            dirty_MVAR(&cap->r, (StgClosure*)mvar);
+        }
+
+        mvar->value = value;
+        unlockClosure((StgClosure*)mvar, &stg_MVAR_DIRTY_info);
+        return true;
+    }
+    if (q->header.info == &stg_IND_info ||
+        q->header.info == &stg_MSG_NULL_info) {
+        q = (StgMVarTSOQueue*)((StgInd*)q)->indirectee;
+        goto loop;
+    }
+
+    // There are takeMVar(s) waiting: wake up the first one
+    tso = q->tso;
+    mvar->head = q->link;
+    if (mvar->head == (StgMVarTSOQueue*)&stg_END_TSO_QUEUE_closure) {
+        mvar->tail = (StgMVarTSOQueue*)&stg_END_TSO_QUEUE_closure;
+    }
+
+    ASSERT(tso->block_info.closure == (StgClosure*)mvar);
+    // save why_blocked here, because waking up the thread destroys
+    // this information
+    StgWord why_blocked = tso->why_blocked;
+
+    // actually perform the takeMVar
+    StgStack* stack = tso->stackobj;
+    stack->sp[1] = (W_)value;
+    stack->sp[0] = (W_)&stg_ret_p_info;
+
+    // indicate that the MVar operation has now completed.
+    tso->_link = (StgTSO*)&stg_END_TSO_QUEUE_closure;
+
+    if (stack->dirty == 0) {
+        dirty_STACK(cap, stack);
+    }
+
+    tryWakeupThread(cap, tso);
+
+    // If it was an readMVar, then we can still do work,
+    // so loop back. (XXX: This could take a while)
+    if (why_blocked == BlockedOnMVarRead) {
+        q = ((StgMVarTSOQueue*)q)->link;
+        goto loop;
+    }
+
+    ASSERT(why_blocked == BlockedOnMVar);
+
+    unlockClosure((StgClosure*)mvar, info);
+
+    return true;
 }
 
 /* ----------------------------------------------------------------------------

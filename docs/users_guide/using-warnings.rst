@@ -92,15 +92,32 @@ The following flags are simple ways to select standard "packages" of warnings:
     Turns off all warnings, including the standard ones and those that
     :ghc-flag:`-Wall` doesn't enable.
 
+These options control which warnings are considered fatal and cause compilation
+to abort.
+
 .. ghc-flag:: -Werror
 
     Makes any warning into a fatal error. Useful so that you don't miss
     warnings when doing batch compilation.
 
+.. ghc-flag:: -Werror=<wflag>
+
+    :implies: ``-W<wflag>``
+
+    Makes a specific warning into a fatal error. The warning will be enabled if
+    it hasn't been enabled yet.
+
 .. ghc-flag:: -Wwarn
 
     Warnings are treated only as warnings, not as errors. This is the
     default, but can be useful to negate a :ghc-flag:`-Werror` flag.
+
+.. ghc-flag:: -Wwarn=<wflag>
+
+    Causes a specific warning to be treated as normal warning, not fatal error.
+
+    Note that it doesn't fully negate the effects of ``-Werror=<wflag>`` - the
+    warning will still be enabled.
 
 When a warning is emitted, the specific warning flag which controls
 it is shown.
@@ -152,13 +169,24 @@ of ``-W(no-)*``.
 
 .. ghc-flag:: -fdefer-typed-holes
 
-    Defer typed holes errors until runtime. This will turn the errors
+    Defer typed holes errors (errors about names with a leading underscore
+    (e.g., “_”, “_foo”, “_bar”)) until runtime. This will turn the errors
     produced by :ref:`typed holes <typed-holes>` into warnings. Using a value
     that depends on a typed hole produces a runtime error, the same as
     :ghc-flag:`-fdefer-type-errors` (which implies this option). See :ref:`typed-holes`
     and :ref:`defer-type-errors`.
 
     Implied by :ghc-flag:`-fdefer-type-errors`. See also :ghc-flag:`-Wtyped-holes`.
+
+.. ghc-flag:: -fdefer-out-of-scope-variables
+
+    Defer variable out of scope errors (errors about names without a leading underscore)
+    until runtime. This will turn variable-out-of-scope errors into warnings.
+    Using a value that depends on a typed hole produces a runtime error,
+    the same as :ghc-flag:`-fdefer-type-errors` (which implies this option).
+    See :ref:`typed-holes` and :ref:`defer-type-errors`.
+
+    Implied by :ghc-flag:`-fdefer-type-errors`. See also :ghc-flag:`-Wdeferred-out-of-scope-variables`.
 
 .. ghc-flag:: -Wpartial-type-signatures
 
@@ -190,12 +218,12 @@ of ``-W(no-)*``.
               -Wall-missed-specialisations
 
     Emits a warning if GHC cannot specialise an overloaded function, usually
-    because the function needs an ``INLINEABLE`` pragma. The "all" form reports
+    because the function needs an ``INLINABLE`` pragma. The "all" form reports
     all such situations whereas the "non-all" form only reports when the
     situation arises during specialisation of an imported function.
 
     The "non-all" form is intended to catch cases where an imported function
-    that is marked as ``INLINEABLE`` (presumably to enable specialisation) cannot
+    that is marked as ``INLINABLE`` (presumably to enable specialisation) cannot
     be specialised as it calls other functions that are themselves not specialised.
 
     Note that these warnings will not throw errors if used with :ghc-flag:`-Werror`.
@@ -995,6 +1023,12 @@ of ``-W(no-)*``.
     Warn if a rewrite RULE might fail to fire because the function might
     be inlined before the rule has a chance to fire. See
     :ref:`rules-inline`.
+
+.. ghc-flag:: -Wcpp-undef
+
+    This flag passes ``-Wundef`` to the C pre-processor (if its being used)
+    which causes the pre-processor to warn on uses of the `#if` directive on
+    undefined identifiers.
 
 If you're feeling really paranoid, the :ghc-flag:`-dcore-lint` option is a good choice.
 It turns on heavyweight intra-pass sanity-checking within GHC. (It checks GHC's

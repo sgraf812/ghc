@@ -46,7 +46,9 @@
 #include "win32/AsyncIO.h"
 #endif
 
-#if !defined(mingw32_HOST_OS)
+#if defined(mingw32_HOST_OS)
+#include <fenv.h>
+#else
 #include "posix/TTY.h"
 #endif
 
@@ -69,10 +71,18 @@ static void flushStdHandles(void);
 
 #define X86_INIT_FPU 0
 
-#if X86_INIT_FPU
 static void
 x86_init_fpu ( void )
 {
+#if defined(mingw32_HOST_OS) && !X86_INIT_FPU
+    /* Mingw-w64 does a stupid thing. They set the FPU precision to extended mode by default.
+    The reasoning is that it's for compatibility with GNU Linux ported libraries. However the
+    problem is this is incompatible with the standard Windows double precision mode.  In fact,
+    if we create a new OS thread then Windows will reset the FPU to double precision mode.
+    So we end up with a weird state where the main thread by default has a different precision
+    than any child threads. */
+    fesetenv(FE_PC53_ENV);
+#elif X86_INIT_FPU
   __volatile unsigned short int fpu_cw;
 
   // Grab the control word
@@ -87,7 +97,25 @@ x86_init_fpu ( void )
 
   // Store the new control word back
   __asm __volatile ("fldcw %0" : : "m" (fpu_cw));
+#else
+    return;
+#endif
 }
+
+#if defined(mingw32_HOST_OS)
+/* And now we have to override the build in ones in Mingw-W64's CRT. */
+void _fpreset(void)
+{
+    x86_init_fpu();
+}
+
+#ifdef __GNUC__
+void __attribute__((alias("_fpreset"))) fpreset(void);
+#else
+void fpreset(void) {
+    _fpreset();
+}
+#endif
 #endif
 
 /* -----------------------------------------------------------------------------
@@ -201,6 +229,9 @@ hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
     getStablePtr((StgPtr)nonTermination_closure);
     getStablePtr((StgPtr)blockedIndefinitelyOnSTM_closure);
     getStablePtr((StgPtr)allocationLimitExceeded_closure);
+    getStablePtr((StgPtr)cannotCompactFunction_closure);
+    getStablePtr((StgPtr)cannotCompactPinned_closure);
+    getStablePtr((StgPtr)cannotCompactMutable_closure);
     getStablePtr((StgPtr)nestedAtomically_closure);
 
     getStablePtr((StgPtr)runSparks_closure);
@@ -241,9 +272,7 @@ hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
     startupAsyncIO();
 #endif
 
-#if X86_INIT_FPU
     x86_init_fpu();
-#endif
 
     startupHpc();
 
@@ -292,7 +321,7 @@ hs_add_root(void (*init_root)(void) STG_UNUSED)
  ------------------------------------------------------------------------- */
 
 static void
-hs_exit_(rtsBool wait_foreign)
+hs_exit_(bool wait_foreign)
 {
     uint32_t g, i;
 
@@ -346,7 +375,7 @@ hs_exit_(rtsBool wait_foreign)
      * (e.g. pthread) may fire even after we exit, which may segfault as we've
      * already freed the capabilities.
      */
-    exitTimer(rtsTrue);
+    exitTimer(true);
 
     // set the terminal settings back to what they were
 #if !defined(mingw32_HOST_OS)
@@ -434,6 +463,9 @@ hs_exit_(rtsBool wait_foreign)
 
     // Free the various argvs
     freeRtsArgs();
+
+    // Free threading resources
+    freeThreadingResources();
 }
 
 // Flush stdout and stderr.  We do this during shutdown so that it
@@ -451,8 +483,16 @@ static void flushStdHandles(void)
 void
 hs_exit(void)
 {
-    hs_exit_(rtsTrue);
+    hs_exit_(true);
     // be safe; this might be a DLL
+}
+
+void
+hs_exit_nowait(void)
+{
+    hs_exit_(false);
+    // do not wait for outstanding foreign calls to return; if they return in
+    // the future, they will block indefinitely.
 }
 
 // Compatibility interfaces
@@ -466,12 +506,8 @@ void
 shutdownHaskellAndExit(int n, int fastExit)
 {
     if (!fastExit) {
-        // even if hs_init_count > 1, we still want to shut down the RTS
-        // and exit immediately (see #5402)
-        hs_init_count = 1;
-
         // we're about to exit(), no need to wait for foreign calls to return.
-        hs_exit_(rtsFalse);
+        hs_exit_(false);
     }
 
     stg_exit(n);
@@ -484,7 +520,7 @@ void
 shutdownHaskellAndSignal(int sig, int fastExit)
 {
     if (!fastExit) {
-        hs_exit_(rtsFalse);
+        hs_exit_(false);
     }
 
     exitBySignal(sig);

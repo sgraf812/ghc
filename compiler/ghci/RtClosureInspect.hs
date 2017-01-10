@@ -191,7 +191,7 @@ getClosureData dflags a =
 
 readCType :: Integral a => a -> ClosureType
 readCType i
- | i >= CONSTR && i <= CONSTR_NOCAF_STATIC = Constr
+ | i >= CONSTR && i <= CONSTR_NOCAF        = Constr
  | i >= FUN    && i <= FUN_STATIC          = Fun
  | i >= THUNK  && i < THUNK_SELECTOR       = Thunk i'
  | i == THUNK_SELECTOR                     = ThunkSelector
@@ -898,10 +898,9 @@ cvReconstructType hsc_env max_depth old_ty hval = runTR_maybe hsc_env $ do
         (_,mb_dc)    <- tryTcErrs (tcLookupDataCon dcname)
         case mb_dc of
           Nothing-> do
-                     --  TODO: Check this case
-            forM [0..length (elems $ ptrs clos)] $ \i -> do
-                        tv <- newVar liftedTypeKind
-                        return$ appArr (\e->(tv,e)) (ptrs clos) i
+            forM (elems $ ptrs clos) $ \a -> do
+              tv <- newVar liftedTypeKind
+              return (tv, a)
 
           Just dc -> do
             arg_tys <- getDataConArgTys dc my_ty
@@ -946,7 +945,7 @@ findPtrTyss i tys = foldM step (i, []) tys
 -- The types can contain skolem type variables, which need to be treated as normal vars.
 -- In particular, we want them to unify with things.
 improveRTTIType :: HscEnv -> RttiType -> RttiType -> Maybe TCvSubst
-improveRTTIType _ base_ty new_ty = U.tcUnifyTy base_ty new_ty
+improveRTTIType _ base_ty new_ty = U.tcUnifyTyKi base_ty new_ty
 
 getDataConArgTys :: DataCon -> Type -> TR [Type]
 -- Given the result type ty of a constructor application (D a b c :: ty)
@@ -1219,7 +1218,7 @@ zonkRttiType = zonkTcTypeToType (mkEmptyZonkEnv zonk_unbound_meta)
   where
     zonk_unbound_meta tv
       = ASSERT( isTcTyVar tv )
-        do { tv' <- skolemiseUnboundMetaTyVar tv RuntimeUnk
+        do { tv' <- skolemiseRuntimeUnk tv
              -- This is where RuntimeUnks are born:
              -- otherwise-unconstrained unification variables are
              -- turned into RuntimeUnks as they leave the

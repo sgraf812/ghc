@@ -22,15 +22,16 @@ module TcType (
   -- Types
   TcType, TcSigmaType, TcRhoType, TcTauType, TcPredType, TcThetaType,
   TcTyVar, TcTyVarSet, TcDTyVarSet, TcTyCoVarSet, TcDTyCoVarSet,
-  TcKind, TcCoVar, TcTyCoVar, TcTyBinder, TcTyVarBinder, TcTyCon,
+  TcKind, TcCoVar, TcTyCoVar, TcTyVarBinder, TcTyCon,
 
-  ExpType(..), ExpSigmaType, ExpRhoType, mkCheckExpType,
+  ExpType(..), InferResult(..), ExpSigmaType, ExpRhoType, mkCheckExpType,
 
   SyntaxOpType(..), synKnownType, mkSynFunTys,
 
   -- TcLevel
   TcLevel(..), topTcLevel, pushTcLevel, isTopTcLevel,
   strictlyDeeperThan, sameDepthAs, fmvTcLevel,
+  tcTypeLevel, tcTyVarLevel, maxTcLevel,
 
   --------------------------------
   -- MetaDetails
@@ -40,12 +41,11 @@ module TcType (
   isImmutableTyVar, isSkolemTyVar, isMetaTyVar,  isMetaTyVarTy, isTyVarTy,
   isSigTyVar, isOverlappableTyVar,  isTyConableTyVar,
   isFskTyVar, isFmvTyVar, isFlattenTyVar,
-  isAmbiguousTyVar, metaTvRef, metaTyVarInfo,
+  isAmbiguousTyVar, metaTyVarRef, metaTyVarInfo,
   isFlexi, isIndirect, isRuntimeUnkSkol,
   metaTyVarTcLevel, setMetaTyVarTcLevel, metaTyVarTcLevel_maybe,
   isTouchableMetaTyVar, isTouchableOrFmv,
   isFloatedTouchableMetaTyVar,
-  canUnifyWithPolyType,
 
   --------------------------------
   -- Builders
@@ -82,7 +82,8 @@ module TcType (
 
   ---------------------------------
   -- Misc type manipulators
-  deNoteType, occurCheckExpand, OccCheckResult(..),
+
+  deNoteType,
   orphNamesOfType, orphNamesOfCo,
   orphNamesOfTypes, orphNamesOfCoCon,
   getDFunTyKey,
@@ -101,6 +102,7 @@ module TcType (
   -- * Finding "exact" (non-dead) type variables
   exactTyCoVarsOfType, exactTyCoVarsOfTypes,
   splitDepVarsOfType, splitDepVarsOfTypes, TcDepVars(..), tcDepVarSet,
+  rewritableTyVarsOfTypes, rewritableTyVarsOfType,
 
   -- * Extracting bound variables
   allBoundVariables, allBoundVariabless,
@@ -140,7 +142,7 @@ module TcType (
   mkClassPred,
   isDictLikeTy,
   tcSplitDFunTy, tcSplitDFunHead, tcSplitMethodTy,
-  isRuntimeRepVar, isRuntimeRepPolymorphic,
+  isRuntimeRepVar, isLevityPolymorphic,
   isVisibleBinder, isInvisibleBinder,
 
   -- Type substitutions
@@ -177,7 +179,7 @@ module TcType (
   toTcTypeBag, -- :: Bag EvVar -> Bag EvVar
 
   pprKind, pprParendKind, pprSigmaType,
-  pprType, pprParendType, pprTypeApp, pprTyThingCategory,
+  pprType, pprParendType, pprTypeApp, pprTyThingCategory, tyThingCategory,
   pprTheta, pprThetaArrowTy, pprClassPred,
   pprTvBndr, pprTvBndrs,
 
@@ -214,7 +216,6 @@ import BasicTypes
 import Util
 import Bag
 import Maybes
-import Pair( pFst )
 import Outputable
 import FastString
 import ErrUtils( Validity(..), MsgDoc, isValid )
@@ -222,7 +223,6 @@ import FV
 import qualified GHC.LanguageExtensions as LangExt
 
 import Data.IORef
-import Control.Monad (liftM, ap)
 import Data.Functor.Identity
 
 {-
@@ -260,8 +260,45 @@ tau ::= tyvar
 
 -- In all cases, a (saturated) type synonym application is legal,
 -- provided it expands to the required form.
+
+Note [TcTyVars in the typechecker]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The typechecker uses a lot of type variables with special properties,
+notably being a unification variable with a mutable reference.  These
+use the 'TcTyVar' variant of Var.Var.
+
+However, the type checker and constraint solver can encounter type
+variables that use the 'TyVar' variant of Var.Var, for a couple of
+reasons:
+
+  - When unifying or flattening under (forall a. ty)
+
+  - When typechecking a class decl, say
+       class C (a :: k) where
+          foo :: T a -> Int
+    We have first kind-check the header; fix k and (a:k) to be
+    TyVars, bring 'k' and 'a' into scope, and kind check the
+    signature for 'foo'.  In doing so we call solveEqualities to
+    solve any kind equalities in foo's signature.  So the solver
+    may see free occurences of 'k'.
+
+It's convenient to simply treat these TyVars as skolem constants,
+which of course they are.  So
+
+* Var.tcTyVarDetails succeeds on a TyVar, returning
+  vanillaSkolemTv, as well as on a TcTyVar.
+
+* tcIsTcTyVar returns True for both TyVar and TcTyVar variants
+  of Var.Var.  The "tc" prefix means "a type variable that can be
+  encountered by the typechecker".
+
+This is a bit of a change from an earlier era when we remoselessly
+insisted on real TcTyVars in the type checker.  But that seems
+unnecessary (for skolems, TyVars are fine) and it's now very hard
+to guarantee, with the advent of kind equalities.
 -}
 
+-- See Note [TcTyVars in the typechecker]
 type TcTyVar = TyVar    -- Used only during type inference
 type TcCoVar = CoVar    -- Used only during type inference
 type TcType = Type      -- A TcType can have mutable type variables
@@ -272,7 +309,6 @@ type TcTyCoVar = Var    -- Either a TcTyVar or a CoVar
         -- T is "flattened" before quantifying over a
 
 type TcTyVarBinder = TyVarBinder
-type TcTyBinder    = TyBinder
 type TcTyCon       = TyCon   -- these can be the TcTyCon constructor
 
 -- These types do not have boxy type variables in them
@@ -297,19 +333,30 @@ type TcDTyCoVarSet  = DTyCoVarSet
 -- | An expected type to check against during type-checking.
 -- See Note [ExpType] in TcMType, where you'll also find manipulators.
 data ExpType = Check TcType
-             | Infer Unique  -- for debugging only
-                     TcLevel -- See Note [TcLevel of ExpType] in TcMType
-                     Kind
-                     (IORef (Maybe TcType))
+             | Infer !InferResult
+
+data InferResult
+  = IR { ir_uniq :: Unique  -- For debugging only
+       , ir_lvl  :: TcLevel -- See Note [TcLevel of ExpType] in TcMType
+       , ir_inst :: Bool    -- True <=> deeply instantiate before returning
+                            --           i.e. return a RhoType
+                            -- False <=> do not instantiate before returning
+                            --           i.e. return a SigmaType
+       , ir_ref  :: IORef (Maybe TcType) }
+         -- The type that fills in this hole should be a Type,
+         -- that is, its kind should be (TYPE rr) for some rr
 
 type ExpSigmaType = ExpType
 type ExpRhoType   = ExpType
 
 instance Outputable ExpType where
-  ppr (Check ty) = ppr ty
-  ppr (Infer u lvl ki _)
-    = parens (text "Infer" <> braces (ppr u <> comma <> ppr lvl)
-              <+> dcolon <+> ppr ki)
+  ppr (Check ty) = text "Check" <> braces (ppr ty)
+  ppr (Infer ir) = ppr ir
+
+instance Outputable InferResult where
+  ppr (IR { ir_uniq = u, ir_lvl = lvl
+          , ir_inst = inst })
+    = text "Infer" <> braces (ppr u <> comma <> ppr lvl <+> ppr inst)
 
 -- | Make an 'ExpType' suitable for checking.
 mkCheckExpType :: TcType -> ExpType
@@ -419,6 +466,7 @@ we would need to enforce the separation.
 -- See Note [TyVars and TcTyVars]
 data TcTyVarDetails
   = SkolemTv      -- A skolem
+       TcLevel    -- Level of the implication that binds it
        Bool       -- True <=> this skolem type variable can be overlapped
                   --          when looking up instances
                   -- See Note [Binding when looking up instances] in InstEnv
@@ -436,8 +484,8 @@ data TcTyVarDetails
 
 vanillaSkolemTv, superSkolemTv :: TcTyVarDetails
 -- See Note [Binding when looking up instances] in InstEnv
-vanillaSkolemTv = SkolemTv False  -- Might be instantiated
-superSkolemTv   = SkolemTv True   -- Treat this as a completely distinct type
+vanillaSkolemTv = SkolemTv (pushTcLevel topTcLevel) False  -- Might be instantiated
+superSkolemTv   = SkolemTv (pushTcLevel topTcLevel) True   -- Treat this as a completely distinct type
 
 -----------------------------
 data MetaDetails
@@ -466,10 +514,10 @@ instance Outputable MetaDetails where
 
 pprTcTyVarDetails :: TcTyVarDetails -> SDoc
 -- For debugging
-pprTcTyVarDetails (SkolemTv True)  = text "ssk"
-pprTcTyVarDetails (SkolemTv False) = text "sk"
 pprTcTyVarDetails (RuntimeUnk {})  = text "rt"
 pprTcTyVarDetails (FlatSkol {})    = text "fsk"
+pprTcTyVarDetails (SkolemTv lvl True)  = text "ssk" <> colon <> ppr lvl
+pprTcTyVarDetails (SkolemTv lvl False) = text "sk"  <> colon <> ppr lvl
 pprTcTyVarDetails (MetaTv { mtv_info = info, mtv_tclvl = tclvl })
   = pp_info <> colon <> ppr tclvl
   where
@@ -645,23 +693,21 @@ Note [TcLevel assignment]
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 We arrange the TcLevels like this
 
+   0   Level for flatten meta-vars
    1   Top level
-   2     Flatten-meta-vars of level 3
-   3   First-level implication constraints
-   4     Flatten-meta-vars of level 5
-   5   Second-level implication constraints
+   2   First-level implication constraints
+   3   Second-level implication constraints
    ...etc...
 
-The even-numbered levels are for the flatten-meta-variables assigned
-at the next level in.  Eg for a second-level implication conststraint
-(level 5), the flatten meta-vars are level 4, which makes them untouchable.
-The flatten meta-vars could equally well all have level 0, or just NotALevel
-since they do not live across implications.
+The flatten meta-vars are all at level 0, just to make them untouchable.
 -}
+
+maxTcLevel :: TcLevel -> TcLevel -> TcLevel
+maxTcLevel (TcLevel a) (TcLevel b) = TcLevel (a `max` b)
 
 fmvTcLevel :: TcLevel -> TcLevel
 -- See Note [TcLevel assignment]
-fmvTcLevel (TcLevel n) = TcLevel (n-1)
+fmvTcLevel _ = TcLevel 0
 
 topTcLevel :: TcLevel
 -- See Note [TcLevel assignment]
@@ -673,7 +719,7 @@ isTopTcLevel _           = False
 
 pushTcLevel :: TcLevel -> TcLevel
 -- See Note [TcLevel assignment]
-pushTcLevel (TcLevel us) = TcLevel (us + 2)
+pushTcLevel (TcLevel us) = TcLevel (us + 1)
 
 strictlyDeeperThan :: TcLevel -> TcLevel -> Bool
 strictlyDeeperThan (TcLevel tv_tclvl) (TcLevel ctxt_tclvl)
@@ -688,6 +734,24 @@ checkTcLevelInvariant :: TcLevel -> TcLevel -> Bool
 -- Checks (MetaTvInv) from Note [TcLevel and untouchable type variables]
 checkTcLevelInvariant (TcLevel ctxt_tclvl) (TcLevel tv_tclvl)
   = ctxt_tclvl >= tv_tclvl
+
+tcTyVarLevel :: TcTyVar -> TcLevel
+tcTyVarLevel tv
+  = ASSERT2( tcIsTcTyVar tv, ppr tv )
+    case tcTyVarDetails tv of
+          MetaTv { mtv_tclvl = tv_lvl } -> tv_lvl
+          SkolemTv tv_lvl _             -> tv_lvl
+          FlatSkol ty                   -> tcTypeLevel ty
+          RuntimeUnk                    -> topTcLevel
+
+tcTypeLevel :: TcType -> TcLevel
+-- Max level of any free var of the type
+tcTypeLevel ty
+  = foldDVarSet add topTcLevel (tyCoVarsOfTypeDSet ty)
+  where
+    add v lvl
+      | isTcTyVar v = lvl `maxTcLevel` tcTyVarLevel v
+      | otherwise   = lvl
 
 instance Outputable TcLevel where
   ppr (TcLevel us) = ppr us
@@ -807,6 +871,26 @@ exactTyCoVarsOfType ty
 
 exactTyCoVarsOfTypes :: [Type] -> TyVarSet
 exactTyCoVarsOfTypes tys = mapUnionVarSet exactTyCoVarsOfType tys
+
+rewritableTyVarsOfTypes :: [TcType] -> TcTyVarSet
+rewritableTyVarsOfTypes tys = mapUnionVarSet rewritableTyVarsOfType tys
+
+rewritableTyVarsOfType :: TcType -> TcTyVarSet
+-- Used during kick-out from the inert set
+-- Ignores coercions and casts, because rewriting those does
+-- not help solving, and it's more efficient to ignore them
+rewritableTyVarsOfType ty
+  = go ty
+  where
+    go (TyVarTy tv)     = unitVarSet tv
+    go (LitTy {})       = emptyVarSet
+    go (TyConApp _ tys) = rewritableTyVarsOfTypes tys
+    go (AppTy fun arg)  = go fun `unionVarSet` go arg
+    go (FunTy arg res)  = go arg `unionVarSet` go res
+    go ty@(ForAllTy {}) = pprPanic "rewriteableTyVarOfType" (ppr ty)
+    go (CastTy ty _co)  = go ty
+    go (CoercionTy _co) = emptyVarSet
+
 
 {- *********************************************************************
 *                                                                      *
@@ -961,9 +1045,13 @@ splitDepVarsOfType = go
 ************************************************************************
 -}
 
+tcIsTcTyVar :: TcTyVar -> Bool
+-- See Note [TcTyVars in the typechecker]
+tcIsTcTyVar tv = isTyVar tv
+
 isTouchableOrFmv :: TcLevel -> TcTyVar -> Bool
 isTouchableOrFmv ctxt_tclvl tv
-  = ASSERT2( isTcTyVar tv, ppr tv )
+  = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
       MetaTv { mtv_tclvl = tv_tclvl, mtv_info = info }
         -> ASSERT2( checkTcLevelInvariant ctxt_tclvl tv_tclvl,
@@ -975,7 +1063,7 @@ isTouchableOrFmv ctxt_tclvl tv
 
 isTouchableMetaTyVar :: TcLevel -> TcTyVar -> Bool
 isTouchableMetaTyVar ctxt_tclvl tv
-  = ASSERT2( isTcTyVar tv, ppr tv )
+  = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
       MetaTv { mtv_tclvl = tv_tclvl }
         -> ASSERT2( checkTcLevelInvariant ctxt_tclvl tv_tclvl,
@@ -985,15 +1073,13 @@ isTouchableMetaTyVar ctxt_tclvl tv
 
 isFloatedTouchableMetaTyVar :: TcLevel -> TcTyVar -> Bool
 isFloatedTouchableMetaTyVar ctxt_tclvl tv
-  = ASSERT2( isTcTyVar tv, ppr tv )
+  = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
       MetaTv { mtv_tclvl = tv_tclvl } -> tv_tclvl `strictlyDeeperThan` ctxt_tclvl
       _ -> False
 
 isImmutableTyVar :: TyVar -> Bool
-isImmutableTyVar tv
-  | isTcTyVar tv = isSkolemTyVar tv
-  | otherwise    = True
+isImmutableTyVar tv = isSkolemTyVar tv
 
 isTyConableTyVar, isSkolemTyVar, isOverlappableTyVar,
   isMetaTyVar, isAmbiguousTyVar,
@@ -1003,20 +1089,20 @@ isTyConableTyVar tv
         -- True of a meta-type variable that can be filled in
         -- with a type constructor application; in particular,
         -- not a SigTv
-  = ASSERT2( isTcTyVar tv, ppr tv )
+  = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
         MetaTv { mtv_info = SigTv } -> False
         _                           -> True
 
 isFmvTyVar tv
-  = ASSERT2( isTcTyVar tv, ppr tv )
+  = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
         MetaTv { mtv_info = FlatMetaTv } -> True
         _                                -> False
 
 -- | True of both given and wanted flatten-skolems (fak and usk)
 isFlattenTyVar tv
-  = ASSERT2( isTcTyVar tv, ppr tv )
+  = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
         FlatSkol {}                      -> True
         MetaTv { mtv_info = FlatMetaTv } -> True
@@ -1024,25 +1110,25 @@ isFlattenTyVar tv
 
 -- | True of FlatSkol skolems only
 isFskTyVar tv
-  = ASSERT2( isTcTyVar tv, ppr tv )
+  = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
         FlatSkol {} -> True
         _           -> False
 
 isSkolemTyVar tv
-  = ASSERT2( isTcTyVar tv, ppr tv )
+  = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
         MetaTv {} -> False
         _other    -> True
 
 isOverlappableTyVar tv
-  = ASSERT2( isTcTyVar tv, ppr tv )
+  = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
-        SkolemTv overlappable -> overlappable
-        _                     -> False
+        SkolemTv _ overlappable -> overlappable
+        _                       -> False
 
 isMetaTyVar tv
-  = ASSERT2( isTcTyVar tv, ppr tv )
+  = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
         MetaTv {} -> True
         _         -> False
@@ -1080,6 +1166,12 @@ metaTyVarTcLevel_maybe tv
       MetaTv { mtv_tclvl = tclvl } -> Just tclvl
       _                            -> Nothing
 
+metaTyVarRef :: TyVar -> IORef MetaDetails
+metaTyVarRef tv
+  = case tcTyVarDetails tv of
+        MetaTv { mtv_ref = ref } -> ref
+        _ -> pprPanic "metaTyVarRef" (ppr tv)
+
 setMetaTyVarTcLevel :: TcTyVar -> TcLevel -> TcTyVar
 setMetaTyVarTcLevel tv tclvl
   = case tcTyVarDetails tv of
@@ -1092,12 +1184,6 @@ isSigTyVar tv
         MetaTv { mtv_info = SigTv } -> True
         _                           -> False
 
-metaTvRef :: TyVar -> IORef MetaDetails
-metaTvRef tv
-  = case tcTyVarDetails tv of
-        MetaTv { mtv_ref = ref } -> ref
-        _ -> pprPanic "metaTvRef" (ppr tv)
-
 isFlexi, isIndirect :: MetaDetails -> Bool
 isFlexi Flexi = True
 isFlexi _     = False
@@ -1108,8 +1194,8 @@ isIndirect _            = False
 isRuntimeUnkSkol :: TyVar -> Bool
 -- Called only in TcErrors; see Note [Runtime skolems] there
 isRuntimeUnkSkol x
-  | isTcTyVar x, RuntimeUnk <- tcTyVarDetails x = True
-  | otherwise                                   = False
+  | RuntimeUnk <- tcTyVarDetails x = True
+  | otherwise                      = False
 
 {-
 ************************************************************************
@@ -1122,7 +1208,7 @@ isRuntimeUnkSkol x
 mkSigmaTy :: [TyVarBinder] -> [PredType] -> Type -> Type
 mkSigmaTy bndrs theta tau = mkForAllTys bndrs (mkPhiTy theta tau)
 
--- | Make a sigma ty wherea ll type variables are 'Inferred'. That is,
+-- | Make a sigma ty where all type variables are 'Inferred'. That is,
 -- they cannot be used with visible type application.
 mkInfSigmaTy :: [TyVar] -> [PredType] -> Type -> Type
 mkInfSigmaTy tyvars ty = mkSigmaTy (mkTyVarBinders Inferred tyvars) ty
@@ -1134,24 +1220,6 @@ mkSpecSigmaTy tyvars ty = mkSigmaTy (mkTyVarBinders Specified tyvars) ty
 
 mkPhiTy :: [PredType] -> Type -> Type
 mkPhiTy = mkFunTys
-
--- @isTauTy@ tests if a type is "simple"..
-isTauTy :: Type -> Bool
-isTauTy ty | Just ty' <- coreView ty = isTauTy ty'
-isTauTy (TyVarTy _)           = True
-isTauTy (LitTy {})            = True
-isTauTy (TyConApp tc tys)     = all isTauTy tys && isTauTyCon tc
-isTauTy (AppTy a b)           = isTauTy a && isTauTy b
-isTauTy (FunTy a b)           = isTauTy a && isTauTy b
-isTauTy (ForAllTy {})         = False
-isTauTy (CastTy _ _)          = False
-isTauTy (CoercionTy _)        = False
-
-isTauTyCon :: TyCon -> Bool
--- Returns False for type synonyms whose expansion is a polytype
-isTauTyCon tc
-  | Just (_, rhs) <- synTyConDefn_maybe tc = isTauTy rhs
-  | otherwise                              = True
 
 ---------------
 getDFunTyKey :: Type -> OccName -- Get some string from a type, to be used to
@@ -1427,7 +1495,13 @@ tcSplitMethodTy ty
   | otherwise
   = pprPanic "tcSplitMethodTy" (ppr ty)
 
------------------------
+
+{- *********************************************************************
+*                                                                      *
+            Type equalities
+*                                                                      *
+********************************************************************* -}
+
 tcEqKind :: TcKind -> TcKind -> Bool
 tcEqKind = tcEqType
 
@@ -1537,237 +1611,9 @@ pickyEqType ty1 ty2
   = isNothing $
     tc_eq_type (const Nothing) ty1 ty2
 
-{-
-Note [Occurs check expansion]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-(occurCheckExpand tv xi) expands synonyms in xi just enough to get rid
-of occurrences of tv outside type function arguments, if that is
-possible; otherwise, it returns Nothing.
-
-For example, suppose we have
-  type F a b = [a]
-Then
-  occurCheckExpand b (F Int b) = Just [Int]
-but
-  occurCheckExpand a (F a Int) = Nothing
-
-We don't promise to do the absolute minimum amount of expanding
-necessary, but we try not to do expansions we don't need to.  We
-prefer doing inner expansions first.  For example,
-  type F a b = (a, Int, a, [a])
-  type G b   = Char
-We have
-  occurCheckExpand b (F (G b)) = F Char
-even though we could also expand F to get rid of b.
-
-The two variants of the function are to support TcUnify.checkTauTvUpdate,
-which wants to prevent unification with type families. For more on this
-point, see Note [Prevent unification with type families] in TcUnify.
-
-See also Note [occurCheckExpand] in TcCanonical
--}
-
-data OccCheckResult a
-  = OC_OK a
-  | OC_Forall
-  | OC_Occurs
-
-instance Functor OccCheckResult where
-      fmap = liftM
-
-instance Applicative OccCheckResult where
-      pure = OC_OK
-      (<*>) = ap
-
-instance Monad OccCheckResult where
-  OC_OK x       >>= k = k x
-  OC_Forall     >>= _ = OC_Forall
-  OC_Occurs     >>= _ = OC_Occurs
-
-occurCheckExpand :: DynFlags -> TcTyVar -> Type -> OccCheckResult Type
--- See Note [Occurs check expansion]
--- Check whether
---   a) the given variable occurs in the given type.
---   b) there is a forall in the type (unless we have -XImpredicativeTypes)
---
--- We may have needed to do some type synonym unfolding in order to
--- get rid of the variable (or forall), so we also return the unfolded
--- version of the type, which is guaranteed to be syntactically free
--- of the given type variable.  If the type is already syntactically
--- free of the variable, then the same type is returned.
---
--- NB: in the past we also rejected a SigTv matched with a non-tyvar
---     But it is wrong to reject that for Givens;
---     and SigTv is in any case handled separately by
---        - TcUnify.checkTauTvUpdate (on-the-fly unifier)
---        - TcInteract.canSolveByUnification (main constraint solver)
-occurCheckExpand dflags tv ty
-  | fast_check ty = return ty
-  | otherwise     = go emptyVarEnv ty
-  where
-    details = tcTyVarDetails tv
-
-    impredicative = canUnifyWithPolyType dflags details
-
-    -- True => fine
-    fast_check (LitTy {})          = True
-    fast_check (TyVarTy tv')       = tv /= tv' && fast_check (tyVarKind tv')
-    fast_check (TyConApp tc tys)   = all fast_check tys
-                                     && (isTauTyCon tc || impredicative)
-    fast_check (FunTy a r)         = fast_check a && fast_check r
-    fast_check (AppTy fun arg)     = fast_check fun && fast_check arg
-    fast_check (ForAllTy (TvBndr tv' _) ty)
-                                   = impredicative
-                                   && fast_check (tyVarKind tv')
-                                   && (tv == tv' || fast_check ty)
-    fast_check (CastTy ty co)      = fast_check ty && fast_check_co co
-    fast_check (CoercionTy co)     = fast_check_co co
-
-     -- we really are only doing an occurs check here; no bother about
-     -- impredicativity in coercions, as they're inferred
-    fast_check_co co = not (tv `elemVarSet` tyCoVarsOfCo co)
-
-    go :: VarEnv TyVar  -- carries mappings necessary because of kind expansion
-       -> Type -> OccCheckResult Type
-    go env (TyVarTy tv')
-      | tv == tv'                         = OC_Occurs
-      | Just tv'' <- lookupVarEnv env tv' = return (mkTyVarTy tv'')
-      | otherwise                         = do { k' <- go env (tyVarKind tv')
-                                               ; return (mkTyVarTy $
-                                                         setTyVarKind tv' k') }
-    go _   ty@(LitTy {}) = return ty
-    go env (AppTy ty1 ty2) = do { ty1' <- go env ty1
-                                ; ty2' <- go env ty2
-                                ; return (mkAppTy ty1' ty2') }
-    go env (FunTy ty1 ty2) = do { ty1' <- go env ty1
-                                ; ty2' <- go env ty2
-                                ; return (mkFunTy ty1' ty2') }
-    go env ty@(ForAllTy (TvBndr tv' vis) body_ty)
-       | not impredicative = OC_Forall
-       | tv == tv'         = return ty
-       | otherwise         = do { ki' <- go env ki
-                                ; let tv'' = setTyVarKind tv' ki'
-                                      env' = extendVarEnv env tv' tv''
-                                ; body' <- go env' body_ty
-                                ; return (ForAllTy (TvBndr tv'' vis) body') }
-      where ki = tyVarKind tv'
-
-    -- For a type constructor application, first try expanding away the
-    -- offending variable from the arguments.  If that doesn't work, next
-    -- see if the type constructor is a type synonym, and if so, expand
-    -- it and try again.
-    go env ty@(TyConApp tc tys)
-      = case do { tys <- mapM (go env) tys
-                ; return (mkTyConApp tc tys) } of
-          OC_OK ty
-              | impredicative || isTauTyCon tc
-              -> return ty  -- First try to eliminate the tyvar from the args
-              | otherwise
-              -> OC_Forall  -- A type synonym with a forall on the RHS
-          bad | Just ty' <- coreView ty -> go env ty'
-              | otherwise               -> bad
-                      -- Failing that, try to expand a synonym
-
-    go env (CastTy ty co) =  do { ty' <- go env ty
-                                ; co' <- go_co env co
-                                ; return (mkCastTy ty' co') }
-    go env (CoercionTy co) = do { co' <- go_co env co
-                                ; return (mkCoercionTy co') }
-
-    go_co env (Refl r ty)               = do { ty' <- go env ty
-                                             ; return (mkReflCo r ty') }
-      -- Note: Coercions do not contain type synonyms
-    go_co env (TyConAppCo r tc args)    = do { args' <- mapM (go_co env) args
-                                             ; return (mkTyConAppCo r tc args') }
-    go_co env (AppCo co arg)            = do { co' <- go_co env co
-                                             ; arg' <- go_co env arg
-                                             ; return (mkAppCo co' arg') }
-    go_co env co@(ForAllCo tv' kind_co body_co)
-      | not impredicative = OC_Forall
-      | tv == tv'         = return co
-      | otherwise         = do { kind_co' <- go_co env kind_co
-                               ; let tv'' = setTyVarKind tv' $
-                                            pFst (coercionKind kind_co')
-                                     env' = extendVarEnv env tv' tv''
-                               ; body' <- go_co env' body_co
-                               ; return (ForAllCo tv'' kind_co' body') }
-    go_co env (CoVarCo c)               = do { k' <- go env (varType c)
-                                             ; return (mkCoVarCo (setVarType c k')) }
-    go_co env (AxiomInstCo ax ind args) = do { args' <- mapM (go_co env) args
-                                             ; return (mkAxiomInstCo ax ind args') }
-    go_co env (UnivCo p r ty1 ty2)      = do { p' <- go_prov env p
-                                             ; ty1' <- go env ty1
-                                             ; ty2' <- go env ty2
-                                             ; return (mkUnivCo p' r ty1' ty2') }
-    go_co env (SymCo co)                = do { co' <- go_co env co
-                                             ; return (mkSymCo co') }
-    go_co env (TransCo co1 co2)         = do { co1' <- go_co env co1
-                                             ; co2' <- go_co env co2
-                                             ; return (mkTransCo co1' co2') }
-    go_co env (NthCo n co)              = do { co' <- go_co env co
-                                             ; return (mkNthCo n co') }
-    go_co env (LRCo lr co)              = do { co' <- go_co env co
-                                             ; return (mkLRCo lr co') }
-    go_co env (InstCo co arg)           = do { co' <- go_co env co
-                                             ; arg' <- go_co env arg
-                                             ; return (mkInstCo co' arg') }
-    go_co env (CoherenceCo co1 co2)     = do { co1' <- go_co env co1
-                                             ; co2' <- go_co env co2
-                                             ; return (mkCoherenceCo co1' co2') }
-    go_co env (KindCo co)               = do { co' <- go_co env co
-                                             ; return (mkKindCo co') }
-    go_co env (SubCo co)                = do { co' <- go_co env co
-                                             ; return (mkSubCo co') }
-    go_co env (AxiomRuleCo ax cs)       = do { cs' <- mapM (go_co env) cs
-                                             ; return (mkAxiomRuleCo ax cs') }
-
-    go_prov _   UnsafeCoerceProv    = return UnsafeCoerceProv
-    go_prov env (PhantomProv co)    = PhantomProv <$> go_co env co
-    go_prov env (ProofIrrelProv co) = ProofIrrelProv <$> go_co env co
-    go_prov _   p@(PluginProv _)    = return p
-    go_prov _   p@(HoleProv _)      = return p
-
-canUnifyWithPolyType :: DynFlags -> TcTyVarDetails -> Bool
-canUnifyWithPolyType dflags details
-  = case details of
-      MetaTv { mtv_info = SigTv }    -> False
-      MetaTv { mtv_info = TauTv }    -> xopt LangExt.ImpredicativeTypes dflags
-      _other                         -> True
-          -- We can have non-meta tyvars in given constraints
-
-{- Note [Expanding superclasses]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-When we expand superclasses, we use the following algorithm:
-
-expand( so_far, pred ) returns the transitive superclasses of pred,
-                               not including pred itself
- 1. If pred is not a class constraint, return empty set
-       Otherwise pred = C ts
- 2. If C is in so_far, return empty set (breaks loops)
- 3. Find the immediate superclasses constraints of (C ts)
- 4. For each such sc_pred, return (sc_pred : expand( so_far+C, D ss )
-
-Notice that
-
- * With normal Haskell-98 classes, the loop-detector will never bite,
-   so we'll get all the superclasses.
-
- * Since there is only a finite number of distinct classes, expansion
-   must terminate.
-
- * The loop breaking is a bit conservative. Notably, a tuple class
-   could contain many times without threatening termination:
-      (Eq a, (Ord a, Ix a))
-   And this is try of any class that we can statically guarantee
-   as non-recursive (in some sense).  For now, we just make a special
-   case for tuples.  Somthing better would be cool.
-
-See also TcTyDecls.checkClassCycles.
-
-
-************************************************************************
+{- *********************************************************************
 *                                                                      *
-\subsection{Predicate types}
+                       Predicate types
 *                                                                      *
 ************************************************************************
 
@@ -1949,7 +1795,35 @@ isImprovementPred ty
       ClassPred cls _    -> classHasFds cls
       IrredPred {}       -> True -- Might have equalities after reduction?
 
-{-
+{- Note [Expanding superclasses]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When we expand superclasses, we use the following algorithm:
+
+expand( so_far, pred ) returns the transitive superclasses of pred,
+                               not including pred itself
+ 1. If pred is not a class constraint, return empty set
+       Otherwise pred = C ts
+ 2. If C is in so_far, return empty set (breaks loops)
+ 3. Find the immediate superclasses constraints of (C ts)
+ 4. For each such sc_pred, return (sc_pred : expand( so_far+C, D ss )
+
+Notice that
+
+ * With normal Haskell-98 classes, the loop-detector will never bite,
+   so we'll get all the superclasses.
+
+ * Since there is only a finite number of distinct classes, expansion
+   must terminate.
+
+ * The loop breaking is a bit conservative. Notably, a tuple class
+   could contain many times without threatening termination:
+      (Eq a, (Ord a, Ix a))
+   And this is try of any class that we can statically guarantee
+   as non-recursive (in some sense).  For now, we just make a special
+   case for tuples.  Something better would be cool.
+
+See also TcTyDecls.checkClassCycles.
+
 Note [Inheriting implicit parameters]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Consider this:
@@ -2125,7 +1999,7 @@ isRigidEqPred :: TcLevel -> PredTree -> Bool
 --   * Meta-tv SigTv on LHS, tyvar on right
 isRigidEqPred tc_lvl (EqPred NomEq ty1 _)
   | Just tv1 <- tcGetTyVar_maybe ty1
-  = ASSERT2( isTcTyVar tv1, ppr tv1 )
+  = ASSERT2( tcIsTcTyVar tv1, ppr tv1 )
     not (isMetaTyVar tv1) || isTouchableMetaTyVar tc_lvl tv1
 
   | otherwise  -- LHS is not a tyvar

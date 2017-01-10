@@ -58,7 +58,7 @@ module Lexer (
    getPState, extopt, withThisPackage,
    failLocMsgP, failSpanMsgP, srcParseFail,
    getMessages,
-   popContext, pushCurrentContext, setLastToken, setSrcLoc,
+   popContext, pushModuleContext, setLastToken, setSrcLoc,
    activeContext, nextIsEOF,
    getLexState, popLexState, pushLexState,
    extension, bangPatEnabled, datatypeContextsEnabled,
@@ -114,7 +114,7 @@ import DynFlags
 import SrcLoc
 import Module
 import BasicTypes     ( InlineSpec(..), RuleMatchInfo(..), FractionalLit(..),
-                        SourceText )
+                        SourceText(..) )
 
 -- compiler/parser
 import Ctype
@@ -285,13 +285,13 @@ $tab          { warnTab }
 
 -- after an 'if', a vertical bar starts a layout context for MultiWayIf
 <layout_if> {
-  \| / { notFollowedBySymbol }          { new_layout_context True ITvbar }
+  \| / { notFollowedBySymbol }          { new_layout_context True dontGenerateSemic ITvbar }
   ()                                    { pop }
 }
 
 -- do is treated in a subtly different way, see new_layout_context
-<layout>    ()                          { new_layout_context True  ITvocurly }
-<layout_do> ()                          { new_layout_context False ITvocurly }
+<layout>    ()                          { new_layout_context True  generateSemic ITvocurly }
+<layout_do> ()                          { new_layout_context False generateSemic ITvocurly }
 
 -- after a new layout context which was found to be to the left of the
 -- previous context, we have generated a '{' token, and we now need to
@@ -612,6 +612,14 @@ data Token
   | ITusing
   | ITpattern
   | ITstatic
+  | ITstock
+  | ITanyclass
+
+  -- Backpack tokens
+  | ITunit
+  | ITsignature
+  | ITdependency
+  | ITrequires
 
   -- Pragmas, see  note [Pragma source text] in BasicTypes
   | ITinline_prag       SourceText InlineSpec RuleMatchInfo
@@ -803,6 +811,8 @@ reservedWordsFM = listToUFM $
          ( "role",           ITrole,          0 ),
          ( "pattern",        ITpattern,       xbit PatternSynonymsBit),
          ( "static",         ITstatic,        0 ),
+         ( "stock",          ITstock,         0 ),
+         ( "anyclass",       ITanyclass,      0 ),
          ( "group",          ITgroup,         xbit TransformComprehensionsBit),
          ( "by",             ITby,            xbit TransformComprehensionsBit),
          ( "using",          ITusing,         xbit TransformComprehensionsBit),
@@ -820,6 +830,10 @@ reservedWordsFM = listToUFM $
          ( "capi",           ITcapiconv,      xbit CApiFfiBit),
          ( "prim",           ITprimcallconv,  xbit FfiBit),
          ( "javascript",     ITjavascriptcallconv, xbit FfiBit),
+
+         ( "unit",           ITunit,          0 ),
+         ( "dependency",     ITdependency,       0 ),
+         ( "signature",      ITsignature,     0 ),
 
          ( "rec",            ITrec,           xbit ArrowsBit .|.
                                               xbit RecursiveDoBit),
@@ -937,8 +951,8 @@ hopefully_open_brace span buf len
       let offset = srcLocCol l
           isOK = relaxed ||
                  case ctx of
-                 Layout prev_off : _ -> prev_off < offset
-                 _                   -> True
+                 Layout prev_off _ : _ -> prev_off < offset
+                 _                     -> True
       if isOK then pop_and open_brace span buf len
               else failSpanMsgP (RealSrcSpan span) (text "Missing block")
 
@@ -1112,7 +1126,7 @@ rulePrag :: Action
 rulePrag span buf len = do
   setExts (.|. xbit InRulePragBit)
   let !src = lexemeToString buf len
-  return (L span (ITrules_prag src))
+  return (L span (ITrules_prag (SourceText src)))
 
 endPrag :: Action
 endPrag span _buf _len = do
@@ -1246,13 +1260,13 @@ sym con span buf len =
     !fs = lexemeToFastString buf len
 
 -- Variations on the integral numeric literal.
-tok_integral :: (String -> Integer -> Token)
+tok_integral :: (SourceText -> Integer -> Token)
              -> (Integer -> Integer)
              -> Int -> Int
              -> (Integer, (Char -> Int))
              -> Action
 tok_integral itint transint transbuf translen (radix,char_to_int) span buf len
- = return $ L span $ itint (lexemeToString buf len)
+ = return $ L span $ itint (SourceText $ lexemeToString buf len)
        $! transint $ parseUnsignedInteger
        (offsetBytes transbuf buf) (subtract translen len) radix char_to_int
 
@@ -1292,18 +1306,18 @@ readFractionalLit str = (FL $! str) $! readRational str
 -- we're at the first token on a line, insert layout tokens if necessary
 do_bol :: Action
 do_bol span _str _len = do
-        pos <- getOffside
+        (pos, gen_semic) <- getOffside
         case pos of
             LT -> do
                 --trace "layout: inserting '}'" $ do
                 popContext
                 -- do NOT pop the lex state, we might have a ';' to insert
                 return (L span ITvccurly)
-            EQ -> do
+            EQ | gen_semic -> do
                 --trace "layout: inserting ';'" $ do
                 _ <- popLexState
                 return (L span ITsemi)
-            GT -> do
+            _ -> do
                 _ <- popLexState
                 lexToken
 
@@ -1337,9 +1351,8 @@ maybe_layout t = do -- If the alternative layout rule is enabled then
 -- We are slightly more lenient than this: when the new context is started
 -- by a 'do', then we allow the new context to be at the same indentation as
 -- the previous context.  This is what the 'strict' argument is for.
---
-new_layout_context :: Bool -> Token -> Action
-new_layout_context strict tok span _buf len = do
+new_layout_context :: Bool -> Bool -> Token -> Action
+new_layout_context strict gen_semic tok span _buf len = do
     _ <- popLexState
     (AI l _) <- getInput
     let offset = srcLocCol l - len
@@ -1347,15 +1360,14 @@ new_layout_context strict tok span _buf len = do
     nondecreasing <- extension nondecreasingIndentation
     let strict' = strict || not nondecreasing
     case ctx of
-        Layout prev_off : _  |
+        Layout prev_off _ : _  |
            (strict'     && prev_off >= offset  ||
             not strict' && prev_off > offset) -> do
                 -- token is indented to the left of the previous context.
                 -- we must generate a {} sequence now.
                 pushLexState layout_left
                 return (L span tok)
-        _ -> do
-                setContext (Layout offset : ctx)
+        _ -> do setContext (Layout offset gen_semic : ctx)
                 return (L span tok)
 
 do_layout_left :: Action
@@ -1440,8 +1452,8 @@ lex_string_tok span buf _len = do
   (AI end bufEnd) <- getInput
   let
     tok' = case tok of
-            ITprimstring _ bs -> ITprimstring src bs
-            ITstring _ s -> ITstring src s
+            ITprimstring _ bs -> ITprimstring (SourceText src) bs
+            ITstring _ s -> ITstring (SourceText src) s
             _ -> panic "lex_string_tok"
     src = lexemeToString buf (cur bufEnd - cur buf)
   return (L (mkRealSrcSpan (realSrcSpanStart span) end) tok')
@@ -1464,11 +1476,13 @@ lex_string s = do
                    if any (> '\xFF') s
                     then failMsgP "primitive string literal must contain only characters <= \'\\xFF\'"
                     else let bs = unsafeMkByteString (reverse s)
-                         in return (ITprimstring "" bs)
+                         in return (ITprimstring (SourceText (reverse s)) bs)
               _other ->
-                return (ITstring "" (mkFastString (reverse s)))
+                return (ITstring (SourceText (reverse s))
+                                 (mkFastString (reverse s)))
           else
-                return (ITstring "" (mkFastString (reverse s)))
+                return (ITstring (SourceText (reverse s))
+                                 (mkFastString (reverse s)))
 
     Just ('\\',i)
         | Just ('&',i) <- next -> do
@@ -1543,14 +1557,16 @@ finish_char_tok buf loc ch  -- We've already seen the closing quote
         i@(AI end bufEnd) <- getInput
         let src = lexemeToString buf (cur bufEnd - cur buf)
         if magicHash then do
-                case alexGetChar' i of
-                        Just ('#',i@(AI end _)) -> do
-                          setInput i
-                          return (L (mkRealSrcSpan loc end) (ITprimchar src ch))
-                        _other ->
-                          return (L (mkRealSrcSpan loc end) (ITchar src ch))
+            case alexGetChar' i of
+              Just ('#',i@(AI end _)) -> do
+                setInput i
+                return (L (mkRealSrcSpan loc end)
+                          (ITprimchar (SourceText src) ch))
+              _other ->
+                return (L (mkRealSrcSpan loc end)
+                          (ITchar (SourceText src) ch))
             else do
-                   return (L (mkRealSrcSpan loc end) (ITchar src ch))
+              return (L (mkRealSrcSpan loc end) (ITchar (SourceText src) ch))
 
 isAny :: Char -> Bool
 isAny c | c > '\x7f' = isPrint c
@@ -1740,9 +1756,19 @@ warnThen option warning action srcspan buf len = do
 -- -----------------------------------------------------------------------------
 -- The Parse Monad
 
+-- | Do we want to generate ';' layout tokens? In some cases we just want to
+-- generate '}', e.g. in MultiWayIf we don't need ';'s because '|' separates
+-- alternatives (unlike a `case` expression where we need ';' to as a separator
+-- between alternatives).
+type GenSemic = Bool
+
+generateSemic, dontGenerateSemic :: GenSemic
+generateSemic     = True
+dontGenerateSemic = False
+
 data LayoutContext
   = NoLayout
-  | Layout !Int
+  | Layout !Int !GenSemic
   deriving Show
 
 data ParseResult a
@@ -2327,19 +2353,24 @@ popContext = P $ \ s@(PState{ buffer = buf, options = o, context = ctx,
         []     -> PFailed (RealSrcSpan last_loc) (srcParseErr o buf len)
 
 -- Push a new layout context at the indentation of the last token read.
--- This is only used at the outer level of a module when the 'module'
--- keyword is missing.
-pushCurrentContext :: P ()
-pushCurrentContext = P $ \ s@PState{ last_loc=loc, context=ctx } ->
-    POk s{context = Layout (srcSpanStartCol loc) : ctx} ()
+pushCurrentContext :: GenSemic -> P ()
+pushCurrentContext gen_semic = P $ \ s@PState{ last_loc=loc, context=ctx } ->
+    POk s{context = Layout (srcSpanStartCol loc) gen_semic : ctx} ()
 
-getOffside :: P Ordering
+-- This is only used at the outer level of a module when the 'module' keyword is
+-- missing.
+pushModuleContext :: P ()
+pushModuleContext = pushCurrentContext generateSemic
+
+getOffside :: P (Ordering, Bool)
 getOffside = P $ \s@PState{last_loc=loc, context=stk} ->
                 let offs = srcSpanStartCol loc in
                 let ord = case stk of
-                        (Layout n:_) -> --trace ("layout: " ++ show n ++ ", offs: " ++ show offs) $
-                                        compare offs n
-                        _            -> GT
+                            Layout n gen_semic : _ ->
+                              --trace ("layout: " ++ show n ++ ", offs: " ++ show offs) $
+                              (compare offs n, gen_semic)
+                            _ ->
+                              (GT, dontGenerateSemic)
                 in POk s ord
 
 -- ---------------------------------------------------------------------------
@@ -2686,37 +2717,46 @@ ignoredPrags = Map.fromList (map ignored pragmas)
                      pragmas = options_pragmas ++ ["cfiles", "contract"]
 
 oneWordPrags = Map.fromList([
-           ("rules", rulePrag),
-           ("inline", strtoken (\s -> (ITinline_prag s Inline FunLike))),
-           ("inlinable", strtoken (\s -> (ITinline_prag s Inlinable FunLike))),
-           ("inlineable", strtoken (\s -> (ITinline_prag s Inlinable FunLike))),
-                                          -- Spelling variant
-           ("notinline", strtoken (\s -> (ITinline_prag s NoInline FunLike))),
-           ("specialize", strtoken (\s -> ITspec_prag s)),
-           ("source", strtoken (\s -> ITsource_prag s)),
-           ("warning", strtoken (\s -> ITwarning_prag s)),
-           ("deprecated", strtoken (\s -> ITdeprecated_prag s)),
-           ("scc", strtoken (\s -> ITscc_prag s)),
-           ("generated", strtoken (\s -> ITgenerated_prag s)),
-           ("core", strtoken (\s -> ITcore_prag s)),
-           ("unpack", strtoken (\s -> ITunpack_prag s)),
-           ("nounpack", strtoken (\s -> ITnounpack_prag s)),
-           ("ann", strtoken (\s -> ITann_prag s)),
-           ("vectorize", strtoken (\s -> ITvect_prag s)),
-           ("novectorize", strtoken (\s -> ITnovect_prag s)),
-           ("minimal", strtoken (\s -> ITminimal_prag s)),
-           ("overlaps", strtoken (\s -> IToverlaps_prag s)),
-           ("overlappable", strtoken (\s -> IToverlappable_prag s)),
-           ("overlapping", strtoken (\s -> IToverlapping_prag s)),
-           ("incoherent", strtoken (\s -> ITincoherent_prag s)),
-           ("ctype", strtoken (\s -> ITctype s))])
+     ("rules", rulePrag),
+     ("inline",
+         strtoken (\s -> (ITinline_prag (SourceText s) Inline FunLike))),
+     ("inlinable",
+         strtoken (\s -> (ITinline_prag (SourceText s) Inlinable FunLike))),
+     ("inlineable",
+         strtoken (\s -> (ITinline_prag (SourceText s) Inlinable FunLike))),
+                                    -- Spelling variant
+     ("notinline",
+         strtoken (\s -> (ITinline_prag (SourceText s) NoInline FunLike))),
+     ("specialize", strtoken (\s -> ITspec_prag (SourceText s))),
+     ("source", strtoken (\s -> ITsource_prag (SourceText s))),
+     ("warning", strtoken (\s -> ITwarning_prag (SourceText s))),
+     ("deprecated", strtoken (\s -> ITdeprecated_prag (SourceText s))),
+     ("scc", strtoken (\s -> ITscc_prag (SourceText s))),
+     ("generated", strtoken (\s -> ITgenerated_prag (SourceText s))),
+     ("core", strtoken (\s -> ITcore_prag (SourceText s))),
+     ("unpack", strtoken (\s -> ITunpack_prag (SourceText s))),
+     ("nounpack", strtoken (\s -> ITnounpack_prag (SourceText s))),
+     ("ann", strtoken (\s -> ITann_prag (SourceText s))),
+     ("vectorize", strtoken (\s -> ITvect_prag (SourceText s))),
+     ("novectorize", strtoken (\s -> ITnovect_prag (SourceText s))),
+     ("minimal", strtoken (\s -> ITminimal_prag (SourceText s))),
+     ("overlaps", strtoken (\s -> IToverlaps_prag (SourceText s))),
+     ("overlappable", strtoken (\s -> IToverlappable_prag (SourceText s))),
+     ("overlapping", strtoken (\s -> IToverlapping_prag (SourceText s))),
+     ("incoherent", strtoken (\s -> ITincoherent_prag (SourceText s))),
+     ("ctype", strtoken (\s -> ITctype (SourceText s)))])
 
 twoWordPrags = Map.fromList([
-     ("inline conlike", strtoken (\s -> (ITinline_prag s Inline ConLike))),
-     ("notinline conlike", strtoken (\s -> (ITinline_prag s NoInline ConLike))),
-     ("specialize inline", strtoken (\s -> (ITspec_inline_prag s True))),
-     ("specialize notinline", strtoken (\s -> (ITspec_inline_prag s False))),
-     ("vectorize scalar", strtoken (\s -> ITvect_scalar_prag s))])
+     ("inline conlike",
+         strtoken (\s -> (ITinline_prag (SourceText s) Inline ConLike))),
+     ("notinline conlike",
+         strtoken (\s -> (ITinline_prag (SourceText s) NoInline ConLike))),
+     ("specialize inline",
+         strtoken (\s -> (ITspec_inline_prag (SourceText s) True))),
+     ("specialize notinline",
+         strtoken (\s -> (ITspec_inline_prag (SourceText s) False))),
+     ("vectorize scalar",
+         strtoken (\s -> ITvect_scalar_prag (SourceText s)))])
 
 dispatch_pragmas :: Map String Action -> Action
 dispatch_pragmas prags span buf len = case Map.lookup (clean_pragma (lexemeToString buf len)) prags of
@@ -2757,6 +2797,21 @@ clean_pragma prag = canon_ws (map toLower (unprefix prag))
 -- | Encapsulated call to addAnnotation, requiring only the SrcSpan of
 --   the AST construct the annotation belongs to; together with the
 --   AnnKeywordId, this is is the key of the annotation map
+--
+--   This type is useful for places in the parser where it is not yet
+--   known what SrcSpan an annotation should be added to.  The most
+--   common situation is when we are parsing a list: the annotations
+--   need to be associated with the AST element that *contains* the
+--   list, not the list itself.  'AddAnn' lets us defer adding the
+--   annotations until we finish parsing the list and are now parsing
+--   the enclosing element; we then apply the 'AddAnn' to associate
+--   the annotations.  Another common situation is where a common fragment of
+--   the AST has been factored out but there is no separate AST node for
+--   this fragment (this occurs in class and data declarations). In this
+--   case, the annotation belongs to the parent data declaration.
+--
+--   The usual way an 'AddAnn' is created is using the 'mj' ("make jump")
+--   function, and then it can be discharged using the 'ams' function.
 type AddAnn = SrcSpan -> P ()
 
 addAnnotation :: SrcSpan          -- SrcSpan of enclosing AST construct

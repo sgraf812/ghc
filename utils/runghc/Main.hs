@@ -24,11 +24,13 @@ import System.Environment
 import System.Exit
 import System.FilePath
 import System.IO
-import System.Process
 
 #if defined(mingw32_HOST_OS)
+import System.Process (rawSystem)
 import Foreign
 import Foreign.C.String
+#else
+import System.Posix.Process (executeFile)
 #endif
 
 #if defined(mingw32_HOST_OS)
@@ -107,6 +109,7 @@ printUsage = do
     putStrLn ""
     putStrLn "The runghc flags are"
     putStrLn "    -f /path/to/ghc       Tell runghc where GHC is"
+    putStrLn "    --ghc-arg=<arg>       Pass an option or argument to GHC"
     putStrLn "    --help                Print this usage information"
     putStrLn "    --version             Print version number"
 
@@ -140,11 +143,21 @@ doIt ghc ghc_args rest = do
                         else []
                 c1 = ":set prog " ++ show filename
                 c2 = ":main " ++ show prog_args
-            res <- rawSystem ghc (["-ignore-dot-ghci"] ++
-                                  xflag ++
-                                  ghc_args ++
-                                  [ "-e", c1, "-e", c2, filename])
-            exitWith res
+
+            let cmd = ghc
+                args = ["-ignore-dot-ghci"] ++
+                       xflag ++
+                       ghc_args ++
+                       [ "-e", c1, "-e", c2, filename]
+
+
+#if defined(mingw32_HOST_OS)
+            rawSystem cmd args >>= exitWith
+#else
+            -- Passing False to avoid searching the PATH, since the cmd should
+            -- always be an absolute path to the ghc executable.
+            executeFile cmd False args Nothing
+#endif
 
 getGhcArgs :: [String] -> ([String], [String])
 getGhcArgs args

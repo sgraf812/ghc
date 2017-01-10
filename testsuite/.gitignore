@@ -102,6 +102,10 @@ mk/ghcconfig*_test___spaces_ghc*.exe.mk
 /tests/arrows/should_run/arrowrun002
 /tests/arrows/should_run/arrowrun003
 /tests/arrows/should_run/arrowrun004
+/tests/backpack/should_run/bkprun01
+/tests/backpack/should_run/bkprun02
+/tests/backpack/should_run/bkprun03
+/tests/backpack/should_run/bkprun04
 /tests/boxy/T2193
 /tests/cabal/1750.hs
 /tests/cabal/1750.out
@@ -790,6 +794,7 @@ mk/ghcconfig*_test___spaces_ghc*.exe.mk
 /tests/ghci/scripts/ghci027.hs
 /tests/ghci/should_run/3171.err
 /tests/hsc2hs/3837.hs
+/tests/hsc2hs/T12504/path/to/T12504.hs
 /tests/hsc2hs/T3837.hs
 /tests/hsc2hs/hsc2hs001.hs
 /tests/hsc2hs/hsc2hs002.hs

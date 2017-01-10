@@ -1,5 +1,5 @@
 name:           template-haskell
-version:        2.11.0.0
+version:        2.12.0.0
 -- NOTE: Don't forget to update ./changelog.md
 license:        BSD3
 license-file:   LICENSE
@@ -49,7 +49,7 @@ Library
         Language.Haskell.TH.Lib.Map
 
     build-depends:
-        base        >= 4.8 && < 4.10,
+        base        >= 4.8 && < 4.11,
         ghc-boot-th == 8.1,
         pretty      == 1.1.*
 

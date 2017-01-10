@@ -4,11 +4,8 @@
 {- BlockId module should probably go away completely, being superseded by Label -}
 module BlockId
   ( BlockId, mkBlockId -- ToDo: BlockId should be abstract, but it isn't yet
-  , BlockSet, BlockEnv
-  , IsSet(..), setInsertList, setDeleteList, setUnions
-  , IsMap(..), mapInsertList, mapDeleteList, mapUnions
-  , emptyBlockSet, emptyBlockMap, lookupBlockMap, insertBlockMap
-  , blockLbl, infoTblLbl, retPtLbl
+  , newBlockId
+  , blockLbl, infoTblLbl
   ) where
 
 import CLabel
@@ -16,6 +13,7 @@ import IdInfo
 import Name
 import Outputable
 import Unique
+import UniqSupply
 
 import Compiler.Hoopl as Hoopl hiding (Unique)
 import Compiler.Hoopl.Internals (uniqueToLbl, lblToUnique)
@@ -43,35 +41,11 @@ instance Outputable BlockId where
 mkBlockId :: Unique -> BlockId
 mkBlockId unique = uniqueToLbl $ intToUnique $ getKey unique
 
-retPtLbl :: BlockId -> CLabel
-retPtLbl label = mkReturnPtLabel $ getUnique label
+newBlockId :: MonadUnique m => m BlockId
+newBlockId = mkBlockId <$> getUniqueM
 
 blockLbl :: BlockId -> CLabel
 blockLbl label = mkEntryLabel (mkFCallName (getUnique label) "block") NoCafRefs
 
 infoTblLbl :: BlockId -> CLabel
 infoTblLbl label = mkInfoTableLabel (mkFCallName (getUnique label) "block") NoCafRefs
-
--- Block environments: Id blocks
-type BlockEnv a = Hoopl.LabelMap a
-
-instance Outputable a => Outputable (BlockEnv a) where
-  ppr = ppr . mapToList
-
-emptyBlockMap :: BlockEnv a
-emptyBlockMap = mapEmpty
-
-lookupBlockMap :: BlockId -> BlockEnv a -> Maybe a
-lookupBlockMap = mapLookup
-
-insertBlockMap :: BlockId -> a -> BlockEnv a -> BlockEnv a
-insertBlockMap = mapInsert
-
--- Block sets
-type BlockSet = Hoopl.LabelSet
-
-instance Outputable BlockSet where
-  ppr = ppr . setElems
-
-emptyBlockSet :: BlockSet
-emptyBlockSet = setEmpty

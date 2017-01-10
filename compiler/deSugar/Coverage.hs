@@ -7,12 +7,14 @@
 
 module Coverage (addTicksToBinds, hpcInitCode) where
 
-#ifdef GHCI
 import qualified GHCi
 import GHCi.RemoteTypes
 import Data.Array
 import ByteCodeTypes
+#if MIN_VERSION_base(4,9,0)
 import GHC.Stack.CCS
+#else
+import GHC.Stack as GHC.Stack.CCS
 #endif
 import Type
 import HsSyn
@@ -129,9 +131,6 @@ guessSourceFile binds orig_file =
 
 
 mkModBreaks :: HscEnv -> Module -> Int -> [MixEntry_] -> IO ModBreaks
-#ifndef GHCI
-mkModBreaks _hsc_env _mod _count _entries = return emptyModBreaks
-#else
 mkModBreaks hsc_env mod count entries
   | HscInterpreted <- hscTarget (hsc_dflags hsc_env) = do
     breakArray <- GHCi.newBreakArray hsc_env (length entries)
@@ -165,7 +164,6 @@ mkCCSArray hsc_env modul count entries = do
     mk_one (srcspan, decl_path, _, _) = (name, src)
       where name = concat (intersperse "." decl_path)
             src = showSDoc dflags (ppr srcspan)
-#endif
 
 
 writeMixEntries
@@ -888,9 +886,10 @@ addTickHsCmd (HsCmdArrApp   e1 e2 ty1 arr_ty lr) =
                (return ty1)
                (return arr_ty)
                (return lr)
-addTickHsCmd (HsCmdArrForm e fix cmdtop) =
-        liftM3 HsCmdArrForm
+addTickHsCmd (HsCmdArrForm e f fix cmdtop) =
+        liftM4 HsCmdArrForm
                (addTickLHsExpr e)
+               (return f)
                (return fix)
                (mapM (liftL (addTickHsCmdTop)) cmdtop)
 

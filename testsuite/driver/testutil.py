@@ -1,7 +1,10 @@
 import errno
 import os
+import platform
 import subprocess
 import shutil
+
+import threading
 
 def strip_quotes(s):
     # Don't wrap commands to subprocess.call/Popen in quotes.
@@ -44,9 +47,36 @@ def lndir(srcdir, dstdir):
             os.mkdir(dst)
             lndir(src, dst)
 
-# On Windows, os.symlink is not defined. Except when using msys2, as ghc
-# does. Then it copies the source file, instead of creating a symbolic
-# link to it. We define the following function to make this magic more
-# explicit/discoverable. You are enouraged to use it instead of
-# os.symlink.
-link_or_copy_file = getattr(os, "symlink", shutil.copyfile)
+# On Windows, os.symlink is not defined with Python 2.7, but is in Python 3
+# when using msys2, as GHC does. Unfortunately, only Administrative users have
+# the privileges necessary to create symbolic links by default. Consequently we
+# are forced to just copy instead.
+#
+# We define the following function to make this magic more
+# explicit/discoverable. You are enouraged to use it instead of os.symlink.
+if platform.system() == 'Windows':
+    link_or_copy_file = shutil.copyfile
+else:
+    link_or_copy_file = os.symlink
+
+class Watcher(object):
+    global pool
+    global evt
+    global sync_lock
+    
+    def __init__(self, count):
+        self.pool = count
+        self.evt = threading.Event()
+        self.sync_lock = threading.Lock()
+        if count <= 0:
+            self.evt.set()
+
+    def wait(self):
+        self.evt.wait()
+
+    def notify(self):
+        self.sync_lock.acquire()
+        self.pool -= 1
+        if self.pool <= 0:
+            self.evt.set()
+        self.sync_lock.release()

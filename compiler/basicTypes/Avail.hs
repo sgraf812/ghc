@@ -1,20 +1,28 @@
+{-# LANGUAGE CPP #-}
 --
 -- (c) The University of Glasgow
 --
 
+#include "HsVersions.h"
+
 module Avail (
     Avails,
     AvailInfo(..),
-    IsPatSyn(..),
     avail,
-    patSynAvail,
     availsToNameSet,
     availsToNameSetWithSelectors,
     availsToNameEnv,
     availName, availNames, availNonFldNames,
     availNamesWithSelectors,
     availFlds,
-    stableAvailCmp
+    stableAvailCmp,
+    plusAvail,
+    trimAvail,
+    filterAvail,
+    filterAvails,
+    nubAvails
+
+
   ) where
 
 import Name
@@ -23,16 +31,18 @@ import NameSet
 
 import FieldLabel
 import Binary
+import ListSetOps
 import Outputable
 import Util
 
+import Data.List ( find )
 import Data.Function
 
 -- -----------------------------------------------------------------------------
 -- The AvailInfo type
 
 -- | Records what things are "available", i.e. in scope
-data AvailInfo = Avail IsPatSyn Name      -- ^ An ordinary identifier in scope
+data AvailInfo = Avail Name      -- ^ An ordinary identifier in scope
                | AvailTC Name
                          [Name]
                          [FieldLabel]
@@ -52,8 +62,6 @@ data AvailInfo = Avail IsPatSyn Name      -- ^ An ordinary identifier in scope
                 deriving( Eq )
                         -- Equality used when deciding if the
                         -- interface has changed
-
-data IsPatSyn = NotPatSyn | IsPatSyn deriving Eq
 
 -- | A collection of 'AvailInfo' - several things that are \"available\"
 type Avails = [AvailInfo]
@@ -108,7 +116,7 @@ modules.
 
 -- | Compare lexicographically
 stableAvailCmp :: AvailInfo -> AvailInfo -> Ordering
-stableAvailCmp (Avail _ n1)       (Avail _ n2)   = n1 `stableNameCmp` n2
+stableAvailCmp (Avail n1)       (Avail n2)   = n1 `stableNameCmp` n2
 stableAvailCmp (Avail {})         (AvailTC {})   = LT
 stableAvailCmp (AvailTC n ns nfs) (AvailTC m ms mfs) =
     (n `stableNameCmp` m) `thenCmp`
@@ -116,11 +124,8 @@ stableAvailCmp (AvailTC n ns nfs) (AvailTC m ms mfs) =
     (cmpList (stableNameCmp `on` flSelector) nfs mfs)
 stableAvailCmp (AvailTC {})       (Avail {})     = GT
 
-patSynAvail :: Name -> AvailInfo
-patSynAvail n = Avail IsPatSyn n
-
 avail :: Name -> AvailInfo
-avail n = Avail NotPatSyn n
+avail n = Avail n
 
 -- -----------------------------------------------------------------------------
 -- Operations on AvailInfo
@@ -141,28 +146,88 @@ availsToNameEnv avails = foldr add emptyNameEnv avails
 -- | Just the main name made available, i.e. not the available pieces
 -- of type or class brought into scope by the 'GenAvailInfo'
 availName :: AvailInfo -> Name
-availName (Avail _ n)     = n
+availName (Avail n)     = n
 availName (AvailTC n _ _) = n
 
 -- | All names made available by the availability information (excluding overloaded selectors)
 availNames :: AvailInfo -> [Name]
-availNames (Avail _ n)         = [n]
+availNames (Avail n)         = [n]
 availNames (AvailTC _ ns fs) = ns ++ [ flSelector f | f <- fs, not (flIsOverloaded f) ]
 
 -- | All names made available by the availability information (including overloaded selectors)
 availNamesWithSelectors :: AvailInfo -> [Name]
-availNamesWithSelectors (Avail _ n)         = [n]
+availNamesWithSelectors (Avail n)         = [n]
 availNamesWithSelectors (AvailTC _ ns fs) = ns ++ map flSelector fs
 
 -- | Names for non-fields made available by the availability information
 availNonFldNames :: AvailInfo -> [Name]
-availNonFldNames (Avail _ n)        = [n]
+availNonFldNames (Avail n)        = [n]
 availNonFldNames (AvailTC _ ns _) = ns
 
 -- | Fields made available by the availability information
 availFlds :: AvailInfo -> [FieldLabel]
 availFlds (AvailTC _ _ fs) = fs
 availFlds _                = []
+
+
+-- -----------------------------------------------------------------------------
+-- Utility
+
+plusAvail :: AvailInfo -> AvailInfo -> AvailInfo
+plusAvail a1 a2
+  | debugIsOn && availName a1 /= availName a2
+  = pprPanic "RnEnv.plusAvail names differ" (hsep [ppr a1,ppr a2])
+plusAvail a1@(Avail {})         (Avail {})        = a1
+plusAvail (AvailTC _ [] [])     a2@(AvailTC {})   = a2
+plusAvail a1@(AvailTC {})       (AvailTC _ [] []) = a1
+plusAvail (AvailTC n1 (s1:ss1) fs1) (AvailTC n2 (s2:ss2) fs2)
+  = case (n1==s1, n2==s2) of  -- Maintain invariant the parent is first
+       (True,True)   -> AvailTC n1 (s1 : (ss1 `unionLists` ss2))
+                                   (fs1 `unionLists` fs2)
+       (True,False)  -> AvailTC n1 (s1 : (ss1 `unionLists` (s2:ss2)))
+                                   (fs1 `unionLists` fs2)
+       (False,True)  -> AvailTC n1 (s2 : ((s1:ss1) `unionLists` ss2))
+                                   (fs1 `unionLists` fs2)
+       (False,False) -> AvailTC n1 ((s1:ss1) `unionLists` (s2:ss2))
+                                   (fs1 `unionLists` fs2)
+plusAvail (AvailTC n1 ss1 fs1) (AvailTC _ [] fs2)
+  = AvailTC n1 ss1 (fs1 `unionLists` fs2)
+plusAvail (AvailTC n1 [] fs1)  (AvailTC _ ss2 fs2)
+  = AvailTC n1 ss2 (fs1 `unionLists` fs2)
+plusAvail a1 a2 = pprPanic "RnEnv.plusAvail" (hsep [ppr a1,ppr a2])
+
+-- | trims an 'AvailInfo' to keep only a single name
+trimAvail :: AvailInfo -> Name -> AvailInfo
+trimAvail (Avail n)         _ = Avail n
+trimAvail (AvailTC n ns fs) m = case find ((== m) . flSelector) fs of
+    Just x  -> AvailTC n [] [x]
+    Nothing -> ASSERT( m `elem` ns ) AvailTC n [m] []
+
+-- | filters 'AvailInfo's by the given predicate
+filterAvails  :: (Name -> Bool) -> [AvailInfo] -> [AvailInfo]
+filterAvails keep avails = foldr (filterAvail keep) [] avails
+
+-- | filters an 'AvailInfo' by the given predicate
+filterAvail :: (Name -> Bool) -> AvailInfo -> [AvailInfo] -> [AvailInfo]
+filterAvail keep ie rest =
+  case ie of
+    Avail n | keep n    -> ie : rest
+            | otherwise -> rest
+    AvailTC tc ns fs ->
+        let ns' = filter keep ns
+            fs' = filter (keep . flSelector) fs in
+        if null ns' && null fs' then rest else AvailTC tc ns' fs' : rest
+
+
+-- | Combines 'AvailInfo's from the same family
+-- 'avails' may have several items with the same availName
+-- E.g  import Ix( Ix(..), index )
+-- will give Ix(Ix,index,range) and Ix(index)
+-- We want to combine these; addAvail does that
+nubAvails :: [AvailInfo] -> [AvailInfo]
+nubAvails avails = nameEnvElts (foldl add emptyNameEnv avails)
+  where
+    add env avail = extendNameEnv_C plusAvail env (availName avail) avail
 
 -- -----------------------------------------------------------------------------
 -- Printing
@@ -171,17 +236,16 @@ instance Outputable AvailInfo where
    ppr = pprAvail
 
 pprAvail :: AvailInfo -> SDoc
-pprAvail (Avail _ n)
+pprAvail (Avail n)
   = ppr n
 pprAvail (AvailTC n ns fs)
   = ppr n <> braces (sep [ fsep (punctuate comma (map ppr ns)) <> semi
                          , fsep (punctuate comma (map (ppr . flLabel) fs))])
 
 instance Binary AvailInfo where
-    put_ bh (Avail b aa) = do
+    put_ bh (Avail aa) = do
             putByte bh 0
             put_ bh aa
-            put_ bh b
     put_ bh (AvailTC ab ac ad) = do
             putByte bh 1
             put_ bh ab
@@ -191,18 +255,8 @@ instance Binary AvailInfo where
             h <- getByte bh
             case h of
               0 -> do aa <- get bh
-                      b  <- get bh
-                      return (Avail b aa)
+                      return (Avail aa)
               _ -> do ab <- get bh
                       ac <- get bh
                       ad <- get bh
                       return (AvailTC ab ac ad)
-
-instance Binary IsPatSyn where
-  put_ bh IsPatSyn = putByte bh 0
-  put_ bh NotPatSyn = putByte bh 1
-  get bh = do
-    h <- getByte bh
-    case h of
-      0 -> return IsPatSyn
-      _ -> return NotPatSyn

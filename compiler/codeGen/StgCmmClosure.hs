@@ -18,6 +18,9 @@ module StgCmmClosure (
         idPrimRep, isVoidRep, isGcPtrRep, addIdReps, addArgReps,
         argPrimRep,
 
+        NonVoid(..), fromNonVoid, nonVoidIds, nonVoidStgArgs,
+        assertNonVoidIds, assertNonVoidStgArgs,
+
         -- * LambdaFormInfo
         LambdaFormInfo,         -- Abstract
         StandardFormInfo,        -- ...ditto...
@@ -84,6 +87,8 @@ import Outputable
 import DynFlags
 import Util
 
+import Data.Coerce (coerce)
+
 -----------------------------------------------------------------------------
 --                Data types and synonyms
 -----------------------------------------------------------------------------
@@ -115,6 +120,42 @@ isKnownFun LFLetNoEscape = True
 isKnownFun _             = False
 
 
+-------------------------------------
+--        Non-void types
+-------------------------------------
+-- We frequently need the invariant that an Id or a an argument
+-- is of a non-void type. This type is a witness to the invariant.
+
+newtype NonVoid a = NonVoid a
+  deriving (Eq, Show)
+
+fromNonVoid :: NonVoid a -> a
+fromNonVoid (NonVoid a) = a
+
+instance (Outputable a) => Outputable (NonVoid a) where
+  ppr (NonVoid a) = ppr a
+
+nonVoidIds :: [Id] -> [NonVoid Id]
+nonVoidIds ids = [NonVoid id | id <- ids, not (isVoidTy (idType id))]
+
+-- | Used in places where some invariant ensures that all these Ids are
+-- non-void; e.g. constructor field binders in case expressions.
+-- See Note [Post-unarisation invariants] in UnariseStg.
+assertNonVoidIds :: [Id] -> [NonVoid Id]
+assertNonVoidIds ids = ASSERT(not (any (isVoidTy . idType) ids))
+                       coerce ids
+
+nonVoidStgArgs :: [StgArg] -> [NonVoid StgArg]
+nonVoidStgArgs args = [NonVoid arg | arg <- args, not (isVoidTy (stgArgType arg))]
+
+-- | Used in places where some invariant ensures that all these arguments are
+-- non-void; e.g. constructor arguments.
+-- See Note [Post-unarisation invariants] in UnariseStg.
+assertNonVoidStgArgs :: [StgArg] -> [NonVoid StgArg]
+assertNonVoidStgArgs args = ASSERT(not (any (isVoidTy . stgArgType) args))
+                            coerce args
+
+
 -----------------------------------------------------------------------------
 --                Representations
 -----------------------------------------------------------------------------
@@ -126,11 +167,13 @@ idPrimRep id = typePrimRep (idType id)
     -- NB: typePrimRep fails on unboxed tuples,
     --     but by StgCmm no Ids have unboxed tuple type
 
-addIdReps :: [Id] -> [(PrimRep, Id)]
-addIdReps ids = [(idPrimRep id, id) | id <- ids]
+addIdReps :: [NonVoid Id] -> [NonVoid (PrimRep, Id)]
+addIdReps = map (\id -> let id' = fromNonVoid id
+                         in NonVoid (idPrimRep id', id'))
 
-addArgReps :: [StgArg] -> [(PrimRep, StgArg)]
-addArgReps args = [(argPrimRep arg, arg) | arg <- args]
+addArgReps :: [NonVoid StgArg] -> [NonVoid (PrimRep, StgArg)]
+addArgReps = map (\arg -> let arg' = fromNonVoid arg
+                           in NonVoid (argPrimRep arg', arg'))
 
 argPrimRep :: StgArg -> PrimRep
 argPrimRep arg = typePrimRep (stgArgType arg)
@@ -522,8 +565,10 @@ getCallMethod dflags _ id _ n_args v_args _cg_loc
 
 getCallMethod dflags name id (LFReEntrant _ _ arity _ _) n_args _v_args _cg_loc
               _self_loop_info
-  | n_args == 0    = ASSERT( arity /= 0 )
-                     ReturnIt        -- No args at all
+  | n_args == 0 -- No args at all
+  && not (gopt Opt_SccProfilingOn dflags)
+     -- See Note [Evaluating functions with profiling] in rts/Apply.cmm
+  = ASSERT( arity /= 0 ) ReturnIt
   | n_args < arity = SlowCall        -- Not enough args
   | otherwise      = DirectEntry (enterIdLabel dflags name (idCafInfo id)) arity
 
@@ -997,12 +1042,8 @@ mkDataConInfoTable dflags data_con is_static ptr_wds nonptr_wds
                 , cit_srt  = NoC_SRT }
  where
    name = dataConName data_con
-
-   info_lbl | is_static = mkStaticInfoTableLabel name NoCafRefs
-            | otherwise = mkConInfoTableLabel    name NoCafRefs
-
+   info_lbl = mkConInfoTableLabel name NoCafRefs
    sm_rep = mkHeapRep dflags is_static ptr_wds nonptr_wds cl_type
-
    cl_type = Constr (dataConTagZ data_con) (dataConIdentity data_con)
 
    prof | not (gopt Opt_SccProfilingOn dflags) = NoProfilingInfo
@@ -1031,16 +1072,10 @@ indStaticInfoTable
 staticClosureNeedsLink :: Bool -> CmmInfoTable -> Bool
 -- A static closure needs a link field to aid the GC when traversing
 -- the static closure graph.  But it only needs such a field if either
---         a) it has an SRT
+--        a) it has an SRT
 --        b) it's a constructor with one or more pointer fields
 -- In case (b), the constructor's fields themselves play the role
 -- of the SRT.
---
--- At this point, the cit_srt field has not been calculated (that
--- happens right at the end of the Cmm pipeline), but we do have the
--- VarSet of CAFs that CoreToStg attached, and if that is empty there
--- will definitely not be an SRT.
---
 staticClosureNeedsLink has_srt CmmInfoTable{ cit_rep = smrep }
   | isConRep smrep         = not (isStaticNoCafCon smrep)
   | otherwise              = has_srt -- needsSRT (cit_srt info_tbl)

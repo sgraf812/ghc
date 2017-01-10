@@ -1,9 +1,12 @@
-# 
+#!/usr/bin/env python3
+
+#
 # (c) Simon Marlow 2002
 #
 
 from __future__ import print_function
 
+import signal
 import sys
 import os
 import string
@@ -23,9 +26,6 @@ import re
 import subprocess
 
 PYTHON3 = sys.version_info >= (3, 0)
-if PYTHON3:
-    print("*** WARNING: running testsuite using Python 3.\n"
-          "*** Python 3 support is experimental. See Trac #9184.")
 
 from testutil import *
 from testglobals import *
@@ -37,6 +37,9 @@ os.environ['TERM'] = 'vt100'
 
 global config
 config = getConfig() # get it from testglobals
+
+def signal_handler(signal, frame):
+        stopNow()
 
 # -----------------------------------------------------------------------------
 # cmd-line options
@@ -139,9 +142,6 @@ if config.use_threads == 1:
         print("Warning: Ignoring request to use threads as python version is 2.7.2")
         print("See http://bugs.python.org/issue13817 for details.")
         config.use_threads = 0
-    if windows: # See Trac ticket #10510.
-        print("Warning: Ignoring request to use threads as running on Windows")
-        config.use_threads = 0
 
 config.cygwin = False
 config.msys = False
@@ -163,18 +163,22 @@ if windows:
 if windows:
     import ctypes
     # Windows and mingw* Python provide windll, msys2 python provides cdll.
-    if hasattr(ctypes, 'windll'):
-        mydll = ctypes.windll
+    if hasattr(ctypes, 'WinDLL'):
+        mydll = ctypes.WinDLL
     else:
-        mydll = ctypes.cdll
+        mydll = ctypes.CDLL
 
     # This actually leaves the terminal in codepage 65001 (UTF8) even
     # after python terminates. We ought really remember the old codepage
     # and set it back.
-    if mydll.kernel32.SetConsoleCP(65001) == 0:
+    kernel32 = mydll('kernel32.dll')
+    if kernel32.SetConsoleCP(65001) == 0:
         raise Exception("Failure calling SetConsoleCP(65001)")
-    if mydll.kernel32.SetConsoleOutputCP(65001) == 0:
+    if kernel32.SetConsoleOutputCP(65001) == 0:
         raise Exception("Failure calling SetConsoleOutputCP(65001)")
+
+    # register the interrupt handler
+    signal.signal(signal.SIGINT, signal_handler)
 else:
     # Try and find a utf8 locale to use
     # First see if we already have a UTF8 locale
@@ -208,7 +212,7 @@ from testlib import *
 # On Windows we need to set $PATH to include the paths to all the DLLs
 # in order for the dynamic library tests to work.
 if windows or darwin:
-    pkginfo = getStdout([config.ghc_pkg, 'dump'])
+    pkginfo = str(getStdout([config.ghc_pkg, 'dump']))
     topdir = config.libdir
     if windows:
         mingw = os.path.join(topdir, '../mingw/bin')
@@ -238,12 +242,6 @@ if windows or darwin:
 
 global testopts_local
 testopts_local.x = TestOptions()
-
-if config.use_threads:
-    t.lock = threading.Lock()
-    t.thread_pool = threading.Condition(t.lock)
-    t.lockFilesWritten = threading.Lock()
-    t.running_threads = 0
 
 # if timeout == -1 then we try to calculate a sensible value
 if config.timeout == -1:
@@ -303,7 +301,14 @@ for file in t_files:
     if_verbose(2, '====> Scanning %s' % file)
     newTestDir(tempdir, os.path.dirname(file))
     try:
-        exec(open(file).read())
+        if PYTHON3:
+            with io.open(file, encoding='utf8') as f:
+                src = f.read()
+        else:
+            with open(file) as f:
+                src = f.read()
+
+        exec(src)
     except Exception as e:
         traceback.print_exc()
         framework_fail(file, '', str(e))
@@ -330,28 +335,34 @@ if config.list_broken:
         print('WARNING:', len(framework_failures), 'framework failures!')
         print('')
 else:
+    # completion watcher
+    watcher = Watcher(len(parallelTests))
+
     # Now run all the tests
-    if config.use_threads:
-        t.running_threads=0
     for oneTest in parallelTests:
         if stopping():
             break
-        oneTest()
-    if config.use_threads:
-        t.thread_pool.acquire()
-        while t.running_threads>0:
-            t.thread_pool.wait()
-        t.thread_pool.release()
+        oneTest(watcher)
+
+    # wait for parallel tests to finish
+    if not stopping():
+        watcher.wait()
+
+    # Run the following tests purely sequential
     config.use_threads = False
     for oneTest in aloneTests:
         if stopping():
             break
-        oneTest()
-        
+        oneTest(watcher)
+
+    # flush everything before we continue
+    sys.stdout.flush()
+
     summary(t, sys.stdout, config.no_print_summary)
 
     if config.summary_file != '':
-        summary(t, open(config.summary_file, 'w'))
+        with open(config.summary_file, 'w') as file:
+            summary(t, file)
 
 cleanup_and_exit(0)
 

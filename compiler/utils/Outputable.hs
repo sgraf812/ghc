@@ -29,7 +29,7 @@ module Outputable (
         semi, comma, colon, dcolon, space, equals, dot, vbar,
         arrow, larrow, darrow, arrowt, larrowt, arrowtt, larrowtt,
         lparen, rparen, lbrack, rbrack, lbrace, rbrace, underscore,
-        blankLine, forAllLit,
+        blankLine, forAllLit, kindStar,
         (<>), (<+>), hcat, hsep,
         ($$), ($+$), vcat,
         sep, cat,
@@ -38,8 +38,9 @@ module Outputable (
         speakNth, speakN, speakNOf, plural, isOrAre, doOrDoes,
         unicodeSyntax,
 
-        coloured, PprColour, colType, colCoerc, colDataCon,
-        colBinder, bold, keyword,
+        coloured, bold, keyword, PprColour, colReset, colBold, colBlackFg,
+        colRedFg, colGreenFg, colYellowFg, colBlueFg, colMagentaFg, colCyanFg,
+        colWhiteFg, colBinder, colCoerc, colDataCon, colType,
 
         -- * Converting 'SDoc' into strings and outputing it
         printForC, printForAsm, printForUser, printForUserPartWay,
@@ -52,7 +53,9 @@ module Outputable (
         pprInfixVar, pprPrefixVar,
         pprHsChar, pprHsString, pprHsBytes,
 
-        primFloatSuffix, primDoubleSuffix,
+        primFloatSuffix, primCharSuffix, primWordSuffix, primDoubleSuffix,
+        primInt64Suffix, primWord64Suffix, primIntSuffix,
+
         pprPrimChar, pprPrimInt, pprPrimWord, pprPrimInt64, pprPrimWord64,
 
         pprFastFilePath,
@@ -68,7 +71,7 @@ module Outputable (
         alwaysQualifyPackages, neverQualifyPackages,
         QualifyName(..), queryQual,
         sdocWithDynFlags, sdocWithPlatform,
-        getPprStyle, withPprStyle, withPprStyleDoc,
+        getPprStyle, withPprStyle, withPprStyleDoc, setStyleColoured,
         pprDeeper, pprDeeperList, pprSetDepth,
         codeStyle, userStyle, debugStyle, dumpStyle, asmStyle,
         ifPprDebug, qualName, qualModule, qualPackage,
@@ -85,6 +88,7 @@ module Outputable (
 import {-# SOURCE #-}   DynFlags( DynFlags,
                                   targetPlatform, pprUserLength, pprCols,
                                   useUnicode, useUnicodeSyntax,
+                                  useColor, canUseColor, overrideWith,
                                   unsafeGlobalDynFlags )
 import {-# SOURCE #-}   Module( UnitId, Module, ModuleName, moduleName )
 import {-# SOURCE #-}   OccName( OccName )
@@ -107,6 +111,7 @@ import Data.Int
 import qualified Data.IntMap as IM
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Monoid (Monoid, mappend, mempty)
 import Data.String
 import Data.Word
 import System.IO        ( Handle )
@@ -118,9 +123,6 @@ import Data.List (intersperse)
 
 import GHC.Fingerprint
 import GHC.Show         ( showMultiLineString )
-#if __GLASGOW_HASKELL__ > 710
-import GHC.Stack
-#endif
 
 {-
 ************************************************************************
@@ -131,7 +133,7 @@ import GHC.Stack
 -}
 
 data PprStyle
-  = PprUser PrintUnqualified Depth
+  = PprUser PrintUnqualified Depth Coloured
                 -- Pretty-print in a way that will make sense to the
                 -- ordinary user; must be very close to Haskell
                 -- syntax, etc.
@@ -154,6 +156,9 @@ data CodeStyle = CStyle         -- The format of labels differs for C and assemb
 data Depth = AllTheWay
            | PartWay Int        -- 0 => stop
 
+data Coloured
+  = Uncoloured
+  | Coloured
 
 -- -----------------------------------------------------------------------------
 -- Printing original names
@@ -181,7 +186,7 @@ type QueryQualifyName = Module -> OccName -> QualifyName
 type QueryQualifyModule = Module -> Bool
 
 -- | For a given package, we need to know whether to print it with
--- the unit id to disambiguate it.
+-- the component id to disambiguate it.
 type QueryQualifyPackage = UnitId -> Bool
 
 -- See Note [Printing original names] in HscTypes
@@ -260,7 +265,16 @@ cmdlineParserStyle = mkUserStyle alwaysQualify AllTheWay
 mkUserStyle :: PrintUnqualified -> Depth -> PprStyle
 mkUserStyle unqual depth
    | opt_PprStyle_Debug = PprDebug
-   | otherwise          = PprUser unqual depth
+   | otherwise          = PprUser unqual depth Uncoloured
+
+setStyleColoured :: Bool -> PprStyle -> PprStyle
+setStyleColoured col style =
+  case style of
+    PprUser q d _ -> PprUser q d c
+    _             -> style
+  where
+    c | col       = Coloured
+      | otherwise = Uncoloured
 
 instance Outputable PprStyle where
   ppr (PprUser {})  = text "user-style"
@@ -311,9 +325,9 @@ withPprStyleDoc dflags sty d = runSDoc d (initSDocContext dflags sty)
 
 pprDeeper :: SDoc -> SDoc
 pprDeeper d = SDoc $ \ctx -> case ctx of
-  SDC{sdocStyle=PprUser _ (PartWay 0)} -> Pretty.text "..."
-  SDC{sdocStyle=PprUser q (PartWay n)} ->
-    runSDoc d ctx{sdocStyle = PprUser q (PartWay (n-1))}
+  SDC{sdocStyle=PprUser _ (PartWay 0) _} -> Pretty.text "..."
+  SDC{sdocStyle=PprUser q (PartWay n) c} ->
+    runSDoc d ctx{sdocStyle = PprUser q (PartWay (n-1)) c}
   _ -> runSDoc d ctx
 
 -- | Truncate a list that is longer than the current depth.
@@ -322,10 +336,10 @@ pprDeeperList f ds
   | null ds   = f []
   | otherwise = SDoc work
  where
-  work ctx@SDC{sdocStyle=PprUser q (PartWay n)}
+  work ctx@SDC{sdocStyle=PprUser q (PartWay n) c}
    | n==0      = Pretty.text "..."
    | otherwise =
-      runSDoc (f (go 0 ds)) ctx{sdocStyle = PprUser q (PartWay (n-1))}
+      runSDoc (f (go 0 ds)) ctx{sdocStyle = PprUser q (PartWay (n-1)) c}
    where
      go _ [] = []
      go i (d:ds) | i >= n    = [text "...."]
@@ -335,8 +349,8 @@ pprDeeperList f ds
 pprSetDepth :: Depth -> SDoc -> SDoc
 pprSetDepth depth doc = SDoc $ \ctx ->
     case ctx of
-        SDC{sdocStyle=PprUser q _} ->
-            runSDoc doc ctx{sdocStyle = PprUser q depth}
+        SDC{sdocStyle=PprUser q _ c} ->
+            runSDoc doc ctx{sdocStyle = PprUser q depth c}
         _ ->
             runSDoc doc ctx
 
@@ -350,19 +364,19 @@ sdocWithPlatform :: (Platform -> SDoc) -> SDoc
 sdocWithPlatform f = sdocWithDynFlags (f . targetPlatform)
 
 qualName :: PprStyle -> QueryQualifyName
-qualName (PprUser q _)  mod occ = queryQualifyName q mod occ
-qualName (PprDump q)    mod occ = queryQualifyName q mod occ
-qualName _other         mod _   = NameQual (moduleName mod)
+qualName (PprUser q _ _) mod occ = queryQualifyName q mod occ
+qualName (PprDump q)     mod occ = queryQualifyName q mod occ
+qualName _other          mod _   = NameQual (moduleName mod)
 
 qualModule :: PprStyle -> QueryQualifyModule
-qualModule (PprUser q _)  m = queryQualifyModule q m
-qualModule (PprDump q)    m = queryQualifyModule q m
-qualModule _other        _m = True
+qualModule (PprUser q _ _)  m = queryQualifyModule q m
+qualModule (PprDump q)      m = queryQualifyModule q m
+qualModule _other          _m = True
 
 qualPackage :: PprStyle -> QueryQualifyPackage
-qualPackage (PprUser q _)  m = queryQualifyPackage q m
-qualPackage (PprDump q)    m = queryQualifyPackage q m
-qualPackage _other        _m = True
+qualPackage (PprUser q _ _)  m = queryQualifyPackage q m
+qualPackage (PprDump q)      m = queryQualifyPackage q m
+qualPackage _other          _m = True
 
 queryQual :: PprStyle -> PrintUnqualified
 queryQual s = QueryQualify (qualName s)
@@ -386,8 +400,8 @@ debugStyle PprDebug = True
 debugStyle _other   = False
 
 userStyle ::  PprStyle -> Bool
-userStyle (PprUser _ _) = True
-userStyle _other        = False
+userStyle (PprUser {}) = True
+userStyle _other       = False
 
 ifPprDebug :: SDoc -> SDoc        -- Empty for non-debug style
 ifPprDebug d = SDoc $ \ctx ->
@@ -576,6 +590,9 @@ rbrace     = docToSDoc $ Pretty.rbrace
 forAllLit :: SDoc
 forAllLit = unicodeSyntax (char '∀') (text "forall")
 
+kindStar :: SDoc
+kindStar = unicodeSyntax (char '★') (char '*')
+
 unicodeSyntax :: SDoc -> SDoc -> SDoc
 unicodeSyntax unicode plain = sdocWithDynFlags $ \dflags ->
     if useUnicode dflags && useUnicodeSyntax dflags
@@ -656,35 +673,72 @@ ppUnless False doc = doc
 -- | A colour\/style for use with 'coloured'.
 newtype PprColour = PprColour String
 
+-- | Allow colours to be combined (e.g. bold + red);
+--   In case of conflict, right side takes precedence.
+instance Monoid PprColour where
+  mempty = PprColour mempty
+  PprColour s1 `mappend` PprColour s2 = PprColour (s1 `mappend` s2)
+
 -- Colours
 
-colType :: PprColour
-colType = PprColour "\27[34m"
+colReset :: PprColour
+colReset = PprColour "\27[0m"
 
 colBold :: PprColour
 colBold = PprColour "\27[;1m"
 
-colCoerc :: PprColour
-colCoerc = PprColour "\27[34m"
+colBlackFg :: PprColour
+colBlackFg = PprColour "\27[30m"
 
-colDataCon :: PprColour
-colDataCon = PprColour "\27[31m"
+colRedFg :: PprColour
+colRedFg = PprColour "\27[31m"
+
+colGreenFg :: PprColour
+colGreenFg = PprColour "\27[32m"
+
+colYellowFg :: PprColour
+colYellowFg = PprColour "\27[33m"
+
+colBlueFg :: PprColour
+colBlueFg = PprColour "\27[34m"
+
+colMagentaFg :: PprColour
+colMagentaFg = PprColour "\27[35m"
+
+colCyanFg :: PprColour
+colCyanFg = PprColour "\27[36m"
+
+colWhiteFg :: PprColour
+colWhiteFg = PprColour "\27[37m"
 
 colBinder :: PprColour
-colBinder = PprColour "\27[32m"
+colBinder = colGreenFg
 
-colReset :: PprColour
-colReset = PprColour "\27[0m"
+colCoerc :: PprColour
+colCoerc = colBlueFg
+
+colDataCon :: PprColour
+colDataCon = colRedFg
+
+colType :: PprColour
+colType = colBlueFg
 
 -- | Apply the given colour\/style for the argument.
 --
 -- Only takes effect if colours are enabled.
 coloured :: PprColour -> SDoc -> SDoc
--- TODO: coloured _ sdoc ctxt | coloursDisabled = sdoc ctxt
 coloured col@(PprColour c) sdoc =
-  SDoc $ \ctx@SDC{ sdocLastColour = PprColour lc } ->
-    let ctx' = ctx{ sdocLastColour = col } in
-    Pretty.zeroWidthText c Pretty.<> runSDoc sdoc ctx' Pretty.<> Pretty.zeroWidthText lc
+  sdocWithDynFlags $ \dflags ->
+    if overrideWith (canUseColor dflags) (useColor dflags)
+    then SDoc $ \ctx@SDC{ sdocLastColour = PprColour lc } ->
+         case ctx of
+           SDC{ sdocStyle = PprUser _ _ Coloured } ->
+             let ctx' = ctx{ sdocLastColour = col } in
+             Pretty.zeroWidthText c
+               Pretty.<> runSDoc sdoc ctx'
+               Pretty.<> Pretty.zeroWidthText lc
+           _ -> runSDoc sdoc ctx
+    else sdoc
 
 bold :: SDoc -> SDoc
 bold = coloured colBold
@@ -1074,9 +1128,13 @@ doOrDoes _   = text "do"
 ************************************************************************
 -}
 
-pprPanic :: String -> SDoc -> a
+callStackDoc :: HasCallStack => SDoc
+callStackDoc =
+    hang (text "Call stack:") 4 (vcat $ map text $ lines prettyCurrentCallStack)
+
+pprPanic :: HasCallStack => String -> SDoc -> a
 -- ^ Throw an exception saying "bug in GHC"
-pprPanic    = panicDoc
+pprPanic s doc = panicDoc s (doc $$ callStackDoc)
 
 pprSorry :: String -> SDoc -> a
 -- ^ Throw an exception saying "this isn't finished yet"
@@ -1101,13 +1159,8 @@ pprTraceIt desc x = pprTrace desc (ppr x) x
 
 -- | If debug output is on, show some 'SDoc' on the screen along
 -- with a call stack when available.
-#if __GLASGOW_HASKELL__ > 710
-pprSTrace :: (?callStack :: CallStack) => SDoc -> a -> a
-pprSTrace = pprTrace (prettyCallStack ?callStack)
-#else
-pprSTrace :: SDoc -> a -> a
-pprSTrace = pprTrace "no callstack info"
-#endif
+pprSTrace :: HasCallStack => SDoc -> a -> a
+pprSTrace doc = pprTrace "" (doc $$ callStackDoc)
 
 warnPprTrace :: Bool -> String -> Int -> SDoc -> a -> a
 -- ^ Just warn about an assertion failure, recording the given file and line number.
@@ -1122,22 +1175,11 @@ warnPprTrace True   file  line  msg x
 
 -- | Panic with an assertation failure, recording the given file and
 -- line number. Should typically be accessed with the ASSERT family of macros
-#if __GLASGOW_HASKELL__ > 710
-assertPprPanic :: (?callStack :: CallStack) => String -> Int -> SDoc -> a
+assertPprPanic :: HasCallStack => String -> Int -> SDoc -> a
 assertPprPanic _file _line msg
   = pprPanic "ASSERT failed!" doc
   where
-    doc = sep [ text (prettyCallStack ?callStack)
-              , msg ]
-#else
-assertPprPanic :: String -> Int -> SDoc -> a
-assertPprPanic file line msg
-  = pprPanic "ASSERT failed!" doc
-  where
-    doc = sep [ hsep [ text "file", text file
-                     , text "line", int line ]
-              , msg ]
-#endif
+    doc = sep [ msg, callStackDoc ]
 
 pprDebugAndThen :: DynFlags -> (String -> a) -> SDoc -> SDoc -> a
 pprDebugAndThen dflags cont heading pretty_msg

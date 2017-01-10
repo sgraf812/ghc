@@ -63,7 +63,6 @@ import Unify
 import Util
 import SrcLoc
 import ListSetOps
-import Digraph
 import DynFlags
 import Unique
 import BasicTypes
@@ -150,6 +149,16 @@ tcTyClGroup (TyClGroup { group_tyclds = tyclds
            -- Step 1: Typecheck the type/class declarations
        ; tyclss <- tcTyClDecls tyclds role_annots
 
+           -- Step 1.5: Make sure we don't have any type synonym cycles
+       ; traceTc "Starting synonym cycle check" (ppr tyclss)
+       ; this_uid <- fmap thisPackage getDynFlags
+       ; checkSynCycles this_uid tyclss tyclds
+       ; traceTc "Done synonym cycle check" (ppr tyclss)
+
+       ; traceTc "Starting family consistency check" (ppr tyclss)
+       ; forM_ tyclss checkRecFamInstConsistency
+       ; traceTc "Done family consistency" (ppr tyclss)
+
            -- Step 2: Perform the validity check on those types/classes
            -- We can do this now because we are done with the recursive knot
            -- Do it before Step 3 (adding implicit things) because the latter
@@ -172,7 +181,6 @@ tcTyClGroup (TyClGroup { group_tyclds = tyclds
 
        ; return (gbl_env, inst_info, datafam_deriv_info) } } }
 
-
 tcTyClDecls :: [LTyClDecl Name] -> RoleAnnotEnv -> TcM [TyCon]
 tcTyClDecls tyclds role_annots
   = do {    -- Step 1: kind-check this group and returns the final
@@ -183,6 +191,10 @@ tcTyClDecls tyclds role_annots
 
             -- Step 2: type-check all groups together, returning
             -- the final TyCons and Classes
+            --
+            -- NB: We have to be careful here to NOT eagerly unfold
+            -- type synonyms, as we have not tested for type synonym
+            -- loops yet and could fall into a black hole.
        ; fixM $ \ ~rec_tyclss -> do
            { is_boot   <- tcIsHsBootOrSig
            ; let roles = inferRoles is_boot role_annots rec_tyclss
@@ -241,14 +253,10 @@ Note [Kind checking for type and class decls]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Kind checking is done thus:
 
-   1. Make up a kind variable for each parameter of the *data* type, class,
-      and closed type family decls, and extend the kind environment (which is
-      in the TcLclEnv)
+   1. Make up a kind variable for each parameter of the declarations,
+      and extend the kind environment (which is in the TcLclEnv)
 
-   2. Dependency-analyse the type *synonyms* (which must be non-recursive),
-      and kind-check them in dependency order.  Extend the kind envt.
-
-   3. Kind check the data type and class decls
+   2. Kind check the declarations
 
 We need to kind check all types in the mutually recursive group
 before we know the kind of the type variables.  For example:
@@ -263,21 +271,18 @@ Here, the kind of the locally-polymorphic type variable "b"
 depends on *all the uses of class D*.  For example, the use of
 Monad c in bop's type signature means that D must have kind Type->Type.
 
-However type synonyms work differently.  They can have kinds which don't
-just involve (->) and *:
-        type R = Int#           -- Kind #
-        type S a = Array# a     -- Kind * -> #
-        type T a b = (# a,b #)  -- Kind * -> * -> (# a,b #)
-and a kind variable can't unify with UnboxedTypeKind.
+Note: we don't treat type synonyms specially (we used to, in the past);
+in particular, even if we have a type synonym cycle, we still kind check
+it normally, and test for cycles later (checkSynCycles).  The reason
+we can get away with this is because we have more systematic TYPE r
+inference, which means that we can do unification between kinds that
+aren't lifted (this historically was not true.)
 
-So we must infer the kinds of type synonyms from their right-hand
-sides *first* and then use them, whereas for the mutually recursive
-data types D we bring into scope kind bindings D -> k, where k is a
-kind variable, and do inference.
-
-NB: synonyms can be mutually recursive with data type declarations though!
-   type T = D -> D
-   data D = MkD Int T
+The downside of not directly reading off the kinds off the RHS of
+type synonyms in topological order is that we don't transparently
+support making synonyms of types with higher-rank kinds.  But
+you can always specify a CUSK directly to make this work out.
+See tc269 for an example.
 
 Open type families
 ~~~~~~~~~~~~~~~~~~
@@ -296,7 +301,28 @@ See also Note [Kind checking recursive type and class declarations]
 
 -}
 
+
+-- Note [Missed opportunity to retain higher-rank kinds]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- In 'kcTyClGroup', there is a missed opportunity to make kind
+-- inference work in a few more cases.  The idea is analogous
+-- to Note [Single function non-recursive binding special-case]:
+--
+--      * If we have an SCC with a single decl, which is non-recursive,
+--        instead of creating a unification variable representing the
+--        kind of the decl and unifying it with the rhs, we can just
+--        read the type directly of the rhs.
+--
+--      * Furthermore, we can update our SCC analysis to ignore
+--        dependencies on declarations which have CUSKs: we don't
+--        have to kind-check these all at once, since we can use
+--        the CUSK to initialize the kind environment.
+--
+-- Unfortunately this requires reworking a bit of the code in
+-- 'kcLTyClDecl' so I've decided to punt unless someone shouts about it.
+--
 kcTyClGroup :: [LTyClDecl Name] -> TcM [TcTyCon]
+
 -- Kind check this group, kind generalize, and return the resulting local env
 -- This bindds the TyCons and Classes of the group, but not the DataCons
 -- See Note [Kind checking for type and class decls]
@@ -307,29 +333,23 @@ kcTyClGroup decls
         ; traceTc "kcTyClGroup" (text "module" <+> ppr mod $$ vcat (map ppr decls))
 
           -- Kind checking;
-          --    1. Bind kind variables for non-synonyms
-          --    2. Kind-check synonyms, and bind kinds of those synonyms
-          --    3. Kind-check non-synonyms
-          --    4. Generalise the inferred kinds
+          --    1. Bind kind variables for decls
+          --    2. Kind-check decls
+          --    3. Generalise the inferred kinds
           -- See Note [Kind checking for type and class decls]
 
         ; lcl_env <- solveEqualities $
           do {
-               -- Step 1: Bind kind variables for non-synonyms
-               let (syn_decls, non_syn_decls) = partition (isSynDecl . unLoc) decls
-             ; initial_kinds <- getInitialKinds non_syn_decls
+               -- Step 1: Bind kind variables for all decls
+               initial_kinds <- getInitialKinds decls
              ; traceTc "kcTyClGroup: initial kinds" $
                vcat (map pp_initial_kind initial_kinds)
+             ; tcExtendKindEnv2 initial_kinds $ do {
 
-             -- Step 2: Set initial envt, kind-check the synonyms
-             ; lcl_env <- tcExtendKindEnv2 initial_kinds $
-                          kcSynDecls (calcSynCycles syn_decls)
+             -- Step 2: Set extended envt, kind-check the decls
+             ; mapM_ kcLTyClDecl decls
 
-             -- Step 3: Set extended envt, kind-check the non-synonyms
-             ; setLclEnv lcl_env $
-               mapM_ kcLTyClDecl non_syn_decls
-
-             ; return lcl_env }
+             ; getLclEnv } }
 
              -- Step 4: generalisation
              -- Kind checking done for this group
@@ -350,19 +370,18 @@ kcTyClGroup decls
                  kc_res_kind = tyConResKind tc
                  kc_tyvars   = tyConTyVars tc
            ; kvs <- kindGeneralize (mkTyConKind kc_binders kc_res_kind)
+           ; let all_binders = mkNamedTyConBinders Inferred kvs ++ kc_binders
 
-           ; (env, kc_binders') <- zonkTyConBinders emptyZonkEnv kc_binders
-           ; kc_res_kind' <- zonkTcTypeToType env kc_res_kind
+           ; (env, all_binders') <- zonkTyVarBindersX emptyZonkEnv all_binders
+           ; kc_res_kind'        <- zonkTcTypeToType env kc_res_kind
 
                       -- Make sure kc_kind' has the final, zonked kind variables
            ; traceTc "Generalise kind" $
-             vcat [ ppr name, ppr kc_binders, ppr kc_res_kind
-                  , ppr kvs, ppr kc_binders', ppr kc_res_kind'
+             vcat [ ppr name, ppr kc_binders, ppr kvs, ppr all_binders, ppr kc_res_kind
+                  , ppr all_binders', ppr kc_res_kind'
                   , ppr kc_tyvars, ppr (tcTyConScopedTyVars tc)]
 
-           ; return (mkTcTyCon name
-                               (mkNamedTyConBinders Inferred kvs ++ kc_binders')
-                               kc_res_kind'
+           ; return (mkTcTyCon name all_binders' kc_res_kind'
                                (mightBeUnsaturatedTyCon tc)
                                (tcTyConScopedTyVars tc)) }
 
@@ -438,12 +457,11 @@ getInitialKind :: TyClDecl Name
 -- No family instances are passed to getInitialKinds
 
 getInitialKind decl@(ClassDecl { tcdLName = L _ name, tcdTyVars = ktvs, tcdATs = ats })
-  = do { (mk_tctc, inner_prs) <-
-           kcHsTyVarBndrs name cusk False True ktvs $
+  = do { (tycon, inner_prs) <-
+           kcHsTyVarBndrs name True cusk False True ktvs $
            do { inner_prs <- getFamDeclInitialKinds (Just cusk) ats
               ; return (constraintKind, inner_prs) }
-       ; let main_pr = mkTcTyConPair (mk_tctc True)
-       ; return (main_pr : inner_prs) }
+       ; return (mkTcTyConPair tycon : inner_prs) }
   where
     cusk = hsDeclHasCusk decl
 
@@ -451,22 +469,35 @@ getInitialKind decl@(DataDecl { tcdLName = L _ name
                               , tcdTyVars = ktvs
                               , tcdDataDefn = HsDataDefn { dd_kindSig = m_sig
                                                          , dd_cons = cons } })
-  = do  { (mk_tctc, _) <-
-           kcHsTyVarBndrs name (hsDeclHasCusk decl) False True ktvs $
+  = do  { (tycon, _) <-
+           kcHsTyVarBndrs name True (hsDeclHasCusk decl) False True ktvs $
            do { res_k <- case m_sig of
                            Just ksig -> tcLHsKind ksig
                            Nothing   -> return liftedTypeKind
               ; return (res_k, ()) }
-        ; let main_pr = mkTcTyConPair (mk_tctc True)
-              inner_prs = [ (unLoc con, APromotionErr RecDataConPE)
+        ; let inner_prs = [ (unLoc con, APromotionErr RecDataConPE)
                           | L _ con' <- cons, con <- getConNames con' ]
-        ; return (main_pr : inner_prs) }
+        ; return (mkTcTyConPair tycon : inner_prs) }
 
 getInitialKind (FamDecl { tcdFam = decl })
   = getFamDeclInitialKind Nothing decl
 
-getInitialKind decl@(SynDecl {})
-  = pprPanic "getInitialKind" (ppr decl)
+getInitialKind decl@(SynDecl { tcdLName = L _ name
+                             , tcdTyVars = ktvs
+                             , tcdRhs = rhs })
+  = do  { (tycon, _) <- kcHsTyVarBndrs name False (hsDeclHasCusk decl)
+                            False {- not open -} True ktvs $
+            do  { res_k <- case kind_annotation rhs of
+                            Nothing -> newMetaKindVar
+                            Just ksig -> tcLHsKind ksig
+                ; return (res_k, ()) }
+        ; return [ mkTcTyConPair tycon ] }
+  where
+    -- Keep this synchronized with 'hsDeclHasCusk'.
+    kind_annotation (L _ ty) = case ty of
+        HsParTy lty     -> kind_annotation lty
+        HsKindSig _ k   -> Just k
+        _               -> Nothing
 
 ---------------------------------
 getFamDeclInitialKinds :: Maybe Bool  -- if assoc., CUSKness of assoc. class
@@ -483,8 +514,8 @@ getFamDeclInitialKind mb_cusk decl@(FamilyDecl { fdLName     = L _ name
                                                , fdTyVars    = ktvs
                                                , fdResultSig = L _ resultSig
                                                , fdInfo      = info })
-  = do { (mk_tctc, _) <-
-           kcHsTyVarBndrs name cusk open True ktvs $
+  = do { (tycon, _) <-
+           kcHsTyVarBndrs name unsat cusk open True ktvs $
            do { res_k <- case resultSig of
                       KindSig ki                        -> tcLHsKind ki
                       TyVarSig (L _ (KindedTyVar _ ki)) -> tcLHsKind ki
@@ -494,44 +525,13 @@ getFamDeclInitialKind mb_cusk decl@(FamilyDecl { fdLName     = L _ name
                         -- by default
                         | otherwise                -> newMetaKindVar
               ; return (res_k, ()) }
-       ; return [ mkTcTyConPair (mk_tctc unsat) ] }
+       ; return [ mkTcTyConPair tycon ] }
   where
     cusk  = famDeclHasCusk mb_cusk decl
     (open, unsat) = case info of
       DataFamily         -> (True,  True)
       OpenTypeFamily     -> (True,  False)
       ClosedTypeFamily _ -> (False, False)
-
-----------------
-kcSynDecls :: [SCC (LTyClDecl Name)]
-           -> TcM TcLclEnv -- Kind bindings
-kcSynDecls [] = getLclEnv
-kcSynDecls (group : groups)
-  = do  { tc <- kcSynDecl1 group
-        ; traceTc "kcSynDecl" (ppr tc <+> dcolon <+> ppr (tyConKind tc))
-        ; tcExtendKindEnv2 [ mkTcTyConPair tc ] $
-          kcSynDecls groups }
-
-kcSynDecl1 :: SCC (LTyClDecl Name)
-           -> TcM TcTyCon -- Kind bindings
-kcSynDecl1 (AcyclicSCC (L _ decl)) = kcSynDecl decl
-kcSynDecl1 (CyclicSCC decls)       = do { recSynErr decls; failM }
-                                     -- Fail here to avoid error cascade
-                                     -- of out-of-scope tycons
-
-kcSynDecl :: TyClDecl Name -> TcM TcTyCon
-kcSynDecl decl@(SynDecl { tcdTyVars = hs_tvs, tcdLName = L _ name
-                        , tcdRhs = rhs })
-  -- Returns a possibly-unzonked kind
-  = tcAddDeclCtxt decl $
-    do { (mk_tctc, _) <-
-           kcHsTyVarBndrs name (hsDeclHasCusk decl) False True hs_tvs $
-           do { traceTc "kcd1" (ppr name <+> brackets (ppr hs_tvs))
-              ; (_, rhs_kind) <- tcLHsType rhs
-              ; traceTc "kcd2" (ppr name)
-              ; return (rhs_kind, ()) }
-       ; return (mk_tctc False) }
-kcSynDecl decl = pprPanic "kcSynDecl" (ppr decl)
 
 ------------------------------------------------------------------------
 kcLTyClDecl :: LTyClDecl Name -> TcM ()
@@ -560,7 +560,12 @@ kcTyClDecl (DataDecl { tcdLName = L _ name, tcdDataDefn = defn })
     do  { _ <- tcHsContext ctxt
         ; mapM_ (wrapLocM kcConDecl) cons }
 
-kcTyClDecl decl@(SynDecl {}) = pprPanic "kcTyClDecl" (ppr decl)
+kcTyClDecl (SynDecl { tcdLName = L _ name, tcdRhs = lrhs })
+  = kcTyClTyVars name $
+    do  { syn_tc <- kcLookupTcTyCon name
+        -- NB: check against the result kind that we allocated
+        -- in getInitialKinds.
+        ; discardResult $ tcCheckLHsType lrhs (tyConResKind syn_tc) }
 
 kcTyClDecl (ClassDecl { tcdLName = L _ name
                       , tcdCtxt = ctxt, tcdSigs = sigs })
@@ -589,7 +594,7 @@ kcConDecl (ConDeclH98 { con_name = name, con_qvars = ex_tvs
          -- the 'False' says that the existentials don't have a CUSK, as the
          -- concept doesn't really apply here. We just need to bring the variables
          -- into scope.
-    do { _ <- kcHsTyVarBndrs (unLoc name) False False False
+    do { _ <- kcHsTyVarBndrs (unLoc name) False False False False
                              ((fromMaybe emptyLHsQTvs ex_tvs)) $
               do { _ <- tcHsContext (fromMaybe (noLoc []) ex_ctxt)
                  ; mapM_ (tcHsOpenType . getBangType) (hsConDeclArgTys details)
@@ -742,14 +747,12 @@ tcTyClDecl1 _parent roles_info
             , tcdATs = ats, tcdATDefs = at_defs })
   = ASSERT( isNothing _parent )
     do { clas <- fixM $ \ clas ->
+            -- We need the knot because 'clas' is passed into tcClassATs
             tcTyClTyVars class_name $ \ binders res_kind ->
             do { MASSERT( isConstraintKind res_kind )
-                 -- This little knot is just so we can get
-                 -- hold of the name of the class TyCon, which we
-                 -- need to look up its recursiveness
                ; traceTc "tcClassDecl 1" (ppr class_name $$ ppr binders)
-               ; let tycon_name = tyConName (classTyCon clas)
-                     roles = roles_info tycon_name
+               ; let tycon_name = class_name        -- We use the same name
+                     roles = roles_info tycon_name  -- for TyCon and Class
 
                ; ctxt' <- solveEqualities $ tcHsContext ctxt
                ; ctxt' <- zonkTcTypeToTypes emptyZonkEnv ctxt'
@@ -912,7 +915,7 @@ tcTySynRhs roles_info tc_name binders res_kind hs_ty
        ; rhs_ty <- solveEqualities $ tcCheckLHsType hs_ty res_kind
        ; rhs_ty <- zonkTcTypeToType emptyZonkEnv rhs_ty
        ; let roles = roles_info tc_name
-             tycon = mkSynonymTyCon tc_name binders res_kind roles rhs_ty
+             tycon = buildSynTyCon tc_name binders res_kind roles rhs_ty
        ; return tycon }
 
 tcDataDefn :: RolesInfo -> Name
@@ -932,7 +935,8 @@ tcDataDefn roles_info
        ; stupid_theta    <- zonkTcTypeToTypes emptyZonkEnv
                                               stupid_tc_theta
        ; kind_signatures <- xoptM LangExt.KindSignatures
-       ; is_boot         <- tcIsHsBootOrSig -- Are we compiling an hs-boot file?
+       ; tcg_env         <- getGblEnv
+       ; let hsc_src = tcg_src tcg_env
 
              -- Check that we don't use kind signatures without Glasgow extensions
        ; when (isJust mb_ksig) $
@@ -942,9 +946,8 @@ tcDataDefn roles_info
 
        ; tycon <- fixM $ \ tycon -> do
              { let res_ty = mkTyConApp tycon (mkTyVarTys (binderVars final_bndrs))
-             ; data_cons <- tcConDecls new_or_data tycon
-                                       (final_bndrs, res_ty) cons
-             ; tc_rhs    <- mk_tc_rhs is_boot tycon data_cons
+             ; data_cons <- tcConDecls tycon (final_bndrs, res_ty) cons
+             ; tc_rhs    <- mk_tc_rhs hsc_src tycon data_cons
              ; tc_rep_nm <- newTyConRepName tc_name
              ; return (mkAlgTyCon tc_name
                                   final_bndrs
@@ -954,12 +957,21 @@ tcDataDefn roles_info
                                   stupid_theta tc_rhs
                                   (VanillaAlgTyCon tc_rep_nm)
                                   gadt_syntax) }
+       ; traceTc "tcDataDefn" (ppr tc_name $$ ppr tycon_binders $$ ppr extra_bndrs)
        ; return tycon }
   where
-    mk_tc_rhs is_boot tycon data_cons
-      | null data_cons, is_boot         -- In a hs-boot file, empty cons means
-      = return totallyAbstractTyConRhs  -- "don't know"; hence totally Abstract
-      | otherwise
+    -- In hs-boot, a 'data' declaration with no constructors
+    -- indicates an nominally distinct abstract data type.
+    mk_tc_rhs HsBootFile _ []
+      = return (AbstractTyCon DistinctNominalAbstract)
+
+    -- In hsig, a 'data' declaration indicates a skolem
+    -- abstract data type. See 'HowAbstract' and Note
+    -- [Skolem abstract data] for more commentary.
+    mk_tc_rhs HsigFile _ []
+      = return (AbstractTyCon SkolemAbstract)
+
+    mk_tc_rhs _ tycon data_cons
       = case new_or_data of
           DataType -> return (mkDataTyConRhs data_cons)
           NewType  -> ASSERT( not (null data_cons) )
@@ -1056,16 +1068,19 @@ tcDefaultAssocDecl fam_tc [L loc (TyFamEqn { tfe_tycon = L _ tc_name
           -- are different.
        ; (pats', rhs_ty)
            <- tcFamTyPats shape Nothing pats
-              (discardResult . tcCheckLHsType rhs) $ \_ pats' rhs_kind ->
+              (discardResult . tcCheckLHsType rhs) $ \tvs pats rhs_kind ->
               do { rhs_ty <- solveEqualities $
                              tcCheckLHsType rhs rhs_kind
-                 ; return (pats', rhs_ty) }
-       -- pats' is fully zonked already
-       ; rhs_ty <- zonkTcTypeToType emptyZonkEnv rhs_ty
+
+                     -- Zonk the patterns etc into the Type world
+                 ; (ze, _) <- zonkTyBndrsX emptyZonkEnv tvs
+                 ; pats'   <- zonkTcTypeToTypes ze pats
+                 ; rhs_ty'  <- zonkTcTypeToType ze rhs_ty
+                 ; return (pats', rhs_ty') }
 
          -- See Note [Type-checking default assoc decls]
        ; case tcMatchTys pats' (mkTyVarTys (tyConTyVars fam_tc)) of
-           Just subst -> return ( Just (substTyUnchecked subst rhs_ty, loc) )
+           Just subst -> return (Just (substTyUnchecked subst rhs_ty, loc) )
            Nothing    -> failWithTc (defaultAssocKindErr fam_tc)
            -- We check for well-formedness and validity later,
            -- in checkValidClass
@@ -1114,13 +1129,17 @@ tcTyFamInstEqn fam_tc_shape@(fam_tc_name,_,_,_) mb_clsinfo
                      , tfe_rhs   = hs_ty }))
   = ASSERT( fam_tc_name == eqn_tc_name )
     setSrcSpan loc $
-    tcFamTyPats fam_tc_shape mb_clsinfo pats (discardResult . (tcCheckLHsType hs_ty)) $
-       \tvs' pats' res_kind ->
+    tcFamTyPats fam_tc_shape mb_clsinfo pats
+                (discardResult . (tcCheckLHsType hs_ty)) $
+                    \tvs pats res_kind ->
     do { rhs_ty <- solveEqualities $ tcCheckLHsType hs_ty res_kind
-       ; rhs_ty <- zonkTcTypeToType emptyZonkEnv rhs_ty
-       ; traceTc "tcTyFamInstEqn" (ppr fam_tc_name <+> pprTvBndrs tvs')
+
+       ; (ze, tvs') <- zonkTyBndrsX emptyZonkEnv tvs
+       ; pats'      <- zonkTcTypeToTypes ze pats
+       ; rhs_ty'    <- zonkTcTypeToType ze rhs_ty
+       ; traceTc "tcTyFamInstEqn" (ppr fam_tc_name <+> pprTyVars tvs')
           -- don't print out the pats here, as they might be zonked inside the knot
-       ; return (mkCoAxBranch tvs' [] pats' rhs_ty
+       ; return (mkCoAxBranch tvs' [] pats' rhs_ty'
                               (map (const Nominal) tvs')
                               loc) }
 
@@ -1142,7 +1161,7 @@ kcDataDefn fam_name (HsIB { hsib_body = pats })
             Just k  -> do { k' <- tcLHsKind k
                           ; unifyKind (Just hs_ty_pats) res_k k' } }
   where
-    hs_ty_pats = mkHsAppTys (noLoc $ HsTyVar (noLoc fam_name)) pats
+    hs_ty_pats = mkHsAppTys (noLoc $ HsTyVar NotPromoted (noLoc fam_name)) pats
 
 {-
 Kind check type patterns and kind annotate the embedded type variables.
@@ -1239,11 +1258,12 @@ tc_fam_ty_pats (name, _, binders, res_kind) mb_clsinfo
 -- See Note [tc_fam_ty_pats vs tcFamTyPats]
 tcFamTyPats :: FamTyConShape
             -> Maybe ClsInstInfo
-            -> HsTyPats Name          -- patterns
+            -> HsTyPats Name         -- patterns
             -> (TcKind -> TcM ())    -- kind-checker for RHS
-            -> (   [TyVar]           -- Kind and type variables
+            -> (   [TcTyVar]         -- Kind and type variables
                 -> [TcType]          -- Kind and type arguments
-                -> Kind -> TcM a)  -- NB: You can use solveEqualities here.
+                -> TcKind
+                -> TcM a)            -- NB: You can use solveEqualities here.
             -> TcM a
 tcFamTyPats fam_shape@(name,_,_,_) mb_clsinfo pats kind_checker thing_inside
   = do { (typats, res_kind)
@@ -1279,15 +1299,14 @@ tcFamTyPats fam_shape@(name,_,_,_) mb_clsinfo pats kind_checker thing_inside
            -- above would fail. TODO (RAE): Update once the solveEqualities
            -- bit is cleverer.
 
-            -- Zonk the patterns etc into the Type world
-       ; (ze, qtkvs') <- zonkTyBndrsX emptyZonkEnv qtkvs
-       ; typats'      <- zonkTcTypeToTypes ze typats
-       ; res_kind'    <- zonkTcTypeToType  ze res_kind
+       ; traceTc "tcFamTyPats" (ppr name $$ ppr typats $$ ppr qtkvs)
+            -- Don't print out too much, as we might be in the knot
 
-       ; traceTc "tcFamTyPats" (ppr name $$ ppr typats)
-            -- don't print out too much, as we might be in the knot
-       ; tcExtendTyVarEnv qtkvs' $
-         thing_inside qtkvs' typats' res_kind' }
+       ; tcExtendTyVarEnv qtkvs $
+            -- Extend envt with TcTyVars not TyVars, because the
+            -- kind checking etc done by thing_inside does not expect
+            -- to encounter TyVars; it expects TcTyVars
+         thing_inside qtkvs typats res_kind }
 
 {-
 Note [Constraints in patterns]
@@ -1418,23 +1437,22 @@ consUseGadtSyntax _                           = False
                  -- All constructors have same shape
 
 -----------------------------------
-tcConDecls :: NewOrData -> TyCon -> ([TyConBinder], Type)
+tcConDecls :: TyCon -> ([TyConBinder], Type)
            -> [LConDecl Name] -> TcM [DataCon]
   -- Why both the tycon tyvars and binders? Because the tyvars
   -- have all the names and the binders have the visibilities.
-tcConDecls new_or_data rep_tycon (tmpl_bndrs, res_tmpl)
+tcConDecls rep_tycon (tmpl_bndrs, res_tmpl)
   = concatMapM $ addLocM $
-    tcConDecl new_or_data rep_tycon tmpl_bndrs res_tmpl
+    tcConDecl rep_tycon tmpl_bndrs res_tmpl
 
-tcConDecl :: NewOrData
-          -> TyCon             -- Representation tycon. Knot-tied!
+tcConDecl :: TyCon             -- Representation tycon. Knot-tied!
           -> [TyConBinder] -> Type
                  -- Return type template (with its template tyvars)
                  --    (tvs, T tys), where T is the family TyCon
           -> ConDecl Name
           -> TcM [DataCon]
 
-tcConDecl new_or_data rep_tycon tmpl_bndrs res_tmpl
+tcConDecl rep_tycon tmpl_bndrs res_tmpl
           (ConDeclH98 { con_name = name
                       , con_qvars = hs_qvars, con_cxt = hs_ctxt
                       , con_details = hs_details })
@@ -1450,7 +1468,7 @@ tcConDecl new_or_data rep_tycon tmpl_bndrs res_tmpl
               tcExplicitTKBndrs hs_tvs $ \ exp_tvs ->
               do { traceTc "tcConDecl" (ppr name <+> text "tvs:" <+> ppr hs_tvs)
                  ; ctxt <- tcHsContext (fromMaybe (noLoc []) hs_ctxt)
-                 ; btys <- tcConArgs new_or_data hs_details
+                 ; btys <- tcConArgs hs_details
                  ; field_lbls <- lookupConstructorFields (unLoc name)
                  ; let (arg_tys, stricts) = unzip btys
                        bound_vars  = allBoundVariabless ctxt `unionVarSet`
@@ -1508,7 +1526,7 @@ tcConDecl new_or_data rep_tycon tmpl_bndrs res_tmpl
        ; mapM buildOneDataCon [name]
        }
 
-tcConDecl _new_or_data rep_tycon tmpl_bndrs res_tmpl
+tcConDecl rep_tycon tmpl_bndrs res_tmpl
           (ConDeclGADT { con_names = names, con_type = ty })
   = addErrCtxt (dataConCtxtName names) $
     do { traceTc "tcConDecl 1" (ppr names)
@@ -1575,7 +1593,7 @@ tcGadtSigType doc name ty@(HsIB { hsib_vars = vars })
               tcImplicitTKBndrs vars $
               tcExplicitTKBndrs gtvs $ \ exp_tvs ->
               do { ctxt <- tcHsContext cxt
-                 ; btys <- tcConArgs DataType hs_details
+                 ; btys <- tcConArgs hs_details
                  ; ty' <- tcHsLiftedType res_ty
                  ; field_lbls <- lookupConstructorFields name
                  ; let (arg_tys, stricts) = unzip btys
@@ -1609,16 +1627,16 @@ tcConIsInfixGADT con details
                         ; return (con `elemNameEnv` fix_env) }
                | otherwise -> return False
 
-tcConArgs :: NewOrData -> HsConDeclDetails Name
+tcConArgs :: HsConDeclDetails Name
           -> TcM [(TcType, HsSrcBang)]
-tcConArgs new_or_data (PrefixCon btys)
-  = mapM (tcConArg new_or_data) btys
-tcConArgs new_or_data (InfixCon bty1 bty2)
-  = do { bty1' <- tcConArg new_or_data bty1
-       ; bty2' <- tcConArg new_or_data bty2
+tcConArgs (PrefixCon btys)
+  = mapM tcConArg btys
+tcConArgs (InfixCon bty1 bty2)
+  = do { bty1' <- tcConArg bty1
+       ; bty2' <- tcConArg bty2
        ; return [bty1', bty2'] }
-tcConArgs new_or_data (RecCon fields)
-  = mapM (tcConArg new_or_data) btys
+tcConArgs (RecCon fields)
+  = mapM tcConArg btys
   where
     -- We need a one-to-one mapping from field_names to btys
     combined = map (\(L _ f) -> (cd_fld_names f,cd_fld_type f)) (unLoc fields)
@@ -1627,10 +1645,13 @@ tcConArgs new_or_data (RecCon fields)
     (_,btys) = unzip exploded
 
 
-tcConArg :: NewOrData -> LHsType Name -> TcM (TcType, HsSrcBang)
-tcConArg new_or_data bty
+tcConArg :: LHsType Name -> TcM (TcType, HsSrcBang)
+tcConArg bty
   = do  { traceTc "tcConArg 1" (ppr bty)
-        ; arg_ty <- tcHsConArgType new_or_data bty
+        ; arg_ty <- tcHsOpenType (getBangType bty)
+             -- Newtypes can't have unboxed types, but we check
+             -- that in checkValidDataCon; this tcConArg stuff
+             -- doesn't happen for GADT-style declarations
         ; traceTc "tcConArg 2" (ppr bty)
         ; return (arg_ty, getBangStrictness bty) }
 
@@ -2223,7 +2244,7 @@ checkValidTyConTyVars tc
                    = text "NB: Implicitly declared kind variables are put first."
                    | otherwise
                    = empty
-       ; checkValidTelescope (pprTvBndrs vis_tvs) stripped_tvs extra
+       ; checkValidTelescope (pprTyVars vis_tvs) stripped_tvs extra
          `and_if_that_doesn't_error`
            -- This triggers on test case dependent/should_fail/InferDependency
            -- It reports errors around Note [Dependent LHsQTyVars] in TcHsType
@@ -2282,6 +2303,8 @@ checkValidDataCon dflags existential_ok tc con
 
           -- Check all argument types for validity
         ; checkValidType ctxt (dataConUserType con)
+        ; mapM_ (checkForRepresentationPolymorphism empty)
+                (dataConOrigArgTys con)
 
           -- Extra checks for newtype data constructors
         ; when (isNewTyCon tc) (checkNewDataCon con)
@@ -2332,6 +2355,9 @@ checkNewDataCon con
   = do  { checkTc (isSingleton arg_tys) (newtypeFieldErr con (length arg_tys))
               -- One argument
 
+        ; checkTc (not (isUnliftedType arg_ty1)) $
+          text "A newtype cannot have an unlifted argument type"
+
         ; check_con (null eq_spec) $
           text "A newtype constructor must have a return type of form T a1 ... an"
                 -- Return type is (T a b c)
@@ -2352,6 +2378,8 @@ checkNewDataCon con
       = dataConFullSig con
     check_con what msg
        = checkTc what (msg $$ ppr con <+> dcolon <+> ppr (dataConUserType con))
+
+    (arg_ty1 : _) = arg_tys
 
     ok_bang (HsSrcBang _ _ SrcStrict) = False
     ok_bang (HsSrcBang _ _ SrcLazy)   = False
@@ -2723,15 +2751,6 @@ noClassTyVarErr clas fam_tc
   = sep [ text "The associated type" <+> quotes (ppr fam_tc)
         , text "mentions none of the type or kind variables of the class" <+>
                 quotes (ppr clas <+> hsep (map ppr (classTyVars clas)))]
-
-recSynErr :: [LTyClDecl Name] -> TcRn ()
-recSynErr syn_decls
-  = setSrcSpan (getLoc (head sorted_decls)) $
-    addErr (sep [text "Cycle in type synonym declarations:",
-                 nest 2 (vcat (map ppr_decl sorted_decls))])
-  where
-    sorted_decls = sortLocated syn_decls
-    ppr_decl (L loc decl) = ppr loc <> colon <+> ppr decl
 
 badDataConTyCon :: DataCon -> Type -> Type -> SDoc
 badDataConTyCon data_con res_ty_tmpl actual_res_ty

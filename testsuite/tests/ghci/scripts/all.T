@@ -97,6 +97,8 @@ test('ghci056',
 test('ghci057', normal, ghci_script, ['ghci057.script'])
 test('ghci060', normal, ghci_script, ['ghci060.script'])
 test('ghci061', normal, ghci_script, ['ghci061.script'])
+test('ghci062', when(config.have_ext_interp, extra_ways(['ghci-ext'])), 
+		ghci_script, ['ghci062.script'])
 
 test('T2452', normal, ghci_script, ['T2452.script'])
 test('T2766', normal, ghci_script, ['T2766.script'])
@@ -258,3 +260,13 @@ test('T11376', normal, ghci_script, ['T11376.script'])
 test('T12007', normal, ghci_script, ['T12007.script'])
 test('T11975', normal, ghci_script, ['T11975.script'])
 test('T10963', normal, ghci_script, ['T10963.script'])
+test('T11547', normal, ghci_script, ['T11547.script'])
+test('T12520', normal, ghci_script, ['T12520.script'])
+test('T12091',
+     [expect_broken(12091), extra_run_opts('-fobject-code')],
+     ghci_script, ['T12091.script'])
+test('T12523', normal, ghci_script, ['T12523.script'])
+test('T12024', normal, ghci_script, ['T12024.script'])
+test('T12447', expect_broken(12447), ghci_script, ['T12447.script'])
+test('T10249', normal, ghci_script, ['T10249.script'])
+test('T12550', normal, ghci_script, ['T12550.script'])

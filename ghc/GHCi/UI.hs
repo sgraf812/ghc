@@ -54,7 +54,8 @@ import HscTypes ( tyThingParent_maybe, handleFlagWarnings, getSafeMode, hsc_IC,
                   setInteractivePrintName, hsc_dflags, msObjFilePath )
 import Module
 import Name
-import Packages ( trusted, getPackageDetails, listVisibleModuleNames, pprFlag )
+import Packages ( trusted, getPackageDetails, getInstalledPackageDetails,
+                  listVisibleModuleNames, pprFlag )
 import PprTyThing
 import PrelNames
 import RdrName ( RdrName, getGRE_NameQualifier_maybes, getRdrName )
@@ -447,6 +448,7 @@ interactiveUI config srcs maybe_exprs = do
 
    default_editor <- liftIO $ findEditor
    eval_wrapper <- mkEvalWrapper default_progname default_args
+   let prelude_import = simpleImportDecl preludeModuleName
    startGHCi (runGHCi srcs maybe_exprs)
         GHCiState{ progname           = default_progname,
                    args               = default_args,
@@ -469,6 +471,8 @@ interactiveUI config srcs maybe_exprs = do
                    cmdqueue           = [],
                    remembered_ctx     = [],
                    transient_ctx      = [],
+                   extra_imports      = [],
+                   prelude_imports    = [prelude_import],
                    ghc_e              = isJust maybe_exprs,
                    short_help         = shortHelpText config,
                    long_help          = fullHelpText config,
@@ -613,10 +617,16 @@ runGHCi paths maybe_exprs = do
 runGHCiInput :: InputT GHCi a -> GHCi a
 runGHCiInput f = do
     dflags <- getDynFlags
-    histFile <- if gopt Opt_GhciHistory dflags
-                then liftIO $ withGhcAppData (\dir -> return (Just (dir </> "ghci_history")))
-                                             (return Nothing)
-                else return Nothing
+    let ghciHistory = gopt Opt_GhciHistory dflags
+    let localGhciHistory = gopt Opt_LocalGhciHistory dflags
+    currentDirectory <- liftIO $ getCurrentDirectory
+
+    histFile <- case (ghciHistory, localGhciHistory) of
+      (True, True) -> return (Just (currentDirectory </> ".ghci_history"))
+      (True, _) -> liftIO $ withGhcAppData
+        (\dir -> return (Just (dir </> "ghci_history"))) (return Nothing)
+      _ -> return Nothing
+
     runInputT
         (setComplete ghciCompleteWord $ defaultSettings {historyFile = histFile})
         f
@@ -742,7 +752,7 @@ getInfoForPrompt = do
 
         rev_imports = reverse imports -- rightmost are the most recent
 
-        myIdeclName d | Just m <- ideclAs d = m
+        myIdeclName d | Just m <- ideclAs d = unLoc m
                       | otherwise           = unLoc (ideclName d)
 
         modules_names =
@@ -1132,9 +1142,9 @@ afterRunStmt step_here run_result = do
                         afterRunStmt step_here >> return ()
 
   flushInterpBuffers
-  liftIO installSignalHandlers
-  b <- isOptionSet RevertCAFs
-  when b revertCAFs
+  withSignalHandlers $ do
+     b <- isOptionSet RevertCAFs
+     when b revertCAFs
 
   return run_result
 
@@ -2050,7 +2060,7 @@ isSafeModule m = do
 
     tallyPkgs dflags deps | not (packageTrustOn dflags) = ([], [])
                           | otherwise = partition part deps
-        where part pkg = trusted $ getPackageDetails dflags pkg
+        where part pkg = trusted $ getInstalledPackageDetails dflags pkg
 
 -----------------------------------------------------------------------------
 -- :browse
@@ -2308,13 +2318,33 @@ setGHCContextFromGHCiState = do
       -- the actual exception thrown by checkAdd, using tryBool to
       -- turn it into a Bool.
   iidecls <- filterM (tryBool.checkAdd) (transient_ctx st ++ remembered_ctx st)
-  dflags <- GHC.getSessionDynFlags
-  GHC.setContext $
-     if xopt LangExt.ImplicitPrelude dflags && not (any isPreludeImport iidecls)
-        then iidecls ++ [implicitPreludeImport]
-        else iidecls
-    -- XXX put prel at the end, so that guessCurrentModule doesn't pick it up.
 
+  prel_iidecls <- getImplicitPreludeImports iidecls
+  valid_prel_iidecls <- filterM (tryBool . checkAdd) prel_iidecls
+
+  extra_imports <- filterM (tryBool . checkAdd) (map IIDecl (extra_imports st))
+
+  GHC.setContext $ iidecls ++ extra_imports ++ valid_prel_iidecls
+
+
+getImplicitPreludeImports :: [InteractiveImport] -> GHCi [InteractiveImport]
+getImplicitPreludeImports iidecls = do
+  dflags <- GHC.getInteractiveDynFlags
+     -- allow :seti to override -XNoImplicitPrelude
+  st <- getGHCiState
+
+  -- We add the prelude imports if there are no *-imports, and we also
+  -- allow each prelude import to be subsumed by another explicit import
+  -- of the same module.  This means that you can override the prelude import
+  -- with "import Prelude hiding (map)", for example.
+  let prel_iidecls =
+         if xopt LangExt.ImplicitPrelude dflags && not (any isIIModule iidecls)
+            then [ IIDecl imp
+                 | imp <- prelude_imports st
+                 , not (any (sameImpModule imp) iidecls) ]
+            else []
+
+  return prel_iidecls
 
 -- -----------------------------------------------------------------------------
 -- Utils on InteractiveImport
@@ -2328,6 +2358,10 @@ mkIIDecl = IIDecl . simpleImportDecl
 iiModules :: [InteractiveImport] -> [ModuleName]
 iiModules is = [m | IIModule m <- is]
 
+isIIModule :: InteractiveImport -> Bool
+isIIModule (IIModule _) = True
+isIIModule _ = False
+
 iiModuleName :: InteractiveImport -> ModuleName
 iiModuleName (IIModule m) = m
 iiModuleName (IIDecl d)   = unLoc (ideclName d)
@@ -2335,12 +2369,9 @@ iiModuleName (IIDecl d)   = unLoc (ideclName d)
 preludeModuleName :: ModuleName
 preludeModuleName = GHC.mkModuleName "Prelude"
 
-implicitPreludeImport :: InteractiveImport
-implicitPreludeImport = IIDecl (simpleImportDecl preludeModuleName)
-
-isPreludeImport :: InteractiveImport -> Bool
-isPreludeImport (IIModule {}) = True
-isPreludeImport (IIDecl d)    = unLoc (ideclName d) == preludeModuleName
+sameImpModule :: ImportDecl RdrName -> InteractiveImport -> Bool
+sameImpModule _ (IIModule _) = False -- we only care about imports here
+sameImpModule imp (IIDecl d) = unLoc (ideclName d) == unLoc (ideclName imp)
 
 addNotSubsumed :: InteractiveImport
                -> [InteractiveImport] -> [InteractiveImport]
@@ -2557,7 +2588,7 @@ setOptions wds =
       let (plus_opts, minus_opts)  = partitionWith isPlus wds
       mapM_ setOpt plus_opts
       -- then, dynamic flags
-      newDynFlags False minus_opts
+      when (not (null minus_opts)) $ newDynFlags False minus_opts
 
 packageFlagsChanged :: DynFlags -> DynFlags -> Bool
 packageFlagsChanged idflags1 idflags0 =
@@ -2654,7 +2685,7 @@ unsetOptions str
              mapM_ unsetOpt plus_opts
 
              no_flags <- mapM no_flag minus_opts
-             newDynFlags False no_flags
+             when (not (null no_flags)) $ newDynFlags False no_flags
 
 isMinus :: String -> Bool
 isMinus ('-':_) = True
@@ -2758,15 +2789,17 @@ showImports = do
           = ":module +*" ++ moduleNameString star_m
       show_one (IIDecl imp) = showPpr dflags imp
 
-      prel_imp
-        | any isPreludeImport (rem_ctx ++ trans_ctx) = []
-        | not (xopt LangExt.ImplicitPrelude dflags)      = []
-        | otherwise = ["import Prelude -- implicit"]
+  prel_iidecls <- getImplicitPreludeImports (rem_ctx ++ trans_ctx)
+
+  let show_prel p = show_one p ++ " -- implicit"
+      show_extra p = show_one (IIDecl p) ++ " -- fixed"
 
       trans_comment s = s ++ " -- added automatically" :: String
   --
-  liftIO $ mapM_ putStrLn (prel_imp ++ map show_one rem_ctx
-                                    ++ map (trans_comment . show_one) trans_ctx)
+  liftIO $ mapM_ putStrLn (map show_one rem_ctx ++
+                           map (trans_comment . show_one) trans_ctx ++
+                           map show_prel prel_iidecls ++
+                           map show_extra (extra_imports st))
 
 showModules :: GHCi ()
 showModules = do
@@ -3619,8 +3652,8 @@ handler :: SomeException -> GHCi Bool
 
 handler exception = do
   flushInterpBuffers
-  liftIO installSignalHandlers
-  ghciHandle handler (showException exception >> return False)
+  withSignalHandlers $
+     ghciHandle handler (showException exception >> return False)
 
 showException :: SomeException -> GHCi ()
 showException se =

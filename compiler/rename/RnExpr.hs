@@ -121,7 +121,7 @@ rnExpr (HsVar (L l v))
            Just (Right fs@(_:_:_)) -> return (HsRecFld (Ambiguous (L l v)
                                                         PlaceHolder)
                                              , mkFVs (map selectorFieldOcc fs));
-           Just (Right [])         -> error "runExpr/HsVar" } }
+           Just (Right [])         -> panic "runExpr/HsVar" } }
 
 rnExpr (HsIPVar v)
   = return (HsIPVar v, emptyFVs)
@@ -168,7 +168,7 @@ rnExpr (OpApp e1 op  _ e2)
         ; fixity <- case op' of
               L _ (HsVar (L _ n)) -> lookupFixityRn n
               L _ (HsRecFld f)    -> lookupFieldFixityRn f
-              _ -> return (Fixity (show minPrecedence) minPrecedence InfixL)
+              _ -> return (Fixity NoSourceText minPrecedence InfixL)
                    -- c.f. lookupFixity for unbound
 
         ; final_e <- mkOpAppRn e1' op' fixity e2'
@@ -336,8 +336,14 @@ We return a (bogus) EWildPat in each case.
 -}
 
 rnExpr EWildPat        = return (hsHoleExpr, emptyFVs)   -- "_" is just a hole
-rnExpr e@(EAsPat {})   =
-  patSynErr e (text "Did you mean to enable TypeApplications?")
+rnExpr e@(EAsPat {})
+  = do { opt_TypeApplications <- xoptM LangExt.TypeApplications
+       ; let msg | opt_TypeApplications
+                    = "Type application syntax requires a space before '@'"
+                 | otherwise
+                    = "Did you mean to enable TypeApplications?"
+       ; patSynErr e (text msg)
+       }
 rnExpr e@(EViewPat {}) = patSynErr e empty
 rnExpr e@(ELazyPat {}) = patSynErr e empty
 
@@ -474,7 +480,7 @@ rnCmd (HsCmdArrApp arrow arg _ ho rtl)
         -- inside 'arrow'.  In the higher-order case (-<<), they are.
 
 -- infix form
-rnCmd (HsCmdArrForm op (Just _) [arg1, arg2])
+rnCmd (HsCmdArrForm op _ (Just _) [arg1, arg2])
   = do { (op',fv_op) <- escapeArrowScope (rnLExpr op)
        ; let L _ (HsVar (L _ op_name)) = op'
        ; (arg1',fv_arg1) <- rnCmdTop arg1
@@ -484,10 +490,10 @@ rnCmd (HsCmdArrForm op (Just _) [arg1, arg2])
        ; final_e <- mkOpFormRn arg1' op' fixity arg2'
        ; return (final_e, fv_arg1 `plusFV` fv_op `plusFV` fv_arg2) }
 
-rnCmd (HsCmdArrForm op fixity cmds)
+rnCmd (HsCmdArrForm op f fixity cmds)
   = do { (op',fvOp) <- escapeArrowScope (rnLExpr op)
        ; (cmds',fvCmds) <- rnCmdArgs cmds
-       ; return (HsCmdArrForm op' fixity cmds', fvOp `plusFV` fvCmds) }
+       ; return (HsCmdArrForm op' f fixity cmds', fvOp `plusFV` fvCmds) }
 
 rnCmd (HsCmdApp fun arg)
   = do { (fun',fvFun) <- rnLCmd  fun
@@ -763,6 +769,25 @@ rnStmtsWithFreeVars ctxt rnBody (lstmt@(L loc _) : lstmts) thing_inside
         ; return (((stmts1 ++ stmts2), thing), fvs) }
 
 ----------------------
+
+{-
+Note [Failing pattern matches in Stmts]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Many things desugar to HsStmts including monadic things like `do` and `mdo`
+statements, pattern guards, and list comprehensions (see 'HsStmtContext' for an
+exhaustive list). How we deal with pattern match failure is context-dependent.
+
+ * In the case of list comprehensions and pattern guards we don't need any 'fail'
+   function; the desugarer ignores the fail function field of 'BindStmt' entirely.
+ * In the case of monadic contexts (e.g. monad comprehensions, do, and mdo
+   expressions) we want pattern match failure to be desugared to the appropriate
+   'fail' function (either that of Monad or MonadFail, depending on whether
+   -XMonadFailDesugaring is enabled.)
+
+At one point we failed to make this distinction, leading to #11216.
+-}
+
 rnStmt :: Outputable (body RdrName)
        => HsStmtContext Name
        -> (Located (body RdrName) -> RnM (Located (body Name), FreeVars))
@@ -803,9 +828,15 @@ rnStmt ctxt rnBody (L loc (BindStmt pat body _ _ _)) thing_inside
         ; (bind_op, fvs1) <- lookupStmtName ctxt bindMName
 
         ; xMonadFailEnabled <- fmap (xopt LangExt.MonadFailDesugaring) getDynFlags
-        ; let failFunction | xMonadFailEnabled = failMName
-                           | otherwise         = failMName_preMFP
-        ; (fail_op, fvs2) <- lookupSyntaxName failFunction
+        ; let getFailFunction
+                -- For non-monadic contexts (e.g. guard patterns, list
+                -- comprehensions, etc.) we should not need to fail.
+                -- See Note [Failing pattern matches in Stmts]
+                | not (isMonadFailStmtContext ctxt)
+                                    = return (noSyntaxExpr, emptyFVs)
+                | xMonadFailEnabled = lookupSyntaxName failMName
+                | otherwise         = lookupSyntaxName failMName_preMFP
+        ; (fail_op, fvs2) <- getFailFunction
 
         ; rnPat (StmtCtxt ctxt) pat $ \ pat' -> do
         { (thing, fvs3) <- thing_inside (collectPatBinders pat')
@@ -888,7 +919,7 @@ rnStmt ctxt _ (L loc (TransStmt { trS_stmts = stmts, trS_by = by, trS_form = for
              bndr_map = used_bndrs `zip` used_bndrs
              -- See Note [TransStmt binder map] in HsExpr
 
-       ; traceRn (text "rnStmt: implicitly rebound these used binders:" <+> ppr bndr_map)
+       ; traceRn "rnStmt: implicitly rebound these used binders:" (ppr bndr_map)
        ; return (([(L loc (TransStmt { trS_stmts = stmts', trS_bndrs = bndr_map
                                     , trS_by = by', trS_using = using', trS_form = form
                                     , trS_ret = return_op, trS_bind = bind_op
@@ -1452,6 +1483,10 @@ dsDo {(arg_1 | ... | arg_n); stmts} expr =
 
 -}
 
+-- | The 'Name's of @return@ and @pure@. These may not be 'returnName' and
+-- 'pureName' due to @RebindableSyntax@.
+data MonadNames = MonadNames { return_name, pure_name :: Name }
+
 -- | rearrange a list of statements using ApplicativeDoStmt.  See
 -- Note [ApplicativeDo].
 rearrangeForApplicativeDo
@@ -1465,7 +1500,11 @@ rearrangeForApplicativeDo ctxt stmts0 = do
   optimal_ado <- goptM Opt_OptimalApplicativeDo
   let stmt_tree | optimal_ado = mkStmtTreeOptimal stmts
                 | otherwise = mkStmtTreeHeuristic stmts
-  stmtTreeToStmts ctxt stmt_tree [last] last_fvs
+  return_name <- lookupSyntaxName' returnMName
+  pure_name   <- lookupSyntaxName' pureAName
+  let monad_names = MonadNames { return_name = return_name
+                               , pure_name   = pure_name }
+  stmtTreeToStmts monad_names ctxt stmt_tree [last] last_fvs
   where
     (stmts,(last,last_fvs)) = findLast stmts0
     findLast [] = error "findLast"
@@ -1568,7 +1607,8 @@ mkStmtTreeOptimal stmts =
 -- | Turn the ExprStmtTree back into a sequence of statements, using
 -- ApplicativeStmt where necessary.
 stmtTreeToStmts
-  :: HsStmtContext Name
+  :: MonadNames
+  -> HsStmtContext Name
   -> ExprStmtTree
   -> [ExprLStmt Name]             -- ^ the "tail"
   -> FreeVars                     -- ^ free variables of the tail
@@ -1581,9 +1621,9 @@ stmtTreeToStmts
 -- In the spec, but we do it here rather than in the desugarer,
 -- because we need the typechecker to typecheck the <$> form rather than
 -- the bind form, which would give rise to a Monad constraint.
-stmtTreeToStmts ctxt (StmtTreeOne (L _ (BindStmt pat rhs _ _ _),_))
+stmtTreeToStmts monad_names ctxt (StmtTreeOne (L _ (BindStmt pat rhs _ _ _),_))
                 tail _tail_fvs
-  | isIrrefutableHsPat pat, (False,tail') <- needJoin tail
+  | isIrrefutableHsPat pat, (False,tail') <- needJoin monad_names tail
     -- WARNING: isIrrefutableHsPat on (HsPat Name) doesn't have enough info
     --          to know which types have only one constructor.  So only
     --          tuples come out as irrefutable; other single-constructor
@@ -1591,19 +1631,19 @@ stmtTreeToStmts ctxt (StmtTreeOne (L _ (BindStmt pat rhs _ _ _),_))
     --          isIrrefuatableHsPat
   = mkApplicativeStmt ctxt [ApplicativeArgOne pat rhs] False tail'
 
-stmtTreeToStmts _ctxt (StmtTreeOne (s,_)) tail _tail_fvs =
+stmtTreeToStmts _monad_names _ctxt (StmtTreeOne (s,_)) tail _tail_fvs =
   return (s : tail, emptyNameSet)
 
-stmtTreeToStmts ctxt (StmtTreeBind before after) tail tail_fvs = do
-  (stmts1, fvs1) <- stmtTreeToStmts ctxt after tail tail_fvs
+stmtTreeToStmts monad_names ctxt (StmtTreeBind before after) tail tail_fvs = do
+  (stmts1, fvs1) <- stmtTreeToStmts monad_names ctxt after tail tail_fvs
   let tail1_fvs = unionNameSets (tail_fvs : map snd (flattenStmtTree after))
-  (stmts2, fvs2) <- stmtTreeToStmts ctxt before stmts1 tail1_fvs
+  (stmts2, fvs2) <- stmtTreeToStmts monad_names ctxt before stmts1 tail1_fvs
   return (stmts2, fvs1 `plusFV` fvs2)
 
-stmtTreeToStmts ctxt (StmtTreeApplicative trees) tail tail_fvs = do
+stmtTreeToStmts monad_names ctxt (StmtTreeApplicative trees) tail tail_fvs = do
    pairs <- mapM (stmtTreeArg ctxt tail_fvs) trees
    let (stmts', fvss) = unzip pairs
-   let (need_join, tail') = needJoin tail
+   let (need_join, tail') = needJoin monad_names tail
    (stmts, fvs) <- mkApplicativeStmt ctxt stmts' need_join tail'
    return (stmts, unionNameSets (fvs:fvss))
  where
@@ -1617,7 +1657,7 @@ stmtTreeToStmts ctxt (StmtTreeApplicative trees) tail tail_fvs = do
            -- See Note [Deterministic ApplicativeDo and RecursiveDo desugaring]
          pat = mkBigLHsVarPatTup pvars
          tup = mkBigLHsVarTup pvars
-     (stmts',fvs2) <- stmtTreeToStmts ctxt tree [] pvarset
+     (stmts',fvs2) <- stmtTreeToStmts monad_names ctxt tree [] pvarset
      (mb_ret, fvs1) <-
         if | L _ ApplicativeStmt{} <- last stmts' ->
              return (unLoc tup, emptyNameSet)
@@ -1763,17 +1803,22 @@ mkApplicativeStmt ctxt args need_join body_stmts
 
 -- | Given the statements following an ApplicativeStmt, determine whether
 -- we need a @join@ or not, and remove the @return@ if necessary.
-needJoin :: [ExprLStmt Name] -> (Bool, [ExprLStmt Name])
-needJoin [] = (False, [])  -- we're in an ApplicativeArg
-needJoin [L loc (LastStmt e _ t)]
- | Just arg <- isReturnApp e = (False, [L loc (LastStmt arg True t)])
-needJoin stmts = (True, stmts)
+needJoin :: MonadNames
+         -> [ExprLStmt Name]
+         -> (Bool, [ExprLStmt Name])
+needJoin _monad_names [] = (False, [])  -- we're in an ApplicativeArg
+needJoin monad_names  [L loc (LastStmt e _ t)]
+ | Just arg <- isReturnApp monad_names e =
+       (False, [L loc (LastStmt arg True t)])
+needJoin _monad_names stmts = (True, stmts)
 
 -- | @Just e@, if the expression is @return e@ or @return $ e@,
 -- otherwise @Nothing@
-isReturnApp :: LHsExpr Name -> Maybe (LHsExpr Name)
-isReturnApp (L _ (HsPar expr)) = isReturnApp expr
-isReturnApp (L _ e) = case e of
+isReturnApp :: MonadNames
+            -> LHsExpr Name
+            -> Maybe (LHsExpr Name)
+isReturnApp monad_names (L _ (HsPar expr)) = isReturnApp monad_names expr
+isReturnApp monad_names (L _ e) = case e of
   OpApp l op _ r | is_return l, is_dollar op -> Just r
   HsApp f arg    | is_return f               -> Just arg
   _otherwise -> Nothing
@@ -1784,7 +1829,8 @@ isReturnApp (L _ e) = case e of
        -- TODO: I don't know how to get this right for rebindable syntax
   is_var _ _ = False
 
-  is_return = is_var (\n -> n == returnMName || n == pureAName)
+  is_return = is_var (\n -> n == return_name monad_names
+                         || n == pure_name monad_names)
   is_dollar = is_var (`hasKey` dollarIdKey)
 
 {-

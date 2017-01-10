@@ -13,10 +13,8 @@ ToDo [Oct 2013]
 {-# LANGUAGE CPP #-}
 
 module SpecConstr(
-        specConstrProgram
-#ifdef GHCI
-        , SpecConstrAnnotation(..)
-#endif
+        specConstrProgram,
+        SpecConstrAnnotation(..)
     ) where
 
 #include "HsVersions.h"
@@ -29,7 +27,7 @@ import CoreFVs          ( exprsFreeVarsList )
 import CoreMonad
 import Literal          ( litIsLifted )
 import HscTypes         ( ModGuts(..) )
-import WwLib            ( mkWorkerArgs )
+import WwLib            ( isWorkerSmallEnough, mkWorkerArgs )
 import DataCon
 import Coercion         hiding( substCo )
 import Rules
@@ -61,12 +59,9 @@ import PrelNames        ( specTyConName )
 import Module
 
 -- See Note [Forcing specialisation]
-#ifndef GHCI
-type SpecConstrAnnotation = ()
-#else
+
 import TyCon ( TyCon )
 import GHC.Exts( SpecConstrAnnotation(..) )
-#endif
 
 {-
 -----------------------------------------------------
@@ -421,7 +416,7 @@ This seeding is done in the binding for seed_calls in specRec.
 
 Actually in case (2), instead of using the calls from the RHS, it
 would be better to specialise in the importing module.  We'd need to
-add an INLINEABLE pragma to the function, and then it can be
+add an INLINABLE pragma to the function, and then it can be
 specialised in the importing scope, just as is done for type classes
 in Specialise.specImports. This remains to be done (#10346).
 
@@ -793,15 +788,6 @@ data ScEnv = SCE { sc_dflags    :: DynFlags,
              }
 
 ---------------------
--- As we go, we apply a substitution (sc_subst) to the current term
-type InExpr = CoreExpr          -- _Before_ applying the subst
-type InVar  = Var
-
-type OutExpr = CoreExpr         -- _After_ applying the subst
-type OutId   = Id
-type OutVar  = Var
-
----------------------
 type HowBoundEnv = VarEnv HowBound      -- Domain is OutVars
 
 ---------------------
@@ -954,11 +940,6 @@ ignoreType    :: ScEnv -> Type   -> Bool
 ignoreDataCon  :: ScEnv -> DataCon -> Bool
 forceSpecBndr :: ScEnv -> Var    -> Bool
 
-#ifndef GHCI
-ignoreType    _ _  = False
-ignoreDataCon  _ _ = False
-#else /* GHCI */
-
 ignoreDataCon env dc = ignoreTyCon env (dataConTyCon dc)
 
 ignoreType env ty
@@ -969,7 +950,6 @@ ignoreType env ty
 ignoreTyCon :: ScEnv -> TyCon -> Bool
 ignoreTyCon env tycon
   = lookupUFM (sc_annotations env) tycon == Just NoSpecConstr
-#endif /* GHCI */
 
 forceSpecBndr env var = forceSpecFunTy env . snd . splitForAllTys . varType $ var
 
@@ -984,9 +964,7 @@ forceSpecArgTy env ty
   | Just (tycon, tys) <- splitTyConApp_maybe ty
   , tycon /= funTyCon
       = tyConName tycon == specTyConName
-#ifdef GHCI
         || lookupUFM (sc_annotations env) tycon == Just ForceSpecConstr
-#endif
         || any (forceSpecArgTy env) tys
 
 forceSpecArgTy _ _ = False
@@ -1533,10 +1511,14 @@ specialise env bind_calls (RI { ri_fn = fn, ri_lam_bndrs = arg_bndrs
 
   | Just all_calls <- lookupVarEnv bind_calls fn
   = -- pprTrace "specialise entry {" (ppr fn <+> ppr (length all_calls)) $
-    do  { (boring_call, pats) <- callsToPats env specs arg_occs all_calls
-
+    do  { (boring_call, all_pats) <- callsToPats env specs arg_occs all_calls
                 -- Bale out if too many specialisations
-        ; let n_pats      = length pats
+        ; let pats = filter (is_small_enough . fst) all_pats
+              is_small_enough vars = isWorkerSmallEnough (sc_dflags env) vars
+                  -- We are about to construct w/w pair in 'spec_one'.
+                  -- Omit specialisation leading to high arity workers.
+                  -- See Note [Limit w/w arity] in WwLib
+              n_pats      = length pats
               spec_count' = n_pats + spec_count
         ; case sc_count env of
             Just max | not (sc_force env) && spec_count' > max

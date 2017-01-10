@@ -1,12 +1,34 @@
 # Changelog for [`template-haskell` package](http://hackage.haskell.org/package/template-haskell)
 
-## next *TBA*
+## 2.12.0.0 *TBA*
+
   * Bundled with GHC *TBA*
 
   * Add support for pattern synonyms. This introduces one new constructor to
     `Info` (`PatSynI`), two new constructors to `Dec` (`PatSynD` and
     `PatSynSigD`), and two new data types (`PatSynDir` and `PatSynArgs`),
     among other changes. (#8761)
+
+  * Add support for unboxed sums. (#12478)
+
+  * Add support for visible type applications. (#12530)
+
+  * Add support for attaching deriving strategies to `deriving` statements
+    (#10598)
+
+  * `unboxedTupleTypeName` and `unboxedTupleDataName` now work for unboxed
+    0-tuples and 1-tuples (#12977)
+
+  * `Language.Haskell.TH` now reexports all of `Language.Haskell.TH.Lib`.
+    (#12992). This causes `Language.Haskell.TH` to export more types and
+    functions that it did before:
+    - `TExp`, `BangQ`, and `FieldExpQ`
+    - `unboxedTupP`, `unboxedTupE` and `unboundVarE`
+    - `infixLD`, `infixRD`, and `infixND`
+    - `unboxedTupleT` and `wildCardT`
+    - `plainTV` and `kindedTV`
+    - `interruptible` and `funDep`
+    - `valueAnnotation`, `typeAnnotation`, and `moduleAnnotation`
 
 ## 2.11.0.0  *May 2016*
 

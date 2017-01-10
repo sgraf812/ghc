@@ -14,6 +14,7 @@ Flags:
   --no-clean        don't make clean first, just carry on from
                     a previous interrupted validation run
   --testsuite-only  don't build the compiler, just run the test suite
+  --build-only      don't test the compiler, just build it
   --hpc             build stage2 with -fhpc, and see how much of the
                     compiler the test suite covers.
                     2008-07-01: 63% slower than the default.
@@ -46,6 +47,7 @@ EOF
 
 no_clean=0
 testsuite_only=0
+build_only=0
 hpc=NO
 speed=NORMAL
 use_dph=0
@@ -63,6 +65,9 @@ do
         ;;
     --testsuite-only)
         testsuite_only=1
+        ;;
+    --build-only)
+        build_only=1
         ;;
     --hpc)
         hpc=YES
@@ -240,6 +245,16 @@ fi # testsuite-only
 # -----------------------------------------------------------------------------
 # Run the testsuite
 
+if [ "$build_only" -eq 1 ]; then
+    cat <<EOF
+-------------------------------------------------------------------
+Congratulations!  This tree has compiled successfully.
+
+You can now test your new compiler using ./validate --testsuite-only.
+EOF
+    exit 0
+fi
+
 if [ "$hpc" = YES ]
 then
     # XXX With threads we'd need to give a different tix file to each thread
@@ -269,10 +284,16 @@ if [ $be_quiet -eq 1 ] && [ -z $VERBOSE ]; then
     TEST_VERBOSITY="VERBOSE=1"
 fi
 
+# We need to be quite picky on Windows about which Python interpreter we use
+# (#12554, #12661). Allow the user to override it.
+if [ "z$PYTHON" != "z" ]; then
+    PYTHON_ARG="PYTHON=$PYTHON"
+fi
+
 rm -f testsuite_summary.txt testsuite_summary_stage1.txt
 
 # Use LOCAL=0, see Note [Running tests in /tmp].
-$make -C testsuite/tests $BINDIST \
+$make -C testsuite/tests $BINDIST $PYTHON_ARG \
       $MAKE_TEST_TARGET stage=2 LOCAL=0 $TEST_VERBOSITY THREADS=$threads \
       NO_PRINT_SUMMARY=YES SUMMARY_FILE=../../testsuite_summary.txt \
       2>&1 | tee testlog
@@ -280,7 +301,7 @@ $make -C testsuite/tests $BINDIST \
 # Run a few tests using the stage1 compiler.
 # See Note [Why is there no stage1 setup function?].
 # Don't use BINDIST=YES, as stage1 is not available in a bindist.
-$make -C testsuite/tests/stage1 \
+$make -C testsuite/tests/stage1 $PYTHON_ARG \
       $MAKE_TEST_TARGET stage=1 LOCAL=0 $TEST_VERBOSITY THREADS=$threads \
       NO_PRINT_SUMMARY=YES SUMMARY_FILE=../../../testsuite_summary_stage1.txt \
       2>&1 | tee testlog-stage1

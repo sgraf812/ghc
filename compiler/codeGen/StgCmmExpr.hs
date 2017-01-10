@@ -427,7 +427,7 @@ cgCase scrut@(StgApp v []) _ (PrimAlt _) _
        ; withSequel (AssignTo [idToReg dflags (NonVoid v)] False) (cgExpr scrut)
        ; restoreCurrentCostCentre mb_cc
        ; emitComment $ mkFastString "should be unreachable code"
-       ; l <- newLabelC
+       ; l <- newBlockId
        ; emitLabel l
        ; emit (mkBranch l)  -- an infinite loop
        ; return AssignedDirectly
@@ -525,24 +525,24 @@ isSimpleOp (StgPrimCallOp _) _                           = return False
 
 -----------------
 chooseReturnBndrs :: Id -> AltType -> [StgAlt] -> [NonVoid Id]
--- These are the binders of a case that are assigned
--- by the evaluation of the scrutinee
--- Only non-void ones come back
+-- These are the binders of a case that are assigned by the evaluation of the
+-- scrutinee.
+-- They're non-void, see Note [Post-unarisation invariants] in UnariseStg.
 chooseReturnBndrs bndr (PrimAlt _) _alts
-  = nonVoidIds [bndr]
+  = assertNonVoidIds [bndr]
 
 chooseReturnBndrs _bndr (MultiValAlt n) [(_, ids, _)]
-  = ASSERT2(n == length (nonVoidIds ids), ppr n $$ ppr ids $$ ppr _bndr)
-    nonVoidIds ids      -- 'bndr' is not assigned!
+  = ASSERT2(n == length ids, ppr n $$ ppr ids $$ ppr _bndr)
+    assertNonVoidIds ids     -- 'bndr' is not assigned!
 
 chooseReturnBndrs bndr (AlgAlt _) _alts
-  = nonVoidIds [bndr]   -- Only 'bndr' is assigned
+  = assertNonVoidIds [bndr]  -- Only 'bndr' is assigned
 
 chooseReturnBndrs bndr PolyAlt _alts
-  = nonVoidIds [bndr]   -- Only 'bndr' is assigned
+  = assertNonVoidIds [bndr]  -- Only 'bndr' is assigned
 
 chooseReturnBndrs _ _ _ = panic "chooseReturnBndrs"
-        -- UbxTupALt has only one alternative
+                             -- MultiValAlt has only one alternative
 
 -------------------------------------
 cgAlts :: (GcPlan,ReturnKind) -> NonVoid Id -> AltType -> [StgAlt]
@@ -651,7 +651,9 @@ cgAltRhss gc_plan bndr alts = do
     cg_alt (con, bndrs, rhs)
       = getCodeScoped             $
         maybeAltHeapCheck gc_plan $
-        do { _ <- bindConArgs con base_reg bndrs
+        do { _ <- bindConArgs con base_reg (assertNonVoidIds bndrs)
+                    -- alt binders are always non-void,
+                    -- see Note [Post-unarisation invariants] in UnariseStg
            ; _ <- cgExpr rhs
            ; return con }
   forkAlts (map cg_alt alts)
@@ -677,7 +679,9 @@ cgConApp con stg_args
   | otherwise   --  Boxed constructors; allocate and return
   = ASSERT2( stg_args `lengthIs` countConRepArgs con, ppr con <> parens (ppr (countConRepArgs con)) <+> ppr stg_args )
     do  { (idinfo, fcode_init) <- buildDynCon (dataConWorkId con) False
-                                     currentCCS con stg_args
+                                     currentCCS con (assertNonVoidStgArgs stg_args)
+                                     -- con args are always non-void,
+                                     -- see Note [Post-unarisation invariants] in UnariseStg
                 -- The first "con" says that the name bound to this
                 -- closure is is "con", which is a bit of a fudge, but
                 -- it only affects profiling (hence the False)
@@ -868,7 +872,7 @@ emitEnter fun = do
       -- The generated code will be something like this:
       --
       --    R1 = fun  -- copyout
-      --    if (fun & 7 != 0) goto Lcall else goto Lret
+      --    if (fun & 7 != 0) goto Lret else goto Lcall
       --  Lcall:
       --    call [fun] returns to Lret
       --  Lret:
@@ -887,9 +891,9 @@ emitEnter fun = do
       -- code in the enclosing case expression.
       --
       AssignTo res_regs _ -> do
-       { lret <- newLabelC
+       { lret <- newBlockId
        ; let (off, _, copyin) = copyInOflow dflags NativeReturn (Young lret) res_regs []
-       ; lcall <- newLabelC
+       ; lcall <- newBlockId
        ; updfr_off <- getUpdFrameOff
        ; let area = Young lret
        ; let (outArgs, regs, copyout) = copyOutOflow dflags NativeNodeCall Call area

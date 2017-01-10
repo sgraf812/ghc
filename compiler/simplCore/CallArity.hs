@@ -20,9 +20,9 @@ import Data.Maybe
 import qualified Data.Set as Set
 
 import BasicTypes
-import CoreArity     (typeArity)
 import CoreSyn
-import CoreUtils     (exprIsHNF, exprIsTrivial)
+import CoreArity ( typeArity )
+import CoreUtils ( exprIsCheap, exprIsTrivial )
 import MkCore
 import Id
 import Outputable
@@ -204,7 +204,7 @@ Using the result: Eta-Expansion
 We use the result of these two analyses to decide whether we can eta-expand the
 rhs of a let-bound variable.
 
-If the variable is already a function (exprIsHNF), and all calls to the
+If the variable is already a function (exprIsCheap), and all calls to the
 variables have a higher arity than the current manifest arity (i.e. the number
 of lambdas), expand.
 
@@ -330,7 +330,7 @@ the analysis of `e2` will not report anything about `x`. To ensure that
 `callArityBind` does still do the right thing we have to take that into account
 everytime we look up up `x` in the analysis result of `e2`.
   * Instead of calling lookupCallArityType, we return (0, True), indicating
-    that this variable might be called many times with no variables.
+    that this variable might be called many times with no arguments.
   * Instead of checking `calledWith x`, we assume that everything can be called
     with it.
   * In the recursive case, when calclulating the `cross_calls`, if there is
@@ -354,7 +354,7 @@ For a mutually recursive let, we begin by
  4. For each variable, we find out the incoming arity and whether it is called
     once, based on the the current analysis result. If this differs from the
     memoized results, we re-analyse the rhs and update the memoized table.
- 5. If nothing had to be reanalized, we are done.
+ 5. If nothing had to be reanalyzed, we are done.
     Otherwise, repeat from step 3.
 
 
@@ -407,6 +407,17 @@ the case for Core!
     arguments mentioned in the strictness signature.
     See #10176 for a real-world-example.
 
+Note [What is a thunk]
+~~~~~~~~~~~~~~~~~~~~~~
+
+Originally, everything that is not in WHNF (`exprIsWHNF`) is considered a
+thunk, not eta-expanded, to avoid losing any sharing. This is also how the
+published papers on Call Arity describe it.
+
+In practice, there are thunks that do a just little work, such as
+pattern-matching on a variable, and the benefits of eta-expansion likely
+oughtweigh the cost of doing that repeatedly. Therefore, this implementation of
+Call Arity considers everything that is not cheap (`exprIsCheap`) as a thunk.
 -}
 
 
@@ -550,15 +561,16 @@ callArityExpr nodes (Lam v e)
   | not (isId v) = callArityExprTransparent nodes (Lam v) e
   | otherwise    = transfer' <$> callArityExpr nodes e
   where
-    -- We have a lambda that may be called multiple times, so its free variables
-    -- can all be co-called.
-    -- Also regardless of the variable not being interesting,
-    -- we have to add the var as an argument.
     transfer' transfer 0 = do
+      -- We have a lambda that may be called multiple times, so its free variables
+      -- can all be co-called.
+      -- Also regardless of the variable not being interesting,
+      -- we have to add the var as an argument.
       (cat, e') <- transfer 0
       return (makeIdArg v (calledMultipleTimes cat), Lam v e')
-    -- We have a lambda that we are calling. decrease arity.
+
     transfer' transfer arity = do
+      -- We have a lambda that we are applying to. decrease arity.
       (cat, e') <- transfer (arity - 1)
       return (makeIdArg v cat, Lam v e')
 
@@ -735,32 +747,29 @@ unleashCall is_recursive cat_usage (id, rhs, transfer_rhs)
                  | otherwise = calledMultipleTimes cat_rhs
     return (cat_rhs', (id `setIdCallArity` trimmed_arity, rhs'))
 
+-- | See Note [What is a thunk].
 isThunk :: CoreExpr -> Bool
-isThunk = not . exprIsHNF
+isThunk = not . exprIsCheap
 
 peelCallArityType :: CoreExpr -> CallArityType -> (Maybe (Arity, Bool), CallArityType)
-peelCallArityType a ca_type = case cat_args ca_type of
-  arg:args -> (arg, ca_type { cat_args = args })
-  _ -> (Just (0, False), ca_type)
-  {- TODO: worry about this later
-  arg:args | isInteresting arg ->
-    -- TODO: not (exprIsTrivial a)?
-    -- TODO: called_once when arity = 0?
-    let (arity, called_once) = lookupCallArityType ca_type arg
-        ca_type' = typeDel arg ca_type
-    in  (arity, called_once, ca_type')
-  _:_ -> (0, False, ca_type) -- See Note [Taking boring variables into account]
-  [] -> (0, not (exprIsTrivial a), ca_type)
-    -- the called function had no signature or has not
-    -- been analysed with high enough incoming arity
-    -- (e.g. when loading the signature from an imported id).
-    -- ca_f is rather useless for analysing a, so
-    -- be consersative assume incoming arity 0.
-    --
-    -- Also, if the argument is trivial (e.g. a variable), then it will _not_ be
-    -- let-bound in the Core to STG transformation (CorePrep actually),
-    -- so no sharing will happen here, and we have to assume many calls.
-    -}
+peelCallArityType a ca_f
+  | exprIsTrivial a
+  -- If the argument is trivial (e.g. a variable), then it will _not_ be
+  -- let-bound in the Core to STG transformation (CorePrep actually),
+  -- so no sharing will happen here, and we have to assume many calls.
+  = (Just (0, False), ca_f { cat_args = drop 1 (cat_args ca_f) })
+
+  | arg:args <- cat_args ca_f
+  -- The called expression had a signature we can return.
+  = (arg, ca_f { cat_args = args })
+
+  | otherwise
+  -- The called function had no signature or has not
+  -- been analysed with high enough incoming arity
+  -- (e.g. when loading the signature from an imported id).
+  -- ca_f is rather useless for analysing a, so
+  -- be consersative assume incoming arity 0.
+  = (Just (0, False), ca_f)
 
 -- Which bindings should we look at?
 -- See Note [Which variables are interesting]

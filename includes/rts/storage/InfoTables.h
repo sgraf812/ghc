@@ -15,6 +15,17 @@
    Several pointer fields in info tables are expressed as offsets
    relative to the info pointer, so that we can generate
    position-independent code.
+
+   Note [x86-64-relative]
+   There is a complication on the x86_64 platform, where pointers are
+   64 bits, but the tools don't support 64-bit relative relocations.
+   However, the default memory model (small) ensures that all symbols
+   have values in the lower 2Gb of the address space, so offsets all
+   fit in 32 bits.  Hence we can use 32-bit offset fields.
+
+   Somewhere between binutils-2.16.1 and binutils-2.16.91.0.6,
+   support for 64-bit PC-relative relocations was added, so maybe this
+   hackery can go away sometime.
    ------------------------------------------------------------------------- */
 
 #if x86_64_TARGET_ARCH
@@ -46,14 +57,12 @@ typedef struct {
 #define _HNF (1<<0)  /* head normal form?    */
 #define _BTM (1<<1)  /* uses info->layout.bitmap */
 #define _NS  (1<<2)  /* non-sparkable        */
-#define _STA (1<<3)  /* static?              */
-#define _THU (1<<4)  /* thunk?               */
-#define _MUT (1<<5)  /* mutable?             */
-#define _UPT (1<<6)  /* unpointed?           */
-#define _SRT (1<<7)  /* has an SRT?          */
-#define _IND (1<<8)  /* is an indirection?   */
+#define _THU (1<<3)  /* thunk?               */
+#define _MUT (1<<4)  /* mutable?             */
+#define _UPT (1<<5)  /* unpointed?           */
+#define _SRT (1<<6)  /* has an SRT?          */
+#define _IND (1<<7)  /* is an indirection?   */
 
-#define isSTATIC(flags)    ((flags) &_STA)
 #define isMUTABLE(flags)   ((flags) &_MUT)
 #define isBITMAP(flags)    ((flags) &_BTM)
 #define isTHUNK(flags)     ((flags) &_THU)
@@ -69,7 +78,6 @@ extern StgWord16 closure_flags[];
 #define closure_BITMAP(c)       (  closureFlags(c) & _BTM)
 #define closure_NON_SPARK(c)    ( (closureFlags(c) & _NS))
 #define closure_SHOULD_SPARK(c) (!(closureFlags(c) & _NS))
-#define closure_STATIC(c)       (  closureFlags(c) & _STA)
 #define closure_THUNK(c)        (  closureFlags(c) & _THU)
 #define closure_MUTABLE(c)      (  closureFlags(c) & _MUT)
 #define closure_UNPOINTED(c)    (  closureFlags(c) & _UPT)
@@ -82,7 +90,6 @@ extern StgWord16 closure_flags[];
 #define ip_HNF(ip)               (  ipFlags(ip) & _HNF)
 #define ip_BITMAP(ip)            (  ipFlags(ip) & _BTM)
 #define ip_SHOULD_SPARK(ip)      (!(ipFlags(ip) & _NS))
-#define ip_STATIC(ip)            (  ipFlags(ip) & _STA)
 #define ip_THUNK(ip)             (  ipFlags(ip) & _THU)
 #define ip_MUTABLE(ip)           (  ipFlags(ip) & _MUT)
 #define ip_UNPOINTED(ip)         (  ipFlags(ip) & _UPT)
@@ -212,9 +219,20 @@ typedef struct StgInfoTable_ {
       them doesn't affect the layout).
 
    -  If srt_bitmap (in the std info table part) is zero, then the srt
-      field may be omitted.  This only applies if the slow_apply and
+      field needn't be set.  This only applies if the slow_apply and
       bitmap fields have also been omitted.
    -------------------------------------------------------------------------- */
+
+/*
+   Note [Encoding static reference tables]
+   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+   As static reference tables appear frequently in code, we use a special
+   compact encoding for the common case of a module defining only a few CAFs: We
+   produce one table containing a list of CAFs in the module and then include a
+   bitmap in each info table describing which entries of this table the closure
+   references.
+ */
 
 typedef struct StgFunInfoExtraRev_ {
     OFFSET_FIELD(slow_apply_offset); /* apply to args on the stack */

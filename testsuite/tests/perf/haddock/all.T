@@ -52,7 +52,7 @@ test('haddock.base',
 test('haddock.Cabal',
      [unless(in_tree_compiler(), skip), req_haddock
      ,stats_num_field('bytes allocated',
-          [(wordsize(64), 16014171248, 5)
+          [(wordsize(64), 25478853176 , 5)
             # 2012-08-14: 3255435248 (amd64/Linux)
             # 2012-08-29: 3324606664 (amd64/Linux, new codegen)
             # 2012-10-08: 3373401360 (amd64/Linux)
@@ -88,6 +88,10 @@ test('haddock.Cabal',
             #   of modules in Cabal.  This Cabal update added a large number
             #   of new modules; if you exclude them from the haddock run
             #   the stats are comparable.
+            # 2016-10-01: 20619433656 (amd64/Linux) - Cabal update
+            # 2016-10-03: 21554874976 (amd64/Linux) - Cabal update
+            # 2016-10-06: 23706190072 (amd64/Linux) - Cabal update
+            # 2016-12-20: 25478853176 (amd64/Linux) - Cabal update
 
           ,(platform('i386-unknown-mingw32'), 3293415576, 5)
             # 2012-10-30:                     1733638168 (x86/Windows)
@@ -109,7 +113,7 @@ test('haddock.Cabal',
 test('haddock.compiler',
      [unless(in_tree_compiler(), skip), req_haddock
      ,stats_num_field('bytes allocated',
-          [(wordsize(64), 55314944264, 10)
+          [(wordsize(64), 60911147344, 10)
             # 2012P-08-14: 26070600504 (amd64/Linux)
             # 2012-08-29: 26353100288 (amd64/Linux, new CG)
             # 2012-09-18: 26882813032 (amd64/Linux)
@@ -124,6 +128,7 @@ test('haddock.compiler',
             # 2015-12-15: 49395782136 (amd64/Linux) more creep, following kind-equalities
             # 2015-12-17: 58017214568 (amd64/Linux) update Haddock to master
             # 2016-06-21: 55314944264 (amd64/Linux) D2350: Make checkFamInstConsistency less expensive
+            # 2016-11-29: 60911147344 (amd64/Linux) unknown cause
 
           ,(platform('i386-unknown-mingw32'),   902576468, 10)
             # 2012-10-30:                     13773051312 (x86/Windows)

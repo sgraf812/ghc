@@ -22,7 +22,7 @@ module TcHsType (
 
                 -- Type checking type and class decls
         kcLookupTcTyCon, kcTyClTyVars, tcTyClTyVars,
-        tcHsConArgType, tcDataKindSig,
+        tcDataKindSig,
 
         -- Kind-checking types
         -- No kind generalisation, no checkValidType
@@ -55,6 +55,7 @@ import TcUnify
 import TcIface
 import TcSimplify ( solveEqualities )
 import TcType
+import TcHsSyn( zonkSigType )
 import Inst   ( tcInstBinders, tcInstBindersX, tcInstBinderX )
 import Type
 import Kind
@@ -174,7 +175,7 @@ pprSigCtxt ctxt hs_ty
 tcHsSigWcType :: UserTypeCtxt -> LHsSigWcType Name -> TcM Type
 -- This one is used when we have a LHsSigWcType, but in
 -- a place where wildards aren't allowed. The renamer has
--- alrady checked this, so we can simply ignore it.
+-- already checked this, so we can simply ignore it.
 tcHsSigWcType ctxt sig_ty = tcHsSigType ctxt (dropWildCards sig_ty)
 
 kcHsSigType :: [Located Name] -> LHsSigType Name -> TcM ()
@@ -200,8 +201,7 @@ tcHsSigType ctxt sig_ty
     do { kind <- case expectedKindInCtxt ctxt of
                     AnythingKind -> newMetaKindVar
                     TheKind k    -> return k
-                    OpenKind     -> do { rr <- newFlexiTyVarTy runtimeRepTy
-                                       ; return $ tYPE rr }
+                    OpenKind     -> newOpenTypeKind
               -- The kind is checked by checkValidType, and isn't necessarily
               -- of kind * in a Template Haskell quote eg [t| Maybe |]
 
@@ -226,26 +226,25 @@ tc_hs_sig_type (HsIB { hsib_body = hs_ty
        ; return (mkSpecForAllTys tkvs ty) }
 
 -----------------
-tcHsDeriv :: LHsSigType Name -> TcM ([TyVar], Class, [Type], Kind)
+tcHsDeriv :: LHsSigType Name -> TcM ([TyVar], Class, [Type], [Kind])
 -- Like tcHsSigType, but for the ...deriving( C t1 ty2 ) clause
--- Returns the C, [ty1, ty2, and the kind of C's *next* argument
+-- Returns the C, [ty1, ty2, and the kinds of C's remaining arguments
 -- E.g.    class C (a::*) (b::k->k)
 --         data T a b = ... deriving( C Int )
---    returns ([k], C, [k, Int],  k->k)
--- Also checks that (C ty1 ty2 arg) :: Constraint
--- if arg has a suitable kind
+--    returns ([k], C, [k, Int], [k->k])
 tcHsDeriv hs_ty
-  = do { arg_kind <- newMetaKindVar
+  = do { cls_kind <- newMetaKindVar
                     -- always safe to kind-generalize, because there
                     -- can be no covars in an outer scope
        ; ty <- checkNoErrs $
                  -- avoid redundant error report with "illegal deriving", below
-               tc_hs_sig_type hs_ty (mkFunTy arg_kind constraintKind)
+               tc_hs_sig_type hs_ty cls_kind
        ; ty <- kindGeneralizeType ty  -- also zonks
-       ; arg_kind <- zonkTcType arg_kind
+       ; cls_kind <- zonkTcType cls_kind
        ; let (tvs, pred) = splitForAllTys ty
+       ; let (args, _) = splitFunTys cls_kind
        ; case getClassPredTys_maybe pred of
-           Just (cls, tys) -> return (tvs, cls, tys, arg_kind)
+           Just (cls, tys) -> return (tvs, cls, tys, args)
            Nothing -> failWithTc (text "Illegal deriving item" <+> quotes (ppr hs_ty)) }
 
 tcHsClsInstType :: UserTypeCtxt    -- InstDeclCtxt or SpecInstCtxt
@@ -298,17 +297,6 @@ tcHsTypeApp wc_ty kind
         First a couple of simple wrappers for kcHsType
 -}
 
-tcHsConArgType :: NewOrData ->  LHsType Name -> TcM Type
--- Permit a bang, but discard it
-tcHsConArgType NewType  bty = tcHsLiftedType (getBangType bty)
-  -- Newtypes can't have bangs, but we don't check that
-  -- until checkValidDataCon, so do not want to crash here
-
-tcHsConArgType DataType bty = tcHsOpenType (getBangType bty)
-  -- Can't allow an unlifted type for newtypes, because we're effectively
-  -- going to remove the constructor while coercing it to a lifted type.
-  -- And newtypes can't be bang'd
-
 ---------------------------
 tcHsOpenType, tcHsLiftedType,
   tcHsOpenTypeNC, tcHsLiftedTypeNC :: LHsType Name -> TcM TcType
@@ -317,7 +305,7 @@ tcHsOpenType, tcHsLiftedType,
 tcHsOpenType ty   = addTypeCtxt ty $ tcHsOpenTypeNC ty
 tcHsLiftedType ty = addTypeCtxt ty $ tcHsLiftedTypeNC ty
 
-tcHsOpenTypeNC   ty = do { ek <- ekOpen
+tcHsOpenTypeNC   ty = do { ek <- newOpenTypeKind
                          ; tc_lhs_type typeLevelMode ty ek }
 tcHsLiftedTypeNC ty = tc_lhs_type typeLevelMode ty liftedTypeKind
 
@@ -442,7 +430,7 @@ tc_infer_lhs_type mode (L span ty)
 -- | Infer the kind of a type and desugar. This is the "up" type-checker,
 -- as described in Note [Bidirectional type checking]
 tc_infer_hs_type :: TcTyMode -> HsType Name -> TcM (TcType, TcKind)
-tc_infer_hs_type mode (HsTyVar (L _ tv)) = tcTyVar mode tv
+tc_infer_hs_type mode (HsTyVar _ (L _ tv)) = tcTyVar mode tv
 tc_infer_hs_type mode (HsAppTy ty1 ty2)
   = do { let (fun_ty, arg_tys) = splitHsAppTys ty1 [ty2]
        ; (fun_ty', fun_kind) <- tc_infer_lhs_type mode fun_ty
@@ -458,6 +446,14 @@ tc_infer_hs_type mode (HsKindSig ty sig)
   = do { sig' <- tc_lhs_kind (kindLevel mode) sig
        ; ty' <- tc_lhs_type mode ty sig'
        ; return (ty', sig') }
+-- HsSpliced is an annotation produced by 'RnSplice.rnSpliceType' to communicate
+-- the splice location to the typechecker. Here we skip over it in order to have
+-- the same kind inferred for a given expression whether it was produced from
+-- splices or not.
+--
+-- See Note [Delaying modFinalizers in untyped splices].
+tc_infer_hs_type mode (HsSpliceTy (HsSpliced _ (HsSplicedTy ty)) _)
+  = tc_infer_hs_type mode ty
 tc_infer_hs_type mode (HsDocTy ty _) = tc_infer_lhs_type mode ty
 tc_infer_hs_type _    (HsCoreTy ty)  = return (ty, typeKind ty)
 tc_infer_hs_type mode other_ty
@@ -476,10 +472,10 @@ tc_lhs_type mode (L span ty) exp_kind
 tc_fun_type :: TcTyMode -> LHsType Name -> LHsType Name -> TcKind -> TcM TcType
 tc_fun_type mode ty1 ty2 exp_kind = case mode_level mode of
   TypeLevel ->
-    do { arg_rr <- newFlexiTyVarTy runtimeRepTy
-       ; res_rr <- newFlexiTyVarTy runtimeRepTy
-       ; ty1' <- tc_lhs_type mode ty1 (tYPE arg_rr)
-       ; ty2' <- tc_lhs_type mode ty2 (tYPE res_rr)
+    do { arg_k <- newOpenTypeKind
+       ; res_k <- newOpenTypeKind
+       ; ty1' <- tc_lhs_type mode ty1 arg_k
+       ; ty2' <- tc_lhs_type mode ty2 res_k
        ; checkExpectedKind (mkFunTy ty1' ty2') liftedTypeKind exp_kind }
   KindLevel ->  -- no representation polymorphism in kinds. yet.
     do { ty1' <- tc_lhs_type mode ty1 liftedTypeKind
@@ -546,8 +542,9 @@ tc_hs_type mode (HsQualTy { hst_ctxt = ctxt, hst_body = ty }) exp_kind
          -- See Note [Body kind of a HsQualTy]
        ; ty' <- if isConstraintKind exp_kind
                 then tc_lhs_type mode ty constraintKind
-                else do { ek <- ekOpen -- The body kind (result of the
-                                       -- function) can be * or #, hence ekOpen
+                else do { ek <- newOpenTypeKind
+                                -- The body kind (result of the function)
+                                -- can be * or #, hence newOpenTypeKind
                         ; ty <- tc_lhs_type mode ty ek
                         ; checkExpectedKind ty liftedTypeKind exp_kind }
 
@@ -606,14 +603,14 @@ tc_hs_type mode (HsTupleTy hs_tup_sort tys) exp_kind
 
 tc_hs_type mode (HsSumTy hs_tys) exp_kind
   = do { let arity = length hs_tys
-       ; arg_kinds <- map tYPE `fmap` newFlexiTyVarTys arity runtimeRepTy
-       ; tau_tys <- zipWithM (tc_lhs_type mode) hs_tys arg_kinds
+       ; arg_kinds <- mapM (\_ -> newOpenTypeKind) hs_tys
+       ; tau_tys   <- zipWithM (tc_lhs_type mode) hs_tys arg_kinds
        ; let arg_tys = map (getRuntimeRepFromKind "tc_hs_type HsSumTy") arg_kinds ++ tau_tys
        ; checkExpectedKind (mkTyConApp (sumTyCon arity) arg_tys) (tYPE unboxedSumRepDataConTy) exp_kind
        }
 
 --------- Promoted lists and tuples
-tc_hs_type mode (HsExplicitListTy _k tys) exp_kind
+tc_hs_type mode (HsExplicitListTy _ _k tys) exp_kind
   = do { tks <- mapM (tc_infer_lhs_type mode) tys
        ; (taus', kind) <- unifyKinds tks
        ; let ty = (foldr (mk_cons kind) (mk_nil kind) taus')
@@ -704,8 +701,7 @@ tc_tuple :: TcTyMode -> TupleSort -> [LHsType Name] -> TcKind -> TcM TcType
 tc_tuple mode tup_sort tys exp_kind
   = do { arg_kinds <- case tup_sort of
            BoxedTuple      -> return (nOfThem arity liftedTypeKind)
-           UnboxedTuple    -> do { rrs <- newFlexiTyVarTys arity runtimeRepTy
-                                 ; return $ map tYPE rrs }
+           UnboxedTuple    -> mapM (\_ -> newOpenTypeKind) tys
            ConstraintTuple -> return (nOfThem arity constraintKind)
        ; tau_tys <- zipWithM (tc_lhs_type mode) tys arg_kinds
        ; finish_tuple tup_sort tau_tys arg_kinds exp_kind }
@@ -865,7 +861,7 @@ checkExpectedKind :: TcType               -- the type whose kind we're checking
 checkExpectedKind ty act_kind exp_kind
  = do { (ty', act_kind') <- instantiate ty act_kind exp_kind
       ; let origin = TypeEqOrigin { uo_actual   = act_kind'
-                                  , uo_expected = mkCheckExpType exp_kind
+                                  , uo_expected = exp_kind
                                   , uo_thing    = Just $ mkTypeErrorThing ty'
                                   }
       ; co_k <- uType origin KindLevel act_kind' exp_kind
@@ -1232,7 +1228,7 @@ Note [Dependent LHsQTyVars]
 We track (in the renamer) which explicitly bound variables in a
 LHsQTyVars are manifestly dependent; only precisely these variables
 may be used within the LHsQTyVars. We must do this so that kcHsTyVarBndrs
-can produce the right TcTyBinders, and tell Anon vs. Named. Earlier,
+can produce the right TyConBinders, and tell Anon vs. Named. Earlier,
 I thought it would work simply to do a free-variable check during
 kcHsTyVarBndrs, but this is bogus, because there may be unsolved
 equalities about. And we don't want to eagerly solve the equalities,
@@ -1274,28 +1270,28 @@ tcWildCardBindersX new_wc wc_names thing_inside
 --
 -- This function does not do telescope checking.
 kcHsTyVarBndrs :: Name    -- ^ of the thing being checked
+               -> Bool    -- ^ True <=> the TyCon being kind-checked can be unsaturated
                -> Bool    -- ^ True <=> the decl being checked has a CUSK
                -> Bool    -- ^ True <=> the decl is an open type/data family
                -> Bool    -- ^ True <=> all the hsq_implicit are *kind* vars
                           -- (will give these kind * if -XNoTypeInType)
                -> LHsQTyVars Name
-               -> TcM (Kind, r)  -- ^ the result kind, possibly with other info
-               -> TcM (Bool -> TcTyCon, r)
-                     -- ^ a way to make a TcTyCon, with the other info.
-                     -- The Bool says whether the tycon can be unsaturated.
-kcHsTyVarBndrs name cusk open_fam all_kind_vars
+               -> TcM (Kind, r)     -- ^ The result kind, possibly with other info
+               -> TcM (TcTyCon, r)  -- ^ A suitably-kinded TcTyCon
+kcHsTyVarBndrs name unsat cusk open_fam all_kind_vars
   (HsQTvs { hsq_implicit = kv_ns, hsq_explicit = hs_tvs
           , hsq_dependent = dep_names }) thing_inside
   | cusk
   = do { kv_kinds <- mk_kv_kinds
-       ; let scoped_kvs = zipWith mk_skolem_tv kv_ns kv_kinds
+       ; lvl <- getTcLevel
+       ; let scoped_kvs = zipWith (mk_skolem_tv lvl) kv_ns kv_kinds
        ; tcExtendTyVarEnv2 (kv_ns `zip` scoped_kvs) $
     do { (tc_binders, res_kind, stuff) <- solveEqualities $
                                           bind_telescope hs_tvs thing_inside
 
            -- Now, because we're in a CUSK, quantify over the mentioned
            -- kind vars, in dependency order.
-       ; tc_binders  <- mapM zonkTyConBinder tc_binders
+       ; tc_binders  <- mapM zonkTcTyVarBinder tc_binders
        ; res_kind <- zonkTcType res_kind
        ; let tc_tvs = binderVars tc_binders
              qkvs   = tyCoVarsOfTypeWellScoped (mkTyConKind tc_binders res_kind)
@@ -1321,13 +1317,13 @@ kcHsTyVarBndrs name cusk open_fam all_kind_vars
 
        ; let final_binders = map (mkNamedTyConBinder Specified) good_tvs
                             ++ tc_binders
-             mk_tctc unsat = mkTcTyCon name final_binders res_kind
-                                       unsat (scoped_kvs ++ tc_tvs)
+             tycon = mkTcTyCon name final_binders res_kind
+                               unsat (scoped_kvs ++ tc_tvs)
                            -- the tvs contain the binders already
                            -- in scope from an enclosing class, but
                            -- re-adding tvs to the env't doesn't cause
                            -- harm
-       ; return ( mk_tctc, stuff ) }}
+       ; return (tycon, stuff) }}
 
   | otherwise
   = do { kv_kinds <- mk_kv_kinds
@@ -1338,9 +1334,9 @@ kcHsTyVarBndrs name cusk open_fam all_kind_vars
               bind_telescope hs_tvs thing_inside
        ; let   -- NB: Don't add scoped_kvs to tyConTyVars, because they
                -- must remain lined up with the binders
-             mk_tctc unsat = mkTcTyCon name binders res_kind unsat
-                                       (scoped_kvs ++ binderVars binders)
-       ; return (mk_tctc, stuff) }
+             tycon = mkTcTyCon name binders res_kind unsat
+                               (scoped_kvs ++ binderVars binders)
+       ; return (tycon, stuff) }
   where
       -- if -XNoTypeInType and we know all the implicits are kind vars,
       -- just give the kind *. This prevents test
@@ -1480,7 +1476,7 @@ tcExplicitTKBndrsX new_tv orig_hs_tvs thing_inside
 
        ; traceTc "tcExplicitTKBndrs" $
            vcat [ text "Hs vars:" <+> ppr orig_hs_tvs
-                , text "tvs:" <+> sep (map pprTvBndr tvs) ]
+                , text "tvs:" <+> sep (map pprTyVar tvs) ]
 
        ; return (result, bound_tvs `unionVarSet` mkVarSet tvs)
        }
@@ -1539,21 +1535,24 @@ tcHsTyVarName m_kind name
            _ -> do { kind <- case m_kind of
                                Just kind -> return kind
                                Nothing   -> newMetaKindVar
-                   ; return (mk_skolem_tv name kind, False) }}
+                   ; tv <- newSkolemTyVar name kind
+                   ; return (tv, False) }}
 
 -- makes a new skolem tv
 newSkolemTyVar :: Name -> Kind -> TcM TcTyVar
-newSkolemTyVar name kind = return (mk_skolem_tv name kind)
+newSkolemTyVar name kind = do { lvl <- getTcLevel
+                              ; return (mk_skolem_tv lvl name kind) }
 
-mk_skolem_tv :: Name -> Kind -> TcTyVar
-mk_skolem_tv n k = mkTcTyVar n k vanillaSkolemTv
+mk_skolem_tv :: TcLevel -> Name -> Kind -> TcTyVar
+mk_skolem_tv lvl n k = mkTcTyVar n k (SkolemTv lvl False)
 
 ------------------
 kindGeneralizeType :: Type -> TcM Type
 -- Result is zonked
 kindGeneralizeType ty
   = do { kvs <- kindGeneralize ty
-       ; zonkTcType (mkInvForAllTys kvs ty) }
+       ; ty <- zonkSigType (mkInvForAllTys kvs ty)
+       ; return ty  }
 
 kindGeneralize :: TcType -> TcM [KindVar]
 -- Quantify the free kind variables of a kind or type
@@ -1702,7 +1701,6 @@ tcTyClTyVars tycon_name thing_inside
           -- are the ones mentioned in the source.
        ; tcExtendTyVarEnv scoped_tvs $
          thing_inside binders res_kind }
-  where
 
 -----------------------------------
 tcDataKindSig :: Kind -> TcM ([TyConBinder], Kind)
@@ -1823,7 +1821,7 @@ tcHsPartialSigType ctxt sig_ty
         ; tau     <- zonkTcType tau
         ; checkValidType ctxt (mkSpecForAllTys all_tvs $ mkPhiTy theta tau)
 
-        ; traceTc "tcHsPatSigType" (ppr all_tvs)
+        ; traceTc "tcHsPartialSigType" (ppr all_tvs)
         ; return (wcs, wcx, all_tvs, theta, tau) }
   where
     new_implicit_tv name = do { kind <- newMetaKindVar
@@ -1902,7 +1900,7 @@ tcPatSig in_pat_bind sig res_ty
         ; if null sig_tvs then do {
                 -- Just do the subsumption check and return
                   wrap <- addErrCtxtM (mk_msg sig_ty) $
-                          tcSubTypeET_NC PatSigCtxt res_ty sig_ty
+                          tcSubTypeET PatSigOrigin PatSigCtxt res_ty sig_ty
                 ; return (sig_ty, [], sig_wcs, wrap)
         } else do
                 -- Type signature binds at least one scoped type variable
@@ -1925,7 +1923,7 @@ tcPatSig in_pat_bind sig res_ty
 
         -- Now do a subsumption check of the pattern signature against res_ty
         ; wrap <- addErrCtxtM (mk_msg sig_ty) $
-                  tcSubTypeET_NC PatSigCtxt res_ty sig_ty
+                  tcSubTypeET PatSigOrigin PatSigCtxt res_ty sig_ty
 
         -- Phew!
         ; return (sig_ty, sig_tvs, sig_wcs, wrap)
@@ -1998,11 +1996,6 @@ in-scope variables that it should not unify with, but it's fiddly.
 ************************************************************************
 
 -}
-
--- | Produce an 'TcKind' suitable for a checking a type that can be * or #.
-ekOpen :: TcM TcKind
-ekOpen = do { rr <- newFlexiTyVarTy runtimeRepTy
-            ; return (tYPE rr) }
 
 unifyKinds :: [(TcType, TcKind)] -> TcM ([TcType], TcKind)
 unifyKinds act_kinds

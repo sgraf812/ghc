@@ -5,7 +5,7 @@
 Core pass to saturate constructors and PrimOps
 -}
 
-{-# LANGUAGE BangPatterns, CPP #-}
+{-# LANGUAGE BangPatterns, CPP, MultiWayIf #-}
 
 module CorePrep (
       corePrepPgm, corePrepExpr, cvtLitInteger,
@@ -110,6 +110,7 @@ The goal of this pass is to prepare for code generation.
     aren't inlined by some caller.
 
 9.  Replace (lazy e) by e.  See Note [lazyId magic] in MkId.hs
+    Also replace (noinline e) by e.
 
 10. Convert (LitInteger i t) into the core representation
     for the Integer i. Normally this uses mkInteger, but if
@@ -126,17 +127,17 @@ when type erasure is done for conversion to STG, we don't end up with
 any trivial or useless bindings.
 
 
-Invariants
-~~~~~~~~~~
+Note [CorePrep invariants]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 Here is the syntax of the Core produced by CorePrep:
 
     Trivial expressions
-       triv ::= lit |  var
-              | triv ty  |  /\a. triv
-              | truv co  |  /\c. triv  |  triv |> co
+       arg ::= lit |  var
+              | arg ty  |  /\a. arg
+              | truv co  |  /\c. arg  |  arg |> co
 
     Applications
-       app ::= lit  |  var  |  app triv  |  app ty  | app co | app |> co
+       app ::= lit  |  var  |  app arg  |  app ty  | app co | app |> co
 
     Expressions
        body ::= app
@@ -152,7 +153,7 @@ We define a synonym for each of these non-terminals.  Functions
 with the corresponding name produce a result in that syntax.
 -}
 
-type CpeTriv = CoreExpr    -- Non-terminal 'triv'
+type CpeArg  = CoreExpr    -- Non-terminal 'arg'
 type CpeApp  = CoreExpr    -- Non-terminal 'app'
 type CpeBody = CoreExpr    -- Non-terminal 'body'
 type CpeRhs  = CoreExpr    -- Non-terminal 'rhs'
@@ -378,7 +379,7 @@ cpeBind top_lvl env (NonRec bndr rhs)
                                           is_unlifted
                                           env bndr1 rhs
        -- See Note [Inlining in CorePrep]
-       ; if cpe_ExprIsTrivial rhs2 && isNotTopLevel top_lvl
+       ; if exprIsTrivial rhs2 && isNotTopLevel top_lvl
             then return (extendCorePrepEnvExpr env bndr rhs2, floats)
             else do {
 
@@ -515,30 +516,6 @@ cpeRhsE env (Lit (LitInteger i _))
                    (cpe_integerSDataCon env) i)
 cpeRhsE _env expr@(Lit {}) = return (emptyFloats, expr)
 cpeRhsE env expr@(Var {})  = cpeApp env expr
-
-cpeRhsE env (Var f `App` _{-type-} `App` arg)
-  | f `hasKey` lazyIdKey          -- Replace (lazy a) by a
-  = cpeRhsE env arg               -- See Note [lazyId magic] in MkId
-
-cpeRhsE env (Var f `App` _runtimeRep `App` _type `App` arg)
-    -- See Note [runRW magic] in MkId
-  | f `hasKey` runRWKey           -- Replace (runRW# f) by (f realWorld#),
-  = case arg of                   -- beta reducing if possible
-      Lam s body -> cpeRhsE (extendCorePrepEnv env s realWorldPrimId) body
-      _          -> cpeRhsE env (arg `App` Var realWorldPrimId)
-                    -- See Note [runRW arg]
-
-{- Note [runRW arg]
-~~~~~~~~~~~~~~~~~~~
-If we got, say
-   runRW# (case bot of {})
-which happened in Trac #11291, we do /not/ want to turn it into
-   (case bot of {}) realWorldPrimId#
-because that gives a panic in CoreToStg.myCollectArgs, which expects
-only variables in function position.  But if we are sure to make
-runRW# strict (which we do in MkId), this can't happen
--}
-
 cpeRhsE env expr@(App {}) = cpeApp env expr
 
 cpeRhsE env (Let bind expr)
@@ -586,7 +563,7 @@ cpeRhsE env (Case scrut bndr ty alts)
 
 cvtLitInteger :: DynFlags -> Id -> Maybe DataCon -> Integer -> CoreExpr
 -- Here we convert a literal Integer to the low-level
--- represenation. Exactly how we do this depends on the
+-- representation. Exactly how we do this depends on the
 -- library that implements Integer.  If it's GMP we
 -- use the S# data constructor for small literals.
 -- See Note [Integer literals] in Literal
@@ -672,67 +649,91 @@ rhsToBody expr = return (emptyFloats, expr)
 --              CpeApp: produces a result satisfying CpeApp
 -- ---------------------------------------------------------------------------
 
+data ArgInfo = CpeApp  CoreArg
+             | CpeCast Coercion
+             | CpeTick (Tickish Id)
+
+{- Note [runRW arg]
+~~~~~~~~~~~~~~~~~~~
+If we got, say
+   runRW# (case bot of {})
+which happened in Trac #11291, we do /not/ want to turn it into
+   (case bot of {}) realWorldPrimId#
+because that gives a panic in CoreToStg.myCollectArgs, which expects
+only variables in function position.  But if we are sure to make
+runRW# strict (which we do in MkId), this can't happen
+-}
+
 cpeApp :: CorePrepEnv -> CoreExpr -> UniqSM (Floats, CpeRhs)
 -- May return a CpeRhs because of saturating primops
-cpeApp env expr
-  = do { (app, head, _, floats, ss) <- collect_args expr 0
-       ; MASSERT(null ss)       -- make sure we used all the strictness info
-
-        -- Now deal with the function
-       ; case head of
-           Just (fn_id, depth) -> do { sat_app <- maybeSaturate fn_id app depth
-                                     ; return (floats, sat_app) }
-           _other              -> return (floats, app) }
+cpeApp top_env expr
+  = do { let (terminal, args, depth) = collect_args expr
+       ; cpe_app top_env terminal args depth
+       }
 
   where
-    -- Deconstruct and rebuild the application, floating any non-atomic
-    -- arguments to the outside.  We collect the type of the expression,
-    -- the head of the application, and the number of actual value arguments,
-    -- all of which are used to possibly saturate this application if it
-    -- has a constructor or primop at the head.
+    -- We have a nested data structure of the form
+    -- e `App` a1 `App` a2 ... `App` an, convert it into
+    -- (e, [CpeApp a1, CpeApp a2, ..., CpeApp an], depth)
+    -- We use 'ArgInfo' because we may also need to
+    -- record casts and ticks.  Depth counts the number
+    -- of arguments that would consume strictness information
+    -- (so, no type or coercion arguments.)
+    collect_args :: CoreExpr -> (CoreExpr, [ArgInfo], Int)
+    collect_args e = go e [] 0
+      where
+        go (App fun arg)      as depth
+            = go fun (CpeApp arg : as)
+                (if isTyCoArg arg then depth else depth + 1)
+        go (Cast fun co)      as depth
+            = go fun (CpeCast co : as) depth
+        go (Tick tickish fun) as depth
+            | tickishPlace tickish == PlaceNonLam
+            && tickish `tickishScopesLike` SoftScope
+            = go fun (CpeTick tickish : as) depth
+        go terminal as depth = (terminal, as, depth)
 
-    collect_args
-        :: CoreExpr
-        -> Int                       -- Current app depth
-        -> UniqSM (CpeApp,           -- The rebuilt expression
-                   Maybe (Id, Int),  -- The head of the application,
-                                     -- and no. of args it was applied to
-                   Type,             -- Type of the whole expr
-                   Floats,           -- Any floats we pulled out
-                   [Demand])         -- Remaining argument demands
-
-    collect_args (App fun arg@(Type arg_ty)) depth
-      = do { (fun',hd,fun_ty,floats,ss) <- collect_args fun depth
-           ; return (App fun' arg, hd, piResultTy fun_ty arg_ty, floats, ss) }
-
-    collect_args (App fun arg@(Coercion {})) depth
-      = do { (fun',hd,fun_ty,floats,ss) <- collect_args fun depth
-           ; return (App fun' arg, hd, funResultTy fun_ty, floats, ss) }
-
-    collect_args (App fun arg) depth
-      = do { (fun',hd,fun_ty,floats,ss) <- collect_args fun (depth+1)
-           ; let (ss1, ss_rest)  -- See Note [lazyId magic] in MkId
-                    = case (ss, isLazyExpr arg) of
-                        (_   : ss_rest, True)  -> (topDmd, ss_rest)
-                        (ss1 : ss_rest, False) -> (ss1,    ss_rest)
-                        ([],            _)     -> (topDmd, [])
-                 (arg_ty, res_ty) = expectJust "cpeBody:collect_args" $
-                                    splitFunTy_maybe fun_ty
-
-           ; (fs, arg') <- cpeArg env ss1 arg arg_ty
-           ; return (App fun' arg', hd, res_ty, fs `appendFloats` floats, ss_rest) }
-
-    collect_args (Var v) depth
+    cpe_app :: CorePrepEnv
+            -> CoreExpr
+            -> [ArgInfo]
+            -> Int
+            -> UniqSM (Floats, CpeRhs)
+    cpe_app env (Var f) (CpeApp Type{} : CpeApp arg : args) depth
+        | f `hasKey` lazyIdKey          -- Replace (lazy a) with a, and
+       || f `hasKey` noinlineIdKey      -- Replace (noinline a) with a
+        -- Consider the code:
+        --
+        --      lazy (f x) y
+        --
+        -- We need to make sure that we need to recursively collect arguments on
+        -- "f x", otherwise we'll float "f x" out (it's not a variable) and
+        -- end up with this awful -ddump-prep:
+        --
+        --      case f x of f_x {
+        --        __DEFAULT -> f_x y
+        --      }
+        --
+        -- rather than the far superior "f x y".  Test case is par01.
+        = let (terminal, args', depth') = collect_args arg
+          in cpe_app env terminal (args' ++ args) (depth + depth' - 1)
+    cpe_app env (Var f) [CpeApp _runtimeRep@Type{}, CpeApp _type@Type{}, CpeApp arg] 1
+        | f `hasKey` runRWKey
+        -- Replace (runRW# f) by (f realWorld#), beta reducing if possible (this
+        -- is why we return a CorePrepEnv as well)
+        = case arg of
+            Lam s body -> cpe_app (extendCorePrepEnv env s realWorldPrimId) body [] 0
+            _          -> cpe_app env arg [CpeApp (Var realWorldPrimId)] 1
+    cpe_app env (Var v) args depth
       = do { v1 <- fiddleCCall v
            ; let e2 = lookupCorePrepEnv env v1
-                 mb_v2 = getIdFromTrivialExpr_maybe e2
-                 hd = fmap (\v2 -> (v2, depth)) mb_v2
-           -- NB: current depth is right, because e2 is a trivial expression
+                 hd = getIdFromTrivialExpr_maybe e2
+           -- NB: depth from collect_args is right, because e2 is a trivial expression
            -- and thus its embedded Id *must* be at the same depth as any
            -- Apps it is under are type applications only (c.f.
-           -- cpe_ExprIsTrivial).  But note that we need the type of the
+           -- exprIsTrivial).  But note that we need the type of the
            -- expression, not the id.
-           ; return (e2, hd, exprType e2, emptyFloats, stricts) }
+           ; (app, floats) <- rebuild_app args e2 (exprType e2) emptyFloats stricts
+           ; mb_saturate hd app floats depth }
         where
           stricts = case idStrictness v of
                             StrictSig (DmdType _ demands _)
@@ -745,26 +746,63 @@ cpeApp env expr
                 -- Here, we can't evaluate the arg strictly, because this
                 -- partial application might be seq'd
 
-    collect_args (Cast fun co) depth
-      = do { let Pair _ty1 ty2 = coercionKind co
-           ; (fun', hd, _, floats, ss) <- collect_args fun depth
-           ; return (Cast fun' co, hd, ty2, floats, ss) }
-
-    collect_args (Tick tickish fun) depth
-      | tickishPlace tickish == PlaceNonLam
-        && tickish `tickishScopesLike` SoftScope
-      = do { (fun',hd,fun_ty,floats,ss) <- collect_args fun depth
-             -- See [Floating Ticks in CorePrep]
-           ; return (fun',hd,fun_ty,addFloat floats (FloatTick tickish),ss) }
+        -- We inlined into something that's not a var and has no args.
+        -- Bounce it back up to cpeRhsE.
+    cpe_app env fun [] _ = cpeRhsE env fun
 
         -- N-variable fun, better let-bind it
-    collect_args fun _
+    cpe_app env fun args depth
       = do { (fun_floats, fun') <- cpeArg env evalDmd fun ty
                           -- The evalDmd says that it's sure to be evaluated,
                           -- so we'll end up case-binding it
-           ; return (fun', Nothing, ty, fun_floats, []) }
+           ; (app, floats) <- rebuild_app args fun' ty fun_floats []
+           ; mb_saturate Nothing app floats depth }
         where
           ty = exprType fun
+
+    -- Saturate if necessary
+    mb_saturate head app floats depth =
+       case head of
+         Just fn_id -> do { sat_app <- maybeSaturate fn_id app depth
+                          ; return (floats, sat_app) }
+         _other              -> return (floats, app)
+
+    -- Deconstruct and rebuild the application, floating any non-atomic
+    -- arguments to the outside.  We collect the type of the expression,
+    -- the head of the application, and the number of actual value arguments,
+    -- all of which are used to possibly saturate this application if it
+    -- has a constructor or primop at the head.
+    rebuild_app
+        :: [ArgInfo]                  -- The arguments (inner to outer)
+        -> CpeApp
+        -> Type
+        -> Floats
+        -> [Demand]
+        -> UniqSM (CpeApp, Floats)
+    rebuild_app [] app _ floats ss = do
+      MASSERT(null ss) -- make sure we used all the strictness info
+      return (app, floats)
+    rebuild_app (a : as) fun' fun_ty floats ss = case a of
+      CpeApp arg@(Type arg_ty) ->
+        rebuild_app as (App fun' arg) (piResultTy fun_ty arg_ty) floats ss
+      CpeApp arg@(Coercion {}) ->
+        rebuild_app as (App fun' arg) (funResultTy fun_ty) floats ss
+      CpeApp arg -> do
+        let (ss1, ss_rest)  -- See Note [lazyId magic] in MkId
+               = case (ss, isLazyExpr arg) of
+                   (_   : ss_rest, True)  -> (topDmd, ss_rest)
+                   (ss1 : ss_rest, False) -> (ss1,    ss_rest)
+                   ([],            _)     -> (topDmd, [])
+            (arg_ty, res_ty) = expectJust "cpeBody:collect_args" $
+                               splitFunTy_maybe fun_ty
+        (fs, arg') <- cpeArg top_env ss1 arg arg_ty
+        rebuild_app as (App fun' arg') res_ty (fs `appendFloats` floats) ss_rest
+      CpeCast co ->
+        let Pair _ty1 ty2 = coercionKind co
+        in rebuild_app as (Cast fun' co) ty2 floats ss
+      CpeTick tickish ->
+        -- See [Floating Ticks in CorePrep]
+        rebuild_app as fun' fun_ty (addFloat floats (FloatTick tickish)) ss
 
 isLazyExpr :: CoreExpr -> Bool
 -- See Note [lazyId magic] in MkId
@@ -777,9 +815,43 @@ isLazyExpr _                       = False
 --      CpeArg: produces a result satisfying CpeArg
 -- ---------------------------------------------------------------------------
 
+{-
+Note [ANF-ising literal string arguments]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Consider a program like,
+
+    data Foo = Foo Addr#
+
+    foo = Foo "turtle"#
+
+When we go to ANFise this we might think that we want to float the string
+literal like we do any other non-trivial argument. This would look like,
+
+    foo = u\ [] case "turtle"# of s { __DEFAULT__ -> Foo s }
+
+However, this 1) isn't necessary since strings are in a sense "trivial"; and 2)
+wreaks havoc on the CAF annotations that we produce here since we the result
+above is caffy since it is updateable. Ideally at some point in the future we
+would like to just float the literal to the top level as suggested in #11312,
+
+    s = "turtle"#
+    foo = Foo s
+
+However, until then we simply add a special case excluding literals from the
+floating done by cpeArg.
+-}
+
+-- | Is an argument okay to CPE?
+okCpeArg :: CoreExpr -> Bool
+-- Don't float literals. See Note [ANF-ising literal string arguments].
+okCpeArg (Lit _) = False
+-- Do not eta expand a trivial argument
+okCpeArg expr    = not (exprIsTrivial expr)
+
 -- This is where we arrange that a non-trivial argument is let-bound
 cpeArg :: CorePrepEnv -> Demand
-       -> CoreArg -> Type -> UniqSM (Floats, CpeTriv)
+       -> CoreArg -> Type -> UniqSM (Floats, CpeArg)
 cpeArg env dmd arg arg_ty
   = do { (floats1, arg1) <- cpeRhsE env arg     -- arg1 can be a lambda
        ; (floats2, arg2) <- if want_float floats1 arg1
@@ -788,13 +860,13 @@ cpeArg env dmd arg arg_ty
                 -- Else case: arg1 might have lambdas, and we can't
                 --            put them inside a wrapBinds
 
-       ; if cpe_ExprIsTrivial arg2    -- Do not eta expand a trivial argument
-         then return (floats2, arg2)
-         else do
-       { v <- newVar arg_ty
-       ; let arg3      = cpeEtaExpand (exprArity arg2) arg2
-             arg_float = mkFloat dmd is_unlifted v arg3
-       ; return (addFloat floats2 arg_float, varToCoreExpr v) } }
+       ; if okCpeArg arg2
+         then do { v <- newVar arg_ty
+                 ; let arg3      = cpeEtaExpand (exprArity arg2) arg2
+                       arg_float = mkFloat dmd is_unlifted v arg3
+                 ; return (addFloat floats2 arg_float, varToCoreExpr v) }
+         else return (floats2, arg2)
+       }
   where
     is_unlifted = isUnliftedType arg_ty
     want_float  = wantFloatNested NonRecursive dmd is_unlifted
@@ -880,21 +952,6 @@ of the scope of a `seq`, or dropped the `seq` altogether.
 *                                                                      *
 ************************************************************************
 -}
-
-cpe_ExprIsTrivial :: CoreExpr -> Bool
--- Version that doesn't consider an scc annotation to be trivial.
--- See also 'exprIsTrivial'
-cpe_ExprIsTrivial (Var _)         = True
-cpe_ExprIsTrivial (Type _)        = True
-cpe_ExprIsTrivial (Coercion _)    = True
-cpe_ExprIsTrivial (Lit _)         = True
-cpe_ExprIsTrivial (App e arg)     = not (isRuntimeArg arg) && cpe_ExprIsTrivial e
-cpe_ExprIsTrivial (Lam b e)       = not (isRuntimeVar b) && cpe_ExprIsTrivial e
-cpe_ExprIsTrivial (Tick t e)      = not (tickishIsCode t) && cpe_ExprIsTrivial e
-cpe_ExprIsTrivial (Cast e _)      = cpe_ExprIsTrivial e
-cpe_ExprIsTrivial (Case e _ _ []) = cpe_ExprIsTrivial e
-                                    -- See Note [Empty case is trivial] in CoreUtils
-cpe_ExprIsTrivial _               = False
 
 {-
 -- -----------------------------------------------------------------------------

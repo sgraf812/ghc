@@ -18,6 +18,23 @@
 
   * `Data.Type.Coercion` now provides `gcoerceWith` (#12493)
 
+  * New methods `liftReadList(2)` and `liftReadListPrec(2)` in the
+    `Read1`/`Read2` classes that are defined in terms of `ReadPrec` instead of
+    `ReadS`, as well as related combinators, have been added to
+    `Data.Functor.Classes` (#12358)
+
+  * Add `Semigroup` instance for `IO`, as well as for `Event` and `Lifetime`
+    from `GHC.Event` (#12464)
+
+  * Add `Data` instance for `Const` (#12438)
+
+  * Added `Eq1`, `Ord1`, `Read1` and `Show1` instances for `NonEmpty`.
+
+  * Add wrappers for `blksize_t`, `blkcnt_t`, `clockid_t`, `fsblkcnt_t`,
+    `fsfilcnt_t`, `id_t`, and `key_t` to System.Posix.Types (#12795)
+
+  * Raw buffer operations in `GHC.IO.FD` are now strict in the buffer, offset, and length operations (#9696)
+
 ## 4.9.0.0  *May 2016*
 
   * Bundled with GHC 8.0

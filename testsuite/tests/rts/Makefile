@@ -52,7 +52,9 @@ T9405:
     sleep 0.2; \
     kill -2 $$!; \
     wait $$!; \
-    [ -s T9405.ticky ] && echo Ticky-Ticky
+    [ -e T9405.ticky ] || echo "Error: Ticky profile doesn't exist"; \
+    [ -s T9405.ticky ] || echo "Error: Ticky profile is empty"; \
+    echo Ticky-Ticky;
 
 # Naming convention: 'T5423_' obj-way '_' obj-src
 # obj-way ::= v | dyn
@@ -168,3 +170,7 @@ T11788:
 	"$(TEST_HC)" -c T11788.c -o T11788_obj.o
 	"$(AR)" rsT libT11788.a T11788_obj.o 2> /dev/null
 	echo main | "$(TEST_HC)" $(filter-out -rtsopts, $(TEST_HC_OPTS_INTERACTIVE)) T11788.hs -lT11788 -L"$(PWD)"
+
+ .PHONY: T12497
+T12497:
+	echo main | "$(TEST_HC)" $(filter-out -rtsopts, $(TEST_HC_OPTS_INTERACTIVE)) T12497.hs

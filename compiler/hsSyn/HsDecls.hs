@@ -19,6 +19,7 @@
 module HsDecls (
   -- * Toplevel declarations
   HsDecl(..), LHsDecl, HsDataDefn(..), HsDeriving,
+  HsDerivingClause(..), LHsDerivingClause,
 
   -- ** Class or type declarations
   TyClDecl(..), LTyClDecl,
@@ -85,7 +86,8 @@ module HsDecls (
     ) where
 
 -- friends:
-import {-# SOURCE #-}   HsExpr( LHsExpr, HsExpr, HsSplice, pprExpr, pprSplice )
+import {-# SOURCE #-}   HsExpr( LHsExpr, HsExpr, HsSplice, pprExpr,
+                                pprSpliceDecl )
         -- Because Expr imports Decls via HsBracket
 
 import HsBinds
@@ -108,7 +110,7 @@ import SrcLoc
 
 import Bag
 import Maybes
-import Data.Data        hiding (TyCon,Fixity)
+import Data.Data        hiding (TyCon,Fixity, Infix)
 
 {-
 ************************************************************************
@@ -299,10 +301,6 @@ instance (OutputableBndrId name) => Outputable (HsGroup name) where
           vcat_mb gap (Nothing : ds) = vcat_mb gap ds
           vcat_mb gap (Just d  : ds) = gap $$ d $$ vcat_mb blankLine ds
 
-data SpliceExplicitFlag = ExplicitSplice | -- <=> $(f x y)
-                          ImplicitSplice   -- <=> f x y,  i.e. a naked top level expression
-    deriving Data
-
 -- | Located Splice Declaration
 type LSpliceDecl name = Located (SpliceDecl name)
 
@@ -314,7 +312,7 @@ data SpliceDecl id
 deriving instance (DataId id) => Data (SpliceDecl id)
 
 instance (OutputableBndrId name) => Outputable (SpliceDecl name) where
-   ppr (SpliceDecl (L _ e) _) = pprSplice e
+   ppr (SpliceDecl (L _ e) f) = pprSpliceDecl e f
 
 {-
 ************************************************************************
@@ -482,6 +480,7 @@ data TyClDecl name
     SynDecl { tcdLName  :: Located name           -- ^ Type constructor
             , tcdTyVars :: LHsQTyVars name        -- ^ Type variables; for an associated type
                                                   --   these include outer binders
+            , tcdFixity :: LexicalFixity    -- ^ Fixity used in the declaration
             , tcdRhs    :: LHsType name           -- ^ RHS of type declaration
             , tcdFVs    :: PostRn name NameSet }
 
@@ -502,6 +501,7 @@ data TyClDecl name
                                                   --       type F a = a -> a
                                                   -- Here the type decl for 'f' includes 'a'
                                                   -- in its tcdTyVars
+             , tcdFixity  :: LexicalFixity -- ^ Fixity used in the declaration
              , tcdDataDefn :: HsDataDefn name
              , tcdDataCusk :: PostRn name Bool    -- ^ does this have a CUSK?
              , tcdFVs      :: PostRn name NameSet }
@@ -509,6 +509,7 @@ data TyClDecl name
   | ClassDecl { tcdCtxt    :: LHsContext name,          -- ^ Context...
                 tcdLName   :: Located name,             -- ^ Name of the class
                 tcdTyVars  :: LHsQTyVars name,          -- ^ Class type variables
+                tcdFixity  :: LexicalFixity, -- ^ Fixity used in the declaration
                 tcdFDs     :: [Located (FunDep (Located name))],
                                                         -- ^ Functional deps
                 tcdSigs    :: [LSig name],              -- ^ Methods' signatures
@@ -618,6 +619,7 @@ countTyClDecls decls
 hsDeclHasCusk :: TyClDecl Name -> Bool
 hsDeclHasCusk (FamDecl { tcdFam = fam_decl }) = famDeclHasCusk Nothing fam_decl
 hsDeclHasCusk (SynDecl { tcdTyVars = tyvars, tcdRhs = rhs })
+  -- NB: Keep this synchronized with 'getInitialKind'
   = hsTvbAllKinded tyvars && rhs_annotated rhs
   where
     rhs_annotated (L _ ty) = case ty of
@@ -633,15 +635,18 @@ hsDeclHasCusk (ClassDecl { tcdTyVars = tyvars }) = hsTvbAllKinded tyvars
 instance (OutputableBndrId name) => Outputable (TyClDecl name) where
 
     ppr (FamDecl { tcdFam = decl }) = ppr decl
-    ppr (SynDecl { tcdLName = ltycon, tcdTyVars = tyvars, tcdRhs = rhs })
+    ppr (SynDecl { tcdLName = ltycon, tcdTyVars = tyvars, tcdFixity = fixity
+                 , tcdRhs = rhs })
       = hang (text "type" <+>
-              pp_vanilla_decl_head ltycon tyvars [] <+> equals)
+              pp_vanilla_decl_head ltycon tyvars fixity [] <+> equals)
           4 (ppr rhs)
 
-    ppr (DataDecl { tcdLName = ltycon, tcdTyVars = tyvars, tcdDataDefn = defn })
-      = pp_data_defn (pp_vanilla_decl_head ltycon tyvars) defn
+    ppr (DataDecl { tcdLName = ltycon, tcdTyVars = tyvars, tcdFixity = fixity
+                  , tcdDataDefn = defn })
+      = pp_data_defn (pp_vanilla_decl_head ltycon tyvars fixity) defn
 
     ppr (ClassDecl {tcdCtxt = context, tcdLName = lclas, tcdTyVars = tyvars,
+                    tcdFixity = fixity,
                     tcdFDs  = fds,
                     tcdSigs = sigs, tcdMeths = methods,
                     tcdATs = ats, tcdATDefs = at_defs})
@@ -655,8 +660,8 @@ instance (OutputableBndrId name) => Outputable (TyClDecl name) where
                                      pprLHsBindsForUser methods sigs) ]
       where
         top_matter = text "class"
-                     <+> pp_vanilla_decl_head lclas tyvars (unLoc context)
-                     <+> pprFundeps (map unLoc fds)
+                    <+> pp_vanilla_decl_head lclas tyvars fixity (unLoc context)
+                    <+> pprFundeps (map unLoc fds)
 
 instance (OutputableBndrId name) => Outputable (TyClGroup name) where
   ppr (TyClGroup { group_tyclds = tyclds
@@ -668,13 +673,21 @@ instance (OutputableBndrId name) => Outputable (TyClGroup name) where
       ppr roles $$
       ppr instds
 
-pp_vanilla_decl_head :: (OutputableBndrId name)
-   => Located name
+pp_vanilla_decl_head :: (OutputableBndrId name) => Located name
    -> LHsQTyVars name
+   -> LexicalFixity
    -> HsContext name
    -> SDoc
-pp_vanilla_decl_head thing tyvars context
- = hsep [pprHsContext context, pprPrefixOcc (unLoc thing), ppr tyvars]
+pp_vanilla_decl_head thing (HsQTvs { hsq_explicit = tyvars }) fixity context
+ = hsep [pprHsContext context, pp_tyvars tyvars]
+  where
+    pp_tyvars (varl:varsr)
+      | fixity == Infix
+         = hsep [ppr (unLoc varl), pprInfixOcc (unLoc thing)
+         , hsep (map (ppr.unLoc) varsr)]
+      | otherwise = hsep [ pprPrefixOcc (unLoc thing)
+                  , hsep (map (ppr.unLoc) (varl:varsr))]
+    pp_tyvars [] = ppr thing
 
 pprTyClDeclFlavour :: TyClDecl a -> SDoc
 pprTyClDeclFlavour (ClassDecl {})   = text "class"
@@ -879,6 +892,7 @@ data FamilyDecl name = FamilyDecl
   { fdInfo           :: FamilyInfo name              -- type/data, closed/open
   , fdLName          :: Located name                 -- type constructor
   , fdTyVars         :: LHsQTyVars name              -- type variables
+  , fdFixity         :: LexicalFixity         -- Fixity used in the declaration
   , fdResultSig      :: LFamilyResultSig name        -- result signature
   , fdInjectivityAnn :: Maybe (LInjectivityAnn name) -- optional injectivity ann
   }
@@ -949,10 +963,11 @@ pprFamilyDecl :: (OutputableBndrId name)
               => TopLevelFlag -> FamilyDecl name -> SDoc
 pprFamilyDecl top_level (FamilyDecl { fdInfo = info, fdLName = ltycon
                                     , fdTyVars = tyvars
+                                    , fdFixity = fixity
                                     , fdResultSig = L _ result
                                     , fdInjectivityAnn = mb_inj })
   = vcat [ pprFlavour info <+> pp_top_level <+>
-           pp_vanilla_decl_head ltycon tyvars [] <+>
+           pp_vanilla_decl_head ltycon tyvars fixity [] <+>
            pp_kind <+> pp_inj <+> pp_where
          , nest 2 $ pp_eqns ]
   where
@@ -1027,23 +1042,55 @@ data HsDataDefn name   -- The payload of a data type defn
 deriving instance (DataId id) => Data (HsDataDefn id)
 
 -- | Haskell Deriving clause
-type HsDeriving name = Maybe (Located [LHsSigType name])
-  -- ^ The optional 'deriving' clause of a data declaration
+type HsDeriving name = Located [LHsDerivingClause name]
+  -- ^ The optional @deriving@ clauses of a data declaration. "Clauses" is
+  -- plural because one can specify multiple deriving clauses using the
+  -- @-XDerivingStrategies@ language extension.
   --
-  --   @Nothing@ => not specified,
-  --   @Just []@ => derive exactly what is asked
-  --
-  -- It's a 'LHsSigType' because, with Generalised Newtype
-  -- Deriving, we can mention type variables that aren't
-  -- bound by the date type.   e.g.
-  --     data T b = ... deriving( C [a] )
-  -- should producd a derived instance for (C [a] (T b))
-  --
-  -- The payload of the Maybe is Located so that we have a
-  -- place to hang the API annotations:
-  --  - 'ApiAnnotation.AnnKeywordId' :
-  --       'ApiAnnotation.AnnDeriving',
-  --       'ApiAnnotation.AnnOpen','ApiAnnotation.AnnClose'
+  -- The list of 'LHsDerivingClause's corresponds to exactly what the user
+  -- requested to derive, in order. If no deriving clauses were specified,
+  -- the list is empty.
+
+type LHsDerivingClause name = Located (HsDerivingClause name)
+
+-- | A single @deriving@ clause of a data declaration.
+--
+--  - 'ApiAnnotation.AnnKeywordId' :
+--       'ApiAnnotation.AnnDeriving', 'ApiAnnotation.AnnStock',
+--       'ApiAnnotation.AnnAnyClass', 'Api.AnnNewtype',
+--       'ApiAnnotation.AnnOpen','ApiAnnotation.AnnClose'
+data HsDerivingClause name
+  -- See Note [Deriving strategies] in TcDeriv
+  = HsDerivingClause
+    { deriv_clause_strategy :: Maybe (Located DerivStrategy)
+      -- ^ The user-specified strategy (if any) to use when deriving
+      -- 'deriv_clause_tys'.
+    , deriv_clause_tys :: Located [LHsSigType name]
+      -- ^ The types to derive.
+      --
+      -- It uses 'LHsSigType's because, with @-XGeneralizedNewtypeDeriving@,
+      -- we can mention type variables that aren't bound by the datatype, e.g.
+      --
+      -- > data T b = ... deriving (C [a])
+      --
+      -- should produce a derived instance for @C [a] (T b)@.
+    }
+deriving instance (DataId id) => Data (HsDerivingClause id)
+
+instance (OutputableBndrId name)
+       => Outputable (HsDerivingClause name) where
+  ppr (HsDerivingClause { deriv_clause_strategy = dcs
+                        , deriv_clause_tys      = L _ dct })
+    = hsep [ text "deriving"
+           , ppDerivStrategy dcs
+           , pp_dct dct ]
+      where
+        -- This complexity is to distinguish between
+        --    deriving Show
+        --    deriving (Show)
+        pp_dct [a@(HsIB _ (L _ HsAppsTy{}))] = parens (ppr a)
+        pp_dct [a] = ppr a
+        pp_dct _   = parens (interpp'SP dct)
 
 data NewOrData
   = NewType                     -- ^ @newtype Blah ...@
@@ -1152,22 +1199,24 @@ pp_data_defn :: (OutputableBndrId name)
                   -> HsDataDefn name
                   -> SDoc
 pp_data_defn pp_hdr (HsDataDefn { dd_ND = new_or_data, dd_ctxt = L _ context
+                                , dd_cType = mb_ct
                                 , dd_kindSig = mb_sig
                                 , dd_cons = condecls, dd_derivs = derivings })
   | null condecls
-  = ppr new_or_data <+> pp_hdr context <+> pp_sig
+  = ppr new_or_data <+> pp_ct <+> pp_hdr context <+> pp_sig
+    <+> pp_derivings derivings
 
   | otherwise
-  = hang (ppr new_or_data <+> pp_hdr context <+> pp_sig)
-       2 (pp_condecls condecls $$ pp_derivings)
+  = hang (ppr new_or_data <+> pp_ct  <+> pp_hdr context <+> pp_sig)
+       2 (pp_condecls condecls $$ pp_derivings derivings)
   where
+    pp_ct = case mb_ct of
+               Nothing   -> empty
+               Just ct -> ppr ct
     pp_sig = case mb_sig of
                Nothing   -> empty
                Just kind -> dcolon <+> ppr kind
-    pp_derivings = case derivings of
-                     Nothing -> empty
-                     Just (L _ ds) -> hsep [ text "deriving"
-                                           , parens (interpp'SP ds)]
+    pp_derivings (L _ ds) = vcat (map ppr ds)
 
 instance (OutputableBndrId name) => Outputable (HsDataDefn name) where
    ppr d = pp_data_defn (\_ -> text "Naked HsDataDefn") d
@@ -1296,9 +1345,10 @@ type TyFamDefltEqn name = TyFamEqn name (LHsQTyVars name)
 -- See Note [Type family instance declarations in HsSyn]
 data TyFamEqn name pats
   = TyFamEqn
-       { tfe_tycon :: Located name
-       , tfe_pats  :: pats
-       , tfe_rhs   :: LHsType name }
+       { tfe_tycon  :: Located name
+       , tfe_pats   :: pats
+       , tfe_fixity :: LexicalFixity    -- ^ Fixity used in the declaration
+       , tfe_rhs    :: LHsType name }
     -- ^
     --  - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnEqual'
 
@@ -1330,6 +1380,7 @@ data DataFamInstDecl name
   = DataFamInstDecl
        { dfid_tycon     :: Located name
        , dfid_pats      :: HsTyPats   name       -- LHS
+       , dfid_fixity    :: LexicalFixity    -- ^ Fixity used in the declaration
        , dfid_defn      :: HsDataDefn name       -- RHS
        , dfid_fvs       :: PostRn name NameSet } -- Free vars for dependency analysis
     -- ^
@@ -1403,14 +1454,17 @@ ppr_instance_keyword NotTopLevel = empty
 ppr_fam_inst_eqn :: (OutputableBndrId name) => LTyFamInstEqn name -> SDoc
 ppr_fam_inst_eqn (L _ (TyFamEqn { tfe_tycon = tycon
                                 , tfe_pats  = pats
+                                , tfe_fixity = fixity
                                 , tfe_rhs   = rhs }))
-    = pp_fam_inst_lhs tycon pats [] <+> equals <+> ppr rhs
+    = pp_fam_inst_lhs tycon pats fixity [] <+> equals <+> ppr rhs
 
 ppr_fam_deflt_eqn :: (OutputableBndrId name) => LTyFamDefltEqn name -> SDoc
 ppr_fam_deflt_eqn (L _ (TyFamEqn { tfe_tycon = tycon
                                  , tfe_pats  = tvs
+                                 , tfe_fixity = fixity
                                  , tfe_rhs   = rhs }))
-    = text "type" <+> pp_vanilla_decl_head tycon tvs [] <+> equals <+> ppr rhs
+    = text "type" <+> pp_vanilla_decl_head tycon tvs fixity []
+                  <+> equals <+> ppr rhs
 
 instance (OutputableBndrId name) => Outputable (DataFamInstDecl name) where
   ppr = pprDataFamInstDecl TopLevel
@@ -1419,23 +1473,33 @@ pprDataFamInstDecl :: (OutputableBndrId name)
                    => TopLevelFlag -> DataFamInstDecl name -> SDoc
 pprDataFamInstDecl top_lvl (DataFamInstDecl { dfid_tycon = tycon
                                             , dfid_pats  = pats
+                                            , dfid_fixity = fixity
                                             , dfid_defn  = defn })
   = pp_data_defn pp_hdr defn
   where
-    pp_hdr ctxt = ppr_instance_keyword top_lvl <+> pp_fam_inst_lhs tycon pats ctxt
+    pp_hdr ctxt = ppr_instance_keyword top_lvl
+              <+> pp_fam_inst_lhs tycon pats fixity ctxt
 
 pprDataFamInstFlavour :: DataFamInstDecl name -> SDoc
 pprDataFamInstFlavour (DataFamInstDecl { dfid_defn = (HsDataDefn { dd_ND = nd }) })
   = ppr nd
 
-pp_fam_inst_lhs :: (OutputableBndrId name)
-   => Located name
+pp_fam_inst_lhs :: (OutputableBndrId name) => Located name
    -> HsTyPats name
+   -> LexicalFixity
    -> HsContext name
    -> SDoc
-pp_fam_inst_lhs thing (HsIB { hsib_body = typats }) context -- explicit type patterns
-   = hsep [ pprHsContext context, pprPrefixOcc (unLoc thing)
-          , hsep (map (pprParendHsType.unLoc) typats)]
+pp_fam_inst_lhs thing (HsIB { hsib_body = typats }) fixity context
+                                              -- explicit type patterns
+   = hsep [ pprHsContext context, pp_pats typats]
+   where
+     pp_pats (patl:patsr)
+       | fixity == Infix
+          = hsep [pprParendHsType (unLoc patl), pprInfixOcc (unLoc thing)
+          , hsep (map (pprParendHsType.unLoc) patsr)]
+       | otherwise = hsep [ pprPrefixOcc (unLoc thing)
+                   , hsep (map (pprParendHsType.unLoc) (patl:patsr))]
+     pp_pats [] = empty
 
 instance (OutputableBndrId name) => Outputable (ClsInstDecl name) where
     ppr (ClsInstDecl { cid_poly_ty = inst_ty, cid_binds = binds
@@ -1455,15 +1519,24 @@ instance (OutputableBndrId name) => Outputable (ClsInstDecl name) where
         top_matter = text "instance" <+> ppOverlapPragma mbOverlap
                                              <+> ppr inst_ty
 
+ppDerivStrategy :: Maybe (Located DerivStrategy) -> SDoc
+ppDerivStrategy mb =
+  case mb of
+    Nothing       -> empty
+    Just (L _ ds) -> ppr ds
+
 ppOverlapPragma :: Maybe (Located OverlapMode) -> SDoc
 ppOverlapPragma mb =
   case mb of
     Nothing           -> empty
-    Just (L _ (NoOverlap _))    -> text "{-# NO_OVERLAP #-}"
-    Just (L _ (Overlappable _)) -> text "{-# OVERLAPPABLE #-}"
-    Just (L _ (Overlapping _))  -> text "{-# OVERLAPPING #-}"
-    Just (L _ (Overlaps _))     -> text "{-# OVERLAPS #-}"
-    Just (L _ (Incoherent _))   -> text "{-# INCOHERENT #-}"
+    Just (L _ (NoOverlap s))    -> maybe_stext s "{-# NO_OVERLAP #-}"
+    Just (L _ (Overlappable s)) -> maybe_stext s "{-# OVERLAPPABLE #-}"
+    Just (L _ (Overlapping s))  -> maybe_stext s "{-# OVERLAPPING #-}"
+    Just (L _ (Overlaps s))     -> maybe_stext s "{-# OVERLAPS #-}"
+    Just (L _ (Incoherent s))   -> maybe_stext s "{-# INCOHERENT #-}"
+  where
+    maybe_stext NoSourceText     alt = text alt
+    maybe_stext (SourceText src) _   = text src <+> text "#-}"
 
 
 instance (OutputableBndrId name) => Outputable (InstDecl name) where
@@ -1496,19 +1569,26 @@ type LDerivDecl name = Located (DerivDecl name)
 -- | Deriving Declaration
 data DerivDecl name = DerivDecl
         { deriv_type         :: LHsSigType name
+        , deriv_strategy     :: Maybe (Located DerivStrategy)
         , deriv_overlap_mode :: Maybe (Located OverlapMode)
-         -- ^ - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnOpen',
-         --                                    'ApiAnnotation.AnnClose',
-         --                                    'ApiAnnotation.AnnDeriving',
-         --                                    'ApiAnnotation.AnnInstance'
+         -- ^ - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnDeriving',
+         --        'ApiAnnotation.AnnInstance', 'ApiAnnotation.AnnStock',
+         --        'ApiAnnotation.AnnAnyClass', 'Api.AnnNewtype',
+         --        'ApiAnnotation.AnnOpen','ApiAnnotation.AnnClose'
 
   -- For details on above see note [Api annotations] in ApiAnnotation
         }
 deriving instance (DataId name) => Data (DerivDecl name)
 
 instance (OutputableBndrId name) => Outputable (DerivDecl name) where
-    ppr (DerivDecl ty o)
-        = hsep [text "deriving instance", ppOverlapPragma o, ppr ty]
+    ppr (DerivDecl { deriv_type = ty
+                   , deriv_strategy = ds
+                   , deriv_overlap_mode = o })
+        = hsep [ text "deriving"
+               , ppDerivStrategy ds
+               , text "instance"
+               , ppOverlapPragma o
+               , ppr ty ]
 
 {-
 ************************************************************************
@@ -1646,24 +1726,32 @@ instance (OutputableBndrId name) => Outputable (ForeignDecl name) where
        2 (dcolon <+> ppr ty)
 
 instance Outputable ForeignImport where
-  ppr (CImport  cconv safety mHeader spec _) =
-    ppr cconv <+> ppr safety <+>
-    char '"' <> pprCEntity spec <> char '"'
+  ppr (CImport  cconv safety mHeader spec (L _ srcText)) =
+    ppr cconv <+> ppr safety
+      <+> pprWithSourceText srcText (pprCEntity spec "")
     where
       pp_hdr = case mHeader of
                Nothing -> empty
                Just (Header _ header) -> ftext header
 
-      pprCEntity (CLabel lbl) =
-        text "static" <+> pp_hdr <+> char '&' <> ppr lbl
-      pprCEntity (CFunction (StaticTarget _ lbl _ isFun)) =
-            text "static"
-        <+> pp_hdr
-        <+> (if isFun then empty else text "value")
-        <+> ppr lbl
-      pprCEntity (CFunction (DynamicTarget)) =
-        text "dynamic"
-      pprCEntity (CWrapper) = text "wrapper"
+      pprCEntity (CLabel lbl) _ =
+        doubleQuotes $ text "static" <+> pp_hdr <+> char '&' <> ppr lbl
+      pprCEntity (CFunction (StaticTarget st _lbl _ isFun)) src =
+        if dqNeeded then doubleQuotes ce else empty
+          where
+            dqNeeded = (take 6 src == "static")
+                    || isJust mHeader
+                    || not isFun
+                    || st /= NoSourceText
+            ce =
+                  -- We may need to drop leading spaces first
+                  (if take 6 src == "static" then text "static" else empty)
+              <+> pp_hdr
+              <+> (if isFun then empty else text "value")
+              <+> (pprWithSourceText st empty)
+      pprCEntity (CFunction DynamicTarget) _ =
+        doubleQuotes $ text "dynamic"
+      pprCEntity CWrapper _ = doubleQuotes $ text "wrapper"
 
 instance Outputable ForeignExport where
   ppr (CExport  (L _ (CExportStatic _ lbl cconv)) _) =
@@ -1733,24 +1821,25 @@ collectRuleBndrSigTys :: [RuleBndr name] -> [LHsSigWcType name]
 collectRuleBndrSigTys bndrs = [ty | RuleBndrSig _ ty <- bndrs]
 
 pprFullRuleName :: Located (SourceText, RuleName) -> SDoc
-pprFullRuleName (L _ (_, n)) = doubleQuotes $ ftext n
+pprFullRuleName (L _ (st, n)) = pprWithSourceText st (doubleQuotes $ ftext n)
 
 instance (OutputableBndrId name) => Outputable (RuleDecls name) where
-  ppr (HsRules _ rules) = ppr rules
+  ppr (HsRules st rules)
+    = pprWithSourceText st (text "{-# RULES")
+          <+> vcat (punctuate semi (map ppr rules)) <+> text "#-}"
 
 instance (OutputableBndrId name) => Outputable (RuleDecl name) where
   ppr (HsRule name act ns lhs _fv_lhs rhs _fv_rhs)
-        = sep [text "{-# RULES" <+> pprFullRuleName name
-                                <+> ppr act,
+        = sep [pprFullRuleName name <+> ppr act,
                nest 4 (pp_forall <+> pprExpr (unLoc lhs)),
-               nest 4 (equals <+> pprExpr (unLoc rhs) <+> text "#-}") ]
+               nest 6 (equals <+> pprExpr (unLoc rhs)) ]
         where
           pp_forall | null ns   = empty
                     | otherwise = forAllLit <+> fsep (map ppr ns) <> dot
 
 instance (OutputableBndrId name) => Outputable (RuleBndr name) where
    ppr (RuleBndr name) = ppr name
-   ppr (RuleBndrSig name ty) = ppr name <> dcolon <> ppr ty
+   ppr (RuleBndrSig name ty) = parens (ppr name <> dcolon <> ppr ty)
 
 {-
 ************************************************************************
@@ -1924,11 +2013,14 @@ data WarnDecl name = Warning [Located name] WarningTxt
   deriving Data
 
 instance OutputableBndr name => Outputable (WarnDecls name) where
-    ppr (Warnings _ decls) = ppr decls
+    ppr (Warnings (SourceText src) decls)
+      = text src <+> vcat (punctuate comma (map ppr decls)) <+> text "#-}"
+    ppr (Warnings NoSourceText _decls) = panic "WarnDecls"
 
 instance OutputableBndr name => Outputable (WarnDecl name) where
     ppr (Warning thing txt)
-      = hsep [text "{-# DEPRECATED", ppr thing, doubleQuotes (ppr txt), text "#-}"]
+      = hsep ( punctuate comma (map ppr thing))
+              <+> ppr txt
 
 {-
 ************************************************************************

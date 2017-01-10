@@ -20,6 +20,8 @@ import TcRnMonad
 import TcSigs( emptyPragEnv, completeSigFromId )
 import TcEnv
 import TcMType
+import TcHsSyn( zonkTyVarBindersX, zonkTcTypeToTypes
+              , zonkTcTypeToType, emptyZonkEnv )
 import TysPrim
 import TysWiredIn  ( runtimeRepTy )
 import Name
@@ -48,7 +50,6 @@ import FieldLabel
 import Bag
 import Util
 import ErrUtils
-import FV
 import Control.Monad ( zipWithM )
 import Data.List( partition )
 
@@ -73,23 +74,22 @@ tcInferPatSynDecl PSB{ psb_id = lname@(L _ name), psb_args = details,
        ; let (arg_names, rec_fields, is_infix) = collectPatSynArgInfo details
        ; (tclvl, wanted, ((lpat', args), pat_ty))
             <- pushLevelAndCaptureConstraints  $
-               do { pat_ty <- newOpenInferExpType
-                  ; stuff <- tcPat PatSyn lpat pat_ty $
-                             mapM tcLookupId arg_names
-                  ; pat_ty <- readExpType pat_ty
-                  ; return (stuff, pat_ty) }
+               tcInferNoInst $ \ exp_ty ->
+               tcPat PatSyn lpat exp_ty $
+               mapM tcLookupId arg_names
 
        ; let named_taus = (name, pat_ty) : map (\arg -> (getName arg, varType arg)) args
 
        ; (qtvs, req_dicts, ev_binds) <- simplifyInfer tclvl NoRestrictions []
                                                       named_taus wanted
 
-       ; let ((ex_tvs, ex_vars), prov_dicts) = tcCollectEx lpat'
-             univ_tvs   = filter (not . (`elemVarSet` ex_vars)) qtvs
+       ; let (ex_tvs, prov_dicts) = tcCollectEx lpat'
+             ex_tv_set  = mkVarSet ex_tvs
+             univ_tvs   = filterOut (`elemVarSet` ex_tv_set) qtvs
              prov_theta = map evVarPred prov_dicts
              req_theta  = map evVarPred req_dicts
 
-       ; traceTc "tcInferPatSynDecl }" $ ppr name
+       ; traceTc "tcInferPatSynDecl }" $ (ppr name $$ ppr ex_tvs)
        ; tc_patsyn_finish lname dir is_infix lpat'
                           (mkTyVarBinders Inferred univ_tvs
                             , req_theta,  ev_binds, req_dicts)
@@ -243,7 +243,7 @@ unify x := [a] during type checking, and then use the instantiating type
                                               dl = $dfunEqList d
                                           in k [a] dl ys
 
-This "concealing" story works for /uni-directional/ pattern synonmys,
+This "concealing" story works for /uni-directional/ pattern synonyms,
 but obviously not for bidirectional ones.  So in the bidirectional case
 we use SigTv, rather than a generic TauTv, meta-tyvar so that.  And
 we should really check that those SigTvs don't get unified with each
@@ -294,18 +294,19 @@ tc_patsyn_finish :: Located Name  -- ^ PatSyn Name
                  -- ^ Whether fields, empty if not record PatSyn
                  -> TcM (LHsBinds Id, TcGblEnv)
 tc_patsyn_finish lname dir is_infix lpat'
-                 (univ_bndrs, req_theta, req_ev_binds, req_dicts)
-                 (ex_bndrs, ex_tys, prov_theta, prov_dicts)
+                 (univ_tvs, req_theta, req_ev_binds, req_dicts)
+                 (ex_tvs,   ex_tys,    prov_theta,   prov_dicts)
                  (args, arg_tys)
                  pat_ty field_labels
   = do { -- Zonk everything.  We are about to build a final PatSyn
          -- so there had better be no unification variables in there
-         univ_tvs'    <- mapMaybeM zonk_qtv univ_bndrs
-       ; ex_tvs'      <- mapMaybeM zonk_qtv ex_bndrs
-       ; prov_theta'  <- zonkTcTypes prov_theta
-       ; req_theta'   <- zonkTcTypes req_theta
-       ; pat_ty'      <- zonkTcType pat_ty
-       ; arg_tys'     <- zonkTcTypes arg_tys
+
+         (ze, univ_tvs') <- zonkTyVarBindersX emptyZonkEnv univ_tvs
+       ; req_theta'      <- zonkTcTypeToTypes ze req_theta
+       ; (ze, ex_tvs')   <- zonkTyVarBindersX ze ex_tvs
+       ; prov_theta'       <- zonkTcTypeToTypes ze prov_theta
+       ; pat_ty'         <- zonkTcTypeToType ze pat_ty
+       ; arg_tys'        <- zonkTcTypeToTypes ze arg_tys
 
        ; let (env1, univ_tvs) = tidyTyVarBinders emptyTidyEnv univ_tvs'
              (env2, ex_tvs)   = tidyTyVarBinders env1 ex_tvs'
@@ -359,14 +360,6 @@ tc_patsyn_finish lname dir is_infix lpat'
 
        ; traceTc "tc_patsyn_finish }" empty
        ; return (matcher_bind, tcg_env) }
-  where
-    -- This is a bit of an odd functions; why does it not occur elsewhere
-    zonk_qtv :: TcTyVarBinder -> TcM (Maybe TcTyVarBinder)
-    zonk_qtv (TvBndr tv vis)
-      = do { mb_tv' <- zonkQuantifiedTyVar False tv
-                    -- ToDo: The False means that we behave here as if
-                    -- -XPolyKinds was always on, which isn't right.
-           ; return (fmap (\tv' -> TvBndr tv' vis) mb_tv') }
 
 {-
 ************************************************************************
@@ -390,11 +383,11 @@ tcPatSynMatcher (L loc name) lpat
                 (args, arg_tys) pat_ty
   = do { rr_name <- newNameAt (mkTyVarOcc "rep") loc
        ; tv_name <- newNameAt (mkTyVarOcc "r")   loc
-       ; let rr_tv    = mkTcTyVar rr_name runtimeRepTy (SkolemTv False)
-             rr       = mkTyVarTy rr_tv
-             res_tv   = mkTcTyVar tv_name  (tYPE rr) (SkolemTv False)
-             is_unlifted = null args && null prov_dicts
+       ; let rr_tv  = mkTcTyVar rr_name runtimeRepTy vanillaSkolemTv
+             rr     = mkTyVarTy rr_tv
+             res_tv = mkTcTyVar tv_name (tYPE rr) vanillaSkolemTv
              res_ty = mkTyVarTy res_tv
+             is_unlifted = null args && null prov_dicts
              (cont_args, cont_arg_tys)
                | is_unlifted = ([nlHsVar voidPrimId], [voidPrimTy])
                | otherwise   = (args,                 arg_tys)
@@ -555,7 +548,7 @@ tcPatSynBuilderBind (PSB { psb_id = L loc name, psb_def = lpat
            Unidirectional -> panic "tcPatSynBuilderBind"
 
     mk_mg :: LHsExpr Name -> MatchGroup Name (LHsExpr Name)
-    mk_mg body = mkMatchGroupName Generated [builder_match]
+    mk_mg body = mkMatchGroup Generated [builder_match]
              where
                builder_args  = [L loc (VarPat (L loc n)) | L loc n <- args]
                builder_match = mkMatch (FunRhs (L loc name) Prefix)
@@ -802,17 +795,16 @@ nonBidirectionalErr name = failWithTc $
 -- to be passed these pattern-bound evidences.
 tcCollectEx
   :: LPat Id
-  -> ( ([Var], VarSet) -- Existentially-bound type variables as a
-                       -- deterministically ordered list and a set.
-                       -- See Note [Deterministic FV] in FV
-     , [EvVar]
-     )
-tcCollectEx pat = let (fv, evs) = go pat in (fvVarListVarSet fv, evs)
+  -> ( [TyVar]        -- Existentially-bound type variables
+                      -- in correctly-scoped order; e.g. [ k:*, x:k ]
+     , [EvVar] )      -- and evidence variables
+
+tcCollectEx pat = go pat
   where
-    go :: LPat Id -> (FV, [EvVar])
+    go :: LPat Id -> ([TyVar], [EvVar])
     go = go1 . unLoc
 
-    go1 :: Pat Id -> (FV, [EvVar])
+    go1 :: Pat Id -> ([TyVar], [EvVar])
     go1 (LazyPat p)         = go p
     go1 (AsPat _ p)         = go p
     go1 (ParPat p)          = go p
@@ -822,23 +814,23 @@ tcCollectEx pat = let (fv, evs) = go pat in (fvVarListVarSet fv, evs)
     go1 (SumPat p _ _ _)    = go p
     go1 (PArrPat ps _)      = mergeMany . map go $ ps
     go1 (ViewPat _ p _)     = go p
-    go1 con@ConPatOut{}     = merge (FV.mkFVs (pat_tvs con), pat_dicts con) $
-                                 goConDetails $ pat_args con
+    go1 con@ConPatOut{}     = merge (pat_tvs con, pat_dicts con) $
+                              goConDetails $ pat_args con
     go1 (SigPatOut p _)     = go p
     go1 (CoPat _ p _)       = go1 p
     go1 (NPlusKPat n k _ geq subtract _)
       = pprPanic "TODO: NPlusKPat" $ ppr n $$ ppr k $$ ppr geq $$ ppr subtract
     go1 _                   = empty
 
-    goConDetails :: HsConPatDetails Id -> (FV, [EvVar])
+    goConDetails :: HsConPatDetails Id -> ([TyVar], [EvVar])
     goConDetails (PrefixCon ps) = mergeMany . map go $ ps
     goConDetails (InfixCon p1 p2) = go p1 `merge` go p2
     goConDetails (RecCon HsRecFields{ rec_flds = flds })
       = mergeMany . map goRecFd $ flds
 
-    goRecFd :: LHsRecField Id (LPat Id) -> (FV, [EvVar])
+    goRecFd :: LHsRecField Id (LPat Id) -> ([TyVar], [EvVar])
     goRecFd (L _ HsRecField{ hsRecFieldArg = p }) = go p
 
-    merge (vs1, evs1) (vs2, evs2) = (vs1 `unionFV` vs2, evs1 ++ evs2)
+    merge (vs1, evs1) (vs2, evs2) = (vs1 ++ vs2, evs1 ++ evs2)
     mergeMany = foldr merge empty
-    empty = (emptyFV, [])
+    empty     = ([], [])

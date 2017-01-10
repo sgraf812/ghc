@@ -137,6 +137,7 @@ test('simpl021',
      run_command,
      ['$MAKE -s --no-print-directory simpl021'])
 test('T5327', normal, run_command, ['$MAKE -s --no-print-directory T5327'])
+test('T5615', normal, run_command, ['$MAKE -s --no-print-directory T5615'])
 test('T5623', normal, run_command, ['$MAKE -s --no-print-directory T5623'])
 test('T5658b',
      normal,
@@ -220,7 +221,7 @@ test('T10602', only_ways(['optasm']), multimod_compile, ['T10602','-v0'])
 test('T10627', only_ways(['optasm']), compile, [''])
 test('T10181', [expect_broken(10181), only_ways(['optasm'])], compile, [''])
 test('T10083',
-     expect_broken(10083),
+     normal,
      run_command,
      ['$MAKE -s --no-print-directory T10083'])
 test('T10689', normal, compile, [''])
@@ -241,3 +242,22 @@ test('T12076', extra_clean(['T12076a.hi', 'T12076a.o']), multimod_compile, ['T12
 test('T12076lit', normal, compile, ['-O'])
 test('T12076sat', normal, compile, ['-O'])
 test('T12212', normal, compile, ['-O'])
+
+test('noinline01', only_ways(['optasm']), compile, ['-ddump-stg -dsuppress-uniques -O'])
+test('par01', only_ways(['optasm']), compile, ['-ddump-prep -dsuppress-uniques -O2'])
+test('T12776', normal, compile, ['-O2'])
+test('T9509',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T9509'])
+test('T12603',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T12603'])
+test('T12877', normal, run_command, ['$MAKE -s --no-print-directory T12877'])
+test('T13027', normal, compile, [''])
+test('T13025',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T13025'])
+

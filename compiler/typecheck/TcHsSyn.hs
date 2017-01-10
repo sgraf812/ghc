@@ -12,7 +12,7 @@ checker.
 {-# LANGUAGE CPP, TupleSections #-}
 
 module TcHsSyn (
-        mkHsConApp, mkHsDictLet, mkHsApp,
+        mkHsDictLet, mkHsApp,
         hsLitType, hsLPatType, hsPatType,
         mkHsAppTy, mkHsCaseAlt,
         nlHsIntLit,
@@ -27,10 +27,10 @@ module TcHsSyn (
         -- in TcMType
         zonkTopDecls, zonkTopExpr, zonkTopLExpr,
         zonkTopBndrs, zonkTyBndrsX,
-        zonkTyConBinders,
+        zonkTyVarBindersX, zonkTyVarBinderX,
         emptyZonkEnv, mkEmptyZonkEnv,
         zonkTcTypeToType, zonkTcTypeToTypes, zonkTyVarOcc,
-        zonkCoToCo,
+        zonkCoToCo, zonkSigType,
         zonkEvBinds,
 
         -- * Validity checking
@@ -187,6 +187,10 @@ the environment manipulation is tiresome.
 -- Confused by zonking? See Note [What is zonking?] in TcMType.
 type UnboundTyVarZonker = TcTyVar -> TcM Type
         -- How to zonk an unbound type variable
+        -- The TcTyVar is
+        --     (a) a MetaTv
+        --     (b) Flexi and
+        --     (c) its kind is already zonked
         -- Note [Zonking the LHS of a RULE]
 
 -- | A ZonkEnv carries around several bits.
@@ -252,8 +256,8 @@ extendIdZonkEnv1 (ZonkEnv zonk_ty ty_env id_env) id
   = ZonkEnv zonk_ty ty_env (extendVarEnv id_env id id)
 
 extendTyZonkEnv1 :: ZonkEnv -> TyVar -> ZonkEnv
-extendTyZonkEnv1 (ZonkEnv zonk_ty ty_env id_env) ty
-  = ZonkEnv zonk_ty (extendVarEnv ty_env ty ty) id_env
+extendTyZonkEnv1 (ZonkEnv zonk_ty ty_env id_env) tv
+  = ZonkEnv zonk_ty (extendVarEnv ty_env tv tv) id_env
 
 setZonkType :: ZonkEnv -> UnboundTyVarZonker -> ZonkEnv
 setZonkType (ZonkEnv _ ty_env id_env) zonk_ty
@@ -333,10 +337,10 @@ zonkEvVarOcc env v
   | otherwise
   = return (EvId $ zonkIdOcc env v)
 
-zonkTyBndrsX :: ZonkEnv -> [TyVar] -> TcM (ZonkEnv, [TyVar])
+zonkTyBndrsX :: ZonkEnv -> [TcTyVar] -> TcM (ZonkEnv, [TyVar])
 zonkTyBndrsX = mapAccumLM zonkTyBndrX
 
-zonkTyBndrX :: ZonkEnv -> TyVar -> TcM (ZonkEnv, TyVar)
+zonkTyBndrX :: ZonkEnv -> TcTyVar -> TcM (ZonkEnv, TyVar)
 -- This guarantees to return a TyVar (not a TcTyVar)
 -- then we add it to the envt, so all occurrences are replaced
 zonkTyBndrX env tv
@@ -346,11 +350,14 @@ zonkTyBndrX env tv
        ; let tv' = mkTyVar (tyVarName tv) ki
        ; return (extendTyZonkEnv1 env tv', tv') }
 
-zonkTyConBinders :: ZonkEnv -> [TyConBinder] -> TcM (ZonkEnv, [TyConBinder])
-zonkTyConBinders = mapAccumLM zonkTyConBinderX
+zonkTyVarBindersX :: ZonkEnv -> [TyVarBndr TcTyVar vis]
+                             -> TcM (ZonkEnv, [TyVarBndr TyVar vis])
+zonkTyVarBindersX = mapAccumLM zonkTyVarBinderX
 
-zonkTyConBinderX :: ZonkEnv -> TyConBinder -> TcM (ZonkEnv, TyConBinder)
-zonkTyConBinderX env (TvBndr tv vis)
+zonkTyVarBinderX :: ZonkEnv -> TyVarBndr TcTyVar vis
+                            -> TcM (ZonkEnv, TyVarBndr TyVar vis)
+-- Takes a TcTyVar and guarantees to return a TyVar
+zonkTyVarBinderX env (TvBndr tv vis)
   = do { (env', tv') <- zonkTyBndrX env tv
        ; return (env', TvBndr tv' vis) }
 
@@ -867,10 +874,10 @@ zonkCmd env (HsCmdArrApp e1 e2 ty ho rl)
        new_ty <- zonkTcTypeToType env ty
        return (HsCmdArrApp new_e1 new_e2 new_ty ho rl)
 
-zonkCmd env (HsCmdArrForm op fixity args)
+zonkCmd env (HsCmdArrForm op f fixity args)
   = do new_op <- zonkLExpr env op
        new_args <- mapM (zonkCmdTop env) args
-       return (HsCmdArrForm new_op fixity new_args)
+       return (HsCmdArrForm new_op f fixity new_args)
 
 zonkCmd env (HsCmdApp c e)
   = do new_c <- zonkLCmd env c
@@ -1445,8 +1452,9 @@ zonk_tc_ev_binds env (TcEvBinds var) = zonkEvBindsVar env var
 zonk_tc_ev_binds env (EvBinds bs)    = zonkEvBinds env bs
 
 zonkEvBindsVar :: ZonkEnv -> EvBindsVar -> TcM (ZonkEnv, Bag EvBind)
-zonkEvBindsVar env (EvBindsVar ref _) = do { bs <- readMutVar ref
-                                           ; zonkEvBinds env (evBindMapBinds bs) }
+zonkEvBindsVar env (EvBindsVar { ebv_binds = ref })
+  = do { bs <- readMutVar ref
+       ; zonkEvBinds env (evBindMapBinds bs) }
 
 zonkEvBinds :: ZonkEnv -> Bag EvBind -> TcM (ZonkEnv, Bag EvBind)
 zonkEvBinds env binds
@@ -1594,12 +1602,30 @@ zonkTcTypeToTypes env tys = mapM (zonkTcTypeToType env) tys
 zonkCoToCo :: ZonkEnv -> Coercion -> TcM Coercion
 zonkCoToCo = mapCoercion zonk_tycomapper
 
+zonkSigType :: TcType -> TcM Type
+-- Zonk the type obtained from a user type signature
+-- We want to turn any quantified (forall'd) variables into TyVars
+-- but we may find some free TcTyVars, and we want to leave them
+-- completely alone.  They may even have unification variables inside
+-- e.g.  f (x::a) = ...(e :: a -> a)....
+-- The type sig for 'e' mentions a free 'a' which will be a
+-- unification SigTv variable.
+zonkSigType = zonkTcTypeToType (mkEmptyZonkEnv zonk_unbound_tv)
+  where
+    zonk_unbound_tv :: UnboundTyVarZonker
+    zonk_unbound_tv tv = return (mkTyVarTy tv)
+
 zonkTvSkolemising :: UnboundTyVarZonker
 -- This variant is used for the LHS of rules
 -- See Note [Zonking the LHS of a RULE].
 zonkTvSkolemising tv
-  = do { tv' <- skolemiseUnboundMetaTyVar tv vanillaSkolemTv
-       ; return (mkTyVarTy tv') }
+  = do { let tv' = mkTyVar (tyVarName tv) (tyVarKind tv)
+                  -- NB: the kind of tv is already zonked
+             ty = mkTyVarTy tv'
+                  -- Make a proper TyVar (remember we
+                  -- are now done with type checking)
+       ; writeMetaTyVar tv ty
+       ; return ty }
 
 zonkTypeZapping :: UnboundTyVarZonker
 -- This variant is used for everything except the LHS of rules
@@ -1633,9 +1659,10 @@ over it!
 
 We do this in two stages.
 
-* During zonking, we skolemise 'alpha' to 'a'.  We do this by using
-  zonkTvSkolemising as the UnboundTyVarZonker in the ZonkEnv.
-  (This is the whole reason that the ZonkEnv has a UnboundTyVarZonker.)
+* During zonking, we skolemise the TcTyVar 'alpha' to TyVar 'a'.  We
+  do this by using zonkTvSkolemising as the UnboundTyVarZonker in the
+  ZonkEnv.  (This is in fact the whole reason that the ZonkEnv has a
+  UnboundTyVarZonker.)
 
 * In DsBinds, we quantify over it.  See DsBinds
   Note [Free tyvars on rule LHS]

@@ -3,6 +3,7 @@ module Coercion where
 import {-# SOURCE #-} TyCoRep
 import {-# SOURCE #-} TyCon
 
+import BasicTypes ( LeftOrRight )
 import CoAxiom
 import Var
 import Outputable
@@ -38,7 +39,6 @@ mkCoercionType :: Role -> Type -> Type -> Type
 
 data LiftingContext
 liftCoSubst :: Role -> LiftingContext -> Type -> Coercion
-coercionSize :: Coercion -> Int
 seqCo :: Coercion -> ()
 
 coercionKind :: Coercion -> Pair Type

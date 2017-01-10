@@ -16,6 +16,7 @@
 #include "Schedule.h"
 #include "Capability.h"
 #include "Stable.h"
+#include "Threads.h"
 #include "Weak.h"
 
 /* ----------------------------------------------------------------------------
@@ -460,6 +461,35 @@ void rts_evalIO (/* inout */ Capability **cap,
 }
 
 /*
+ * rts_evalStableIOMain() is suitable for calling main Haskell thread
+ * stored in (StablePtr (IO a)) it calls rts_evalStableIO but wraps
+ * function in GHC.TopHandler.runMainIO that installs top_handlers.
+ * See Trac #12903.
+ */
+void rts_evalStableIOMain(/* inout */ Capability **cap,
+                          /* in    */ HsStablePtr s,
+                          /* out   */ HsStablePtr *ret)
+{
+    StgTSO* tso;
+    StgClosure *p, *r, *w;
+    SchedulerStatus stat;
+
+    p = (StgClosure *)deRefStablePtr(s);
+    w = rts_apply(*cap, &base_GHCziTopHandler_runMainIO_closure, p);
+    tso = createStrictIOThread(*cap, RtsFlags.GcFlags.initialStkSize, w);
+    // async exceptions are always blocked by default in the created
+    // thread.  See #1048.
+    tso->flags |= TSO_BLOCKEX | TSO_INTERRUPTIBLE;
+    scheduleWaitThread(tso,&r,cap);
+    stat = rts_getSchedStatus(*cap);
+
+    if (stat == Success && ret != NULL) {
+        ASSERT(r != NULL);
+        *ret = getStablePtr((StgPtr)r);
+    }
+}
+
+/*
  * rts_evalStableIO() is suitable for calling from Haskell.  It
  * evaluates a value of the form (StablePtr (IO a)), forcing the
  * action's result to WHNF before returning.  The result is returned
@@ -601,7 +631,7 @@ rts_unlock (Capability *cap)
     // random point in the future, which causes problems for
     // freeTaskManager().
     ACQUIRE_LOCK(&cap->lock);
-    releaseCapability_(cap,rtsFalse);
+    releaseCapability_(cap,false);
 
     // Finally, we can release the Task to the free list.
     boundTaskExiting(task);
@@ -620,3 +650,77 @@ void rts_done (void)
     freeMyTask();
 }
 
+/* -----------------------------------------------------------------------------
+   tryPutMVar from outside Haskell
+
+   The C call
+
+      hs_try_putmvar(cap, mvar)
+
+   is equivalent to the Haskell call
+
+      tryPutMVar mvar ()
+
+   but it is
+
+     * non-blocking: takes a bounded, short, amount of time
+     * asynchronous: the actual putMVar may be performed after the
+       call returns.  That's why hs_try_putmvar() doesn't return a
+       result to say whether the put succeeded.
+
+   NOTE: this call transfers ownership of the StablePtr to the RTS, which will
+   free it after the tryPutMVar has taken place.  The reason is that otherwise,
+   it would be very difficult for the caller to arrange to free the StablePtr
+   in all circumstances.
+
+   For more details, see the section "Waking up Haskell threads from C" in the
+   User's Guide.
+   -------------------------------------------------------------------------- */
+
+void hs_try_putmvar (/* in */ int capability,
+                     /* in */ HsStablePtr mvar)
+{
+    Task *task = getTask();
+    Capability *cap;
+
+    if (capability < 0) {
+        capability = task->preferred_capability;
+        if (capability < 0) {
+            capability = 0;
+        }
+    }
+    cap = capabilities[capability % enabled_capabilities];
+
+#if !defined(THREADED_RTS)
+
+    performTryPutMVar(cap, (StgMVar*)deRefStablePtr(mvar), Unit_closure);
+    freeStablePtr(mvar);
+
+#else
+
+    ACQUIRE_LOCK(&cap->lock);
+    // If the capability is free, we can perform the tryPutMVar immediately
+    if (cap->running_task == NULL) {
+        cap->running_task = task;
+        task->cap = cap;
+        RELEASE_LOCK(&cap->lock);
+
+        performTryPutMVar(cap, (StgMVar*)deRefStablePtr(mvar), Unit_closure);
+
+        freeStablePtr(mvar);
+
+        // Wake up the capability, which will start running the thread that we
+        // just awoke (if there was one).
+        releaseCapability(cap);
+    } else {
+        PutMVar *p = stgMallocBytes(sizeof(PutMVar),"hs_try_putmvar");
+        // We cannot deref the StablePtr if we don't have a capability,
+        // so we have to store it and deref it later.
+        p->mvar = mvar;
+        p->link = cap->putMVars;
+        cap->putMVars = p;
+        RELEASE_LOCK(&cap->lock);
+    }
+
+#endif
+}

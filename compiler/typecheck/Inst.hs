@@ -34,6 +34,7 @@ module Inst (
 import {-# SOURCE #-}   TcExpr( tcPolyExpr, tcSyntaxOp )
 import {-# SOURCE #-}   TcUnify( unifyType, unifyKind, noThing )
 
+import BasicTypes ( SourceText(..) )
 import FastString
 import HsSyn
 import TcHsSyn
@@ -65,7 +66,6 @@ import Outputable
 import qualified GHC.LanguageExtensions as LangExt
 
 import Control.Monad( unless )
-import Data.Maybe( isJust )
 
 {-
 ************************************************************************
@@ -226,29 +226,47 @@ deeplyInstantiate :: CtOrigin -> TcSigmaType -> TcM (HsWrapper, TcRhoType)
 -- if    deeplyInstantiate ty = (wrap, rho)
 -- and   e :: ty
 -- then  wrap e :: rho
--- That is, wrap :: ty "->" rho
+-- That is, wrap :: ty ~> rho
 
-deeplyInstantiate orig ty
+deeplyInstantiate orig ty =
+  deeply_instantiate orig
+                     (mkEmptyTCvSubst (mkInScopeSet (tyCoVarsOfType ty)))
+                     ty
+
+deeply_instantiate :: CtOrigin
+                   -> TCvSubst
+                   -> TcSigmaType -> TcM (HsWrapper, TcRhoType)
+-- Internal function to deeply instantiate that builds on an existing subst.
+-- It extends the input substitution and applies the final subtitution to
+-- the types on return.  See #12549.
+
+deeply_instantiate orig subst ty
   | Just (arg_tys, tvs, theta, rho) <- tcDeepSplitSigmaTy_maybe ty
-  = do { (subst, tvs') <- newMetaTyVars tvs
-       ; ids1  <- newSysLocalIds (fsLit "di") (substTysUnchecked subst arg_tys)
-       ; let theta' = substThetaUnchecked subst theta
+  = do { (subst', tvs') <- newMetaTyVarsX subst tvs
+       ; ids1  <- newSysLocalIds (fsLit "di") (substTys subst' arg_tys)
+       ; let theta' = substTheta subst' theta
        ; wrap1 <- instCall orig (mkTyVarTys tvs') theta'
        ; traceTc "Instantiating (deeply)" (vcat [ text "origin" <+> pprCtOrigin orig
                                                 , text "type" <+> ppr ty
                                                 , text "with" <+> ppr tvs'
                                                 , text "args:" <+> ppr ids1
                                                 , text "theta:" <+>  ppr theta'
-                                                , text "subst:" <+> ppr subst ])
-       ; (wrap2, rho2) <- deeplyInstantiate orig (substTyUnchecked subst rho)
+                                                , text "subst:" <+> ppr subst'])
+       ; (wrap2, rho2) <- deeply_instantiate orig subst' rho
        ; return (mkWpLams ids1
                     <.> wrap2
                     <.> wrap1
                     <.> mkWpEvVarApps ids1,
                  mkFunTys arg_tys rho2) }
 
-  | otherwise = return (idHsWrapper, ty)
-
+  | otherwise
+  = do { let ty' = substTy subst ty
+       ; traceTc "deeply_instantiate final subst"
+                 (vcat [ text "origin:"   <+> pprCtOrigin orig
+                       , text "type:"     <+> ppr ty
+                       , text "new type:" <+> ppr ty'
+                       , text "subst:"    <+> ppr subst ])
+      ; return (idHsWrapper, ty') }
 
 {-
 ************************************************************************
@@ -382,7 +400,7 @@ tcInstBinderX _ subst (Anon ty)
      -- This is the *only* constraint currently handled in types.
   | Just (mk, role, k1, k2) <- get_pred_tys_maybe substed_ty
   = do { let origin = TypeEqOrigin { uo_actual   = k1
-                                   , uo_expected = mkCheckExpType k2
+                                   , uo_expected = k2
                                    , uo_thing    = Nothing }
        ; co <- case role of
                  Nominal          -> unifyKind noThing k1 k2
@@ -622,9 +640,9 @@ getOverlapFlag overlap_mode
               incoherent_ok = xopt LangExt.IncoherentInstances  dflags
               use x = OverlapFlag { isSafeOverlap = safeLanguageOn dflags
                                   , overlapMode   = x }
-              default_oflag | incoherent_ok = use (Incoherent "")
-                            | overlap_ok    = use (Overlaps "")
-                            | otherwise     = use (NoOverlap "")
+              default_oflag | incoherent_ok = use (Incoherent NoSourceText)
+                            | overlap_ok    = use (Overlaps NoSourceText)
+                            | otherwise     = use (NoOverlap NoSourceText)
 
               final_oflag = setOverlapModeMaybe default_oflag overlap_mode
         ; return final_oflag }
@@ -639,13 +657,15 @@ newClsInst overlap_mode dfun_name tvs theta clas tys
   = do { (subst, tvs') <- freshenTyVarBndrs tvs
              -- Be sure to freshen those type variables,
              -- so they are sure not to appear in any lookup
-       ; let tys'   = substTys subst tys
-             theta' = substTheta subst theta
-             dfun   = mkDictFunId dfun_name tvs' theta' clas tys'
-             -- Substituting in the DFun type just makes sure that
-             -- we are using TyVars rather than TcTyVars
-             -- Not sure if this is really the right place to do so,
-             -- but it'll do fine
+       ; let tys' = substTys subst tys
+
+             dfun = mkDictFunId dfun_name tvs theta clas tys
+             -- The dfun uses the original 'tvs' because
+             -- (a) they don't need to be fresh
+             -- (b) they may be mentioned in the ib_binds field of
+             --     an InstInfo, and in TcEnv.pprInstInfoDetails it's
+             --     helpful to use the same names
+
        ; oflag <- getOverlapFlag overlap_mode
        ; let inst = mkLocalInstance dfun oflag tvs' clas tys'
        ; warnIf (Reason Opt_WarnOrphans)
@@ -699,13 +719,7 @@ addLocalInst (home_ie, my_insts) ispec
                  | isGHCi    = deleteFromInstEnv home_ie ispec
                  | otherwise = home_ie
 
-               -- If we're compiling sig-of and there's an external duplicate
-               -- instance, silently ignore it (that's the instance we're
-               -- implementing!)  NB: we still count local duplicate instances
-               -- as errors.
-               -- See Note [Signature files and type class instances]
-               global_ie | isJust (tcg_sig_of tcg_env) = emptyInstEnv
-                         | otherwise = eps_inst_env eps
+               global_ie = eps_inst_env eps
                inst_envs = InstEnvs { ie_global  = global_ie
                                     , ie_local   = home_ie'
                                     , ie_visible = tcVisibleOrphanMods tcg_env }

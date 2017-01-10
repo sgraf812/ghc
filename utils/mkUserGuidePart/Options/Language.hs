@@ -191,6 +191,13 @@ languageOptions =
          , flagReverse = "-XNoDeriveTraversable"
          , flagSince = "7.10.1"
          }
+  , flag { flagName = "-XDerivingStrategies"
+         , flagDescription =
+           "Enables :ref:`deriving strategies <deriving-strategies>`."
+         , flagType = DynamicFlag
+         , flagReverse = "-XNoDerivingStrategies"
+         , flagSince = "8.2.1"
+         }
   , flag { flagName = "-XDisambiguateRecordFields"
          , flagDescription =
            "Enable :ref:`record field disambiguation <disambiguate-fields>`. "++
@@ -601,14 +608,6 @@ languageOptions =
            "Enable :ref:`recursive do (mdo) notation <recursive-do-notation>`."
          , flagType = DynamicFlag
          , flagReverse = "-XNoRecursiveDo"
-         , flagSince = "6.8.1"
-         }
-  , flag { flagName = "-XRelaxedPolyRec"
-         , flagDescription =
-           "*(deprecated)* Relaxed checking for :ref:`mutually-recursive "++
-           "polymorphic functions <typing-binds>`."
-         , flagType = DynamicFlag
-         , flagReverse = "-XNoRelaxedPolyRec"
          , flagSince = "6.8.1"
          }
   , flag { flagName = "-XRoleAnnotations"

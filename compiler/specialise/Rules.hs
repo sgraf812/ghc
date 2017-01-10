@@ -51,7 +51,7 @@ import Name             ( Name, NamedThing(..), nameIsLocalOrFrom )
 import NameSet
 import NameEnv
 import UniqFM
-import Unify            ( ruleMatchTyX )
+import Unify            ( ruleMatchTyKiX )
 import BasicTypes       ( Activation, CompilerPhase, isActive, pprRuleName )
 import StaticFlags      ( opt_PprStyle_Debug )
 import DynFlags         ( DynFlags )
@@ -703,7 +703,7 @@ match _ _ e@Tick{} _
 -- Consider matching
 --      \x->f      against    \f->f
 -- When we meet the lambdas we must remember to rename f to f' in the
--- second expresion.  The RnEnv2 does that.
+-- second expression.  The RnEnv2 does that.
 --
 -- Consider matching
 --      forall a. \b->b    against   \a->3
@@ -947,7 +947,7 @@ match_ty :: RuleMatchEnv
 
 match_ty renv subst ty1 ty2
   = do  { tv_subst'
-            <- Unify.ruleMatchTyX (rv_tmpls renv) (rv_lcl renv) tv_subst ty1 ty2
+            <- Unify.ruleMatchTyKiX (rv_tmpls renv) (rv_lcl renv) tv_subst ty1 ty2
         ; return (subst { rs_tv_subst = tv_subst' }) }
   where
     tv_subst = rs_tv_subst subst

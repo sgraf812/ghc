@@ -38,23 +38,108 @@ Compiler
   syntax can be used, in addition to a new form for specifying the cost centre
   name. See :ref:`scc-pragma` for examples.
 
+- It is now possible to explicitly pick a strategy to use when deriving a
+  class instance using the :ghc-flag:`-XDerivingStrategies` language extension
+  (see :ref:`deriving-strategies`).
+
+- GHC now allows standalone deriving using :ghc-flag:`-XDeriveAnyClass` on
+  any data type, even if its data constructors are not in scope. This is
+  consistent with the fact that this code (in the presence of
+  :ghc-flag:`-XDeriveAnyClass`): ::
+
+      deriving instance C T
+
+  is exactly equivalent to: ::
+
+      instance C T
+
+  and the latter code has no restrictions about whether the data constructors
+  of ``T`` are in scope.
+
+- :ghc-flag:`-XGeneralizedNewtypeDeriving` now supports deriving type classes
+  with associated type families. See the section on
+  :ref:`GeneralizedNewtypeDeriving and associated type families
+  <gnd-and-associated-types>`.
+
+- :ghc-flag:`-XGeneralizedNewtypeDeriving` will no longer infer constraints
+  when deriving a class with no methods. That is, this code: ::
+
+      class Throws e
+      newtype Id a = MkId a
+        deriving Throws
+
+  will now generate this instance: ::
+
+      instance Throws (Id a)
+
+  instead of this instance: ::
+
+      instance Throws a => Throws (Id a)
+
+  This change was motivated by the fact that the latter code has a strictly
+  redundant ``Throws a`` constraint, so it would emit a warning when compiled
+  with :ghc-flag:`-Wredundant-constraints`. The latter instance could still
+  be derived if so desired using :ghc-flag:`-XStandaloneDeriving`: ::
+
+      deriving instance Throws a => Throws (Id a)
+
+- Add warning flag :ghc-flag:`-Wcpp-undef` which passes ``-Wundef`` to the C
+  pre-processor causing the pre-processor to warn on uses of the ``#if``
+  directive on undefined identifiers.
+
+- GHC will no longer automatically infer the kind of higher-rank type synonyms;
+  you must explicitly explicitly annotate the synonym with a kind signature.
+  For example, given::
+
+    data T :: (forall k. k -> Type) -> Type
+
+  to define a synonym of ``T``, you must write::
+
+    type TSyn = (T :: (forall k. k -> Type) -> Type)
+
+- The Mingw-w64 toolchain for the Windows version of GHC has been updated. GHC now uses
+  `GCC 6.2.0` and `binutils 2.27`.
+
+- Previously, :ghc-flag:`-Wmissing-methods` would not warn whenever a type
+  class method beginning with an underscore was not implemented in an instance.
+  For instance, this code would compile without any warnings: ::
+
+     class Foo a where
+       _Bar :: a -> Int
+
+     instance Foo Int
+
+  :ghc-flag:`-Wmissing-methods` will now warn that ``_Bar`` is not implemented
+  in the ``Foo Int`` instance.
+
 GHCi
 ~~~~
 
 -  TODO FIXME.
+
+- Added :ghc-flag:`-flocal-ghci-history` which uses current directory for `.ghci-history`.
 
 Template Haskell
 ~~~~~~~~~~~~~~~~
 
 -  TODO FIXME.
 
-- ``addModFinalizer`` now exposes the local typing environment at the splice
-  point. This allows ``reify`` to see local and top-level definitions in the
-  current declaration group when used as in
+-  Reifying types that contain unboxed tuples now works correctly. (Previously,
+   Template Haskell reified unboxed tuples as boxed tuples with twice their
+   appropriate arity.)
 
-  .. code-block:: none
+-  Splicing singleton unboxed tuple types (e.g., ``(# Int #)``) now works
+   correctly. Previously, Template Haskell would implicitly remove the
+   parentheses when splicing, which would turn ``(# Int #)`` into ``Int``.
 
-      f x = $(addModFinalizer (reify 'x >>= runIO . print) >> [| x |])
+-  Add support for type signatures in patterns. (:ghc-ticket:`12164`)
+
+-  Make quoting and reification return the same types.  (:ghc-ticket:`11629`)
+
+-  More kind annotations appear in the left-hand sides of reified closed
+   type family equations, in order to disambiguate types that would otherwise
+   be ambiguous in the presence of :ghc-flag:`-XPolyKinds`.
+   (:ghc-ticket:`12646`)
 
 Runtime system
 ~~~~~~~~~~~~~~
@@ -64,6 +149,12 @@ Runtime system
 - The :ref:`heap profiler <prof-heap>` can now emit heap census data to the GHC
   event log, allowing heap profiles to be correlated with other tracing events
   (see :ghc-ticket:`11094`).
+
+- Added NUMA support to Windows.
+
+- Added processor group support for Windows. This allows the runtime to allocate
+  threads to all cores in systems which have multiple processor groups.
+  (e.g. > 64 cores, see :ghc-ticket:`11054`)
 
 Build system
 ~~~~~~~~~~~~
@@ -103,6 +194,12 @@ See ``changelog.md`` in the ``base`` package for full release notes.
 - ``Data.Type.Coercion`` now provides ``gcoerceWith``, which is analogous to
   ``gcastWith`` from ``Data.Type.Equality``.
 
+- The ``Read1`` and ``Read2`` classes in ``Data.Functor.Classes`` have new
+  methods, ``liftReadList(2)`` and ``liftReadListPrec(2)``, that are defined in
+  terms of ``ReadPrec`` instead of ``ReadS``. This matches the interface
+  provided in GHC's version of the ``Read`` class, and allows users to write
+  more efficient ``Read1`` and ``Read2`` instances.
+
 binary
 ~~~~~~
 
@@ -141,8 +238,7 @@ filepath
 ghc
 ~~~
 
--  TODO FIXME.
-
+-
 ghc-boot
 ~~~~~~~~
 
@@ -156,6 +252,9 @@ ghc-prim
 -  Version number XXXXX (was 0.3.1.0)
 
 -  Added new ``isByteArrayPinned#`` and ``isMutableByteArrayPinned#`` operation.
+
+-  New function ``noinline`` in ``GHC.Magic`` lets you mark that a function
+   should not be inlined.  It is optimized away after the simplifier runs.
 
 haskell98
 ~~~~~~~~~
@@ -201,6 +300,10 @@ template-haskell
 ~~~~~~~~~~~~~~~~
 
 -  Version number XXXXX (was 2.9.0.0)
+
+-  Added support for unboxed sums :ghc-ticket:`12478`.
+
+-  Added support for visible type applications :ghc-ticket:`12530`.
 
 time
 ~~~~

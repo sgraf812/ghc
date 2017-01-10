@@ -78,19 +78,17 @@ module TcRnTypes(
         ctEvTerm, ctEvCoercion, ctEvId,
         tyCoVarsOfCt, tyCoVarsOfCts,
         tyCoVarsOfCtList, tyCoVarsOfCtsList,
-        toDerivedCt,
 
         WantedConstraints(..), insolubleWC, emptyWC, isEmptyWC,
-        toDerivedWC,
         andWC, unionsWC, mkSimpleWC, mkImplicWC,
-        addInsols, addSimples, addImplics,
+        addInsols, getInsolubles, addSimples, addImplics,
         tyCoVarsOfWC, dropDerivedWC, dropDerivedSimples, dropDerivedInsols,
         tyCoVarsOfWCList,
         isDroppableDerivedLoc, insolubleImplic,
         arisesFromGivens,
 
-        Implication(..), ImplicStatus(..), isInsolubleStatus,
-        SubGoalDepth, initialSubGoalDepth,
+        Implication(..), ImplicStatus(..), isInsolubleStatus, isSolvedStatus,
+        SubGoalDepth, initialSubGoalDepth, maxSubGoalDepth,
         bumpSubGoalDepth, subGoalDepthExceeded,
         CtLoc(..), ctLocSpan, ctLocEnv, ctLocLevel, ctLocOrigin,
         ctLocTypeOrKind_maybe,
@@ -103,21 +101,23 @@ module TcRnTypes(
         pushErrCtxt, pushErrCtxtSameOrigin,
 
         SkolemInfo(..), pprSigSkolInfo, pprSkolInfo,
+        termEvidenceAllowed,
 
         CtEvidence(..), TcEvDest(..),
         mkGivenLoc, mkKindLoc, toKindLoc,
-        isWanted, isGiven, isDerived,
+        isWanted, isGiven, isDerived, isGivenOrWDeriv,
         ctEvRole,
 
         -- Constraint solver plugins
         TcPlugin(..), TcPluginResult(..), TcPluginSolver,
         TcPluginM, runTcPluginM, unsafeTcPluginTcM,
-        getEvBindsTcPluginM_maybe,
+        getEvBindsTcPluginM,
 
-        CtFlavour(..), ctEvFlavour,
+        CtFlavour(..), ShadowInfo(..), ctEvFlavour,
         CtFlavourRole, ctEvFlavourRole, ctFlavourRole,
-        eqCanRewrite, eqCanRewriteFR,  eqCanDischarge,
-        funEqCanDischarge, funEqCanDischargeFR,
+        eqCanRewriteFR, eqMayRewriteFR,
+        eqCanDischarge,
+        funEqCanDischarge, funEqCanDischargeF,
 
         -- Pretty printing
         pprEvVarTheta,
@@ -125,7 +125,8 @@ module TcRnTypes(
 
         -- Misc other types
         TcId, TcIdSet,
-        Hole(..), holeOcc
+        Hole(..), holeOcc,
+        NameShape(..)
 
   ) where
 
@@ -171,6 +172,8 @@ import Outputable
 import ListSetOps
 import FastString
 import qualified GHC.LanguageExtensions as LangExt
+import Fingerprint
+import Util
 
 import Control.Monad (ap, liftM, msum)
 #if __GLASGOW_HASKELL__ > 710
@@ -178,7 +181,6 @@ import qualified Control.Monad.Fail as MonadFail
 #endif
 import Data.Set      ( Set )
 
-#ifdef GHCI
 import Data.Map      ( Map )
 import Data.Dynamic  ( Dynamic )
 import Data.Typeable ( TypeRep )
@@ -186,7 +188,34 @@ import GHCi.Message
 import GHCi.RemoteTypes
 
 import qualified Language.Haskell.TH as TH
-#endif
+
+-- | A 'NameShape' is a substitution on 'Name's that can be used
+-- to refine the identities of a hole while we are renaming interfaces
+-- (see 'RnModIface').  Specifically, a 'NameShape' for
+-- 'ns_module_name' @A@, defines a mapping from @{A.T}@
+-- (for some 'OccName' @T@) to some arbitrary other 'Name'.
+--
+-- The most intruiging thing about a 'NameShape', however, is
+-- how it's constructed.  A 'NameShape' is *implied* by the
+-- exported 'AvailInfo's of the implementor of an interface:
+-- if an implementor of signature @<H>@ exports @M.T@, you implicitly
+-- define a substitution from @{H.T}@ to @M.T@.  So a 'NameShape'
+-- is computed from the list of 'AvailInfo's that are exported
+-- by the implementation of a module, or successively merged
+-- together by the export lists of signatures which are joining
+-- together.
+--
+-- It's not the most obvious way to go about doing this, but it
+-- does seem to work!
+--
+-- NB: Can't boot this and put it in NameShape because then we
+-- start pulling in too many DynFlags things.
+data NameShape = NameShape {
+        ns_mod_name :: ModuleName,
+        ns_exports :: [AvailInfo],
+        ns_map :: OccEnv Name
+    }
+
 
 {-
 ************************************************************************
@@ -262,6 +291,7 @@ data IfGblEnv
         -- was originally a hi-boot file.
         -- We need the module name so we can test when it's appropriate
         -- to look in this env.
+        -- See Note [Tying the knot] in TcIface
         if_rec_types :: Maybe (Module, IfG TypeEnv)
                 -- Allows a read effect, so it can be in a mutable
                 -- variable; c.f. handling the external package type env
@@ -273,7 +303,14 @@ data IfLclEnv
         -- The module for the current IfaceDecl
         -- So if we see   f = \x -> x
         -- it means M.f = \x -> x, where M is the if_mod
+        -- NB: This is a semantic module, see
+        -- Note [Identity versus semantic module]
         if_mod :: Module,
+
+        -- Whether or not the IfaceDecl came from a boot
+        -- file or not; we'll use this to choose between
+        -- NoUnfolding and BootUnfolding
+        if_boot :: Bool,
 
         -- The field is used only for error reporting
         -- if (say) there's a Lint error in it
@@ -281,6 +318,8 @@ data IfLclEnv
                 -- Where the interface came from:
                 --      .hi file, or GHCi state, or ext core
                 -- plus which bit is currently being examined
+
+        if_nsubst :: Maybe NameShape,
 
         if_tv_env  :: FastStringEnv TyVar,     -- Nested tyvar bindings
         if_id_env  :: FastStringEnv Id         -- Nested id binding
@@ -375,6 +414,49 @@ data DsMetaVal
 data FrontendResult
         = FrontendTypecheck TcGblEnv
 
+-- Note [Identity versus semantic module]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- When typechecking an hsig file, it is convenient to keep track
+-- of two different "this module" identifiers:
+--
+--      - The IDENTITY module is simply thisPackage + the module
+--        name; i.e. it uniquely *identifies* the interface file
+--        we're compiling.  For example, p[A=<A>]:A is an
+--        identity module identifying the requirement named A
+--        from library p.
+--
+--      - The SEMANTIC module, which is the actual module that
+--        this signature is intended to represent (e.g. if
+--        we have a identity module p[A=base:Data.IORef]:A,
+--        then the semantic module is base:Data.IORef)
+--
+-- Which one should you use?
+--
+--      - In the desugarer and later phases of compilation,
+--        identity and semantic modules coincide, since we never compile
+--        signatures (we just generate blank object files for
+--        hsig files.)
+--
+--        A corrolary of this is that the following invariant holds at any point
+--        past desugaring,
+--
+--            if I have a Module, this_mod, in hand representing the module
+--            currently being compiled,
+--            then moduleUnitId this_mod == thisPackage dflags
+--
+--      - For any code involving Names, we want semantic modules.
+--        See lookupIfaceTop in IfaceEnv, mkIface and addFingerprints
+--        in MkIface, and tcLookupGlobal in TcEnv
+--
+--      - When reading interfaces, we want the identity module to
+--        identify the specific interface we want (such interfaces
+--        should never be loaded into the EPS).  However, if a
+--        hole module <A> is requested, we look for A.hi
+--        in the home library we are compiling.  (See LoadIface.)
+--        Similarly, in RnNames we check for self-imports using
+--        identity modules, to allow signatures to import their implementor.
+
+
 -- | 'TcGblEnv' describes the top-level of the module at the
 -- point at which the typechecker is finished work.
 -- It is this structure that is handed on to the desugarer
@@ -383,13 +465,10 @@ data FrontendResult
 data TcGblEnv
   = TcGblEnv {
         tcg_mod     :: Module,         -- ^ Module being compiled
+        tcg_semantic_mod :: Module,    -- ^ If a signature, the backing module
+            -- See also Note [Identity versus semantic module]
         tcg_src     :: HscSource,
           -- ^ What kind of module (regular Haskell, hs-boot, hsig)
-        tcg_sig_of  :: Maybe Module,
-          -- ^ Are we being compiled as a signature of an implementation?
-        tcg_impl_rdr_env :: Maybe GlobalRdrEnv,
-          -- ^ Environment used only during -sig-of for resolving top level
-          -- bindings.  See Note [Signature parameters in TcGblEnv and DynFlags]
 
         tcg_rdr_env :: GlobalRdrEnv,   -- ^ Top level envt; used during renaming
         tcg_default :: Maybe [Type],
@@ -421,6 +500,13 @@ data TcGblEnv
           -- Includes the dfuns in tcg_insts
         tcg_fam_inst_env :: FamInstEnv, -- ^ Ditto for family instances
         tcg_ann_env      :: AnnEnv,     -- ^ And for annotations
+
+        -- | Family instances we have to check for consistency.
+        -- Invariant: each FamInst in the list's fi_fam matches the
+        -- key of the entry in the 'NameEnv'.  This gets consumed
+        -- by 'checkRecFamInstConsistency'.
+        -- See Note [Don't check hs-boot type family instances too early]
+        tcg_pending_fam_checks :: NameEnv [([FamInst], FamInstEnv)],
 
                 -- Now a bunch of things about this module that are simply
                 -- accumulated, but never consulted until the end.
@@ -476,6 +562,10 @@ data TcGblEnv
         tcg_dfun_n  :: TcRef OccSet,
           -- ^ Allows us to choose unique DFun names.
 
+        tcg_merged :: [(Module, Fingerprint)],
+          -- ^ The requirements we merged with; we always have to recompile
+          -- if any of these changed.
+
         -- The next fields accumulate the payload of the module
         -- The binds, rules and foreign-decl fields are collected
         -- initially in un-zonked form and are finally zonked in tcRnSrcDecls
@@ -495,7 +585,6 @@ data TcGblEnv
 
         tcg_dependent_files :: TcRef [FilePath], -- ^ dependencies from addDependentFile
 
-#ifdef GHCI
         tcg_th_topdecls :: TcRef [LHsDecl RdrName],
         -- ^ Top-level declarations from addTopDecls
 
@@ -511,7 +600,6 @@ data TcGblEnv
         tcg_th_state :: TcRef (Map TypeRep Dynamic),
         tcg_th_remote_state :: TcRef (Maybe (ForeignRef (IORef QState))),
         -- ^ Template Haskell state
-#endif /* GHCI */
 
         tcg_ev_binds  :: Bag EvBind,        -- Top-level evidence bindings
 
@@ -553,63 +641,45 @@ data TcGblEnv
         tcg_tc_plugins :: [TcPluginSolver],
         -- ^ A list of user-defined plugins for the constraint solver.
 
+        tcg_top_loc :: RealSrcSpan,
+        -- ^ The RealSrcSpan this module came from
+
         tcg_static_wc :: TcRef WantedConstraints
-          -- ^ Wanted constraints of static forms.
+        -- ^ Wanted constraints of static forms.
+        -- See Note [Constraints in static forms].
     }
+
+-- NB: topModIdentity, not topModSemantic!
+-- Definition sites of orphan identities will be identity modules, not semantic
+-- modules.
+
+-- Note [Constraints in static forms]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+--
+-- When a static form produces constraints like
+--
+-- f :: StaticPtr (Bool -> String)
+-- f = static show
+--
+-- we collect them in tcg_static_wc and resolve them at the end
+-- of type checking. They need to be resolved separately because
+-- we don't want to resolve them in the context of the enclosing
+-- expression. Consider
+--
+-- g :: Show a => StaticPtr (a -> String)
+-- g = static show
+--
+-- If the @Show a0@ constraint that the body of the static form produces was
+-- resolved in the context of the enclosing expression, then the body of the
+-- static form wouldn't be closed because the Show dictionary would come from
+-- g's context instead of coming from the top level.
 
 tcVisibleOrphanMods :: TcGblEnv -> ModuleSet
 tcVisibleOrphanMods tcg_env
     = mkModuleSet (tcg_mod tcg_env : imp_orphs (tcg_imports tcg_env))
 
--- Note [Signature parameters in TcGblEnv and DynFlags]
--- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
--- When compiling signature files, we need to know which implementation
--- we've actually linked against the signature.  There are three seemingly
--- redundant places where this information is stored: in DynFlags, there
--- is sigOf, and in TcGblEnv, there is tcg_sig_of and tcg_impl_rdr_env.
--- Here's the difference between each of them:
---
--- * DynFlags.sigOf is global per invocation of GHC.  If we are compiling
---   with --make, there may be multiple signature files being compiled; in
---   which case this parameter is a map from local module name to implementing
---   Module.
---
--- * HscEnv.tcg_sig_of is global per the compilation of a single file, so
---   it is simply the result of looking up tcg_mod in the DynFlags.sigOf
---   parameter.  It's setup in TcRnMonad.initTc.  This prevents us
---   from having to repeatedly do a lookup in DynFlags.sigOf.
---
--- * HscEnv.tcg_impl_rdr_env is a RdrEnv that lets us look up names
---   according to the sig-of module.  It's setup in TcRnDriver.tcRnSignature.
---   Here is an example showing why we need this map:
---
---  module A where
---      a = True
---
---  module ASig where
---      import B
---      a :: Bool
---
---  module B where
---      b = False
---
--- When we compile ASig --sig-of main:A, the default
--- global RdrEnv (tcg_rdr_env) has an entry for b, but not for a
--- (we never imported A).  So we have to look in a different environment
--- to actually get the original name.
---
--- By the way, why do we need to do the lookup; can't we just use A:a
--- as the name directly?  Well, if A is reexporting the entity from another
--- module, then the original name needs to be the real original name:
---
---  module C where
---      a = True
---
---  module A(a) where
---      import C
-
 instance ContainsModule TcGblEnv where
-    extractModule env = tcg_mod env
+    extractModule env = tcg_semantic_mod env
 
 type RecFieldEnv = NameEnv [FieldLabel]
         -- Maps a constructor name *in this module*
@@ -795,7 +865,6 @@ data ThStage    -- See Note [Template Haskell state diagram] in TcSplice
                       --   the result replaces the splice
                       -- Binding level = 0
 
-#ifdef GHCI
   | RunSplice (TcRef [ForeignRef (TH.Q ())])
       -- Set when running a splice, i.e. NOT when renaming or typechecking the
       -- Haskell code for the splice. See Note [RunSplice ThLevel].
@@ -810,9 +879,6 @@ data ThStage    -- See Note [Template Haskell state diagram] in TcSplice
       -- inserts them in the list of finalizers in the global environment.
       --
       -- See Note [Collecting modFinalizers in typed splices] in "TcSplice".
-#else
-  | RunSplice ()
-#endif
 
   | Comp        -- Ordinary Haskell code
                 -- Binding level = 1
@@ -1117,7 +1183,7 @@ data ImportAvails
           --      = ModuleEnv [ImportedModsVal],
           -- ^ Domain is all directly-imported modules
           --
-          -- See the documentaion on ImportedModsVal in HscTypes for the
+          -- See the documentation on ImportedModsVal in HscTypes for the
           -- meaning of the fields.
           --
           -- We need a full ModuleEnv rather than a ModuleNameEnv here,
@@ -1135,12 +1201,12 @@ data ImportAvails
           -- compiling M might not need to consult X.hi, but X
           -- is still listed in M's dependencies.
 
-        imp_dep_pkgs :: [UnitId],
+        imp_dep_pkgs :: [InstalledUnitId],
           -- ^ Packages needed by the module being compiled, whether directly,
           -- or via other modules in this package, or via modules imported
           -- from other packages.
 
-        imp_trust_pkgs :: [UnitId],
+        imp_trust_pkgs :: [InstalledUnitId],
           -- ^ This is strictly a subset of imp_dep_pkgs and records the
           -- packages the current module needs to trust for Safe Haskell
           -- compilation to succeed. A package is required to be trusted if
@@ -1391,7 +1457,7 @@ isPartialSig _                                       = False
 ************************************************************************
 -}
 
--- The syntax of xi types:
+-- The syntax of xi (ξ) types:
 -- xi ::= a | T xis | xis -> xis | ... | forall a. tau
 -- Two important notes:
 --      (i) No type families, unless we are under a ForAll
@@ -1449,7 +1515,8 @@ data Ct
       cc_tyvar  :: TcTyVar,
       cc_rhs    :: TcType,     -- Not necessarily function-free (hence not Xi)
                                -- See invariants above
-      cc_eq_rel :: EqRel
+
+      cc_eq_rel :: EqRel       -- INVARIANT: cc_eq_rel = ctEvEqRel cc_ev
     }
 
   | CFunEqCan {  -- F xis ~ fsk
@@ -1565,16 +1632,6 @@ ctPred :: Ct -> PredType
 -- See Note [Ct/evidence invariant]
 ctPred ct = ctEvPred (cc_ev ct)
 
--- | Convert a Wanted to a Derived
-toDerivedCt :: Ct -> Ct
-toDerivedCt ct
-  = case ctEvidence ct of
-      CtWanted { ctev_pred = pred, ctev_loc = loc }
-        -> ct {cc_ev = CtDerived {ctev_pred = pred, ctev_loc = loc}}
-
-      CtDerived {} -> ct
-      CtGiven   {} -> pprPanic "to_derived" (ppr ct)
-
 -- | Makes a new equality predicate with the same role as the given
 -- evidence.
 mkTcEqPredLikeEv :: CtEvidence -> TcType -> TcType -> TcType
@@ -1689,8 +1746,22 @@ tyCoFVsOfBag tvs_of = foldrBag (unionFV . tvs_of) emptyFV
 
 --------------------------
 dropDerivedSimples :: Cts -> Cts
-dropDerivedSimples simples = filterBag isWantedCt simples
-                             -- simples are all Wanted or Derived
+-- Drop all Derived constraints, but make [W] back into [WD],
+-- so that if we re-simplify these constraints we will get all
+-- the right derived constraints re-generated.  Forgetting this
+-- step led to #12936
+dropDerivedSimples simples = mapMaybeBag dropDerivedCt simples
+
+dropDerivedCt :: Ct -> Maybe Ct
+dropDerivedCt ct
+  = case ctEvFlavour ev of
+      Wanted WOnly -> Just (ct { cc_ev = ev_wd })
+      Wanted _     -> Just ct
+      _            -> ASSERT( isDerivedCt ct ) Nothing
+                      -- simples are all Wanted or Derived
+  where
+    ev    = ctEvidence ct
+    ev_wd = ev { ctev_nosh = WDeriv }
 
 dropDerivedInsols :: Cts -> Cts
 -- See Note [Dropping derived constraints]
@@ -1910,7 +1981,7 @@ Note that
     trigger superclass expansion. This was a good part of the loop
     in  Trac #11523
 
-  * Even for Wanted constraints, we say "no" for implicit paramters.
+  * Even for Wanted constraints, we say "no" for implicit parameters.
     we have [W] ?x::ty, expanding superclasses won't help:
       - Superclasses can't be implicit parameters
       - If we have a [G] ?x:ty2, then we'll have another unsolved
@@ -2014,16 +2085,6 @@ andWC (WC { wc_simple = f1, wc_impl = i1, wc_insol = n1 })
 unionsWC :: [WantedConstraints] -> WantedConstraints
 unionsWC = foldr andWC emptyWC
 
--- | Convert all Wanteds into Deriveds (ignoring insolubles)
-toDerivedWC :: WantedConstraints -> WantedConstraints
-toDerivedWC wc@(WC { wc_simple = simples, wc_impl = implics })
-  = wc { wc_simple = mapBag toDerivedCt simples
-       , wc_impl   = mapBag to_derived_implic implics }
-  where
-    to_derived_implic implic@(Implic { ic_wanted = inner_wanted })
-      = implic { ic_wanted = toDerivedWC inner_wanted }
-
-
 addSimples :: WantedConstraints -> Bag Ct -> WantedConstraints
 addSimples wc cts
   = wc { wc_simple = wc_simple wc `unionBags` cts }
@@ -2036,12 +2097,19 @@ addInsols :: WantedConstraints -> Bag Ct -> WantedConstraints
 addInsols wc cts
   = wc { wc_insol = wc_insol wc `unionBags` cts }
 
+getInsolubles :: WantedConstraints -> Cts
+getInsolubles = wc_insol
+
 dropDerivedWC :: WantedConstraints -> WantedConstraints
 -- See Note [Dropping derived constraints]
 dropDerivedWC wc@(WC { wc_simple = simples, wc_insol = insols })
   = wc { wc_simple = dropDerivedSimples simples
        , wc_insol  = dropDerivedInsols insols }
     -- The wc_impl implications are already (recursively) filtered
+
+isSolvedStatus :: ImplicStatus -> Bool
+isSolvedStatus (IC_Solved {}) = True
+isSolvedStatus _              = False
 
 isInsolubleStatus :: ImplicStatus -> Bool
 isInsolubleStatus IC_Insoluble = True
@@ -2050,21 +2118,23 @@ isInsolubleStatus _            = False
 insolubleImplic :: Implication -> Bool
 insolubleImplic ic = isInsolubleStatus (ic_status ic)
 
-insolubleWC :: TcLevel -> WantedConstraints -> Bool
-insolubleWC tc_lvl (WC { wc_impl = implics, wc_insol = insols })
-  =  anyBag (trulyInsoluble tc_lvl) insols
+insolubleWC :: WantedConstraints -> Bool
+insolubleWC (WC { wc_impl = implics, wc_insol = insols })
+  =  anyBag trulyInsoluble insols
   || anyBag insolubleImplic implics
 
-trulyInsoluble :: TcLevel -> Ct -> Bool
+trulyInsoluble :: Ct -> Bool
 -- Constraints in the wc_insol set which ARE NOT
 -- treated as truly insoluble:
 --   a) type holes, arising from PartialTypeSignatures,
 --   b) "true" expression holes arising from TypedHoles
 --
--- Out-of-scope variables masquerading as expression holes
--- ARE treated as truly insoluble.
+-- A "expression hole" or "type hole" constraint isn't really an error
+-- at all; it's a report saying "_ :: Int" here.  But an out-of-scope
+-- variable masquerading as expression holes IS treated as truly
+-- insoluble, so that it trumps other errors during error reporting.
 -- Yuk!
-trulyInsoluble _tc_lvl insol
+trulyInsoluble insol
   | isHoleCt insol = isOutOfScopeCt insol
   | otherwise      = True
 
@@ -2091,10 +2161,10 @@ ppr_bag doc bag
 
 data Implication
   = Implic {
-      ic_tclvl :: TcLevel, -- TcLevel: unification variables
-                                -- free in the environment
+      ic_tclvl :: TcLevel,       -- TcLevel of unification variables
+                                 -- allocated /inside/ this implication
 
-      ic_skols  :: [TcTyVar],    -- Introduced skolems
+      ic_skols :: [TcTyVar],     -- Introduced skolems
       ic_info  :: SkolemInfo,    -- See Note [Skolems in an implication]
                                  -- See Note [Shadowing in a constraint]
 
@@ -2111,19 +2181,19 @@ data Implication
 
       ic_wanted :: WantedConstraints,  -- The wanted
 
-      ic_binds  :: Maybe EvBindsVar,
-                                  -- Points to the place to fill in the
+      ic_binds  :: EvBindsVar,    -- Points to the place to fill in the
                                   -- abstraction and bindings.
-                                  -- is Nothing if we can't deal with
-                                  -- non-equality constraints here
-                                  -- (this happens in TcS.deferTcSForAllEq)
+
+      ic_needed   :: VarSet,      -- Union of the ics_need fields of any /discarded/
+                                  -- solved implications in ic_wanted
 
       ic_status   :: ImplicStatus
     }
 
 data ImplicStatus
   = IC_Solved     -- All wanteds in the tree are solved, all the way down
-       { ics_need :: VarSet     -- Evidence variables needed by this implication
+       { ics_need :: VarSet     -- Evidence variables bound further out,
+                                -- but needed by this solved implication
        , ics_dead :: [EvVar] }  -- Subset of ic_given that are not needed
          -- See Note [Tracking redundant constraints] in TcSimplify
 
@@ -2135,15 +2205,16 @@ instance Outputable Implication where
   ppr (Implic { ic_tclvl = tclvl, ic_skols = skols
               , ic_given = given, ic_no_eqs = no_eqs
               , ic_wanted = wanted, ic_status = status
-              , ic_binds = binds, ic_info = info })
+              , ic_binds = binds, ic_needed = needed , ic_info = info })
    = hang (text "Implic" <+> lbrace)
         2 (sep [ text "TcLevel =" <+> ppr tclvl
-               , text "Skolems =" <+> pprTvBndrs skols
+               , text "Skolems =" <+> pprTyVars skols
                , text "No-eqs =" <+> ppr no_eqs
                , text "Status =" <+> ppr status
                , hang (text "Given =")  2 (pprEvVars given)
                , hang (text "Wanted =") 2 (ppr wanted)
                , text "Binds =" <+> ppr binds
+               , text "Needed =" <+> ppr needed
                , pprSkolInfo info ] <+> rbrace)
 
 instance Outputable ImplicStatus where
@@ -2283,22 +2354,25 @@ data TcEvDest
               -- See Note [Coercion holes] in TyCoRep
 
 data CtEvidence
-  = CtGiven { ctev_pred :: TcPredType      -- See Note [Ct/evidence invariant]
-            , ctev_evar :: EvVar           -- See Note [Evidence field of CtEvidence]
-            , ctev_loc  :: CtLoc }
-    -- Truly given, not depending on subgoals
-    -- NB: Spontaneous unifications belong here
+  = CtGiven    -- Truly given, not depending on subgoals
+               -- NB: Spontaneous unifications belong here
+      { ctev_pred :: TcPredType      -- See Note [Ct/evidence invariant]
+      , ctev_evar :: EvVar           -- See Note [Evidence field of CtEvidence]
+      , ctev_loc  :: CtLoc }
 
-  | CtWanted { ctev_pred :: TcPredType     -- See Note [Ct/evidence invariant]
-             , ctev_dest :: TcEvDest
-             , ctev_loc  :: CtLoc }
-    -- Wanted goal
 
-  | CtDerived { ctev_pred :: TcPredType
-              , ctev_loc  :: CtLoc }
-    -- A goal that we don't really have to solve and can't immediately
-    -- rewrite anything other than a derived (there's no evidence!)
-    -- but if we do manage to solve it may help in solving other goals.
+  | CtWanted   -- Wanted goal
+      { ctev_pred :: TcPredType     -- See Note [Ct/evidence invariant]
+      , ctev_dest :: TcEvDest
+      , ctev_nosh :: ShadowInfo     -- See Note [Constraint flavours]
+      , ctev_loc  :: CtLoc }
+
+  | CtDerived  -- A goal that we don't really have to solve and can't
+               -- immediately rewrite anything other than a derived
+               -- (there's no evidence!) but if we do manage to solve
+               -- it may help in solving other goals.
+      { ctev_pred :: TcPredType
+      , ctev_loc  :: CtLoc }
 
 ctEvPred :: CtEvidence -> TcPredType
 -- The predicate of a flavor
@@ -2340,11 +2414,16 @@ instance Outputable TcEvDest where
   ppr (EvVarDest ev) = ppr ev
 
 instance Outputable CtEvidence where
-  ppr fl = case fl of
-             CtGiven {}   -> text "[G]" <+> ppr (ctev_evar fl) <+> ppr_pty
-             CtWanted {}  -> text "[W]" <+> ppr (ctev_dest fl) <+> ppr_pty
-             CtDerived {} -> text "[D]" <+> text "_" <+> ppr_pty
-         where ppr_pty = dcolon <+> ppr (ctEvPred fl)
+  ppr ev = ppr (ctEvFlavour ev)
+           <+> pp_ev
+           <+> braces (ppr (ctl_depth (ctEvLoc ev))) <> dcolon
+                  -- Show the sub-goal depth too
+           <+> ppr (ctEvPred ev)
+    where
+      pp_ev = case ev of
+             CtGiven { ctev_evar = v } -> ppr v
+             CtWanted {ctev_dest = d } -> ppr d
+             CtDerived {}              -> text "_"
 
 isWanted :: CtEvidence -> Bool
 isWanted (CtWanted {}) = True
@@ -2365,23 +2444,62 @@ isDerived _              = False
 %*                                                                      *
 %************************************************************************
 
-Just an enum type that tracks whether a constraint is wanted, derived,
-or given, when we need to separate that info from the constraint itself.
+Note [Constraint flavours]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+Constraints come in four flavours:
 
+* [G] Given: we have evidence
+
+* [W] Wanted WOnly: we want evidence
+
+* [D] Derived: any solution must satisfy this constraint, but
+      we don't need evidence for it.  Examples include:
+        - superclasses of [W] class constraints
+        - equalities arising from functional dependencies
+          or injectivity
+
+* [WD] Wanted WDeriv: a single constraint that represents
+                      both [W] and [D]
+  We keep them paired as one both for efficiency, and because
+  when we have a finite map  F tys -> CFunEqCan, it's inconvenient
+  to have two CFunEqCans in the range
+
+The ctev_nosh field of a Wanted distinguishes between [W] and [WD]
+
+Wanted constraints are born as [WD], but are split into [W] and its
+"shadow" [D] in TcSMonad.maybeEmitShadow.
+
+See Note [The improvement story and derived shadows] in TcSMonad
 -}
 
-data CtFlavour = Given | Wanted | Derived
+data CtFlavour  -- See Note [Constraint flavours]
+  = Given
+  | Wanted ShadowInfo
+  | Derived
   deriving Eq
 
+data ShadowInfo
+  = WDeriv   -- [WD] This Wanted constraint has no Derived shadow,
+             -- so it behaves like a pair of a Wanted and a Derived
+  | WOnly    -- [W] It has a separate derived shadow
+             -- See Note [Derived shadows]
+  deriving( Eq )
+
+isGivenOrWDeriv :: CtFlavour -> Bool
+isGivenOrWDeriv Given           = True
+isGivenOrWDeriv (Wanted WDeriv) = True
+isGivenOrWDeriv _               = False
+
 instance Outputable CtFlavour where
-  ppr Given   = text "[G]"
-  ppr Wanted  = text "[W]"
-  ppr Derived = text "[D]"
+  ppr Given           = text "[G]"
+  ppr (Wanted WDeriv) = text "[WD]"
+  ppr (Wanted WOnly)  = text "[W]"
+  ppr Derived         = text "[D]"
 
 ctEvFlavour :: CtEvidence -> CtFlavour
-ctEvFlavour (CtWanted {})  = Wanted
-ctEvFlavour (CtGiven {})   = Given
-ctEvFlavour (CtDerived {}) = Derived
+ctEvFlavour (CtWanted { ctev_nosh = nosh }) = Wanted nosh
+ctEvFlavour (CtGiven {})                    = Given
+ctEvFlavour (CtDerived {})                  = Derived
 
 -- | Whether or not one 'Ct' can rewrite another is determined by its
 -- flavour and its equality relation. See also
@@ -2397,7 +2515,7 @@ ctFlavourRole :: Ct -> CtFlavourRole
 ctFlavourRole = ctEvFlavourRole . cc_ev
 
 {- Note [eqCanRewrite]
-~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~
 (eqCanRewrite ct1 ct2) holds if the constraint ct1 (a CTyEqCan of form
 tv ~ ty) can be used to rewrite ct2.  It must satisfy the properties of
 a can-rewrite relation, see Definition [Can-rewrite relation] in
@@ -2439,9 +2557,31 @@ I thought maybe we could never get Derived ReprEq constraints, but
 we can; straight from the Wanteds during improvment. And from a Derived
 ReprEq we could conceivably get a Derived NomEq improvment (by decomposing
 a type constructor with Nomninal role), and hence unify.
+-}
 
-Note [funEqCanDischarge]
-~~~~~~~~~~~~~~~~~~~~~~~~~
+eqCanRewriteFR :: CtFlavourRole -> CtFlavourRole -> Bool
+-- Can fr1 actually rewrite fr2?
+-- Very important function!
+-- See Note [eqCanRewrite]
+-- See Note [Wanteds do not rewrite Wanteds]
+-- See Note [Deriveds do rewrite Deriveds]
+eqCanRewriteFR (Given, NomEq)         (_, _)           = True
+eqCanRewriteFR (Given, ReprEq)        (_, ReprEq)      = True
+eqCanRewriteFR (Wanted WDeriv, NomEq) (Derived, NomEq) = True
+eqCanRewriteFR (Derived,       NomEq) (Derived, NomEq) = True
+eqCanRewriteFR _                      _                = False
+
+eqMayRewriteFR :: CtFlavourRole -> CtFlavourRole -> Bool
+-- Is it /possible/ that fr1 can rewrite fr2?
+-- This is used when deciding which inerts to kick out,
+-- at which time a [WD] inert may be split into [W] and [D]
+eqMayRewriteFR (Wanted WDeriv, NomEq) (Wanted WDeriv, NomEq) = True
+eqMayRewriteFR (Derived,       NomEq) (Wanted WDeriv, NomEq) = True
+eqMayRewriteFR fr1 fr2 = eqCanRewriteFR fr1 fr2
+
+-----------------
+{- Note [funEqCanDischarge]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Suppose we have two CFunEqCans with the same LHS:
     (x1:F ts ~ f1) `funEqCanDischarge` (x2:F ts ~ f2)
 Can we drop x2 in favour of x1, either unifying
@@ -2449,12 +2589,37 @@ f2 (if it's a flatten meta-var) or adding a new Given
 (f1 ~ f2), if x2 is a Given?
 
 Answer: yes if funEqCanDischarge is true.
+-}
 
-Note [eqCanDischarge]
-~~~~~~~~~~~~~~~~~~~~~
-Suppose we have two identicla equality constraints
+funEqCanDischarge
+  :: CtEvidence -> CtEvidence
+  -> ( SwapFlag   -- NotSwapped => lhs can discharge rhs
+                  -- Swapped    => rhs can discharge lhs
+     , Bool)      -- True <=> upgrade non-discharded one
+                  --          from [W] to [WD]
+-- See Note [funEqCanDischarge]
+funEqCanDischarge ev1 ev2
+  = ASSERT2( ctEvEqRel ev1 == NomEq, ppr ev1 )
+    ASSERT2( ctEvEqRel ev2 == NomEq, ppr ev2 )
+    -- CFunEqCans are all Nominal, hence asserts
+    funEqCanDischargeF (ctEvFlavour ev1) (ctEvFlavour ev2)
+
+funEqCanDischargeF :: CtFlavour -> CtFlavour -> (SwapFlag, Bool)
+funEqCanDischargeF Given           _               = (NotSwapped, False)
+funEqCanDischargeF _               Given           = (IsSwapped,  False)
+funEqCanDischargeF (Wanted WDeriv) _               = (NotSwapped, False)
+funEqCanDischargeF _               (Wanted WDeriv) = (IsSwapped,  True)
+funEqCanDischargeF (Wanted WOnly)  (Wanted WOnly)  = (NotSwapped, False)
+funEqCanDischargeF (Wanted WOnly)  Derived         = (NotSwapped, True)
+funEqCanDischargeF Derived         (Wanted WOnly)  = (IsSwapped,  True)
+funEqCanDischargeF Derived         Derived         = (NotSwapped, False)
+
+
+{- Note [eqCanDischarge]
+~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose we have two identical CTyEqCan equality constraints
 (i.e. both LHS and RHS are the same)
-      (x1:s~t) `eqCanDischarge` (xs:s~t)
+      (x1:a~t) `eqCanDischarge` (xs:a~t)
 Can we just drop x2 in favour of x1?
 
 Answer: yes if eqCanDischarge is true.
@@ -2466,48 +2631,27 @@ other Deriveds in the model whereas the Wanted cannot.
 However a Wanted can certainly discharge an identical Wanted.  So
 eqCanDischarge does /not/ define a can-rewrite relation in the
 sense of Definition [Can-rewrite relation] in TcSMonad.
--}
 
------------------
-eqCanRewrite :: CtEvidence -> CtEvidence -> Bool
--- Very important function!
--- See Note [eqCanRewrite]
--- See Note [Wanteds do not rewrite Wanteds]
--- See Note [Deriveds do rewrite Deriveds]
-eqCanRewrite ev1 ev2 = eqCanRewriteFR (ctEvFlavourRole ev1)
-                                      (ctEvFlavourRole ev2)
+We /do/ say that a [W] can discharge a [WD].  In evidence terms it
+certainly can, and the /caller/ arranges that the otherwise-lost [D]
+is spat out as a new Derived.  -}
 
-eqCanRewriteFR :: CtFlavourRole -> CtFlavourRole -> Bool
-eqCanRewriteFR (Given, NomEq)   (_, _)           = True
-eqCanRewriteFR (Given, ReprEq)  (_, ReprEq)      = True
-eqCanRewriteFR (Derived, NomEq) (Derived, NomEq) = True
-eqCanRewriteFR _                _                = False
-
------------------
-funEqCanDischarge :: CtEvidence -> CtEvidence -> Bool
--- See Note [funEqCanDischarge]
-funEqCanDischarge ev1 ev2 = funEqCanDischargeFR (ctEvFlavourRole ev1)
-                                      (ctEvFlavourRole ev2)
-
-funEqCanDischargeFR :: CtFlavourRole -> CtFlavourRole -> Bool
-funEqCanDischargeFR (_, ReprEq)  (_, NomEq)   = False
-funEqCanDischargeFR (Given,   _) _            = True
-funEqCanDischargeFR (Wanted,  _) (Wanted,  _) = True
-funEqCanDischargeFR (Wanted,  _) (Derived, _) = True
-funEqCanDischargeFR (Derived, _) (Derived, _) = True
-funEqCanDischargeFR _            _            = False
-
------------------
 eqCanDischarge :: CtEvidence -> CtEvidence -> Bool
 -- See Note [eqCanDischarge]
 eqCanDischarge ev1 ev2 = eqCanDischargeFR (ctEvFlavourRole ev1)
                                           (ctEvFlavourRole ev2)
+
 eqCanDischargeFR :: CtFlavourRole -> CtFlavourRole -> Bool
-eqCanDischargeFR (_, ReprEq)  (_, NomEq)   = False
-eqCanDischargeFR (Given,   _) (Given,_)    = True
-eqCanDischargeFR (Wanted,  _) (Wanted,  _) = True
-eqCanDischargeFR (Derived, _) (Derived, _) = True
-eqCanDischargeFR _            _            = False
+eqCanDischargeFR (_, ReprEq) (_, NomEq) = False
+eqCanDischargeFR (f1,_)      (f2, _)    = eqCanDischargeF f1 f2
+
+eqCanDischargeF :: CtFlavour -> CtFlavour -> Bool
+eqCanDischargeF Given   _                  = True
+eqCanDischargeF (Wanted _)      (Wanted _) = True
+eqCanDischargeF (Wanted WDeriv) Derived    = True
+eqCanDischargeF Derived         Derived    = True
+eqCanDischargeF _               _          = False
+
 
 {-
 ************************************************************************
@@ -2574,6 +2718,9 @@ initialSubGoalDepth = SubGoalDepth 0
 
 bumpSubGoalDepth :: SubGoalDepth -> SubGoalDepth
 bumpSubGoalDepth (SubGoalDepth n) = SubGoalDepth (n + 1)
+
+maxSubGoalDepth :: SubGoalDepth -> SubGoalDepth -> SubGoalDepth
+maxSubGoalDepth (SubGoalDepth n) (SubGoalDepth m) = SubGoalDepth (n `max` m)
 
 subGoalDepthExceeded :: DynFlags -> SubGoalDepth -> Bool
 subGoalDepthExceeded dflags (SubGoalDepth d)
@@ -2717,6 +2864,14 @@ data SkolemInfo
 instance Outputable SkolemInfo where
   ppr = pprSkolInfo
 
+termEvidenceAllowed :: SkolemInfo -> Bool
+-- Whether an implication constraint with this SkolemInfo
+-- is permitted to have term-level evidence.  There is
+-- only one that is not, associated with unifiying
+-- forall-types
+termEvidenceAllowed (UnifyForAllSkol {}) = False
+termEvidenceAllowed _                    = True
+
 pprSkolInfo :: SkolemInfo -> SDoc
 -- Complete the sentence "is a rigid type variable bound by..."
 pprSkolInfo (SigSkol ctxt ty) = pprSigSkolInfo ctxt ty
@@ -2796,7 +2951,7 @@ data CtOrigin
                                    -- function or instance
 
   | TypeEqOrigin { uo_actual   :: TcType
-                 , uo_expected :: ExpType
+                 , uo_expected :: TcType
                  , uo_thing    :: Maybe ErrorThing
                                   -- ^ The thing that has type "actual"
                  }
@@ -2854,7 +3009,7 @@ data CtOrigin
 
   | FunDepOrigin2       -- A functional dependency from combining
         PredType CtOrigin   -- This constraint arising from ...
-        PredType SrcSpan    -- and this instance
+        PredType SrcSpan    -- and this top-level instance
         -- We only need a CtOrigin on the first, because the location
         -- is pinned on the entire error message
 
@@ -2869,6 +3024,9 @@ data CtOrigin
                             -- the user should never see this one,
                             -- unlesss ImpredicativeTypes is on, where all
                             -- bets are off
+  | InstProvidedOrigin Module ClsInst
+        -- Skolem variable arose when we were testing if an instance
+        -- is solvable or not.
 
 -- | A thing that can be stored for error message generation only.
 -- It is stored with a function to zonk and tidy the thing.
@@ -3063,6 +3221,11 @@ pprCtOrigin (ProvCtxtOrigin PSB{ psb_id = (L _ name) })
   = hang (ctoHerald <+> text "the \"provided\" constraints claimed by")
        2 (text "the signature of" <+> quotes (ppr name))
 
+pprCtOrigin (InstProvidedOrigin mod cls_inst)
+  = vcat [ text "arising when attempting to show that"
+         , ppr cls_inst
+         , text "is provided by" <+> quotes (ppr mod)]
+
 pprCtOrigin simple_origin
   = ctoHerald <+> pprCtO simple_origin
 
@@ -3111,9 +3274,9 @@ type TcPluginSolver = [Ct]    -- given
                    -> [Ct]    -- wanted
                    -> TcPluginM TcPluginResult
 
-newtype TcPluginM a = TcPluginM (Maybe EvBindsVar -> TcM a)
+newtype TcPluginM a = TcPluginM (EvBindsVar -> TcM a)
 
-instance Functor     TcPluginM where
+instance Functor TcPluginM where
   fmap = liftM
 
 instance Applicative TcPluginM where
@@ -3131,7 +3294,7 @@ instance MonadFail.MonadFail TcPluginM where
   fail x   = TcPluginM (const $ fail x)
 #endif
 
-runTcPluginM :: TcPluginM a -> Maybe EvBindsVar -> TcM a
+runTcPluginM :: TcPluginM a -> EvBindsVar -> TcM a
 runTcPluginM (TcPluginM m) = m
 
 -- | This function provides an escape for direct access to
@@ -3143,8 +3306,8 @@ unsafeTcPluginTcM = TcPluginM . const
 -- | Access the 'EvBindsVar' carried by the 'TcPluginM' during
 -- constraint solving.  Returns 'Nothing' if invoked during
 -- 'tcPluginInit' or 'tcPluginStop'.
-getEvBindsTcPluginM_maybe :: TcPluginM (Maybe EvBindsVar)
-getEvBindsTcPluginM_maybe = TcPluginM return
+getEvBindsTcPluginM :: TcPluginM EvBindsVar
+getEvBindsTcPluginM = TcPluginM return
 
 
 data TcPlugin = forall s. TcPlugin

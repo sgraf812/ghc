@@ -85,6 +85,10 @@ doubleToBytes d
 -- If -split-section was specified, include the suffix label, otherwise just
 -- print the section type. For Darwin, where subsections-for-symbols are
 -- used instead, only print section type.
+--
+-- For string literals, additional flags are specified to enable merging of
+-- identical strings in the linker. With -split-sections each string also gets
+-- a unique section to allow strings from unused code to be GC'd.
 
 pprSectionHeader :: Platform -> Section -> SDoc
 pprSectionHeader platform (Section t suffix) =
@@ -98,17 +102,28 @@ pprGNUSectionHeader t suffix = sdocWithDynFlags $ \dflags ->
   let splitSections = gopt Opt_SplitSections dflags
       subsection | splitSections = char '.' <> ppr suffix
                  | otherwise     = empty
-  in  text ".section " <> ptext header <> subsection
+  in  text ".section " <> ptext (header dflags) <> subsection <>
+      flags dflags
   where
-    header = case t of
+    header dflags = case t of
       Text -> sLit ".text"
       Data -> sLit ".data"
       ReadOnlyData -> sLit ".rodata"
       RelocatableReadOnlyData -> sLit ".data.rel.ro"
       UninitialisedData -> sLit ".bss"
       ReadOnlyData16 -> sLit ".rodata.cst16"
+      CString
+        | OSMinGW32 <- platformOS (targetPlatform dflags)
+          -> sLit ".rdata"
+        | otherwise -> sLit ".rodata.str"
       OtherSection _ ->
         panic "PprBase.pprGNUSectionHeader: unknown section type"
+    flags dflags = case t of
+      CString
+        | OSMinGW32 <- platformOS (targetPlatform dflags)
+          -> text ",\"dr\""
+        | otherwise -> text ",\"aMS\",@progbits,1"
+      _ -> empty
 
 -- XCOFF doesn't support relocating label-differences, so we place all
 -- RO sections into .text[PR] sections
@@ -119,6 +134,7 @@ pprXcoffSectionHeader t = text $ case t of
      ReadOnlyData            -> ".csect .text[PR] # ReadOnlyData"
      RelocatableReadOnlyData -> ".csect .text[PR] # RelocatableReadOnlyData"
      ReadOnlyData16          -> ".csect .text[PR] # ReadOnlyData16"
+     CString                 -> ".csect .text[PR] # CString"
      UninitialisedData       -> ".csect .data[BS]"
      OtherSection _          ->
        panic "PprBase.pprXcoffSectionHeader: unknown section type"
@@ -132,5 +148,6 @@ pprDarwinSectionHeader t =
      RelocatableReadOnlyData -> sLit ".const_data"
      UninitialisedData -> sLit ".data"
      ReadOnlyData16 -> sLit ".const"
+     CString -> sLit ".section\t__TEXT,__cstring,cstring_literals"
      OtherSection _ ->
        panic "PprBase.pprDarwinSectionHeader: unknown section type"

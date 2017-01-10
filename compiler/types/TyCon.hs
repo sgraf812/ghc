@@ -10,7 +10,7 @@ The @TyCon@ datatype
 
 module TyCon(
         -- * Main TyCon data types
-        TyCon, AlgTyConRhs(..), visibleDataCons,
+        TyCon, AlgTyConRhs(..), HowAbstract(..), visibleDataCons,
         AlgTyConFlav(..), isNoParent,
         FamTyConFlav(..), Role(..), Injectivity(..),
         RuntimeRepInfo(..),
@@ -45,16 +45,18 @@ module TyCon(
         isFunTyCon,
         isPrimTyCon,
         isTupleTyCon, isUnboxedTupleTyCon, isBoxedTupleTyCon,
-        isUnboxedSumTyCon,
+        isUnboxedSumTyCon, isPromotedTupleTyCon,
         isTypeSynonymTyCon,
         mightBeUnsaturatedTyCon,
         isPromotedDataCon, isPromotedDataCon_maybe,
         isKindTyCon, isLiftedTypeKindTyConName,
+        isTauTyCon, isFamFreeTyCon,
 
         isDataTyCon, isProductTyCon, isDataProductTyCon_maybe,
         isDataSumTyCon_maybe,
         isEnumerationTyCon,
         isNewTyCon, isAbstractTyCon,
+        isSkolemAbstractTyCon,
         isFamilyTyCon, isOpenFamilyTyCon,
         isTypeFamilyTyCon, isDataFamilyTyCon,
         isOpenTypeFamilyTyCon, isClosedSynFamilyTyConWithAxiom_maybe,
@@ -119,11 +121,12 @@ module TyCon(
 
 #include "HsVersions.h"
 
-import {-# SOURCE #-} TyCoRep ( Kind, Type, PredType, pprType )
-import {-# SOURCE #-} TysWiredIn  ( runtimeRepTyCon, constraintKind
-                                  , vecCountTyCon, vecElemTyCon, liftedTypeKind
-                                  , mkFunKind, mkForAllKind )
-import {-# SOURCE #-} DataCon ( DataCon, dataConExTyVars, dataConFieldLabels )
+import {-# SOURCE #-} TyCoRep    ( Kind, Type, PredType, pprType )
+import {-# SOURCE #-} TysWiredIn ( runtimeRepTyCon, constraintKind
+                                 , vecCountTyCon, vecElemTyCon, liftedTypeKind
+                                 , mkFunKind, mkForAllKind )
+import {-# SOURCE #-} DataCon    ( DataCon, dataConExTyVars, dataConFieldLabels
+                                 , dataConTyCon )
 
 import Binary
 import Var
@@ -618,8 +621,16 @@ data TyCon
                                  -- This list has length = tyConArity
                                  -- See also Note [TyCon Role signatures]
 
-        synTcRhs     :: Type     -- ^ Contains information about the expansion
+        synTcRhs     :: Type,    -- ^ Contains information about the expansion
                                  -- of the synonym
+
+        synIsTau     :: Bool,   -- True <=> the RHS of this synonym does not
+                                 --          have any foralls, after expanding any
+                                 --          nested synonyms
+        synIsFamFree  :: Bool    -- True <=> the RHS of this synonym does not mention
+                                 --          any type synonym families (data families
+                                 --          are fine), again after expanding any
+                                 --          nested synonyms
     }
 
   -- | Represents families (both type and data)
@@ -721,7 +732,6 @@ data TyCon
                                        -- tycon's body. See Note [TcTyCon]
       }
 
-
 -- | Represents right-hand-sides of 'TyCon's for algebraic types
 data AlgTyConRhs
 
@@ -729,9 +739,7 @@ data AlgTyConRhs
     -- it's represented by a pointer.  Used when we export a data type
     -- abstractly into an .hi file.
   = AbstractTyCon
-      Bool      -- True  <=> It's definitely a distinct data type,
-                --           equal only to itself; ie not a newtype
-                -- False <=> Not sure
+      HowAbstract
 
     -- | Information about those 'TyCon's derived from a @data@
     -- declaration. This includes data types with no constructors at
@@ -788,6 +796,72 @@ data AlgTyConRhs
                              -- Watch out!  If any newtypes become transparent
                              -- again check Trac #1072.
     }
+
+-- | An 'AbstractTyCon' represents some matchable type constructor (i.e., valid
+-- in instance heads), for which we do not know the implementation.  We refer to
+-- these as "abstract data".
+--
+-- At the moment, there are two flavors of abstract data, corresponding
+-- to whether or not the abstract data declaration occurred in an hs-boot
+-- file or an hsig file.
+--
+data HowAbstract
+  -- | Nominally distinct abstract data arises from abstract data
+  -- declarations in an hs-boot file.
+  --
+  -- Abstract data of this form is guaranteed to be nominally distinct
+  -- from all other declarations in the system; e.g., if I have
+  -- a @data T@ and @data S@ in an hs-boot file, it is safe to
+  -- assume that they will never equal each other.  This is something
+  -- of an implementation accident: it is a lot easier to assume that
+  -- @data T@ in @A.hs-boot@ indicates there will be @data T = ...@
+  -- in @A.hs@, than to permit the possibility that @A.hs@ reexports
+  -- it from somewhere else.
+  = DistinctNominalAbstract
+
+  -- Note [Skolem abstract data]
+  -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  -- Skolem abstract data arises from abstract data declarations
+  -- in an hsig file.
+  --
+  -- The best analogy is to interpret the abstract types in Backpack
+  -- unit as elaborating to universally quantified type variables;
+  -- e.g.,
+  --
+  --    unit p where
+  --        signature H where
+  --            data T
+  --            data S
+  --        module M where
+  --            import H
+  --            f :: (T ~ S) => a -> b
+  --            f x = x
+  --
+  -- elaborates as (with some fake structural types):
+  --
+  --    p :: forall t s. { f :: forall a b. t ~ s => a -> b }
+  --    p = { f = \x -> x } -- ill-typed
+  --
+  -- It is clear that inside p, t ~ s is not provable (and
+  -- if we tried to write a function to cast t to s, that
+  -- would not work), but if we call p @Int @Int, clearly Int ~ Int
+  -- is provable.  The skolem variables are all distinct from
+  -- one another, but we can't make assumptions like "f is
+  -- inaccessible", because the skolem variables will get
+  -- instantiated eventually!
+  --
+  -- Skolem abstract data still has the constraint that there
+  -- are no type family applications, to keep this data matchable.
+  | SkolemAbstract
+
+instance Binary HowAbstract where
+    put_ bh DistinctNominalAbstract          = putByte bh 0
+    put_ bh SkolemAbstract                   = putByte bh 1
+
+    get bh = do { h <- getByte bh
+                ; case h of
+                    0 -> return DistinctNominalAbstract
+                    _ -> return SkolemAbstract }
 
 -- | Some promoted datacons signify extra info relevant to GHC. For example,
 -- the @IntRep@ constructor of @RuntimeRep@ corresponds to the 'IntRep'
@@ -1363,7 +1437,7 @@ mkClassTyCon name binders roles rhs clas tc_rep_name
 mkTupleTyCon :: Name
              -> [TyConBinder]
              -> Kind    -- ^ Result kind of the 'TyCon'
-             -> Arity   -- ^ Arity of the tuple
+             -> Arity   -- ^ Arity of the tuple 'TyCon'
              -> DataCon
              -> TupleSort    -- ^ Whether the tuple is boxed or unboxed
              -> AlgTyConFlav
@@ -1479,8 +1553,8 @@ mkPrimTyCon' name binders res_kind roles is_unlifted rep_nm
 
 -- | Create a type synonym 'TyCon'
 mkSynonymTyCon :: Name -> [TyConBinder] -> Kind   -- ^ /result/ kind
-               -> [Role] -> Type -> TyCon
-mkSynonymTyCon name binders res_kind roles rhs
+               -> [Role] -> Type -> Bool -> Bool -> TyCon
+mkSynonymTyCon name binders res_kind roles rhs is_tau is_fam_free
   = SynonymTyCon {
         tyConName    = name,
         tyConUnique  = nameUnique name,
@@ -1490,7 +1564,9 @@ mkSynonymTyCon name binders res_kind roles rhs
         tyConArity   = length binders,
         tyConTyVars  = binderVars binders,
         tcRoles      = roles,
-        synTcRhs     = rhs
+        synTcRhs     = rhs,
+        synIsTau     = is_tau,
+        synIsFamFree = is_fam_free
     }
 
 -- | Create a type family 'TyCon'
@@ -1542,6 +1618,12 @@ isFunTyCon _             = False
 isAbstractTyCon :: TyCon -> Bool
 isAbstractTyCon (AlgTyCon { algTcRhs = AbstractTyCon {} }) = True
 isAbstractTyCon _ = False
+
+-- | Test if the 'TyCon' is totally abstract; i.e., it is not even certain
+-- to be nominally distinct.
+isSkolemAbstractTyCon :: TyCon -> Bool
+isSkolemAbstractTyCon (AlgTyCon { algTcRhs = AbstractTyCon SkolemAbstract }) = True
+isSkolemAbstractTyCon _ = False
 
 -- | Make an fake, abstract 'TyCon' from an existing one.
 -- Used when recovering from errors
@@ -1640,7 +1722,7 @@ isGenInjAlgRhs :: AlgTyConRhs -> Bool
 isGenInjAlgRhs (TupleTyCon {})          = True
 isGenInjAlgRhs (SumTyCon {})            = True
 isGenInjAlgRhs (DataTyCon {})           = True
-isGenInjAlgRhs (AbstractTyCon distinct) = distinct
+isGenInjAlgRhs (AbstractTyCon {})       = False
 isGenInjAlgRhs (NewTyCon {})            = False
 
 -- | Is this 'TyCon' that for a @newtype@
@@ -1735,6 +1817,14 @@ isTypeSynonymTyCon :: TyCon -> Bool
 isTypeSynonymTyCon (SynonymTyCon {}) = True
 isTypeSynonymTyCon _                 = False
 
+isTauTyCon :: TyCon -> Bool
+isTauTyCon (SynonymTyCon { synIsTau = is_tau }) = is_tau
+isTauTyCon _                                    = True
+
+isFamFreeTyCon :: TyCon -> Bool
+isFamFreeTyCon (SynonymTyCon { synIsFamFree = fam_free }) = fam_free
+isFamFreeTyCon (FamilyTyCon { famTcFlav = flav })         = isDataFamFlav flav
+isFamFreeTyCon _                                          = True
 
 -- As for newtypes, it is in some contexts important to distinguish between
 -- closed synonyms and synonym families, as synonym families have no unique
@@ -1868,6 +1958,13 @@ isUnboxedSumTyCon (AlgTyCon { algTcRhs = rhs })
   | SumTyCon {} <- rhs
   = True
 isUnboxedSumTyCon _ = False
+
+-- | Is this the 'TyCon' for a /promoted/ tuple?
+isPromotedTupleTyCon :: TyCon -> Bool
+isPromotedTupleTyCon tyCon
+  | Just dataCon <- isPromotedDataCon_maybe tyCon
+  , isTupleTyCon (dataConTyCon dataCon) = True
+  | otherwise                           = False
 
 -- | Is this a PromotedDataCon?
 isPromotedDataCon :: TyCon -> Bool

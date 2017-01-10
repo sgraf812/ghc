@@ -13,8 +13,14 @@ test('T11128', normal, compile, [''])
 test('T11128b', normal, compile, [''])
 test('PluralS', normal, compile, [''])
 
+# T12574 Test that suggest current flag over deprecated
+test('T12574',normal, compile, ['-fwarn-missing-local-signatures'])
+
 test('DeprU',
 	extra_clean([
 		'DeprM.o',  'DeprU.o',
 		'DeprM.hi', 'DeprU.hi']),
 	multimod_compile, ['DeprU', '-Wall'])
+
+test('Werror01', normal, compile, [''])
+test('Werror02', normal, compile, [''])

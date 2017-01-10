@@ -10,7 +10,6 @@
 --
 module GHCi.Run
   ( run, redirectInterrupts
-  , toSerializableException, fromSerializableException
   ) where
 
 import GHCi.CreateBCO
@@ -36,7 +35,6 @@ import Foreign
 import Foreign.C
 import GHC.Conc.Sync
 import GHC.IO hiding ( bracket )
-import System.Exit
 import System.Mem.Weak  ( deRefWeak )
 import Unsafe.Coerce
 
@@ -45,7 +43,7 @@ import Unsafe.Coerce
 
 run :: Message a -> IO a
 run m = case m of
-  InitLinker -> initObjLinker
+  InitLinker -> initObjLinker RetainCAFs
   LookupSymbol str -> fmap toRemotePtr <$> lookupSymbol str
   LookupClosure str -> lookupClosure str
   LoadDLL str -> loadDLL str
@@ -83,8 +81,8 @@ run m = case m of
   MallocStrings bss -> mapM mkString0 bss
   PrepFFI conv args res -> toRemotePtr <$> prepForeignCall conv args res
   FreeFFI p -> freeForeignCallInfo (fromRemotePtr p)
-  MkConInfoTable ptrs nptrs tag desc ->
-    toRemotePtr <$> mkConInfoTable ptrs nptrs tag desc
+  MkConInfoTable ptrs nptrs tag ptrtag desc ->
+    toRemotePtr <$> mkConInfoTable ptrs nptrs tag ptrtag desc
   StartTH -> startTH
   _other -> error "GHCi.Run.run"
 
@@ -222,17 +220,6 @@ tryEval io = do
   case e of
     Left ex -> return (EvalException (toSerializableException ex))
     Right a -> return (EvalSuccess a)
-
-toSerializableException :: SomeException -> SerializableException
-toSerializableException ex
-  | Just UserInterrupt <- fromException ex  = EUserInterrupt
-  | Just (ec::ExitCode) <- fromException ex = (EExitCode ec)
-  | otherwise = EOtherException (show (ex :: SomeException))
-
-fromSerializableException :: SerializableException -> SomeException
-fromSerializableException EUserInterrupt = toException UserInterrupt
-fromSerializableException (EExitCode c) = toException c
-fromSerializableException (EOtherException str) = toException (ErrorCall str)
 
 -- This function sets up the interpreter for catching breakpoints, and
 -- resets everything when the computation has stopped running.  This

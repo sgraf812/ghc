@@ -1443,6 +1443,10 @@ not the Prelude versions:
    functions must match the Prelude types very closely. Details are in
    flux; if you want to use this, ask!
 
+-  List notation, such as ``[x,y]`` or ``[m..n]`` can also be treated
+   via rebindable syntax if you use `-XOverloadedLists`;
+   see :ref:`overloaded-lists`.
+
 :ghc-flag:`-XRebindableSyntax` implies :ghc-flag:`-XNoImplicitPrelude`.
 
 In all cases (apart from arrow notation), the static semantics should be
@@ -1459,6 +1463,33 @@ any of the types: ::
 Be warned: this is an experimental facility, with fewer checks than
 usual. Use ``-dcore-lint`` to typecheck the desugared program. If Core
 Lint is happy you should be all right.
+
+Things unaffected by :ghc-flag:`-XRebindableSyntax`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:ghc-flag:`-XRebindableSyntax` does not apply to any code generated from a
+``deriving`` clause or declaration. To see why, consider the following code: ::
+
+    {-# LANGUAGE RebindableSyntax, OverloadedStrings #-}
+    newtype Text = Text String
+
+    fromString :: String -> Text
+    fromString = Text
+
+    data Foo = Foo deriving Show
+
+This will generate code to the effect of: ::
+
+    instance Show Foo where
+      showsPrec _ Foo = showString "Foo"
+
+But because :ghc-flag:`-XRebindableSyntax` and :ghc-flag:`-XOverloadedStrings`
+are enabled, the ``"Foo"`` string literal would now be of type ``Text``, not
+``String``, which ``showString`` doesn't accept! This causes the generated
+``Show`` instance to fail to typecheck. It's hard to imagine any scenario where
+it would be desirable have :ghc-flag:`-XRebindableSyntax` behavior within
+derived code, so GHC simply ignores :ghc-flag:`-XRebindableSyntax` entirely
+when checking derived code.
 
 .. _postfix-operators:
 
@@ -1588,7 +1619,7 @@ has no non-bottom values. For example:
       f :: Void -> Int
       f x = case x of { }
 
-With dependently-typed features it is more useful (see :ghc-ticket:`2431``). For
+With dependently-typed features it is more useful (see :ghc-ticket:`2431`). For
 example, consider these two candidate definitions of ``absurd``:
 
 ::
@@ -2117,10 +2148,10 @@ much more liberal about type synonyms than Haskell 98.
          foo :: forall x. x -> [x]
 
 GHC currently does kind checking before expanding synonyms (though even
-that could be changed)..
+that could be changed).
 
 After expanding type synonyms, GHC does validity checking on types,
-looking for the following mal-formedness which isn't detected simply by
+looking for the following malformedness which isn't detected simply by
 kind checking:
 
 -  Type constructor applied to a type involving for-alls (if
@@ -3267,6 +3298,17 @@ number of important ways:
    necessarily more conservative, but any error message may be more
    comprehensible.
 
+-  Under most circumstances, you cannot use standalone deriving to create an
+   instance for a data type whose constructors are not all in scope. This is
+   because the derived instance would generate code that uses the constructors
+   behind the scenes, which would break abstraction.
+
+   The one exception to this rule is :ghc-flag:`-XDeriveAnyClass`, since
+   deriving an instance via :ghc-flag:`-XDeriveAnyClass` simply generates
+   an empty instance declaration, which does not require the use of any
+   constructors. See the `deriving any class <#derive-any-class>`__ section
+   for more details.
+
 In other ways, however, a standalone deriving obeys the same rules as
 ordinary deriving:
 
@@ -3383,7 +3425,7 @@ example), then we apply the function ``f`` directly to it. If a type is
 encountered that is not syntactically equivalent to the last type parameter
 *but does mention* the last type parameter somewhere in it, then a recursive
 call to ``fmap`` is made. If a type is found which doesn't mention the last
-type paramter at all, then it is left alone.
+type parameter at all, then it is left alone.
 
 The second of those cases, in which a type is unequal to the type parameter but
 does contain the type parameter, can be surprisingly tricky. For example, the
@@ -3830,7 +3872,7 @@ generates ::
 
       instance Num Dollars
 
-One can think of this instance being implementated with the same code as the
+One can think of this instance being implemented with the same code as the
 ``Num Int`` instance, but with ``Dollars`` and ``getDollars`` added wherever
 necessary in order to make it typecheck. (In practice, GHC uses a somewhat
 different approach to code generation. See the :ref:`precise-gnd-specification`
@@ -3925,9 +3967,18 @@ where
    missing last argument to ``C`` is not used at a nominal role in any
    of the ``C``'s methods. (See :ref:`roles`.)
 
+- ``C`` is allowed to have associated type families, provided they meet the
+  requirements laid out in the section on :ref:`GND and associated types
+  <gnd-and-associated-types>`.
+
 Then the derived instance declaration is of the form ::
 
       instance C t1..tj t => C t1..tj (T v1...vk)
+
+Note that if ``C`` does not contain any class methods, the instance context
+is wholly unnecessary, and as such GHC will instead generate: ::
+
+      instance C t1..tj (T v1..vk)
 
 As an example which does *not* work, consider ::
 
@@ -3955,10 +4006,137 @@ usually have one "main" parameter for which deriving new instances is
 most interesting.
 
 Lastly, all of this applies only for classes other than ``Read``,
-``Show``, ``Typeable``, and ``Data``, for which the built-in derivation
+``Show``, ``Typeable``, and ``Data``, for which the stock derivation
 applies (section 4.3.3. of the Haskell Report). (For the standard
 classes ``Eq``, ``Ord``, ``Ix``, and ``Bounded`` it is immaterial
-whether the standard method is used or the one described here.)
+whether the stock method is used or the one described here.)
+
+.. _gnd-and-associated-types:
+
+Associated type families
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+:ghc-flag:`-XGeneralizedNewtypeDeriving` also works for some type classes with
+associated type families. Here is an example: ::
+
+      class HasRing a where
+        type Ring a
+
+      newtype L1Norm a = L1Norm a
+        deriving HasRing
+
+The derived ``HasRing`` instance would look like ::
+
+      instance HasRing (L1Norm a) where
+        type Ring (L1Norm a) = Ring a
+
+To be precise, if the class being derived is of the form ::
+
+      class C c_1 c_2 ... c_m where
+        type T1 t1_1 t1_2 ... t1_n
+        ...
+        type Tk tk_1 tk_2 ... tk_p
+
+and the newtype is of the form ::
+
+      newtype N n_1 n_2 ... n_q = MkN <rep-type>
+
+then you can derive a ``C c_1 c_2 ... c_(m-1)`` instance for
+``N n_1 n_2 ... n_q``, provided that:
+
+- The type parameter ``c_m`` occurs once in each of the type variables of
+  ``T1`` through ``Tk``. Imagine a class where this condition didn't hold.
+  For example: ::
+
+      class Bad a b where
+        type B a
+
+      instance Bad Int a where
+        type B Int = Char
+
+      newtype Foo a = Foo a
+        deriving (Bad Int)
+
+  For the derived ``Bad Int`` instance, GHC would need to generate something
+  like this: ::
+
+      instance Bad Int (Foo a) where
+        type B Int = B ???
+
+  Now we're stuck, since we have no way to refer to ``a`` on the right-hand
+  side of the ``B`` family instance, so this instance doesn't really make sense
+  in a :ghc-flag:`-XGeneralizedNewtypeDeriving` setting.
+
+- ``C`` does not have any associated data families (only type families). To
+  see why data families are forbidden, imagine the following scenario: ::
+
+      class Ex a where
+        data D a
+
+      instance Ex Int where
+        data D Int = DInt Bool
+
+      newtype Age = MkAge Int deriving Ex
+
+  For the derived ``Ex`` instance, GHC would need to generate something like
+  this: ::
+
+      instance Ex Age where
+        data D Age = ???
+
+  But it is not clear what GHC would fill in for ``???``, as each data family
+  instance must generate fresh data constructors.
+
+If both of these conditions are met, GHC will generate this instance: ::
+
+      instance C c_1 c_2 ... c_(m-1) <rep-type> =>
+               C c_1 c_2 ... c_(m-1) (N n_1 n_2 ... n_q) where
+        type T1 t1_1 t1_2 ... (N n_1 n_2 ... n_q) ... t1_n
+           = T1 t1_1 t1_2 ... <rep-type>          ... t1_n
+        ...
+        type Tk tk_1 tk_2 ... (N n_1 n_2 ... n_q) ... tk_p
+           = Tk tk_1 tk_2 ... <rep-type>          ... tk_p
+
+Again, if ``C`` contains no class methods, the instance context will be
+redundant, so GHC will instead generate
+``instance C c_1 c_2 ... c_(m-1) (N n_1 n_2 ... n_q)``.
+
+Beware that in some cases, you may need to enable the
+:ghc-flag:`-XUndecidableInstances` extension in order to use this feature.
+Here's a pathological case that illustrates why this might happen: ::
+
+      class C a where
+        type T a
+
+      newtype Loop = MkLoop Loop
+        deriving C
+
+This will generate the derived instance: ::
+
+      instance C Loop where
+        type T Loop = T Loop
+
+Here, it is evident that attempting to use the type ``T Loop`` will throw the
+typechecker into an infinite loop, as its definition recurses endlessly. In
+other cases, you might need to enable :ghc-flag:`-XUndecidableInstances` even
+if the generated code won't put the typechecker into a loop. For example: ::
+
+      instance C Int where
+        type C Int = Int
+
+      newtype MyInt = MyInt Int
+        deriving C
+
+This will generate the derived instance: ::
+
+      instance C MyInt where
+        type T MyInt = T Int
+
+Although typechecking ``T MyInt`` will terminate, GHC's termination checker
+isn't sophisticated enough to determine this, so you'll need to enable
+:ghc-flag:`-XUndecidableInstances` in order to use this derived instance. If
+you do go down this route, make sure you can convince yourself that all of
+the type family instances you're deriving will eventually terminate if used!
 
 .. _derive-any-class:
 
@@ -4063,6 +4241,64 @@ Note the following details
 
   and then the normal rules for filling in associated types from the
   default will apply, making ``Size Bar`` equal to ``Int``.
+
+.. _deriving-strategies:
+
+Deriving strategies
+-------------------
+
+In most scenarios, every ``deriving`` statement generates a typeclass instance
+in an unambiguous fashion. There is a corner case, however, where
+simultaneously enabling both the :ghc-flag:`-XGeneralizedNewtypeDeriving` and
+:ghc-flag:`-XDeriveAnyClass` extensions can make deriving become ambiguous.
+Consider the following example ::
+
+    {-# LANGUAGE DeriveAnyClass, GeneralizedNewtypeDeriving #-}
+    newtype Foo = MkFoo Bar deriving C
+
+One could either pick the ``DeriveAnyClass`` approach to deriving ``C`` or the
+``GeneralizedNewtypeDeriving`` approach to deriving ``C``, both of which would
+be equally as valid. GHC defaults to favoring ``DeriveAnyClass`` in such a
+dispute, but this is not a satisfying solution, since that leaves users unable
+to use both language extensions in a single module.
+
+To make this more robust, GHC has a notion of deriving strategies, which allow
+the user to explicitly request which approach to use when deriving an instance.
+To enable this feature, one must enable the :ghc-flag:`-XDerivingStrategies`
+language extension. A deriving strategy can be specified in a deriving
+clause ::
+
+    newtype Foo = MkFoo Bar
+      deriving newtype C
+
+Or in a standalone deriving declaration ::
+
+    deriving anyclass instance C Foo
+
+:ghc-flag:`-XDerivingStrategies` also allows the use of multiple deriving
+clauses per data declaration so that a user can derive some instance with
+one deriving strategy and other instances with another deriving strategy.
+For example ::
+
+    newtype Baz = Baz Quux
+      deriving          (Eq, Ord)
+      deriving stock    (Read, Show)
+      deriving newtype  (Num, Floating)
+      deriving anyclass C
+
+Currently, the deriving strategies are:
+
+- ``stock``: Have GHC implement a "standard" instance for a data type,
+  if possible (e.g., ``Eq``, ``Ord``, ``Generic``, ``Data``, ``Functor``, etc.)
+
+- ``anyclass``: Use :ghc-flag:`-XDeriveAnyClass`
+
+- ``newtype``: Use :ghc-flag:`-XGeneralizedNewtypeDeriving`
+
+If an explicit deriving strategy is not given, GHC has an algorithm for
+determining how it will actually derive an instance. For brevity, the algorithm
+is omitted here. You can read the full algorithm at
+:ghc-wiki:`Wiki page <DerivingStrategies>`.
 
 .. _pattern-synonyms:
 
@@ -4199,7 +4435,7 @@ constructors. The syntax for doing this is as follows:
 
 ::
 
-      pattern Point :: (Int, Int)
+      pattern Point :: Int -> Int -> (Int, Int)
       pattern Point{x, y} = (x, y)
 
 The idea is that we can then use ``Point`` just as if we had defined a new
@@ -4229,7 +4465,11 @@ For a unidirectional record pattern synonym we define record selectors but do
 not allow record updates or construction.
 
 The syntax and semantics of pattern synonyms are elaborated in the
-following subsections. See the :ghc-wiki:`Wiki page <PatternSynonyms>` for more
+following subsections.
+There are also lots more details in the `paper
+<https://www.microsoft.com/en-us/research/wp-content/uploads/2016/08/pattern-synonyms-Haskell16.pdf>`_.
+
+See the :ghc-wiki:`Wiki page <PatternSynonyms>` for more
 details.
 
 Syntax and scoping of pattern synonyms
@@ -4701,7 +4941,8 @@ Functional dependencies
 
     Allow use of functional dependencies in class declarations.
 
-Functional dependencies are implemented as described by [Jones2000]_.Mark Jones in
+Functional dependencies are implemented as described by Mark Jones in
+[Jones2000]_.
 
 Functional dependencies are introduced by a vertical bar in the syntax
 of a class declaration; e.g. ::
@@ -8412,7 +8653,6 @@ Lexically scoped type variables
 
 .. ghc-flag:: -XScopedTypeVariables
 
-    :implies: :ghc-flag:`-XRelaxedPolyRec`
     :implies: :ghc-flag:`-XExplicitForAll`
 
     Enable lexical scoping of type variables explicitly introduced with
@@ -8435,9 +8675,6 @@ scopes over the whole definition of ``f``, including over the type
 signature for ``ys``. In Haskell 98 it is not possible to declare a type
 for ``ys``; a major benefit of scoped type variables is that it becomes
 possible to do so.
-
-Lexically-scoped type variables are enabled by
-:ghc-flag:`-XScopedTypeVariables`. This flag implies :ghc-flag:`-XRelaxedPolyRec`.
 
 Overview
 --------
@@ -8650,64 +8887,6 @@ the Haskell Report) can be completely switched off by
 :ghc-flag:`-XNoMonomorphismRestriction`. Since GHC 7.8.1, the monomorphism
 restriction is switched off by default in GHCi's interactive options
 (see :ref:`ghci-interactive-options`).
-
-.. _typing-binds:
-
-Generalised typing of mutually recursive bindings
--------------------------------------------------
-
-.. ghc-flag:: -XRelaxedPolyRec
-
-    Allow the typechecker to ignore references to bindings with
-    explicit type signatures.
-
-The Haskell Report specifies that a group of bindings (at top level, or
-in a ``let`` or ``where``) should be sorted into strongly-connected
-components, and then type-checked in dependency order
-(`Haskell Report, Section
-4.5.1 <http://www.haskell.org/onlinereport/decls.html#sect4.5.1>`__). As
-each group is type-checked, any binders of the group that have an
-explicit type signature are put in the type environment with the
-specified polymorphic type, and all others are monomorphic until the
-group is generalised (`Haskell Report, Section
-4.5.2 <http://www.haskell.org/onlinereport/decls.html#sect4.5.2>`__).
-
-Following a suggestion of Mark Jones, in his paper `Typing Haskell in
-Haskell <http://citeseer.ist.psu.edu/424440.html>`__, GHC implements a
-more general scheme. If :ghc-flag:`-XRelaxedPolyRec` is specified: *the
-dependency analysis ignores references to variables that have an
-explicit type signature*. As a result of this refined dependency
-analysis, the dependency groups are smaller, and more bindings will
-typecheck. For example, consider: ::
-
-      f :: Eq a => a -> Bool
-      f x = (x == x) || g True || g "Yes"
-
-      g y = (y <= y) || f True
-
-This is rejected by Haskell 98, but under Jones's scheme the definition
-for ``g`` is typechecked first, separately from that for ``f``, because
-the reference to ``f`` in ``g``\'s right hand side is ignored by the
-dependency analysis. Then ``g``\'s type is generalised, to get ::
-
-      g :: Ord a => a -> Bool
-
-Now, the definition for ``f`` is typechecked, with this type for ``g``
-in the type environment.
-
-The same refined dependency analysis also allows the type signatures of
-mutually-recursive functions to have different contexts, something that
-is illegal in Haskell 98 (Section 4.5.2, last sentence). With
-:ghc-flag:`-XRelaxedPolyRec` GHC only insists that the type signatures of a
-*refined* group have identical type signatures; in practice this means
-that only variables bound by the same pattern binding must have the same
-context. For example, this is fine: ::
-
-      f :: Eq a => a -> Bool
-      f x = (x == x) || g True
-
-      g :: Ord a => a -> Bool
-      g y = (y <= y) || f True
 
 .. _mono-local-binds:
 
@@ -9168,10 +9347,8 @@ example: ::
 
     newtype Swizzle' = MkSwizzle' (Ord a => [a] -> [a])
 
-As of GHC 7.10, this is deprecated. The
-:ghc-flag:`-Wcontext-quantification` flag detects this situation and issues
-a warning. In GHC 8.0 this flag was deprecated and declarations such as
-``MkSwizzle'`` will cause an out-of-scope error.
+Since GHC 8.0 declarations such as ``MkSwizzle'`` will cause an out-of-scope
+error.
 
 As for type signatures, implicit quantification happens for
 non-overloaded types too. So if you write this: ::
@@ -9319,13 +9496,13 @@ your ``forall``\s explicitly. Indeed, doing so is strongly advised for
 rank-2 types.
 
 Sometimes there *is* no "outermost level", in which case no
-implicit quanification happens: ::
+implicit quantification happens: ::
 
       data PackMap a b s t = PackMap (Monad f => (a -> f b) -> s -> f t)
 
 This is rejected because there is no "outermost level" for the types on the RHS
 (it would obviously be terrible to add extra parameters to ``PackMap``),
-so no implicit quantificaiton happens, and the declaration is rejected
+so no implicit quantification happens, and the declaration is rejected
 (with "``f`` is out of scope").  Solution: use an explicit ``forall``: ::
 
       data PackMap a b s t = PackMap (forall f. Monad f => (a -> f b) -> s -> f t)
@@ -9430,13 +9607,21 @@ Here are some more details:
    containing holes, by using the :ghc-flag:`-fdefer-typed-holes` flag. This
    flag defers errors produced by typed holes until runtime, and
    converts them into compile-time warnings. These warnings can in turn
-   be suppressed entirely by :ghc-flag:`-fno-warn-typed-holes`).
+   be suppressed entirely by :ghc-flag:`-fno-warn-typed-holes`.
 
-   The result is that a hole will behave like ``undefined``, but with
+   The same behaviour for "``Variable out of scope``" errors, it terminates
+   compilation by default. You can defer such errors by using the
+   :ghc-flag:`-fdefer-out-of-scope-variables` flag. This flag defers errors
+   produced by out of scope variables until runtime, and
+   converts them into compile-time warnings. These warnings can in turn
+   be suppressed entirely by :ghc-flag:`-fno-warn-deferred-out-of-scope-variables`.
+
+   The result is that a hole or a variable will behave like ``undefined``, but with
    the added benefits that it shows a warning at compile time, and will
    show the same message if it gets evaluated at runtime. This behaviour
    follows that of the :ghc-flag:`-fdefer-type-errors` option, which implies
-   :ghc-flag:`-fdefer-typed-holes`. See :ref:`defer-type-errors`.
+   :ghc-flag:`-fdefer-typed-holes` and :ghc-flag:`-fdefer-out-of-scope-variables`.
+   See :ref:`defer-type-errors`.
 
 -  All unbound identifiers are treated as typed holes, *whether or not
    they start with an underscore*. The only difference is in the error
@@ -9512,6 +9697,33 @@ Here are some more details:
    be deferred, and instead bring compilation to a halt. (In
    implementation terms, they are reported by the renamer rather than
    the type checker.)
+
+There's a flag for controlling the amount of context information shown for
+typed holes:
+
+.. ghc-flag:: -fshow-hole-constraints
+
+    When reporting typed holes, also print constraints that are in scope.
+    Example: ::
+
+        f :: Eq a => a -> Bool
+        f x = _
+
+    results in the following message:
+
+    .. code-block:: none
+
+        show_constraints.hs:4:7: error:
+            • Found hole: _ :: Bool
+            • In the expression: _
+              In an equation for ‘f’: f x = _
+            • Relevant bindings include
+                x :: a (bound at show_constraints.hs:4:3)
+                f :: a -> Bool (bound at show_constraints.hs:4:1)
+              Constraints include
+                Eq a (from the type signature for:
+                             f :: Eq a => a -> Bool
+                      at show_constraints.hs:3:1-22)
 
 
 .. _partial-type-signatures:
@@ -9824,9 +10036,14 @@ splices.
 -  Typed expression splices: the same wildcards as in (untyped)
    expression splices are supported.
 
--  Pattern splices: Template Haskell doesn't support type signatures in
-   pattern splices. Consequently, partial type signatures are not
-   supported either.
+-  Pattern splices: anonymous and named wildcards can be used in pattern
+   signatures. Note that :ghc-flag:`-XScopedTypeVariables` has to be enabled
+   to allow pattern signatures. Extra-constraints wildcards are not supported,
+   just like in regular pattern signatures.
+   ::
+
+       {-# LANGUAGE TemplateHaskell, ScopedTypeVariables #-}
+       foo $( [p| (x :: _) |] ) = x
 
 -  Type splices: only anonymous wildcards are supported in type splices.
    Named and extra-constraints wildcards are not. ::
@@ -9930,12 +10147,13 @@ will not prevent compilation. You can use
 :ghc-flag:`-Wno-deferred-type-errors <-Wdeferred-type-errors>` to suppress these
 warnings.
 
-This flag implies the :ghc-flag:`-fdefer-typed-holes` flag, which enables this
-behaviour for `typed holes <#typed-holes>`__. Should you so wish, it is
+This flag implies the :ghc-flag:`-fdefer-typed-holes` and
+:ghc-flag:`-fdefer-out-of-scope-variables` flags, which enables this
+behaviour for `typed holes <#typed-holes>`__ and variables. Should you so wish, it is
 possible to enable :ghc-flag:`-fdefer-type-errors` without enabling
-:ghc-flag:`-fdefer-typed-holes`, by explicitly specifying
-:ghc-flag:`-fno-defer-typed-holes` on the command-line after the
-:ghc-flag:`-fdefer-type-errors` flag.
+:ghc-flag:`-fdefer-typed-holes` or :ghc-flag:`-fdefer-out-of-scope-variables`,
+by explicitly specifying :ghc-flag:`-fno-defer-typed-holes` or :ghc-flag:`-fno-defer-out-of-scope-variables`
+on the command-line after the :ghc-flag:`-fdefer-type-errors` flag.
 
 At runtime, whenever a term containing a type error would need to be
 evaluated, the error is converted into a runtime exception of type
@@ -10135,7 +10353,7 @@ The :ghc-flag:`-XTemplateHaskellQuotes` extension is considered safe under
        add1 :: Int -> Q Exp
        add1 x = [| x + 1 |]
 
-   Now consider a splice using <literal>add1</literal> in a separate
+   Now consider a splice using ``add1`` in a separate
    module: ::
 
        module Foo where
@@ -10329,9 +10547,8 @@ The :ghc-flag:`-XTemplateHaskellQuotes` extension is considered safe under
 
    -  Recursive ``do``-statements (see :ghc-ticket:`1262`)
 
-   -  Pattern synonyms (see :ghc-ticket:`8761`)
-
-   -  Typed holes (see :ghc-ticket:`10267`)
+   -  Type holes in typed splices (see :ghc-ticket:`10945` and
+      :ghc-ticket:`10946`)
 
 (Compared to the original paper, there are many differences of detail.
 The syntax for a declaration splice uses "``$``" not "``splice``". The type of
@@ -11403,7 +11620,7 @@ optionally had by adding ``!`` in front of a variable.
    In ordinary Haskell, ``f`` is lazy in its argument and hence in
    ``x``; and ``g`` is strict in its argument and hence also strict in
    ``x``. With ``Strict``, both become strict because ``f``'s argument
-   gets an implict bang.
+   gets an implicit bang.
 
 
 .. _strict-modularity:
@@ -12119,6 +12336,8 @@ behaviour:
 -  Unlike ``INLINE``, it is OK to use an ``INLINABLE`` pragma on a
    recursive function. The principal reason do to so to allow later use
    of ``SPECIALISE``
+
+The alternative spelling ``INLINEABLE`` is also accepted by GHC.
 
 .. _noinline-pragma:
 

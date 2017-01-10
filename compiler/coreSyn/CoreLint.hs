@@ -474,7 +474,7 @@ lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
   = addLoc (RhsOf binder) $
          -- Check the rhs
     do { ty <- lintRhs rhs
-       ; lintBinder binder -- Check match to RHS type
+       ; lint_bndr binder -- Check match to RHS type
        ; binder_ty <- applySubstTy (idType binder)
        ; ensureEqTys binder_ty ty (mkRhsMsg binder (text "RHS") ty)
 
@@ -488,14 +488,6 @@ lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
        ; checkL (not (isStrictId binder)
             || (isNonRec rec_flag && not (isTopLevel top_lvl_flag)))
            (mkStrictMsg binder)
-
-        -- Check that if the binder is local, it is not marked as exported
-       ; checkL (not (isExportedId binder) || isTopLevel top_lvl_flag)
-           (mkNonTopExportedMsg binder)
-
-        -- Check that if the binder is local, it does not have an external name
-       ; checkL (not (isExternalName (Var.varName binder)) || isTopLevel top_lvl_flag)
-           (mkNonTopExternalNameMsg binder)
 
        ; flags <- getLintFlags
        ; when (lf_check_inline_loop_breakers flags
@@ -540,8 +532,8 @@ lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
    where
     -- If you edit this function, you may need to update the GHC formalism
     -- See Note [GHC Formalism]
-    lintBinder var | isId var  = lintIdBndr var $ \_ -> (return ())
-                   | otherwise = return ()
+    lint_bndr var | isId var  = lintIdBndr top_lvl_flag var $ \_ -> return ()
+                  | otherwise = return ()
 
 -- | Checks the RHS of top-level bindings. It only differs from 'lintCoreExpr'
 -- in that it doesn't reject applications of the data constructor @StaticPtr@
@@ -563,7 +555,7 @@ lintRhs rhs
         -- imitate @lintCoreExpr (App ...)@
         [] -> do
           fun_ty <- lintCoreExpr fun
-          addLoc (AnExpr rhs') $ foldM lintCoreArg fun_ty args
+          addLoc (AnExpr rhs') $ lintCoreArgs fun_ty args
 -- Rejects applications of the data constructor @StaticPtr@ if it finds any.
 lintRhs rhs = lintCoreExpr rhs
 
@@ -572,6 +564,14 @@ lintIdUnfolding bndr bndr_ty (CoreUnfolding { uf_tmpl = rhs, uf_src = src })
   | isStableSource src
   = do { ty <- lintCoreExpr rhs
        ; ensureEqTys bndr_ty ty (mkRhsMsg bndr (text "unfolding") ty) }
+
+lintIdUnfolding bndr bndr_ty (DFunUnfolding { df_con = con, df_bndrs = bndrs
+                                            , df_args = args })
+  = do { ty <- lintBinders bndrs $ \ bndrs' ->
+               do { res_ty <- lintCoreArgs (dataConRepType con) args
+                  ; return (mkLamTypes bndrs' res_ty) }
+       ; ensureEqTys bndr_ty ty (mkRhsMsg bndr (text "dfun unfolding") ty) }
+
 lintIdUnfolding  _ _ _
   = return ()       -- Do not Lint unstable unfoldings, because that leads
                     -- to exponential behaviour; c.f. CoreFVs.idUnfoldingVars
@@ -593,23 +593,11 @@ the desugarer.
 ************************************************************************
 -}
 
-type InType      = Type
-type InCoercion  = Coercion
-type InVar       = Var
-type InTyVar     = Var
-type InCoVar     = Var
-
-type OutType     = Type -- Substitution has been applied to this,
-                        -- but has not been linted yet
-type OutKind     = Kind
+-- For OutType, OutKind, the substitution has been applied,
+--                       but has not been linted yet
 
 type LintedType  = Type -- Substitution applied, and type is linted
 type LintedKind  = Kind
-
-type OutCoercion    = Coercion
-type OutVar         = Var
-type OutTyVar       = TyVar
-type OutCoVar       = Var
 
 lintCoreExpr :: CoreExpr -> LintM OutType
 -- The returned type has the substitution from the monad
@@ -666,13 +654,13 @@ lintCoreExpr (Let (NonRec bndr rhs) body)
   | isId bndr
   = do  { lintSingleBinding NotTopLevel NonRecursive (bndr,rhs)
         ; addLoc (BodyOfLetRec [bndr])
-                 (lintAndScopeId bndr $ \_ -> (lintCoreExpr body)) }
+                 (lintIdBndr NotTopLevel bndr $ \_ -> lintCoreExpr body) }
 
   | otherwise
   = failWithL (mkLetErr bndr rhs)       -- Not quite accurate
 
 lintCoreExpr (Let (Rec pairs) body)
-  = lintAndScopeIds bndrs       $ \_ ->
+  = lintIdBndrs bndrs       $ \_ ->
     do  { checkL (null dups) (dupVars dups)
         ; mapM_ (lintSingleBinding NotTopLevel Recursive) pairs
         ; addLoc (BodyOfLetRec bndrs) (lintCoreExpr body) }
@@ -694,7 +682,7 @@ lintCoreExpr e@(App _ _)
            _     -> go
   where
     go = do { fun_ty <- lintCoreExpr fun
-            ; addLoc (AnExpr e) $ foldM lintCoreArg fun_ty args }
+            ; addLoc (AnExpr e) $ lintCoreArgs fun_ty args }
 
     (fun, args) = collectArgs e
 
@@ -715,7 +703,7 @@ lintCoreExpr e@(Case scrut var alt_ty alts) =
      ; when (null alts) $
      do { checkL (not (exprIsHNF scrut))
           (text "No alternatives for a case scrutinee in head-normal form:" <+> ppr scrut)
-        ; checkL scrut_diverges
+        ; checkWarnL scrut_diverges
           (text "No alternatives for a case scrutinee not known to diverge for sure:" <+> ppr scrut)
         }
 
@@ -745,7 +733,7 @@ lintCoreExpr e@(Case scrut var alt_ty alts) =
      ; subst <- getTCvSubst
      ; ensureEqTys var_ty scrut_ty (mkScrutMsg var var_ty scrut_ty subst)
 
-     ; lintAndScopeId var $ \_ ->
+     ; lintIdBndr NotTopLevel var $ \_ ->
        do { -- Check the alternatives
             mapM_ (lintCoreAlt scrut_ty alt_ty) alts
           ; checkCaseAlts e scrut_ty alts
@@ -790,6 +778,10 @@ check is not fully reliable, and we keep both around.
 The basic version of these functions checks that the argument is a
 subtype of the required type, as one would expect.
 -}
+
+
+lintCoreArgs  :: OutType -> [CoreArg] -> LintM OutType
+lintCoreArgs fun_ty args = foldM lintCoreArg fun_ty args
 
 lintCoreArg  :: OutType -> CoreArg -> LintM OutType
 lintCoreArg fun_ty (Type arg_ty)
@@ -986,9 +978,9 @@ lintBinders (var:vars) linterF = lintBinder var $ \var' ->
 -- See Note [GHC Formalism]
 lintBinder :: Var -> (Var -> LintM a) -> LintM a
 lintBinder var linterF
-  | isTyVar var = lintTyBndr var linterF
-  | isCoVar var = lintCoBndr var linterF
-  | otherwise   = lintIdBndr var linterF
+  | isTyVar var = lintTyBndr             var linterF
+  | isCoVar var = lintCoBndr             var linterF
+  | otherwise   = lintIdBndr NotTopLevel var linterF
 
 lintTyBndr :: InTyVar -> (OutTyVar -> LintM a) -> LintM a
 lintTyBndr tv thing_inside
@@ -1003,36 +995,43 @@ lintCoBndr cv thing_inside
        ; let (subst', cv') = substCoVarBndr subst cv
        ; lintKind (varType cv')
        ; lintL (isCoercionType (varType cv'))
-               (text "CoVar with non-coercion type:" <+> pprTvBndr cv)
+               (text "CoVar with non-coercion type:" <+> pprTyVar cv)
        ; updateTCvSubst subst' (thing_inside cv') }
 
-lintIdBndr :: Id -> (Id -> LintM a) -> LintM a
--- Do substitution on the type of a binder and add the var with this
--- new type to the in-scope set of the second argument
--- ToDo: lint its rules
-
-lintIdBndr id linterF
-  = do  { lintAndScopeId id $ \id' -> linterF id' }
-
-lintAndScopeIds :: [Var] -> ([Var] -> LintM a) -> LintM a
-lintAndScopeIds ids linterF
+lintIdBndrs :: [Var] -> ([Var] -> LintM a) -> LintM a
+lintIdBndrs ids linterF
   = go ids
   where
     go []       = linterF []
-    go (id:ids) = lintAndScopeId id $ \id ->
-                  lintAndScopeIds ids $ \ids ->
+    go (id:ids) = lintIdBndr NotTopLevel id $ \id ->
+                  lintIdBndrs           ids $ \ids ->
                   linterF (id:ids)
 
-lintAndScopeId :: InVar -> (OutVar -> LintM a) -> LintM a
-lintAndScopeId id linterF
+lintIdBndr :: TopLevelFlag -> InVar -> (OutVar -> LintM a) -> LintM a
+-- Do substitution on the type of a binder and add the var with this
+-- new type to the in-scope set of the second argument
+-- ToDo: lint its rules
+lintIdBndr top_lvl id linterF
   = do { flags <- getLintFlags
        ; checkL (not (lf_check_global_ids flags) || isLocalId id)
                 (text "Non-local Id binder" <+> ppr id)
                 -- See Note [Checking for global Ids]
+
+       -- Check that if the binder is nested, it is not marked as exported
+       ; checkL (not (isExportedId id) || isTopLevel top_lvl)
+           (mkNonTopExportedMsg id)
+
+       -- Check that if the binder is nested, it does not have an external name
+       ; checkL (not (isExternalName (Var.varName id)) || isTopLevel top_lvl)
+           (mkNonTopExternalNameMsg id)
+
        ; (ty, k) <- lintInTy (idType id)
-       ; lintL (not (isRuntimeRepPolymorphic k))
+
+       -- Check for levity polymorphism
+       ; lintL (not (isLevityPolymorphic k))
            (text "RuntimeRep-polymorphic binder:" <+>
                  (ppr id <+> dcolon <+> parens (ppr ty <+> dcolon <+> ppr k)))
+
        ; let id' = setIdType id ty
        ; addInScopeVar id' $ (linterF id') }
 
@@ -1489,13 +1488,14 @@ lintCoercion (InstCo co arg)
   = do { (k3, k4, t1',t2', r) <- lintCoercion co
        ; (k1',k2',s1,s2, r') <- lintCoercion arg
        ; lintRole arg Nominal r'
+       ; in_scope <- getInScope
        ; case (splitForAllTy_maybe t1', splitForAllTy_maybe t2') of
           (Just (tv1,t1), Just (tv2,t2))
             | k1' `eqType` tyVarKind tv1
             , k2' `eqType` tyVarKind tv2
             -> return (k3, k4,
-                       substTyWith [tv1] [s1] t1,
-                       substTyWith [tv2] [s2] t2, r)
+                       substTyWithInScope in_scope [tv1] [s1] t1,
+                       substTyWithInScope in_scope [tv2] [s2] t2, r)
             | otherwise
             -> failWithL (text "Kind mis-match in inst coercion")
           _ -> failWithL (text "Bad argument of inst") }
@@ -1832,7 +1832,7 @@ lintInScope loc_msg var =
 ensureEqTys :: OutType -> OutType -> MsgDoc -> LintM ()
 -- check ty2 is subtype of ty1 (ie, has same structure but usage
 -- annotations need only be consistent, not equal)
--- Assumes ty1,ty2 are have alrady had the substitution applied
+-- Assumes ty1,ty2 are have already had the substitution applied
 ensureEqTys ty1 ty2 msg = lintL (ty1 `eqType` ty2) msg
 
 lintRole :: Outputable thing

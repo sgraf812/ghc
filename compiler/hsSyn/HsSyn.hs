@@ -44,9 +44,9 @@ import HsTypes
 import BasicTypes       ( Fixity, WarningTxt )
 import HsUtils
 import HsDoc
+import OccName          ( HasOccName(..) )
 
 -- others:
-import OccName          ( HasOccName )
 import Outputable
 import SrcLoc
 import Module           ( ModuleName )
@@ -110,7 +110,7 @@ data HsModule name
 deriving instance (DataId name) => Data (HsModule name)
 
 instance (OutputableBndrId name, HasOccName name)
-        => Outputable (HsModule name) where
+  => Outputable (HsModule name) where
 
     ppr (HsModule Nothing _ imports decls _ mbDoc)
       = pp_mb mbDoc $$ pp_nonnull imports

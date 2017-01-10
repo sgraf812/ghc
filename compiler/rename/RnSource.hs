@@ -42,11 +42,11 @@ import NameEnv
 import Avail
 import Outputable
 import Bag
-import BasicTypes       ( RuleName, pprRuleName )
+import BasicTypes       ( DerivStrategy, RuleName, pprRuleName )
 import FastString
 import SrcLoc
 import DynFlags
-import Util             ( debugIsOn, partitionWith )
+import Util             ( debugIsOn, lengthExceeds, partitionWith )
 import HscTypes         ( HscEnv, hsc_dflags )
 import ListSetOps       ( findDupsEq, removeDups, equivClasses )
 import Digraph          ( SCC, flattenSCC, flattenSCCs
@@ -57,6 +57,7 @@ import qualified GHC.LanguageExtensions as LangExt
 import Control.Monad
 import Control.Arrow ( first )
 import Data.List ( sortBy, mapAccumL )
+import Data.Maybe ( isJust )
 import qualified Data.Set as Set ( difference, fromList, toList, null )
 
 {-
@@ -131,9 +132,9 @@ rnSrcDecls group@(HsGroup { hs_valds   = val_decls,
    -- Bind the LHSes (and their fixities) in the global rdr environment
    let { id_bndrs = collectHsIdBinders new_lhs } ;  -- Excludes pattern-synonym binders
                                                     -- They are already in scope
-   traceRn (text "rnSrcDecls" <+> ppr id_bndrs) ;
+   traceRn "rnSrcDecls" (ppr id_bndrs) ;
    tc_envs <- extendGlobalRdrEnvRn (map avail id_bndrs) local_fix_env ;
-   traceRn (text "D2" <+> ppr (tcg_rdr_env (fst tc_envs)));
+   traceRn "D2" (ppr (tcg_rdr_env (fst tc_envs)));
    setEnvs tc_envs $ do {
 
    --  Now everything is in scope, as the remaining renaming assumes.
@@ -148,11 +149,11 @@ rnSrcDecls group@(HsGroup { hs_valds   = val_decls,
    -- So we content ourselves with gathering uses only; that
    -- means we'll only report a declaration as unused if it isn't
    -- mentioned at all.  Ah well.
-   traceRn (text "Start rnTyClDecls" <+> ppr tycl_decls) ;
+   traceRn "Start rnTyClDecls" (ppr tycl_decls) ;
    (rn_tycl_decls, src_fvs1) <- rnTyClDecls tycl_decls ;
 
    -- (F) Rename Value declarations right-hand sides
-   traceRn (text "Start rnmono") ;
+   traceRn "Start rnmono" empty ;
    let { val_bndr_set = mkNameSet id_bndrs `unionNameSet` mkNameSet pat_syn_bndrs } ;
    is_boot <- tcIsHsBootOrSig ;
    (rn_val_decls, bind_dus) <- if is_boot
@@ -161,7 +162,7 @@ rnSrcDecls group@(HsGroup { hs_valds   = val_decls,
     -- bindings in an hs-boot.)
     then rnTopBindsBoot tc_bndrs new_lhs
     else rnValBindsRHS (TopSigCtxt val_bndr_set) new_lhs ;
-   traceRn (text "finish rnmono" <+> ppr rn_val_decls) ;
+   traceRn "finish rnmono" (ppr rn_val_decls) ;
 
    -- (G) Rename Fixity and deprecations
 
@@ -219,9 +220,9 @@ rnSrcDecls group@(HsGroup { hs_valds   = val_decls,
                         in -- we return the deprecs in the env, not in the HsGroup above
                         tcg_env' { tcg_warns = tcg_warns tcg_env' `plusWarns` rn_warns };
        } ;
-   traceRn (text "last" <+> ppr (tcg_rdr_env final_tcg_env)) ;
-   traceRn (text "finish rnSrc" <+> ppr rn_group) ;
-   traceRn (text "finish Dus" <+> ppr src_dus ) ;
+   traceRn "last" (ppr (tcg_rdr_env final_tcg_env)) ;
+   traceRn "finish rnSrc" (ppr rn_group) ;
+   traceRn "finish Dus" (ppr src_dus ) ;
    return (final_tcg_env, rn_group)
                     }}}}
 
@@ -681,7 +682,7 @@ rnClsInstDecl (ClsInstDecl { cid_poly_ty = inst_ty, cid_binds = mbinds
 
        -- Rename the associated types, and type signatures
        -- Both need to have the instance type variables in scope
-       ; traceRn (text "rnSrcInstDecl"  <+> ppr inst_ty' $$ ppr ktv_names)
+       ; traceRn "rnSrcInstDecl" (ppr inst_ty' $$ ppr ktv_names)
        ; ((ats', adts'), more_fvs)
              <- extendTyVarEnvFVRn ktv_names $
                 do { (ats',  at_fvs)  <- rnATInstDecls rnTyFamInstDecl cls ktv_names ats
@@ -797,11 +798,13 @@ rnTyFamInstEqn :: Maybe (Name, [Name])
                -> RnM (TyFamInstEqn Name, FreeVars)
 rnTyFamInstEqn mb_cls (TyFamEqn { tfe_tycon = tycon
                                 , tfe_pats  = pats
+                                , tfe_fixity = fixity
                                 , tfe_rhs   = rhs })
   = do { (tycon', pats', rhs', fvs) <-
            rnFamInstDecl (TySynCtx tycon) mb_cls tycon pats rhs rnTySyn
        ; return (TyFamEqn { tfe_tycon = tycon'
                           , tfe_pats  = pats'
+                          , tfe_fixity = fixity
                           , tfe_rhs   = rhs' }, fvs) }
 
 rnTyFamDefltEqn :: Name
@@ -809,12 +812,14 @@ rnTyFamDefltEqn :: Name
                 -> RnM (TyFamDefltEqn Name, FreeVars)
 rnTyFamDefltEqn cls (TyFamEqn { tfe_tycon = tycon
                               , tfe_pats  = tyvars
+                              , tfe_fixity = fixity
                               , tfe_rhs   = rhs })
   = bindHsQTyVars ctx Nothing (Just cls) [] tyvars $ \ tyvars' _ ->
     do { tycon'      <- lookupFamInstName (Just cls) tycon
        ; (rhs', fvs) <- rnLHsType ctx rhs
        ; return (TyFamEqn { tfe_tycon = tycon'
                           , tfe_pats  = tyvars'
+                          , tfe_fixity = fixity
                           , tfe_rhs   = rhs' }, fvs) }
   where
     ctx = TyFamilyCtx tycon
@@ -824,11 +829,13 @@ rnDataFamInstDecl :: Maybe (Name, [Name])
                   -> RnM (DataFamInstDecl Name, FreeVars)
 rnDataFamInstDecl mb_cls (DataFamInstDecl { dfid_tycon = tycon
                                           , dfid_pats  = pats
+                                          , dfid_fixity = fixity
                                           , dfid_defn  = defn })
   = do { (tycon', pats', (defn', _), fvs) <-
            rnFamInstDecl (TyDataCtx tycon) mb_cls tycon pats defn rnDataDefn
        ; return (DataFamInstDecl { dfid_tycon = tycon'
                                  , dfid_pats  = pats'
+                                 , dfid_fixity = fixity
                                  , dfid_defn  = defn'
                                  , dfid_fvs   = fvs }, fvs) }
 
@@ -945,11 +952,14 @@ Here 'k' is in scope in the kind signature, just like 'x'.
 -}
 
 rnSrcDerivDecl :: DerivDecl RdrName -> RnM (DerivDecl Name, FreeVars)
-rnSrcDerivDecl (DerivDecl ty overlap)
+rnSrcDerivDecl (DerivDecl ty deriv_strat overlap)
   = do { standalone_deriv_ok <- xoptM LangExt.StandaloneDeriving
+       ; deriv_strats_ok     <- xoptM LangExt.DerivingStrategies
        ; unless standalone_deriv_ok (addErr standaloneDerivErr)
+       ; failIfTc (isJust deriv_strat && not deriv_strats_ok) $
+           illegalDerivStrategyErr $ fmap unLoc deriv_strat
        ; (ty', fvs) <- rnLHsInstType (text "In a deriving declaration") ty
-       ; return (DerivDecl ty' overlap, fvs) }
+       ; return (DerivDecl ty' deriv_strat overlap, fvs) }
 
 standaloneDerivErr :: SDoc
 standaloneDerivErr
@@ -1263,8 +1273,8 @@ Consider this
 
 Here the declaration of S depends on the /data instance/ declaration
 for 'D Int'.  That makes things a lot more complicated, especially
-if the data instance is an assocaited type of an enclosing class instance.
-(And the class instance might have several assocatiated type instances
+if the data instance is an associated type of an enclosing class instance.
+(And the class instance might have several associated type instances
 with different dependency structure!)
 
 Ugh.  For now we simply don't allow promotion of data constructors for
@@ -1315,7 +1325,7 @@ rnTyClDecls tycl_ds
                                        $$ ppr (flattenSCCs tycl_sccs) $$ ppr final_inst_ds  )
          mapM_ orphanRoleAnnotErr (nameEnvElts orphan_roles)
 
-       ; traceRn (text "rnTycl dependency analysis made groups" $$ ppr all_groups)
+       ; traceRn "rnTycl dependency analysis made groups" (ppr all_groups)
        ; return (all_groups, all_fvs) }
   where
     mk_group :: (InstDeclFreeVarsMap, RoleAnnotEnv)
@@ -1628,25 +1638,28 @@ rnTyClDecl (FamDecl { tcdFam = decl })
   = do { (decl', fvs) <- rnFamDecl Nothing decl
        ; return (FamDecl decl', fvs) }
 
-rnTyClDecl (SynDecl { tcdLName = tycon, tcdTyVars = tyvars, tcdRhs = rhs })
+rnTyClDecl (SynDecl { tcdLName = tycon, tcdTyVars = tyvars,
+                      tcdFixity = fixity, tcdRhs = rhs })
   = do { tycon' <- lookupLocatedTopBndrRn tycon
        ; kvs <- freeKiTyVarsKindVars <$> extractHsTyRdrTyVars rhs
        ; let doc = TySynCtx tycon
-       ; traceRn (text "rntycl-ty" <+> ppr tycon <+> ppr kvs)
+       ; traceRn "rntycl-ty" (ppr tycon <+> ppr kvs)
        ; ((tyvars', rhs'), fvs) <- bindHsQTyVars doc Nothing Nothing kvs tyvars $
                                     \ tyvars' _ ->
                                     do { (rhs', fvs) <- rnTySyn doc rhs
                                        ; return ((tyvars', rhs'), fvs) }
        ; return (SynDecl { tcdLName = tycon', tcdTyVars = tyvars'
+                         , tcdFixity = fixity
                          , tcdRhs = rhs', tcdFVs = fvs }, fvs) }
 
 -- "data", "newtype" declarations
 -- both top level and (for an associated type) in an instance decl
-rnTyClDecl (DataDecl { tcdLName = tycon, tcdTyVars = tyvars, tcdDataDefn = defn })
+rnTyClDecl (DataDecl { tcdLName = tycon, tcdTyVars = tyvars,
+                       tcdFixity = fixity, tcdDataDefn = defn })
   = do { tycon' <- lookupLocatedTopBndrRn tycon
        ; kvs <- extractDataDefnKindVars defn
        ; let doc = TyDataCtx tycon
-       ; traceRn (text "rntycl-data" <+> ppr tycon <+> ppr kvs)
+       ; traceRn "rntycl-data" (ppr tycon <+> ppr kvs)
        ; ((tyvars', defn', no_kvs), fvs)
            <- bindHsQTyVars doc Nothing Nothing kvs tyvars $ \ tyvars' dep_vars ->
               do { ((defn', kind_sig_fvs), fvs) <- rnDataDefn doc defn
@@ -1658,11 +1671,13 @@ rnTyClDecl (DataDecl { tcdLName = tycon, tcdTyVars = tyvars, tcdDataDefn = defn 
        ; let cusk = hsTvbAllKinded tyvars' &&
                     (not typeintype || no_kvs)
        ; return (DataDecl { tcdLName = tycon', tcdTyVars = tyvars'
+                          , tcdFixity = fixity
                           , tcdDataDefn = defn', tcdDataCusk = cusk
                           , tcdFVs = fvs }, fvs) }
 
 rnTyClDecl (ClassDecl { tcdCtxt = context, tcdLName = lcls,
-                        tcdTyVars = tyvars, tcdFDs = fds, tcdSigs = sigs,
+                        tcdTyVars = tyvars, tcdFixity = fixity,
+                        tcdFDs = fds, tcdSigs = sigs,
                         tcdMeths = mbinds, tcdATs = ats, tcdATDefs = at_defs,
                         tcdDocs = docs})
   = do  { lcls' <- lookupLocatedTopBndrRn lcls
@@ -1716,7 +1731,8 @@ rnTyClDecl (ClassDecl { tcdCtxt = context, tcdLName = lcls,
 
         ; let all_fvs = meth_fvs `plusFV` stuff_fvs `plusFV` fv_at_defs
         ; return (ClassDecl { tcdCtxt = context', tcdLName = lcls',
-                              tcdTyVars = tyvars', tcdFDs = fds', tcdSigs = sigs',
+                              tcdTyVars = tyvars', tcdFixity = fixity,
+                              tcdFDs = fds', tcdSigs = sigs',
                               tcdMeths = mbinds', tcdATs = ats', tcdATDefs = at_defs',
                               tcdDocs = docs', tcdFVs = all_fvs },
                   all_fvs ) }
@@ -1767,16 +1783,39 @@ rnDataDefn doc (HsDataDefn { dd_ND = new_or_data, dd_cType = cType
                      L _ (ConDeclGADT {}) : _  -> False
                      _                         -> True
 
-    rn_derivs Nothing
-      = return (Nothing, emptyFVs)
-    rn_derivs (Just (L loc ds))
-      = do { (ds', fvs) <- mapFvRn (rnHsSigType doc) ds
-           ; return (Just (L loc ds'), fvs) }
+    rn_derivs (L loc ds)
+      = do { deriv_strats_ok <- xoptM LangExt.DerivingStrategies
+           ; failIfTc (lengthExceeds ds 1 && not deriv_strats_ok)
+               multipleDerivClausesErr
+           ; (ds', fvs) <- mapFvRn (rnLHsDerivingClause deriv_strats_ok doc) ds
+           ; return (L loc ds', fvs) }
+
+rnLHsDerivingClause :: Bool -> HsDocContext -> LHsDerivingClause RdrName
+                    -> RnM (LHsDerivingClause Name, FreeVars)
+rnLHsDerivingClause deriv_strats_ok doc
+                (L loc (HsDerivingClause { deriv_clause_strategy = dcs
+                                         , deriv_clause_tys = L loc' dct }))
+  = do { failIfTc (isJust dcs && not deriv_strats_ok) $
+           illegalDerivStrategyErr $ fmap unLoc dcs
+       ; (dct', fvs) <- mapFvRn (rnHsSigType doc) dct
+       ; return ( L loc (HsDerivingClause { deriv_clause_strategy = dcs
+                                          , deriv_clause_tys = L loc' dct' })
+                , fvs ) }
 
 badGadtStupidTheta :: HsDocContext -> SDoc
 badGadtStupidTheta _
   = vcat [text "No context is allowed on a GADT-style data declaration",
           text "(You can put a context on each constructor, though.)"]
+
+illegalDerivStrategyErr :: Maybe DerivStrategy -> SDoc
+illegalDerivStrategyErr ds
+  = vcat [ text "Illegal deriving strategy" <> colon <+> maybe empty ppr ds
+         , text "Use DerivingStrategies to enable this extension" ]
+
+multipleDerivClausesErr :: SDoc
+multipleDerivClausesErr
+  = vcat [ text "Illegal use of multiple, consecutive deriving clauses"
+         , text "Use DerivingStrategies to allow this" ]
 
 rnFamDecl :: Maybe Name -- Just cls => this FamilyDecl is nested
                         --             inside an *class decl* for cls
@@ -1784,6 +1823,7 @@ rnFamDecl :: Maybe Name -- Just cls => this FamilyDecl is nested
           -> FamilyDecl RdrName
           -> RnM (FamilyDecl Name, FreeVars)
 rnFamDecl mb_cls (FamilyDecl { fdLName = tycon, fdTyVars = tyvars
+                             , fdFixity = fixity
                              , fdInfo = info, fdResultSig = res_sig
                              , fdInjectivityAnn = injectivity })
   = do { tycon' <- lookupLocatedTopBndrRn tycon
@@ -1798,6 +1838,7 @@ rnFamDecl mb_cls (FamilyDecl { fdLName = tycon, fdTyVars = tyvars
                ; return ( (tyvars', res_sig', injectivity') , fv_kind ) }
        ; (info', fv2) <- rn_info info
        ; return (FamilyDecl { fdLName = tycon', fdTyVars = tyvars'
+                            , fdFixity = fixity
                             , fdInfo = info', fdResultSig = res_sig'
                             , fdInjectivityAnn = injectivity' }
                 , fv1 `plusFV` fv2) }
@@ -1989,7 +2030,7 @@ rnConDecl decl@(ConDeclH98 { con_name = name, con_qvars = qtvs
                                              ; return (Just lctx',fvs) }
         ; (new_details, fvs2) <- rnConDeclDetails (unLoc new_name) doc details
         ; let (new_details',fvs3) = (new_details,emptyFVs)
-        ; traceRn (text "rnConDecl" <+> ppr name <+> vcat
+        ; traceRn "rnConDecl" (ppr name <+> vcat
              [ text "free_kvs:" <+> ppr kvs
              , text "qtvs:" <+> ppr qtvs
              , text "qtvs':" <+> ppr qtvs' ])
@@ -2022,7 +2063,7 @@ rnConDecl decl@(ConDeclGADT { con_names = names, con_type = ty
         ; mb_doc'      <- rnMbLHsDoc mb_doc
 
         ; (ty', fvs) <- rnHsSigType doc ty
-        ; traceRn (text "rnConDecl" <+> ppr names <+> vcat
+        ; traceRn "rnConDecl" (ppr names <+> vcat
              [ text "fvs:" <+> ppr fvs ])
         ; return (decl { con_names = new_names, con_type = ty'
                        , con_doc = mb_doc' },
@@ -2059,7 +2100,7 @@ extendPatSynEnv val_decls local_fix_env thing = do {
      names_with_fls <- new_ps val_decls
    ; let pat_syn_bndrs = concat [ name: map flSelector fields
                                 | (name, fields) <- names_with_fls ]
-   ; let avails = map patSynAvail pat_syn_bndrs
+   ; let avails = map avail pat_syn_bndrs
    ; (gbl_env, lcl_env) <- extendGlobalRdrEnvRn avails local_fix_env
 
    ; let field_env' = extendNameEnvList (tcg_field_env gbl_env) names_with_fls

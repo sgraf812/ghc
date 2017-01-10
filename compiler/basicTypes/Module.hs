@@ -21,17 +21,54 @@ module Module
         moduleNameString,
         moduleNameSlashes, moduleNameColons,
         moduleStableString,
+        moduleFreeHoles,
+        moduleIsDefinite,
         mkModuleName,
         mkModuleNameFS,
         stableModuleNameCmp,
 
         -- * The UnitId type
-        UnitId,
-        fsToUnitId,
+        ComponentId(..),
+        UnitId(..),
         unitIdFS,
-        stringToUnitId,
+        unitIdKey,
+        IndefUnitId(..),
+        IndefModule(..),
+        indefUnitIdToUnitId,
+        indefModuleToModule,
+        InstalledUnitId(..),
+        toInstalledUnitId,
+        ShHoleSubst,
+
+        unitIdIsDefinite,
         unitIdString,
+        unitIdFreeHoles,
+
+        newUnitId,
+        newIndefUnitId,
+        newSimpleUnitId,
+        hashUnitId,
+        fsToUnitId,
+        stringToUnitId,
         stableUnitIdCmp,
+
+        -- * HOLE renaming
+        renameHoleUnitId,
+        renameHoleModule,
+        renameHoleUnitId',
+        renameHoleModule',
+
+        -- * Generalization
+        splitModuleInsts,
+        splitUnitIdInsts,
+        generalizeIndefUnitId,
+
+        -- * Parsers
+        parseModuleName,
+        parseUnitId,
+        parseComponentId,
+        parseModuleId,
+        parseModSubst,
 
         -- * Wired-in UnitIds
         -- $wired_in_packages
@@ -44,7 +81,7 @@ module Module
         dphParUnitId,
         mainUnitId,
         thisGhcUnitId,
-        holeUnitId, isHoleModule,
+        isHoleModule,
         interactiveUnitId, isInteractiveModule,
         wiredInUnitIds,
 
@@ -53,9 +90,26 @@ module Module
         moduleUnitId, moduleName,
         pprModule,
         mkModule,
+        mkHoleModule,
         stableModuleCmp,
         HasModule(..),
         ContainsModule(..),
+
+        -- * Installed unit ids and modules
+        InstalledModule(..),
+        InstalledModuleEnv,
+        installedModuleEq,
+        installedUnitIdEq,
+        installedUnitIdString,
+        fsToInstalledUnitId,
+        componentIdToInstalledUnitId,
+        stringToInstalledUnitId,
+        emptyInstalledModuleEnv,
+        lookupInstalledModuleEnv,
+        extendInstalledModuleEnv,
+        filterInstalledModuleEnv,
+        delInstalledModuleEnv,
+        DefUnitId(..),
 
         -- * The ModuleLocation type
         ModLocation(..),
@@ -84,17 +138,29 @@ import Outputable
 import Unique
 import UniqFM
 import UniqDFM
+import UniqDSet
 import FastString
 import Binary
 import Util
 import Data.List
 import Data.Ord
-import {-# SOURCE #-} Packages
-import GHC.PackageDb (BinaryStringRep(..), DbModuleRep(..), DbModule(..))
+import GHC.PackageDb (BinaryStringRep(..), DbUnitIdModuleRep(..), DbModule(..), DbUnitId(..))
 
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Unsafe as BS
+import qualified Data.ByteString.Char8 as BS.Char8
+import System.IO.Unsafe
+import Foreign.Ptr (castPtr)
+import GHC.Fingerprint
+import Encoding
+
+import qualified Text.ParserCombinators.ReadP as Parse
+import Text.ParserCombinators.ReadP (ReadP, (<++))
+import Data.Char (isAlphaNum)
 import Control.DeepSeq
 import Data.Coerce
 import Data.Data
+import Data.Function
 import Data.Map (Map)
 import Data.Set (Set)
 import qualified Data.Map as Map
@@ -102,9 +168,12 @@ import qualified Data.Set as Set
 import qualified FiniteMap as Map
 import System.FilePath
 
+import {-# SOURCE #-} DynFlags (DynFlags)
+import {-# SOURCE #-} Packages (componentIdString, improveUnitId, PackageConfigMap, getPackageConfigMap, displayInstalledUnitId)
+
 -- Note [The identifier lexicon]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
--- Package keys, installed package IDs, ABI hashes, package names,
+-- Unit IDs, installed package IDs, ABI hashes, package names,
 -- versions, there are a *lot* of different identifiers for closely
 -- related things.  What do they all mean? Here's what.  (See also
 -- https://ghc.haskell.org/trac/ghc/wiki/Commentary/Packages/Concepts )
@@ -121,10 +190,9 @@ import System.FilePath
 -- 'ComponentId's.
 --      - Same as Distribution.Package.ComponentId
 --
--- UnitId: A ComponentId + a mapping from hole names (ModuleName) to
--- Modules.  This is how the compiler identifies instantatiated
--- components, and also is the main identifier by which GHC identifies
--- things.
+-- UnitId/InstalledUnitId: A ComponentId + a mapping from hole names
+-- (ModuleName) to Modules.  This is how the compiler identifies instantiated
+-- components, and also is the main identifier by which GHC identifies things.
 --      - When Backpack is not being used, UnitId = ComponentId.
 --        this means a useful fiction for end-users is that there are
 --        only ever ComponentIds, and some ComponentIds happen to have
@@ -134,9 +202,13 @@ import System.FilePath
 --      - The same as PackageKey in GHC 7.10 (we renamed it because
 --        they don't necessarily identify packages anymore.)
 --      - Same as -this-package-key/-package-name flags
+--      - An InstalledUnitId corresponds to an actual package which
+--        we have installed on disk.  It could be definite or indefinite,
+--        but if it's indefinite, it has nothing instantiated (we
+--        never install partially instantiated units.)
 --
--- Module: A UnitId + ModuleName. This is how the compiler identifies
--- modules (e.g. a Name is a Module + OccName)
+-- Module/InstalledModule: A UnitId/InstalledUnitId + ModuleName. This is how
+-- the compiler identifies modules (e.g. a Name is a Module + OccName)
 --      - Same as Language.Haskell.TH.Syntax:Module
 --
 -- THE LESS IMPORTANT ONES
@@ -308,7 +380,7 @@ moduleNameSlashes :: ModuleName -> String
 moduleNameSlashes = dots_to_slashes . moduleNameString
   where dots_to_slashes = map (\c -> if c == '.' then pathSeparator else c)
 
--- |Returns the string version of the module name, with dots replaced by underscores.
+-- |Returns the string version of the module name, with dots replaced by colons.
 --
 moduleNameColons :: ModuleName -> String
 moduleNameColons = dots_to_colons . moduleNameString
@@ -323,11 +395,37 @@ moduleNameColons = dots_to_colons . moduleNameString
 -}
 
 -- | A Module is a pair of a 'UnitId' and a 'ModuleName'.
+--
+-- Module variables (i.e. @<H>@) which can be instantiated to a
+-- specific module at some later point in time are represented
+-- with 'moduleUnitId' set to 'holeUnitId' (this allows us to
+-- avoid having to make 'moduleUnitId' a partial operation.)
+--
 data Module = Module {
    moduleUnitId :: !UnitId,  -- pkg-1.0
    moduleName :: !ModuleName  -- A.B.C
   }
   deriving (Eq, Ord)
+
+-- | Calculate the free holes of a 'Module'.  If this set is non-empty,
+-- this module was defined in an indefinite library that had required
+-- signatures.
+--
+-- If a module has free holes, that means that substitutions can operate on it;
+-- if it has no free holes, substituting over a module has no effect.
+moduleFreeHoles :: Module -> UniqDSet ModuleName
+moduleFreeHoles m
+    | isHoleModule m = unitUniqDSet (moduleName m)
+    | otherwise = unitIdFreeHoles (moduleUnitId m)
+
+-- | A 'Module' is definite if it has no free holes.
+moduleIsDefinite :: Module -> Bool
+moduleIsDefinite = isEmptyUniqDSet . moduleFreeHoles
+
+-- | Create a module variable at some 'ModuleName'.
+-- See Note [Representation of module/name variables]
+mkHoleModule :: ModuleName -> Module
+mkHoleModule = mkModule holeUnitId
 
 instance Uniquable Module where
   getUnique (Module p n) = getUnique (unitIdFS p `appendFS` moduleNameFS n)
@@ -360,21 +458,20 @@ mkModule :: UnitId -> ModuleName -> Module
 mkModule = Module
 
 pprModule :: Module -> SDoc
-pprModule mod@(Module p n)  =
-  pprPackagePrefix p mod <> pprModuleName n
-
-pprPackagePrefix :: UnitId -> Module -> SDoc
-pprPackagePrefix p mod = getPprStyle doc
+pprModule mod@(Module p n)  = getPprStyle doc
  where
-   doc sty
-       | codeStyle sty =
-          if p == mainUnitId
+  doc sty
+    | codeStyle sty =
+        (if p == mainUnitId
                 then empty -- never qualify the main package in code
-                else ztext (zEncodeFS (unitIdFS p)) <> char '_'
-       | qualModule sty mod = ppr (moduleUnitId mod) <> char ':'
-                -- the PrintUnqualified tells us which modules have to
-                -- be qualified with package names
-       | otherwise = empty
+                else ztext (zEncodeFS (unitIdFS p)) <> char '_')
+            <> pprModuleName n
+    | qualModule sty mod =
+        if isHoleModule mod
+            then angleBrackets (pprModuleName n)
+            else ppr (moduleUnitId mod) <> char ':' <> pprModuleName n
+    | otherwise =
+        pprModuleName n
 
 class ContainsModule t where
     extractModule :: t -> Module
@@ -382,9 +479,47 @@ class ContainsModule t where
 class HasModule m where
     getModule :: m Module
 
-instance DbModuleRep UnitId ModuleName Module where
-  fromDbModule (DbModule uid mod_name) = mkModule uid mod_name
-  toDbModule mod = DbModule (moduleUnitId mod) (moduleName mod)
+instance DbUnitIdModuleRep InstalledUnitId ComponentId UnitId ModuleName Module where
+  fromDbModule (DbModule uid mod_name)  = mkModule uid mod_name
+  fromDbModule (DbModuleVar mod_name)   = mkHoleModule mod_name
+  fromDbUnitId (DbUnitId cid insts)     = newUnitId cid insts
+  fromDbUnitId (DbInstalledUnitId iuid) = DefiniteUnitId (DefUnitId iuid)
+  -- GHC never writes to the database, so it's not needed
+  toDbModule = error "toDbModule: not implemented"
+  toDbUnitId = error "toDbUnitId: not implemented"
+
+{-
+************************************************************************
+*                                                                      *
+\subsection{ComponentId}
+*                                                                      *
+************************************************************************
+-}
+
+-- | A 'ComponentId' consists of the package name, package version, component
+-- ID, the transitive dependencies of the component, and other information to
+-- uniquely identify the source code and build configuration of a component.
+--
+-- This used to be known as an 'InstalledPackageId', but a package can contain
+-- multiple components and a 'ComponentId' uniquely identifies a component
+-- within a package.  When a package only has one component, the 'ComponentId'
+-- coincides with the 'InstalledPackageId'
+newtype ComponentId        = ComponentId        FastString deriving (Eq, Ord)
+
+instance BinaryStringRep ComponentId where
+  fromStringRep = ComponentId . mkFastStringByteString
+  toStringRep (ComponentId s) = fastStringToByteString s
+
+instance Uniquable ComponentId where
+  getUnique (ComponentId n) = getUnique n
+
+instance Outputable ComponentId where
+  ppr cid@(ComponentId fs) =
+    getPprStyle $ \sty ->
+    sdocWithDynFlags $ \dflags ->
+      case componentIdString dflags cid of
+        Just str | not (debugStyle sty) -> text str
+        _ -> ftext fs
 
 {-
 ************************************************************************
@@ -394,15 +529,347 @@ instance DbModuleRep UnitId ModuleName Module where
 ************************************************************************
 -}
 
--- | A string which uniquely identifies a package.  For wired-in packages,
--- it is just the package name, but for user compiled packages, it is a hash.
--- ToDo: when the key is a hash, we can do more clever things than store
--- the hex representation and hash-cons those strings.
-newtype UnitId = PId FastString deriving Eq
-    -- here to avoid module loops with PackageConfig
+-- | A unit identifier identifies a (possibly partially) instantiated
+-- library.  It is primarily used as part of 'Module', which in turn
+-- is used in 'Name', which is used to give names to entities when
+-- typechecking.
+--
+-- There are two possible forms for a 'UnitId'.  It can be a
+-- 'DefiniteUnitId', in which case we just have a string that uniquely
+-- identifies some fully compiled, installed library we have on disk.
+-- However, when we are typechecking a library with missing holes,
+-- we may need to instantiate a library on the fly (in which case
+-- we don't have any on-disk representation.)  In that case, you
+-- have an 'IndefiniteUnitId', which explicitly records the
+-- instantiation, so that we can substitute over it.
+data UnitId
+    = IndefiniteUnitId {-# UNPACK #-} !IndefUnitId
+    |   DefiniteUnitId {-# UNPACK #-} !DefUnitId
+    deriving (Typeable)
+
+unitIdFS :: UnitId -> FastString
+unitIdFS (IndefiniteUnitId x) = indefUnitIdFS x
+unitIdFS (DefiniteUnitId (DefUnitId x)) = installedUnitIdFS x
+
+unitIdKey :: UnitId -> Unique
+unitIdKey (IndefiniteUnitId x) = indefUnitIdKey x
+unitIdKey (DefiniteUnitId (DefUnitId x)) = installedUnitIdKey x
+
+-- | A unit identifier which identifies an indefinite
+-- library (with holes) that has been *on-the-fly* instantiated
+-- with a substitution 'indefUnitIdInsts'.  In fact, an indefinite
+-- unit identifier could have no holes, but we haven't gotten
+-- around to compiling the actual library yet.
+--
+-- An indefinite unit identifier pretty-prints to something like
+-- @p[H=<H>,A=aimpl:A>]@ (@p@ is the 'ComponentId', and the
+-- brackets enclose the module substitution).
+data IndefUnitId
+    = IndefUnitId {
+        -- | A private, uniquely identifying representation of
+        -- a UnitId.  This string is completely private to GHC
+        -- and is just used to get a unique; in particular, we don't use it for
+        -- symbols (indefinite libraries are not compiled).
+        indefUnitIdFS :: FastString,
+        -- | Cached unique of 'unitIdFS'.
+        indefUnitIdKey :: Unique,
+        -- | The component identity of the indefinite library that
+        -- is being instantiated.
+        indefUnitIdComponentId :: !ComponentId,
+        -- | The sorted (by 'ModuleName') instantiations of this library.
+        indefUnitIdInsts :: ![(ModuleName, Module)],
+        -- | A cache of the free module variables of 'unitIdInsts'.
+        -- This lets us efficiently tell if a 'UnitId' has been
+        -- fully instantiated (free module variables are empty)
+        -- and whether or not a substitution can have any effect.
+        indefUnitIdFreeHoles :: UniqDSet ModuleName
+    } deriving (Typeable)
+
+instance Eq IndefUnitId where
+  u1 == u2 = indefUnitIdKey u1 == indefUnitIdKey u2
+
+instance Ord IndefUnitId where
+  u1 `compare` u2 = indefUnitIdFS u1 `compare` indefUnitIdFS u2
+
+instance Binary IndefUnitId where
+  put_ bh indef = do
+    put_ bh (indefUnitIdComponentId indef)
+    put_ bh (indefUnitIdInsts indef)
+  get bh = do
+    cid   <- get bh
+    insts <- get bh
+    let fs = hashUnitId cid insts
+    return IndefUnitId {
+            indefUnitIdComponentId = cid,
+            indefUnitIdInsts = insts,
+            indefUnitIdFreeHoles = unionManyUniqDSets (map (moduleFreeHoles.snd) insts),
+            indefUnitIdFS = fs,
+            indefUnitIdKey = getUnique fs
+           }
+
+-- | Create a new 'IndefUnitId' given an explicit module substitution.
+newIndefUnitId :: ComponentId -> [(ModuleName, Module)] -> IndefUnitId
+newIndefUnitId cid insts =
+    IndefUnitId {
+        indefUnitIdComponentId = cid,
+        indefUnitIdInsts = sorted_insts,
+        indefUnitIdFreeHoles = unionManyUniqDSets (map (moduleFreeHoles.snd) insts),
+        indefUnitIdFS = fs,
+        indefUnitIdKey = getUnique fs
+    }
+  where
+     fs = hashUnitId cid sorted_insts
+     sorted_insts = sortBy (stableModuleNameCmp `on` fst) insts
+
+-- | Injects an 'IndefUnitId' (indefinite library which
+-- was on-the-fly instantiated) to a 'UnitId' (either
+-- an indefinite or definite library).
+indefUnitIdToUnitId :: DynFlags -> IndefUnitId -> UnitId
+indefUnitIdToUnitId dflags iuid =
+    -- NB: suppose that we want to compare the indefinite
+    -- unit id p[H=impl:H] against p+abcd (where p+abcd
+    -- happens to be the existing, installed version of
+    -- p[H=impl:H].  If we *only* wrap in p[H=impl:H]
+    -- IndefiniteUnitId, they won't compare equal; only
+    -- after improvement will the equality hold.
+    improveUnitId (getPackageConfigMap dflags) $
+        IndefiniteUnitId iuid
+
+data IndefModule = IndefModule {
+        indefModuleUnitId :: IndefUnitId,
+        indefModuleName   :: ModuleName
+    } deriving (Typeable, Eq, Ord)
+
+instance Outputable IndefModule where
+  ppr (IndefModule uid m) =
+    ppr uid <> char ':' <> ppr m
+
+-- | Injects an 'IndefModule' to 'Module' (see also
+-- 'indefUnitIdToUnitId'.
+indefModuleToModule :: DynFlags -> IndefModule -> Module
+indefModuleToModule dflags (IndefModule iuid mod_name) =
+    mkModule (indefUnitIdToUnitId dflags iuid) mod_name
+
+-- | An installed unit identifier identifies a library which has
+-- been installed to the package database.  These strings are
+-- provided to us via the @-this-unit-id@ flag.  The library
+-- in question may be definite or indefinite; if it is indefinite,
+-- none of the holes have been filled (we never install partially
+-- instantiated libraries.)  Put another way, an installed unit id
+-- is either fully instantiated, or not instantiated at all.
+--
+-- Installed unit identifiers look something like @p+af23SAj2dZ219@,
+-- or maybe just @p@ if they don't use Backpack.
+newtype InstalledUnitId =
+    InstalledUnitId {
+      -- | The full hashed unit identifier, including the component id
+      -- and the hash.
+      installedUnitIdFS :: FastString
+    }
+   deriving (Typeable)
+
+instance Binary InstalledUnitId where
+  put_ bh (InstalledUnitId fs) = put_ bh fs
+  get bh = do fs <- get bh; return (InstalledUnitId fs)
+
+instance BinaryStringRep InstalledUnitId where
+  fromStringRep bs = InstalledUnitId (mkFastStringByteString bs)
+  -- GHC doesn't write to database
+  toStringRep   = error "BinaryStringRep InstalledUnitId: not implemented"
+
+instance Eq InstalledUnitId where
+    uid1 == uid2 = installedUnitIdKey uid1 == installedUnitIdKey uid2
+
+instance Ord InstalledUnitId where
+    u1 `compare` u2 = installedUnitIdFS u1 `compare` installedUnitIdFS u2
+
+instance Uniquable InstalledUnitId where
+    getUnique = installedUnitIdKey
+
+instance Outputable InstalledUnitId where
+    ppr uid@(InstalledUnitId fs) =
+        getPprStyle $ \sty ->
+        sdocWithDynFlags $ \dflags ->
+          case displayInstalledUnitId dflags uid of
+            Just str | not (debugStyle sty) -> text str
+            _ -> ftext fs
+
+installedUnitIdKey :: InstalledUnitId -> Unique
+installedUnitIdKey = getUnique . installedUnitIdFS
+
+-- | Lossy conversion to the on-disk 'InstalledUnitId' for a component.
+toInstalledUnitId :: UnitId -> InstalledUnitId
+toInstalledUnitId (DefiniteUnitId (DefUnitId iuid)) = iuid
+toInstalledUnitId (IndefiniteUnitId indef) =
+    componentIdToInstalledUnitId (indefUnitIdComponentId indef)
+
+installedUnitIdString :: InstalledUnitId -> String
+installedUnitIdString = unpackFS . installedUnitIdFS
+
+instance Outputable IndefUnitId where
+    ppr uid =
+      -- getPprStyle $ \sty ->
+      ppr cid <>
+        (if not (null insts) -- pprIf
+          then
+            brackets (hcat
+                (punctuate comma $
+                    [ ppr modname <> text "=" <> ppr m
+                    | (modname, m) <- insts]))
+          else empty)
+     where
+      cid   = indefUnitIdComponentId uid
+      insts = indefUnitIdInsts uid
+
+-- | A 'InstalledModule' is a 'Module' which contains a 'InstalledUnitId'.
+data InstalledModule = InstalledModule {
+   installedModuleUnitId :: !InstalledUnitId,
+   installedModuleName :: !ModuleName
+  }
+  deriving (Eq, Ord)
+
+instance Outputable InstalledModule where
+  ppr (InstalledModule p n) =
+    ppr p <> char ':' <> pprModuleName n
+
+fsToInstalledUnitId :: FastString -> InstalledUnitId
+fsToInstalledUnitId fs = InstalledUnitId fs
+
+componentIdToInstalledUnitId :: ComponentId -> InstalledUnitId
+componentIdToInstalledUnitId (ComponentId fs) = fsToInstalledUnitId fs
+
+stringToInstalledUnitId :: String -> InstalledUnitId
+stringToInstalledUnitId = fsToInstalledUnitId . mkFastString
+
+-- | Test if a 'Module' corresponds to a given 'InstalledModule',
+-- modulo instantiation.
+installedModuleEq :: InstalledModule -> Module -> Bool
+installedModuleEq imod mod =
+    fst (splitModuleInsts mod) == imod
+
+-- | Test if a 'UnitId' corresponds to a given 'InstalledUnitId',
+-- modulo instantiation.
+installedUnitIdEq :: InstalledUnitId -> UnitId -> Bool
+installedUnitIdEq iuid uid =
+    fst (splitUnitIdInsts uid) == iuid
+
+-- | A 'DefUnitId' is an 'InstalledUnitId' with the invariant that
+-- it only refers to a definite library; i.e., one we have generated
+-- code for.
+newtype DefUnitId = DefUnitId { unDefUnitId :: InstalledUnitId }
+    deriving (Eq, Ord, Typeable)
+
+instance Outputable DefUnitId where
+    ppr (DefUnitId uid) = ppr uid
+
+instance Binary DefUnitId where
+    put_ bh (DefUnitId uid) = put_ bh uid
+    get bh = do uid <- get bh; return (DefUnitId uid)
+
+-- | A map keyed off of 'InstalledModule'
+newtype InstalledModuleEnv elt = InstalledModuleEnv (Map InstalledModule elt)
+
+emptyInstalledModuleEnv :: InstalledModuleEnv a
+emptyInstalledModuleEnv = InstalledModuleEnv Map.empty
+
+lookupInstalledModuleEnv :: InstalledModuleEnv a -> InstalledModule -> Maybe a
+lookupInstalledModuleEnv (InstalledModuleEnv e) m = Map.lookup m e
+
+extendInstalledModuleEnv :: InstalledModuleEnv a -> InstalledModule -> a -> InstalledModuleEnv a
+extendInstalledModuleEnv (InstalledModuleEnv e) m x = InstalledModuleEnv (Map.insert m x e)
+
+filterInstalledModuleEnv :: (InstalledModule -> a -> Bool) -> InstalledModuleEnv a -> InstalledModuleEnv a
+filterInstalledModuleEnv f (InstalledModuleEnv e) =
+  InstalledModuleEnv (Map.filterWithKey f e)
+
+delInstalledModuleEnv :: InstalledModuleEnv a -> InstalledModule -> InstalledModuleEnv a
+delInstalledModuleEnv (InstalledModuleEnv e) m = InstalledModuleEnv (Map.delete m e)
+
+-- Note [UnitId to InstalledUnitId improvement]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- Just because a UnitId is definite (has no holes) doesn't
+-- mean it's necessarily a InstalledUnitId; it could just be
+-- that over the course of renaming UnitIds on the fly
+-- while typechecking an indefinite library, we
+-- ended up with a fully instantiated unit id with no hash,
+-- since we haven't built it yet.  This is fine.
+--
+-- However, if there is a hashed unit id for this instantiation
+-- in the package database, we *better use it*, because
+-- that hashed unit id may be lurking in another interface,
+-- and chaos will ensue if we attempt to compare the two
+-- (the unitIdFS for a UnitId never corresponds to a Cabal-provided
+-- hash of a compiled instantiated library).
+--
+-- There is one last niggle: improvement based on the package database means
+-- that we might end up developing on a package that is not transitively
+-- depended upon by the packages the user specified directly via command line
+-- flags.  This could lead to strange and difficult to understand bugs if those
+-- instantiations are out of date.  The solution is to only improve a
+-- unit id if the new unit id is part of the 'preloadClosure'; i.e., the
+-- closure of all the packages which were explicitly specified.
+
+-- | Retrieve the set of free holes of a 'UnitId'.
+unitIdFreeHoles :: UnitId -> UniqDSet ModuleName
+unitIdFreeHoles (IndefiniteUnitId x) = indefUnitIdFreeHoles x
+-- Hashed unit ids are always fully instantiated
+unitIdFreeHoles (DefiniteUnitId _) = emptyUniqDSet
+
+instance Show UnitId where
+    show = unitIdString
+
+-- | A 'UnitId' is definite if it has no free holes.
+unitIdIsDefinite :: UnitId -> Bool
+unitIdIsDefinite = isEmptyUniqDSet . unitIdFreeHoles
+
+-- | Generate a uniquely identifying 'FastString' for a unit
+-- identifier.  This is a one-way function.  You can rely on one special
+-- property: if a unit identifier is in most general form, its 'FastString'
+-- coincides with its 'ComponentId'.  This hash is completely internal
+-- to GHC and is not used for symbol names or file paths.
+hashUnitId :: ComponentId -> [(ModuleName, Module)] -> FastString
+hashUnitId cid sorted_holes =
+    mkFastStringByteString
+  . fingerprintUnitId (toStringRep cid)
+  $ rawHashUnitId sorted_holes
+
+-- | Generate a hash for a sorted module substitution.
+rawHashUnitId :: [(ModuleName, Module)] -> Fingerprint
+rawHashUnitId sorted_holes =
+    fingerprintByteString
+  . BS.concat $ do
+        (m, b) <- sorted_holes
+        [ toStringRep m,                BS.Char8.singleton ' ',
+          fastStringToByteString (unitIdFS (moduleUnitId b)), BS.Char8.singleton ':',
+          toStringRep (moduleName b),   BS.Char8.singleton '\n']
+
+fingerprintByteString :: BS.ByteString -> Fingerprint
+fingerprintByteString bs = unsafePerformIO
+                         . BS.unsafeUseAsCStringLen bs
+                         $ \(p,l) -> fingerprintData (castPtr p) l
+
+fingerprintUnitId :: BS.ByteString -> Fingerprint -> BS.ByteString
+fingerprintUnitId prefix (Fingerprint a b)
+    = BS.concat
+    $ [ prefix
+      , BS.Char8.singleton '-'
+      , BS.Char8.pack (toBase62Padded a)
+      , BS.Char8.pack (toBase62Padded b) ]
+
+-- | Create a new, un-hashed unit identifier.
+newUnitId :: ComponentId -> [(ModuleName, Module)] -> UnitId
+newUnitId cid [] = newSimpleUnitId cid -- TODO: this indicates some latent bug...
+newUnitId cid insts = IndefiniteUnitId $ newIndefUnitId cid insts
+
+pprUnitId :: UnitId -> SDoc
+pprUnitId (DefiniteUnitId uid) = ppr uid
+pprUnitId (IndefiniteUnitId uid) = ppr uid
+
+instance Eq UnitId where
+  uid1 == uid2 = unitIdKey uid1 == unitIdKey uid2
 
 instance Uniquable UnitId where
- getUnique pid = getUnique (unitIdFS pid)
+  getUnique = unitIdKey
 
 instance Ord UnitId where
   nm1 `compare` nm2 = stableUnitIdCmp nm1 nm2
@@ -421,34 +888,161 @@ stableUnitIdCmp :: UnitId -> UnitId -> Ordering
 stableUnitIdCmp p1 p2 = unitIdFS p1 `compare` unitIdFS p2
 
 instance Outputable UnitId where
-   ppr pk = getPprStyle $ \sty -> sdocWithDynFlags $ \dflags ->
-    case unitIdPackageIdString dflags pk of
-      Nothing -> ftext (unitIdFS pk)
-      Just pkg -> text pkg
-           -- Don't bother qualifying if it's wired in!
-           <> (if qualPackage sty pk && not (pk `elem` wiredInUnitIds)
-                then char '@' <> ftext (unitIdFS pk)
-                else empty)
+   ppr pk = pprUnitId pk
 
+-- Performance: would prefer to have a NameCache like thing
 instance Binary UnitId where
-  put_ bh pid = put_ bh (unitIdFS pid)
-  get bh = do { fs <- get bh; return (fsToUnitId fs) }
+  put_ bh (DefiniteUnitId def_uid) = do
+    putByte bh 0
+    put_ bh def_uid
+  put_ bh (IndefiniteUnitId indef_uid) = do
+    putByte bh 1
+    put_ bh indef_uid
+  get bh = do b <- getByte bh
+              case b of
+                0 -> fmap DefiniteUnitId   (get bh)
+                _ -> fmap IndefiniteUnitId (get bh)
 
-instance BinaryStringRep UnitId where
-  fromStringRep = fsToUnitId . mkFastStringByteString
-  toStringRep   = fastStringToByteString . unitIdFS
+instance Binary ComponentId where
+  put_ bh (ComponentId fs) = put_ bh fs
+  get bh = do { fs <- get bh; return (ComponentId fs) }
 
+-- | Create a new simple unit identifier (no holes) from a 'ComponentId'.
+newSimpleUnitId :: ComponentId -> UnitId
+newSimpleUnitId (ComponentId fs) = fsToUnitId fs
+
+-- | Create a new simple unit identifier from a 'FastString'.  Internally,
+-- this is primarily used to specify wired-in unit identifiers.
 fsToUnitId :: FastString -> UnitId
-fsToUnitId = PId
-
-unitIdFS :: UnitId -> FastString
-unitIdFS (PId fs) = fs
+fsToUnitId = DefiniteUnitId . DefUnitId . InstalledUnitId
 
 stringToUnitId :: String -> UnitId
 stringToUnitId = fsToUnitId . mkFastString
 
 unitIdString :: UnitId -> String
 unitIdString = unpackFS . unitIdFS
+
+{-
+************************************************************************
+*                                                                      *
+                        Hole substitutions
+*                                                                      *
+************************************************************************
+-}
+
+-- | Substitution on module variables, mapping module names to module
+-- identifiers.
+type ShHoleSubst = ModuleNameEnv Module
+
+-- | Substitutes holes in a 'Module'.  NOT suitable for being called
+-- directly on a 'nameModule', see Note [Representation of module/name variable].
+-- @p[A=<A>]:B@ maps to @p[A=q():A]:B@ with @A=q():A@;
+-- similarly, @<A>@ maps to @q():A@.
+renameHoleModule :: DynFlags -> ShHoleSubst -> Module -> Module
+renameHoleModule dflags = renameHoleModule' (getPackageConfigMap dflags)
+
+-- | Substitutes holes in a 'UnitId', suitable for renaming when
+-- an include occurs; see Note [Representation of module/name variable].
+--
+-- @p[A=<A>]@ maps to @p[A=<B>]@ with @A=<B>@.
+renameHoleUnitId :: DynFlags -> ShHoleSubst -> UnitId -> UnitId
+renameHoleUnitId dflags = renameHoleUnitId' (getPackageConfigMap dflags)
+
+-- | Like 'renameHoleModule', but requires only 'PackageConfigMap'
+-- so it can be used by "Packages".
+renameHoleModule' :: PackageConfigMap -> ShHoleSubst -> Module -> Module
+renameHoleModule' pkg_map env m
+  | not (isHoleModule m) =
+        let uid = renameHoleUnitId' pkg_map env (moduleUnitId m)
+        in mkModule uid (moduleName m)
+  | Just m' <- lookupUFM env (moduleName m) = m'
+  -- NB m = <Blah>, that's what's in scope.
+  | otherwise = m
+
+-- | Like 'renameHoleUnitId, but requires only 'PackageConfigMap'
+-- so it can be used by "Packages".
+renameHoleUnitId' :: PackageConfigMap -> ShHoleSubst -> UnitId -> UnitId
+renameHoleUnitId' pkg_map env uid =
+    case uid of
+      (IndefiniteUnitId
+        IndefUnitId{ indefUnitIdComponentId = cid
+                   , indefUnitIdInsts       = insts
+                   , indefUnitIdFreeHoles   = fh })
+          -> if isNullUFM (intersectUFM_C const (udfmToUfm fh) env)
+                then uid
+                -- Functorially apply the substitution to the instantiation,
+                -- then check the 'PackageConfigMap' to see if there is
+                -- a compiled version of this 'UnitId' we can improve to.
+                -- See Note [UnitId to InstalledUnitId] improvement
+                else improveUnitId pkg_map $
+                        newUnitId cid
+                            (map (\(k,v) -> (k, renameHoleModule' pkg_map env v)) insts)
+      _ -> uid
+
+-- | Given a possibly on-the-fly instantiated module, split it into
+-- a 'Module' that we definitely can find on-disk, as well as an
+-- instantiation if we need to instantiate it on the fly.  If the
+-- instantiation is @Nothing@ no on-the-fly renaming is needed.
+splitModuleInsts :: Module -> (InstalledModule, Maybe IndefModule)
+splitModuleInsts m =
+    let (uid, mb_iuid) = splitUnitIdInsts (moduleUnitId m)
+    in (InstalledModule uid (moduleName m),
+        fmap (\iuid -> IndefModule iuid (moduleName m)) mb_iuid)
+
+-- | See 'splitModuleInsts'.
+splitUnitIdInsts :: UnitId -> (InstalledUnitId, Maybe IndefUnitId)
+splitUnitIdInsts (IndefiniteUnitId iuid) =
+    (componentIdToInstalledUnitId (indefUnitIdComponentId iuid), Just iuid)
+splitUnitIdInsts (DefiniteUnitId (DefUnitId uid)) = (uid, Nothing)
+
+generalizeIndefUnitId :: IndefUnitId -> IndefUnitId
+generalizeIndefUnitId IndefUnitId{ indefUnitIdComponentId = cid
+                                 , indefUnitIdInsts = insts } =
+    newIndefUnitId cid (map (\(m,_) -> (m, mkHoleModule m)) insts)
+
+parseModuleName :: ReadP ModuleName
+parseModuleName = fmap mkModuleName
+                $ Parse.munch1 (\c -> isAlphaNum c || c `elem` "_.")
+
+parseUnitId :: ReadP UnitId
+parseUnitId = parseFullUnitId <++ parseDefiniteUnitId <++ parseSimpleUnitId
+  where
+    parseFullUnitId = do
+        cid <- parseComponentId
+        insts <- parseModSubst
+        return (newUnitId cid insts)
+    parseDefiniteUnitId = do
+        s <- Parse.munch1 (\c -> isAlphaNum c || c `elem` "-_.+")
+        return (stringToUnitId s)
+    parseSimpleUnitId = do
+        cid <- parseComponentId
+        return (newSimpleUnitId cid)
+
+parseComponentId :: ReadP ComponentId
+parseComponentId = (ComponentId . mkFastString)  `fmap` Parse.munch1 abi_char
+   where abi_char c = isAlphaNum c || c `elem` "-_."
+
+parseModuleId :: ReadP Module
+parseModuleId = parseModuleVar <++ parseModule
+    where
+      parseModuleVar = do
+        _ <- Parse.char '<'
+        modname <- parseModuleName
+        _ <- Parse.char '>'
+        return (mkHoleModule modname)
+      parseModule = do
+        uid <- parseUnitId
+        _ <- Parse.char ':'
+        modname <- parseModuleName
+        return (mkModule uid modname)
+
+parseModSubst :: ReadP [(ModuleName, Module)]
+parseModSubst = Parse.between (Parse.char '[') (Parse.char ']')
+      . flip Parse.sepBy (Parse.char ',')
+      $ do k <- parseModuleName
+           _ <- Parse.char '='
+           v <- parseModuleId
+           return (k, v)
 
 
 -- -----------------------------------------------------------------------------
@@ -497,11 +1091,33 @@ mainUnitId      = fsToUnitId (fsLit "main")
 
 -- | This is a fake package id used to provide identities to any un-implemented
 -- signatures.  The set of hole identities is global over an entire compilation.
+-- Don't use this directly: use 'mkHoleModule' or 'isHoleModule' instead.
+-- See Note [Representation of module/name variables]
 holeUnitId :: UnitId
 holeUnitId      = fsToUnitId (fsLit "hole")
 
 isInteractiveModule :: Module -> Bool
 isInteractiveModule mod = moduleUnitId mod == interactiveUnitId
+
+-- Note [Representation of module/name variables]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- In our ICFP'16, we use <A> to represent module holes, and {A.T} to represent
+-- name holes.  This could have been represented by adding some new cases
+-- to the core data types, but this would have made the existing 'nameModule'
+-- and 'moduleUnitId' partial, which would have required a lot of modifications
+-- to existing code.
+--
+-- Instead, we adopted the following encoding scheme:
+--
+--      <A>   ===> hole:A
+--      {A.T} ===> hole:A.T
+--
+-- This encoding is quite convenient, but it is also a bit dangerous too,
+-- because if you have a 'hole:A' you need to know if it's actually a
+-- 'Module' or just a module stored in a 'Name'; these two cases must be
+-- treated differently when doing substitutions.  'renameHoleModule'
+-- and 'renameHoleUnitId' assume they are NOT operating on a
+-- 'Name'; 'NameShape' handles name substitutions exclusively.
 
 isHoleModule :: Module -> Bool
 isHoleModule mod = moduleUnitId mod == holeUnitId
@@ -526,6 +1142,7 @@ wiredInUnitIds = [ primUnitId,
 
 -- | A map keyed off of 'Module's
 newtype ModuleEnv elt = ModuleEnv (Map NDModule elt)
+
 {-
 Note [ModuleEnv performance and determinism]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

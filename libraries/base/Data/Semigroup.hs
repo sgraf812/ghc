@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP                        #-}
 {-# LANGUAGE DefaultSignatures          #-}
 {-# LANGUAGE DeriveDataTypeable         #-}
 {-# LANGUAGE DeriveGeneric              #-}
@@ -83,6 +84,9 @@ import           Data.Monoid         (All (..), Any (..), Dual (..), Endo (..),
 import           Data.Monoid         (Alt (..))
 import qualified Data.Monoid         as Monoid
 import           Data.Void
+#ifndef mingw32_HOST_OS
+import           GHC.Event           (Event, Lifetime)
+#endif
 import           GHC.Generics
 
 infixr 6 <>
@@ -483,9 +487,11 @@ instance Ord a => Ord (Arg a b) where
 instance Bifunctor Arg where
   bimap f g (Arg a b) = Arg (f a) (g b)
 
+-- | @since 4.10.0.0
 instance Bifoldable Arg where
   bifoldMap f g (Arg a b) = f a `mappend` g b
 
+-- | @since 4.10.0.0
 instance Bitraversable Arg where
   bitraverse f g (Arg a b) = Arg <$> f a <*> g b
 
@@ -703,3 +709,19 @@ instance Semigroup (Proxy s) where
   _ <> _ = Proxy
   sconcat _ = Proxy
   stimes _ _ = Proxy
+
+-- | @since 4.10.0.0
+instance Semigroup a => Semigroup (IO a) where
+    (<>) = liftA2 (<>)
+
+#ifndef mingw32_HOST_OS
+-- | @since 4.10.0.0
+instance Semigroup Event where
+    (<>) = mappend
+    stimes = stimesMonoid
+
+-- | @since 4.10.0.0
+instance Semigroup Lifetime where
+    (<>) = mappend
+    stimes = stimesMonoid
+#endif

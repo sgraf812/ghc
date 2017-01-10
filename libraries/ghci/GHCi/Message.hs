@@ -1,5 +1,6 @@
-{-# LANGUAGE GADTs, DeriveGeneric, StandaloneDeriving,
-    GeneralizedNewtypeDeriving, ExistentialQuantification, RecordWildCards #-}
+{-# LANGUAGE GADTs, DeriveGeneric, StandaloneDeriving, ScopedTypeVariables,
+    GeneralizedNewtypeDeriving, ExistentialQuantification, RecordWildCards,
+    CPP #-}
 {-# OPTIONS_GHC -fno-warn-name-shadowing -fno-warn-orphans #-}
 
 -- |
@@ -14,6 +15,7 @@ module GHCi.Message
   , QResult(..)
   , EvalStatus_(..), EvalStatus, EvalResult(..), EvalOpts(..), EvalExpr(..)
   , SerializableException(..)
+  , toSerializableException, fromSerializableException
   , THResult(..), THResultType(..)
   , ResumeContext(..)
   , QState(..)
@@ -40,7 +42,11 @@ import Data.Dynamic
 import Data.IORef
 import Data.Map (Map)
 import GHC.Generics
+#if MIN_VERSION_base(4,9,0)
 import GHC.Stack.CCS
+#else
+import GHC.Stack as GHC.Stack.CCS
+#endif
 import qualified Language.Haskell.TH        as TH
 import qualified Language.Haskell.TH.Syntax as TH
 import System.Exit
@@ -94,6 +100,7 @@ data Message a where
    :: Int     -- ptr words
    -> Int     -- non-ptr words
    -> Int     -- constr tag
+   -> Int     -- pointer tag
    -> [Word8] -- constructor desccription
    -> Message (RemotePtr StgInfoTable)
 
@@ -351,7 +358,28 @@ data SerializableException
   | EOtherException String
   deriving (Generic, Show)
 
-instance Binary ExitCode
+toSerializableException :: SomeException -> SerializableException
+toSerializableException ex
+  | Just UserInterrupt <- fromException ex  = EUserInterrupt
+  | Just (ec::ExitCode) <- fromException ex = (EExitCode ec)
+  | otherwise = EOtherException (show (ex :: SomeException))
+
+fromSerializableException :: SerializableException -> SomeException
+fromSerializableException EUserInterrupt = toException UserInterrupt
+fromSerializableException (EExitCode c) = toException c
+fromSerializableException (EOtherException str) = toException (ErrorCall str)
+
+-- NB: Replace this with a derived instance once we depend on GHC 8.0
+-- as the minimum
+instance Binary ExitCode where
+  put ExitSuccess      = putWord8 0
+  put (ExitFailure ec) = putWord8 1 `mappend` put ec
+  get = do
+    w <- getWord8
+    case w of
+      0 -> pure ExitSuccess
+      _ -> ExitFailure <$> get
+
 instance Binary SerializableException
 
 data THResult a
@@ -403,7 +431,7 @@ getMessage = do
       15 -> Msg <$> MallocStrings <$> get
       16 -> Msg <$> (PrepFFI <$> get <*> get <*> get)
       17 -> Msg <$> FreeFFI <$> get
-      18 -> Msg <$> (MkConInfoTable <$> get <*> get <*> get <*> get)
+      18 -> Msg <$> (MkConInfoTable <$> get <*> get <*> get <*> get <*> get)
       19 -> Msg <$> (EvalStmt <$> get <*> get)
       20 -> Msg <$> (ResumeStmt <$> get <*> get)
       21 -> Msg <$> (AbandonStmt <$> get)
@@ -440,7 +468,7 @@ putMessage m = case m of
   MallocStrings bss           -> putWord8 15 >> put bss
   PrepFFI conv args res       -> putWord8 16 >> put conv >> put args >> put res
   FreeFFI p                   -> putWord8 17 >> put p
-  MkConInfoTable p n t d      -> putWord8 18 >> put p >> put n >> put t >> put d
+  MkConInfoTable p n t pt d   -> putWord8 18 >> put p >> put n >> put t >> put pt >> put d
   EvalStmt opts val           -> putWord8 19 >> put opts >> put val
   ResumeStmt opts val         -> putWord8 20 >> put opts >> put val
   AbandonStmt val             -> putWord8 21 >> put val

@@ -86,13 +86,6 @@ checkClosureShallow( const StgClosure* p )
 
     q = UNTAG_CONST_CLOSURE(p);
     ASSERT(LOOKS_LIKE_CLOSURE_PTR(q));
-
-    /* Is it a static closure? */
-    if (!HEAP_ALLOCED(q)) {
-        ASSERT(closure_STATIC(q));
-    } else {
-        ASSERT(!closure_STATIC(q));
-    }
 }
 
 // check an individual stack object
@@ -225,12 +218,6 @@ checkClosure( const StgClosure* p )
     ASSERT(LOOKS_LIKE_CLOSURE_PTR(p));
 
     p = UNTAG_CONST_CLOSURE(p);
-    /* Is it a static closure (i.e. in the data segment)? */
-    if (!HEAP_ALLOCED(p)) {
-        ASSERT(closure_STATIC(p));
-    } else {
-        ASSERT(!closure_STATIC(p));
-    }
 
     info = p->header.info;
 
@@ -272,6 +259,7 @@ checkClosure( const StgClosure* p )
     case FUN_0_2:
     case FUN_2_0:
     case CONSTR:
+    case CONSTR_NOCAF:
     case CONSTR_1_0:
     case CONSTR_0_1:
     case CONSTR_1_1:
@@ -283,10 +271,9 @@ checkClosure( const StgClosure* p )
     case MUT_VAR_CLEAN:
     case MUT_VAR_DIRTY:
     case TVAR:
-    case CONSTR_STATIC:
-    case CONSTR_NOCAF_STATIC:
     case THUNK_STATIC:
     case FUN_STATIC:
+    case COMPACT_NFDATA:
         {
             uint32_t i;
             for (i = 0; i < info->layout.payload.ptrs; i++) {
@@ -571,7 +558,7 @@ checkTSO(StgTSO *tso)
    Optionally also check the sanity of the TSOs.
 */
 void
-checkGlobalTSOList (rtsBool checkTSOs)
+checkGlobalTSOList (bool checkTSOs)
 {
   StgTSO *tso;
   uint32_t g;
@@ -692,7 +679,11 @@ checkStaticObjects ( StgClosure* static_objects )
       p = *FUN_STATIC_LINK((StgClosure *)p);
       break;
 
-    case CONSTR_STATIC:
+    case CONSTR:
+    case CONSTR_NOCAF:
+    case CONSTR_1_0:
+    case CONSTR_2_0:
+    case CONSTR_1_1:
       p = *STATIC_LINK(info,(StgClosure *)p);
       break;
 
@@ -722,7 +713,7 @@ checkNurserySanity (nursery *nursery)
 }
 
 static void checkGeneration (generation *gen,
-                             rtsBool after_major_gc USED_IF_THREADS)
+                             bool after_major_gc USED_IF_THREADS)
 {
     uint32_t n;
     gen_workspace *ws;
@@ -751,7 +742,7 @@ static void checkGeneration (generation *gen,
 }
 
 /* Full heap sanity check. */
-static void checkFullHeap (rtsBool after_major_gc)
+static void checkFullHeap (bool after_major_gc)
 {
     uint32_t g, n;
 
@@ -763,7 +754,7 @@ static void checkFullHeap (rtsBool after_major_gc)
     }
 }
 
-void checkSanity (rtsBool after_gc, rtsBool major_gc)
+void checkSanity (bool after_gc, bool major_gc)
 {
     checkFullHeap(after_gc && major_gc);
 
@@ -773,7 +764,7 @@ void checkSanity (rtsBool after_gc, rtsBool major_gc)
     // does nothing in this case.
     if (after_gc) {
         checkMutableLists();
-        checkGlobalTSOList(rtsTrue);
+        checkGlobalTSOList(true);
     }
 }
 
@@ -881,18 +872,19 @@ genBlocks (generation *gen)
     ASSERT(countCompactBlocks(gen->compact_blocks_in_import) == gen->n_compact_blocks_in_import);
     return gen->n_blocks + gen->n_old_blocks +
         countAllocdBlocks(gen->large_objects) +
-        gen->n_compact_blocks + gen->n_compact_blocks_in_import;
+        countAllocdCompactBlocks(gen->compact_objects) +
+        countAllocdCompactBlocks(gen->compact_blocks_in_import);
 }
 
 void
-memInventory (rtsBool show)
+memInventory (bool show)
 {
   uint32_t g, i;
   W_ gen_blocks[RtsFlags.GcFlags.generations];
   W_ nursery_blocks, retainer_blocks,
       arena_blocks, exec_blocks, gc_free_blocks = 0;
   W_ live_blocks = 0, free_blocks = 0;
-  rtsBool leak;
+  bool leak;
 
   // count the blocks we current have
 

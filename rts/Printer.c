@@ -122,8 +122,7 @@ printClosure( const StgClosure *obj )
     case CONSTR:
     case CONSTR_1_0: case CONSTR_0_1:
     case CONSTR_1_1: case CONSTR_0_2: case CONSTR_2_0:
-    case CONSTR_STATIC:
-    case CONSTR_NOCAF_STATIC:
+    case CONSTR_NOCAF:
         {
             StgWord i, j;
             const StgConInfoTable *con_info = get_con_itbl (obj);
@@ -388,7 +387,7 @@ printClosure( const StgClosure *obj )
 
     case COMPACT_NFDATA:
         debugBelch("COMPACT_NFDATA(size=%" FMT_Word ")\n",
-                   (W_)((StgCompactNFData *)obj)->totalDataW * sizeof(W_));
+                   (W_)((StgCompactNFData *)obj)->totalW * sizeof(W_));
         break;
 
 
@@ -527,6 +526,11 @@ printStackChunk( StgPtr sp, StgPtr spBottom )
                 fprintCCS(stderr, (CostCentreStack*)sp[1]);
                 debugBelch("\n" );
                 continue;
+            } else if (c == (StgWord)&stg_restore_cccs_eval_info) {
+                debugBelch("stg_restore_cccs_eval_info\n" );
+                fprintCCS(stderr, (CostCentreStack*)sp[1]);
+                debugBelch("\n" );
+                continue;
 #endif
             } else {
                 debugBelch("RET_SMALL (%p)\n", info);
@@ -636,7 +640,7 @@ const char *lookupGHCName( void *addr )
  * rubbish like the obj-splitting symbols
  */
 
-static rtsBool isReal( flagword flags STG_UNUSED, const char *name )
+static bool isReal( flagword flags STG_UNUSED, const char *name )
 {
 #if 0
     /* ToDo: make this work on BFD */
@@ -644,15 +648,15 @@ static rtsBool isReal( flagword flags STG_UNUSED, const char *name )
     if (tp == N_TEXT || tp == N_DATA) {
         return (name[0] == '_' && name[1] != '_');
     } else {
-        return rtsFalse;
+        return false;
     }
 #else
     if (*name == '\0'  ||
         (name[0] == 'g' && name[1] == 'c' && name[2] == 'c') ||
         (name[0] == 'c' && name[1] == 'c' && name[2] == '.')) {
-        return rtsFalse;
+        return false;
     }
-    return rtsTrue;
+    return true;
 #endif
 }
 
@@ -827,8 +831,7 @@ const char *closure_type_names[] = {
  [CONSTR_2_0]            = "CONSTR_2_0",
  [CONSTR_1_1]            = "CONSTR_1_1",
  [CONSTR_0_2]            = "CONSTR_0_2",
- [CONSTR_STATIC]         = "CONSTR_STATIC",
- [CONSTR_NOCAF_STATIC]   = "CONSTR_NOCAF_STATIC",
+ [CONSTR_NOCAF]          = "CONSTR_NOCAF",
  [FUN]                   = "FUN",
  [FUN_1_0]               = "FUN_1_0",
  [FUN_0_1]               = "FUN_0_1",

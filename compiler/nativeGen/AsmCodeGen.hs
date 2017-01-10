@@ -8,7 +8,18 @@
 
 {-# LANGUAGE BangPatterns, CPP, GADTs, ScopedTypeVariables, UnboxedTuples #-}
 
-module AsmCodeGen ( nativeCodeGen ) where
+module AsmCodeGen (
+                    -- * Module entry point
+                    nativeCodeGen
+
+                    -- * Test-only exports: see trac #12744
+                    -- used by testGraphNoSpills, which needs to access
+                    -- the register allocator intermediate data structures
+                    -- cmmNativeGen emits
+                  , cmmNativeGen
+                  , NcgImpl(..)
+                  , x86NcgImpl
+                  ) where
 
 #include "HsVersions.h"
 #include "nativeGen/NCG.h"
@@ -151,7 +162,7 @@ data NcgImpl statics instr jumpDest = NcgImpl {
     ncg_x86fp_kludge          :: [NatCmmDecl statics instr] -> [NatCmmDecl statics instr],
     ncgExpandTop              :: [NatCmmDecl statics instr] -> [NatCmmDecl statics instr],
     ncgAllocMoreStack         :: Int -> NatCmmDecl statics instr -> UniqSM (NatCmmDecl statics instr),
-    ncgMakeFarBranches        :: BlockEnv CmmStatics -> [NatBasicBlock instr] -> [NatBasicBlock instr]
+    ncgMakeFarBranches        :: LabelMap CmmStatics -> [NatBasicBlock instr] -> [NatBasicBlock instr]
     }
 
 --------------------
@@ -405,7 +416,8 @@ cmmNativeGenStream dflags this_mod modLoc ncgImpl h us cmm_stream ngs
 
 -- | Do native code generation on all these cmms.
 --
-cmmNativeGens :: (Outputable statics, Outputable instr, Instruction instr)
+cmmNativeGens :: forall statics instr jumpDest.
+                 (Outputable statics, Outputable instr, Instruction instr)
               => DynFlags
               -> Module -> ModLocation
               -> NcgImpl statics instr jumpDest
@@ -417,12 +429,15 @@ cmmNativeGens :: (Outputable statics, Outputable instr, Instruction instr)
               -> Int
               -> IO (NativeGenAcc statics instr, UniqSupply)
 
-cmmNativeGens _ _ _ _ _ _ us [] ngs !_
-        = return (ngs, us)
+cmmNativeGens dflags this_mod modLoc ncgImpl h dbgMap = go
+  where
+    go :: UniqSupply -> [RawCmmDecl] -> NativeGenAcc statics instr -> Int
+       -> IO (NativeGenAcc statics instr, UniqSupply)
 
-cmmNativeGens dflags this_mod modLoc ncgImpl h dbgMap us
-              (cmm : cmms) ngs count
- = do
+    go us [] ngs !_ =
+        return (ngs, us)
+
+    go us (cmm : cmms) ngs count = do
         let fileIds = ngs_dwarfFiles ngs
         (us', fileIds', native, imports, colorStats, linearStats)
           <- {-# SCC "cmmNativeGen" #-}
@@ -457,11 +472,10 @@ cmmNativeGens dflags this_mod modLoc ncgImpl h dbgMap us
                       , ngs_labels      = ngs_labels ngs ++ labels'
                       , ngs_dwarfFiles  = fileIds'
                       }
-        cmmNativeGens dflags this_mod modLoc ncgImpl h dbgMap us'
-                      cmms ngs' (count + 1)
+        go us' cmms ngs' (count + 1)
 
- where  seqString []            = ()
-        seqString (x:xs)        = x `seq` seqString xs
+    seqString []            = ()
+    seqString (x:xs)        = x `seq` seqString xs
 
 
 emitNativeCode :: DynFlags -> BufHandle -> SDoc -> IO ()
@@ -747,7 +761,7 @@ sequenceTop ncgImpl (CmmProc info lbl live (ListGraph blocks)) =
 
 sequenceBlocks
         :: Instruction instr
-        => BlockEnv i
+        => LabelMap i
         -> [NatBasicBlock instr]
         -> [NatBasicBlock instr]
 
@@ -782,7 +796,7 @@ mkNode :: (Instruction t)
        -> (GenBasicBlock t, BlockId, [BlockId])
 mkNode block@(BasicBlock id instrs) = (block, id, getOutEdges instrs)
 
-seqBlocks :: BlockEnv i -> [(GenBasicBlock t1, BlockId, [BlockId])]
+seqBlocks :: LabelMap i -> [(GenBasicBlock t1, BlockId, [BlockId])]
                         -> [GenBasicBlock t1]
 seqBlocks infos blocks = placeNext pullable0 todo0
   where
@@ -850,8 +864,8 @@ shortcutBranches dflags ncgImpl tops
     mapping = foldr plusUFM emptyUFM mappings
 
 build_mapping :: NcgImpl statics instr jumpDest
-              -> GenCmmDecl d (BlockEnv t) (ListGraph instr)
-              -> (GenCmmDecl d (BlockEnv t) (ListGraph instr), UniqFM jumpDest)
+              -> GenCmmDecl d (LabelMap t) (ListGraph instr)
+              -> (GenCmmDecl d (LabelMap t) (ListGraph instr), UniqFM jumpDest)
 build_mapping _ top@(CmmData _ _) = (top, emptyUFM)
 build_mapping _ (CmmProc info lbl live (ListGraph []))
   = (CmmProc info lbl live (ListGraph []), emptyUFM)
@@ -863,7 +877,8 @@ build_mapping ncgImpl (CmmProc info lbl live (ListGraph (head:blocks)))
     -- find all the blocks that just consist of a jump that can be
     -- shorted.
     -- Don't completely eliminate loops here -- that can leave a dangling jump!
-    (_, shortcut_blocks, others) = foldl split (emptyBlockSet, [], []) blocks
+    (_, shortcut_blocks, others) =
+        foldl split (setEmpty :: LabelSet, [], []) blocks
     split (s, shortcut_blocks, others) b@(BasicBlock id [insn])
         | Just jd <- canShortcut ncgImpl insn,
           Just dest <- getJumpDestBlockId ncgImpl jd,

@@ -92,12 +92,12 @@ mkDependencies
                 --  on M.hi-boot, and hence that we should do the hi-boot consistency
                 --  check.)
 
-          pkgs | th_used   = insertList thUnitId (imp_dep_pkgs imports)
+          pkgs | th_used   = insertList (toInstalledUnitId thUnitId) (imp_dep_pkgs imports)
                | otherwise = imp_dep_pkgs imports
 
           -- Set the packages required to be Safe according to Safe Haskell.
           -- See Note [RnNames . Tracking Trust Transitively]
-          sorted_pkgs = sortBy stableUnitIdCmp pkgs
+          sorted_pkgs = sort pkgs
           trust_pkgs  = imp_trust_pkgs imports
           dep_pkgs'   = map (\x -> (x, x `elem` trust_pkgs)) sorted_pkgs
 
@@ -111,16 +111,21 @@ mkDependencies
 mkUsedNames :: TcGblEnv -> NameSet
 mkUsedNames TcGblEnv{ tcg_dus = dus } = allUses dus
 
-mkUsageInfo :: HscEnv -> Module -> ImportedMods -> NameSet -> [FilePath] -> IO [Usage]
-mkUsageInfo hsc_env this_mod dir_imp_mods used_names dependent_files
+mkUsageInfo :: HscEnv -> Module -> ImportedMods -> NameSet -> [FilePath] -> [(Module, Fingerprint)] -> IO [Usage]
+mkUsageInfo hsc_env this_mod dir_imp_mods used_names dependent_files merged
   = do
     eps <- hscEPS hsc_env
     hashes <- mapM getFileHash dependent_files
     let mod_usages = mk_mod_usage_info (eps_PIT eps) hsc_env this_mod
                                        dir_imp_mods used_names
-    let usages = mod_usages ++ [ UsageFile { usg_file_path = f
+        usages = mod_usages ++ [ UsageFile { usg_file_path = f
                                            , usg_file_hash = hash }
                                | (f, hash) <- zip dependent_files hashes ]
+                            ++ [ UsageMergedRequirement
+                                    { usg_mod = mod,
+                                      usg_mod_hash = hash
+                                    }
+                               | (mod, hash) <- merged ]
     usages `seqList` return usages
     -- seq the list of Usages returned: occasionally these
     -- don't get evaluated for a while and we can end up hanging on to
@@ -265,7 +270,8 @@ deSugar :: HscEnv -> ModLocation -> TcGblEnv -> IO (Messages, Maybe ModGuts)
 
 deSugar hsc_env
         mod_loc
-        tcg_env@(TcGblEnv { tcg_mod          = mod,
+        tcg_env@(TcGblEnv { tcg_mod          = id_mod,
+                            tcg_semantic_mod = mod,
                             tcg_src          = hsc_src,
                             tcg_type_env     = type_env,
                             tcg_imports      = imports,
@@ -276,6 +282,7 @@ deSugar hsc_env
                             tcg_fix_env      = fix_env,
                             tcg_inst_env     = inst_env,
                             tcg_fam_inst_env = fam_inst_env,
+                            tcg_merged       = merged,
                             tcg_warns        = warns,
                             tcg_anns         = anns,
                             tcg_binds        = binds,
@@ -297,10 +304,7 @@ deSugar hsc_env
                      (text "Desugar"<+>brackets (ppr mod))
                      (const ()) $
      do { -- Desugar the program
-        ; let export_set =
-                -- Used to be 'availsToNameSet', but we now export selectors
-                -- only when necessary. See #12125.
-                availsToNameSetWithSelectors exports
+        ; let export_set = availsToNameSet exports
               target     = hscTarget dflags
               hpcInfo    = emptyHpcInfo other_hpc_info
 
@@ -359,7 +363,12 @@ deSugar hsc_env
         ; used_th <- readIORef tc_splice_used
         ; dep_files <- readIORef dependent_files
         ; safe_mode <- finalSafeMode dflags tcg_env
-        ; usages <- mkUsageInfo hsc_env mod (imp_mods imports) used_names dep_files
+        ; usages <- mkUsageInfo hsc_env mod (imp_mods imports) used_names dep_files merged
+        -- id_mod /= mod when we are processing an hsig, but hsigs
+        -- never desugared and compiled (there's no code!)
+        -- Consequently, this should hold for any ModGuts that make
+        -- past desugaring. See Note [Identity versus semantic module].
+        ; MASSERT( id_mod == mod )
 
         ; let mod_guts = ModGuts {
                 mg_module       = mod,

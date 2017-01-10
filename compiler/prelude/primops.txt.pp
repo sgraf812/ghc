@@ -221,12 +221,16 @@ primop   IntMulMayOfloOp  "mulIntMayOflo#"
 
 primop   IntQuotOp    "quotInt#"    Dyadic
    Int# -> Int# -> Int#
-   {Rounds towards zero.}
+   {Rounds towards zero. The behavior is undefined if the second argument is
+    zero.
+   }
    with can_fail = True
 
 primop   IntRemOp    "remInt#"    Dyadic
    Int# -> Int# -> Int#
-   {Satisfies \texttt{(quotInt\# x y) *\# y +\# (remInt\# x y) == x}.}
+   {Satisfies \texttt{(quotInt\# x y) *\# y +\# (remInt\# x y) == x}. The
+    behavior is undefined if the second argument is zero.
+   }
    with can_fail = True
 
 primop   IntQuotRemOp "quotRemInt#"    GenPrimOp
@@ -2440,14 +2444,6 @@ primop  CompactNewOp "compactNew#" GenPrimOp
    has_side_effects = True
    out_of_line      = True
 
-primop  CompactAppendOp "compactAppend#" GenPrimOp
-   Compact# -> a -> Int# -> State# RealWorld -> (# State# RealWorld, a #)
-   { Append an object to a compact, return the new address in the Compact.
-     The third argument is 1 if sharing should be preserved, 0 otherwise. }
-   with
-   has_side_effects = True
-   out_of_line      = True
-
 primop  CompactResizeOp "compactResize#" GenPrimOp
    Compact# -> Word# -> State# RealWorld ->
    State# RealWorld
@@ -2507,6 +2503,34 @@ primop  CompactFixupPointersOp "compactFixupPointers#" GenPrimOp
      This method must be called exactly once after importing
      a serialized compact, and returns the new compact and
      the new adjusted root address. }
+   with
+   has_side_effects = True
+   out_of_line      = True
+
+primop CompactAdd "compactAdd#" GenPrimOp
+   Compact# -> a -> State# RealWorld -> (# State# RealWorld, a #)
+   { Recursively add a closure and its transitive closure to a
+     {\texttt Compact\#}, evaluating any unevaluated components at the
+     same time.  Note: {\texttt compactAdd\#} is not thread-safe, so
+     only one thread may call {\texttt compactAdd\#} with a particular
+     {\texttt Compact#} at any given time.  The primop does not
+     enforce any mutual exclusion; the caller is expected to
+     arrange this. }
+   with
+   has_side_effects = True
+   out_of_line      = True
+
+primop CompactAddWithSharing "compactAddWithSharing#" GenPrimOp
+   Compact# -> a -> State# RealWorld -> (# State# RealWorld, a #)
+   { Like {\texttt compactAdd\#}, but retains sharing and cycles
+   during compaction. }
+   with
+   has_side_effects = True
+   out_of_line      = True
+
+primop CompactSize "compactSize#" GenPrimOp
+   Compact# -> State# RealWorld -> (# State# RealWorld, Word# #)
+   { Return the size (in bytes) of the total amount of data in the Compact# }
    with
    has_side_effects = True
    out_of_line      = True
@@ -2627,6 +2651,11 @@ primop  NewBCOOp "newBCO#" GenPrimOp
 
 primop  UnpackClosureOp "unpackClosure#" GenPrimOp
    a -> (# Addr#, Array# b, ByteArray# #)
+   { {\tt unpackClosure\# closure} copies non-pointers and pointers in the
+     payload of the given closure into two new arrays, and returns a pointer to
+     the first word of the closure's info table, a pointer array for the
+     pointers in the payload, and a non-pointer array for the non-pointers in
+     the payload. }
    with
    out_of_line = True
 

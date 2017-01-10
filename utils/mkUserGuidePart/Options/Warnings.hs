@@ -31,10 +31,20 @@ warningsOptions =
          , flagType = DynamicFlag
          , flagReverse = "-Wwarn"
          }
+  , flag { flagName = "-Werror=<wflag>"
+         , flagDescription = "make a specific warning fatal"
+         , flagType = DynamicFlag
+         , flagReverse = "-Wwarn=<wflag>"
+         }
   , flag { flagName = "-Wwarn"
          , flagDescription = "make warnings non-fatal"
          , flagType = DynamicFlag
          , flagReverse = "-Werror"
+         }
+  , flag { flagName = "-Wwarn=<wflag>"
+         , flagDescription = "make a specific warning non-fatal"
+         , flagType = DynamicFlag
+         , flagReverse = "-Werror=<wflag>"
          }
   , flag { flagName = "-Wunrecognised-warning-flags"
          , flagDescription =
@@ -51,7 +61,9 @@ warningsOptions =
   , flag { flagName = "-fdefer-type-errors"
          , flagDescription =
            "Turn type errors into warnings, :ref:`deferring the error until "++
-           "runtime <defer-type-errors>`. Implies :ghc-flag:`-fdefer-typed-holes`. "++
+           "runtime <defer-type-errors>`. Implies "++
+           ":ghc-flag:`-fdefer-typed-holes` and "++
+           ":ghc-flag:`-fdefer-out-of-scope-variables`. "++
            "See also :ghc-flag:`-Wdeferred-type-errors`"
          , flagType = DynamicFlag
          , flagReverse = "-fno-defer-type-errors"
@@ -64,6 +76,14 @@ warningsOptions =
            "See also :ghc-flag:`-Wtyped-holes`."
          , flagType = DynamicFlag
          , flagReverse = "-fno-defer-typed-holes"
+         }
+  , flag { flagName = "-fdefer-out-of-scope-variables"
+         , flagDescription =
+           "Convert variable out of scope variables errors into warnings. "++
+           "Implied by :ghc-flag:`-fdefer-type-errors`. "++
+           "See also :ghc-flag:`-Wdeferred-out-of-scope-variables`."
+         , flagType = DynamicFlag
+         , flagReverse = "-fno-defer-out-of-scope-variables"
          }
   , flag { flagName = "-fhelpful-errors"
          , flagDescription = "Make suggestions for mis-spelled names."
@@ -397,6 +417,14 @@ warningsOptions =
            ":ghc-flag:`-fdefer-typed-holes`."
          , flagType = DynamicFlag
          , flagReverse = "-Wno-typed-holes"
+         }
+  , flag { flagName = "-Wdeferred-out-of-scope-variables"
+         , flagDescription =
+           "Report warnings when variable out-of-scope errors are "++
+           ":ref:`deferred until runtime. "++
+           "See :ghc-flag:`-fdefer-out-of-scope-variables`."
+         , flagType = DynamicFlag
+         , flagReverse = "-Wno-deferred-out-of-scope-variables"
          }
   , flag { flagName = "-Wpartial-type-signatures"
          , flagDescription =

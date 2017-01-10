@@ -38,7 +38,7 @@ templateHaskellNames = [
     floatPrimLName, doublePrimLName, rationalLName, stringPrimLName,
     charPrimLName,
     -- Pat
-    litPName, varPName, tupPName, unboxedTupPName,
+    litPName, varPName, tupPName, unboxedTupPName, unboxedSumPName,
     conPName, tildePName, bangPName, infixPName,
     asPName, wildPName, recPName, listPName, sigPName, viewPName,
     -- FieldPat
@@ -48,9 +48,9 @@ templateHaskellNames = [
     -- Clause
     clauseName,
     -- Exp
-    varEName, conEName, litEName, appEName, infixEName,
+    varEName, conEName, litEName, appEName, appTypeEName, infixEName,
     infixAppName, sectionLName, sectionRName, lamEName, lamCaseEName,
-    tupEName, unboxedTupEName,
+    tupEName, unboxedTupEName, unboxedSumEName,
     condEName, multiIfEName, letEName, caseEName, doEName, compEName,
     fromEName, fromThenEName, fromToEName, fromThenToEName,
     listEName, sigEName, recConEName, recUpdEName, staticEName, unboundVarEName,
@@ -65,7 +65,7 @@ templateHaskellNames = [
     -- Dec
     funDName, valDName, dataDName, newtypeDName, tySynDName,
     classDName, instanceWithOverlapDName,
-    standaloneDerivDName, sigDName, forImpDName,
+    standaloneDerivWithStrategyDName, sigDName, forImpDName,
     pragInlDName, pragSpecDName, pragSpecInlDName, pragSpecInstDName,
     pragRuleDName, pragAnnDName, defaultSigDName,
     dataFamilyDName, openTypeFamilyDName, closedTypeFamilyDName,
@@ -93,7 +93,8 @@ templateHaskellNames = [
     prefixPatSynName, infixPatSynName, recordPatSynName,
     -- Type
     forallTName, varTName, conTName, appTName, equalityTName,
-    tupleTName, unboxedTupleTName, arrowTName, listTName, sigTName, litTName,
+    tupleTName, unboxedTupleTName, unboxedSumTName,
+    arrowTName, listTName, sigTName, litTName,
     promotedTName, promotedTupleTName, promotedNilTName, promotedConsTName,
     wildCardTName,
     -- TyLit
@@ -124,6 +125,9 @@ templateHaskellNames = [
     -- Overlap
     overlappableDataConName, overlappingDataConName, overlapsDataConName,
     incoherentDataConName,
+    -- DerivStrategy
+    stockStrategyDataConName, anyclassStrategyDataConName,
+    newtypeStrategyDataConName,
     -- TExp
     tExpDataConName,
     -- RuleBndr
@@ -136,6 +140,8 @@ templateHaskellNames = [
     tySynEqnName,
     -- AnnTarget
     valueAnnotationName, typeAnnotationName, moduleAnnotationName,
+    -- DerivClause
+    derivClauseName,
 
     -- The type classes
     liftClassName,
@@ -149,7 +155,7 @@ templateHaskellNames = [
     patQTyConName, fieldPatQTyConName, fieldExpQTyConName, funDepTyConName,
     predQTyConName, decsQTyConName, ruleBndrQTyConName, tySynEqnQTyConName,
     roleTyConName, tExpTyConName, injAnnTyConName, kindTyConName,
-    overlapTyConName,
+    overlapTyConName, derivClauseQTyConName, derivStrategyTyConName,
 
     -- Quasiquoting
     quoteDecName, quoteTypeName, quoteExpName, quotePatName]
@@ -179,24 +185,25 @@ qTyConName, nameTyConName, fieldExpTyConName, patTyConName,
     fieldPatTyConName, expTyConName, decTyConName, typeTyConName,
     tyVarBndrTyConName, matchTyConName, clauseTyConName, funDepTyConName,
     predTyConName, tExpTyConName, injAnnTyConName, kindTyConName,
-    overlapTyConName :: Name
-qTyConName        = thTc (fsLit "Q")              qTyConKey
-nameTyConName     = thTc (fsLit "Name")           nameTyConKey
-fieldExpTyConName = thTc (fsLit "FieldExp")       fieldExpTyConKey
-patTyConName      = thTc (fsLit "Pat")            patTyConKey
-fieldPatTyConName = thTc (fsLit "FieldPat")       fieldPatTyConKey
-expTyConName      = thTc (fsLit "Exp")            expTyConKey
-decTyConName      = thTc (fsLit "Dec")            decTyConKey
-typeTyConName     = thTc (fsLit "Type")           typeTyConKey
-tyVarBndrTyConName= thTc (fsLit "TyVarBndr")      tyVarBndrTyConKey
-matchTyConName    = thTc (fsLit "Match")          matchTyConKey
-clauseTyConName   = thTc (fsLit "Clause")         clauseTyConKey
-funDepTyConName   = thTc (fsLit "FunDep")         funDepTyConKey
-predTyConName     = thTc (fsLit "Pred")           predTyConKey
-tExpTyConName     = thTc (fsLit "TExp")           tExpTyConKey
-injAnnTyConName   = thTc (fsLit "InjectivityAnn") injAnnTyConKey
-kindTyConName     = thTc (fsLit "Kind")           kindTyConKey
-overlapTyConName  = thTc (fsLit "Overlap")        overlapTyConKey
+    overlapTyConName, derivStrategyTyConName :: Name
+qTyConName             = thTc (fsLit "Q")              qTyConKey
+nameTyConName          = thTc (fsLit "Name")           nameTyConKey
+fieldExpTyConName      = thTc (fsLit "FieldExp")       fieldExpTyConKey
+patTyConName           = thTc (fsLit "Pat")            patTyConKey
+fieldPatTyConName      = thTc (fsLit "FieldPat")       fieldPatTyConKey
+expTyConName           = thTc (fsLit "Exp")            expTyConKey
+decTyConName           = thTc (fsLit "Dec")            decTyConKey
+typeTyConName          = thTc (fsLit "Type")           typeTyConKey
+tyVarBndrTyConName     = thTc (fsLit "TyVarBndr")      tyVarBndrTyConKey
+matchTyConName         = thTc (fsLit "Match")          matchTyConKey
+clauseTyConName        = thTc (fsLit "Clause")         clauseTyConKey
+funDepTyConName        = thTc (fsLit "FunDep")         funDepTyConKey
+predTyConName          = thTc (fsLit "Pred")           predTyConKey
+tExpTyConName          = thTc (fsLit "TExp")           tExpTyConKey
+injAnnTyConName        = thTc (fsLit "InjectivityAnn") injAnnTyConKey
+kindTyConName          = thTc (fsLit "Kind")           kindTyConKey
+overlapTyConName       = thTc (fsLit "Overlap")        overlapTyConKey
+derivStrategyTyConName = thTc (fsLit "DerivStrategy")  derivStrategyTyConKey
 
 returnQName, bindQName, sequenceQName, newNameName, liftName,
     mkNameName, mkNameG_vName, mkNameG_dName, mkNameG_tcName,
@@ -236,12 +243,14 @@ stringPrimLName = libFun (fsLit "stringPrimL") stringPrimLIdKey
 charPrimLName   = libFun (fsLit "charPrimL")   charPrimLIdKey
 
 -- data Pat = ...
-litPName, varPName, tupPName, unboxedTupPName, conPName, infixPName, tildePName, bangPName,
-    asPName, wildPName, recPName, listPName, sigPName, viewPName :: Name
+litPName, varPName, tupPName, unboxedTupPName, unboxedSumPName, conPName,
+    infixPName, tildePName, bangPName, asPName, wildPName, recPName, listPName,
+    sigPName, viewPName :: Name
 litPName   = libFun (fsLit "litP")   litPIdKey
 varPName   = libFun (fsLit "varP")   varPIdKey
 tupPName   = libFun (fsLit "tupP")   tupPIdKey
 unboxedTupPName = libFun (fsLit "unboxedTupP") unboxedTupPIdKey
+unboxedSumPName = libFun (fsLit "unboxedSumP") unboxedSumPIdKey
 conPName   = libFun (fsLit "conP")   conPIdKey
 infixPName = libFun (fsLit "infixP") infixPIdKey
 tildePName = libFun (fsLit "tildeP") tildePIdKey
@@ -266,14 +275,15 @@ clauseName :: Name
 clauseName = libFun (fsLit "clause") clauseIdKey
 
 -- data Exp = ...
-varEName, conEName, litEName, appEName, infixEName, infixAppName,
+varEName, conEName, litEName, appEName, appTypeEName, infixEName, infixAppName,
     sectionLName, sectionRName, lamEName, lamCaseEName, tupEName,
-    unboxedTupEName, condEName, multiIfEName, letEName, caseEName,
-    doEName, compEName, staticEName, unboundVarEName :: Name
+    unboxedTupEName, unboxedSumEName, condEName, multiIfEName, letEName,
+    caseEName, doEName, compEName, staticEName, unboundVarEName :: Name
 varEName        = libFun (fsLit "varE")        varEIdKey
 conEName        = libFun (fsLit "conE")        conEIdKey
 litEName        = libFun (fsLit "litE")        litEIdKey
 appEName        = libFun (fsLit "appE")        appEIdKey
+appTypeEName    = libFun (fsLit "appTypeE")    appTypeEIdKey
 infixEName      = libFun (fsLit "infixE")      infixEIdKey
 infixAppName    = libFun (fsLit "infixApp")    infixAppIdKey
 sectionLName    = libFun (fsLit "sectionL")    sectionLIdKey
@@ -282,6 +292,7 @@ lamEName        = libFun (fsLit "lamE")        lamEIdKey
 lamCaseEName    = libFun (fsLit "lamCaseE")    lamCaseEIdKey
 tupEName        = libFun (fsLit "tupE")        tupEIdKey
 unboxedTupEName = libFun (fsLit "unboxedTupE") unboxedTupEIdKey
+unboxedSumEName = libFun (fsLit "unboxedSumE") unboxedSumEIdKey
 condEName       = libFun (fsLit "condE")       condEIdKey
 multiIfEName    = libFun (fsLit "multiIfE")    multiIfEIdKey
 letEName        = libFun (fsLit "letE")        letEIdKey
@@ -327,12 +338,11 @@ parSName    = libFun (fsLit "parS")    parSIdKey
 -- data Dec = ...
 funDName, valDName, dataDName, newtypeDName, tySynDName, classDName,
     instanceWithOverlapDName, sigDName, forImpDName, pragInlDName,
-    pragSpecDName,
-    pragSpecInlDName, pragSpecInstDName, pragRuleDName, pragAnnDName,
-    standaloneDerivDName, defaultSigDName, dataInstDName, newtypeInstDName,
-    tySynInstDName, dataFamilyDName, openTypeFamilyDName, closedTypeFamilyDName,
-    infixLDName, infixRDName, infixNDName, roleAnnotDName, patSynDName,
-    patSynSigDName :: Name
+    pragSpecDName, pragSpecInlDName, pragSpecInstDName, pragRuleDName,
+    pragAnnDName, standaloneDerivWithStrategyDName, defaultSigDName,
+    dataInstDName, newtypeInstDName, tySynInstDName, dataFamilyDName,
+    openTypeFamilyDName, closedTypeFamilyDName, infixLDName, infixRDName,
+    infixNDName, roleAnnotDName, patSynDName, patSynSigDName :: Name
 funDName             = libFun (fsLit "funD")              funDIdKey
 valDName             = libFun (fsLit "valD")              valDIdKey
 dataDName            = libFun (fsLit "dataD")             dataDIdKey
@@ -341,7 +351,8 @@ tySynDName           = libFun (fsLit "tySynD")            tySynDIdKey
 classDName           = libFun (fsLit "classD")            classDIdKey
 instanceWithOverlapDName
   = libFun (fsLit "instanceWithOverlapD")              instanceWithOverlapDIdKey
-standaloneDerivDName = libFun (fsLit "standaloneDerivD")  standaloneDerivDIdKey
+standaloneDerivWithStrategyDName = libFun
+        (fsLit "standaloneDerivWithStrategyD") standaloneDerivWithStrategyDIdKey
 sigDName             = libFun (fsLit "sigD")              sigDIdKey
 defaultSigDName      = libFun (fsLit "defaultSigD")       defaultSigDIdKey
 forImpDName          = libFun (fsLit "forImpD")           forImpDIdKey
@@ -414,16 +425,16 @@ infixPatSynName  = libFun (fsLit "infixPatSyn")  infixPatSynIdKey
 recordPatSynName = libFun (fsLit "recordPatSyn") recordPatSynIdKey
 
 -- data Type = ...
-forallTName, varTName, conTName, tupleTName, unboxedTupleTName, arrowTName,
-    listTName, appTName, sigTName, equalityTName, litTName,
-    promotedTName, promotedTupleTName,
-    promotedNilTName, promotedConsTName,
-    wildCardTName :: Name
+forallTName, varTName, conTName, tupleTName, unboxedTupleTName,
+    unboxedSumTName, arrowTName, listTName, appTName, sigTName, equalityTName,
+    litTName, promotedTName, promotedTupleTName, promotedNilTName,
+    promotedConsTName, wildCardTName :: Name
 forallTName         = libFun (fsLit "forallT")        forallTIdKey
 varTName            = libFun (fsLit "varT")           varTIdKey
 conTName            = libFun (fsLit "conT")           conTIdKey
 tupleTName          = libFun (fsLit "tupleT")         tupleTIdKey
 unboxedTupleTName   = libFun (fsLit "unboxedTupleT")  unboxedTupleTIdKey
+unboxedSumTName     = libFun (fsLit "unboxedSumT")    unboxedSumTIdKey
 arrowTName          = libFun (fsLit "arrowT")         arrowTIdKey
 listTName           = libFun (fsLit "listT")          listTIdKey
 appTName            = libFun (fsLit "appT")           appTIdKey
@@ -517,11 +528,16 @@ valueAnnotationName  = libFun (fsLit "valueAnnotation")  valueAnnotationIdKey
 typeAnnotationName   = libFun (fsLit "typeAnnotation")   typeAnnotationIdKey
 moduleAnnotationName = libFun (fsLit "moduleAnnotation") moduleAnnotationIdKey
 
+-- type DerivClause = ...
+derivClauseName :: Name
+derivClauseName = libFun (fsLit "derivClause") derivClauseIdKey
+
 matchQTyConName, clauseQTyConName, expQTyConName, stmtQTyConName,
     decQTyConName, conQTyConName, bangTypeQTyConName,
     varBangTypeQTyConName, typeQTyConName, fieldExpQTyConName,
     patQTyConName, fieldPatQTyConName, predQTyConName, decsQTyConName,
-    ruleBndrQTyConName, tySynEqnQTyConName, roleTyConName :: Name
+    ruleBndrQTyConName, tySynEqnQTyConName, roleTyConName,
+    derivClauseQTyConName :: Name
 matchQTyConName         = libTc (fsLit "MatchQ")         matchQTyConKey
 clauseQTyConName        = libTc (fsLit "ClauseQ")        clauseQTyConKey
 expQTyConName           = libTc (fsLit "ExpQ")           expQTyConKey
@@ -539,6 +555,7 @@ predQTyConName          = libTc (fsLit "PredQ")          predQTyConKey
 ruleBndrQTyConName      = libTc (fsLit "RuleBndrQ")      ruleBndrQTyConKey
 tySynEqnQTyConName      = libTc (fsLit "TySynEqnQ")      tySynEqnQTyConKey
 roleTyConName           = libTc (fsLit "Role")           roleTyConKey
+derivClauseQTyConName   = libTc (fsLit "DerivClauseQ")   derivClauseQTyConKey
 
 -- quasiquoting
 quoteExpName, quotePatName, quoteDecName, quoteTypeName :: Name
@@ -574,6 +591,13 @@ overlappingDataConName  = thCon (fsLit "Overlapping")  overlappingDataConKey
 overlapsDataConName     = thCon (fsLit "Overlaps")     overlapsDataConKey
 incoherentDataConName   = thCon (fsLit "Incoherent")   incoherentDataConKey
 
+-- data DerivStrategy = ...
+stockStrategyDataConName, anyclassStrategyDataConName,
+  newtypeStrategyDataConName :: Name
+stockStrategyDataConName    = thCon (fsLit "StockStrategy")    stockDataConKey
+anyclassStrategyDataConName = thCon (fsLit "AnyclassStrategy") anyclassDataConKey
+newtypeStrategyDataConName  = thCon (fsLit "NewtypeStrategy")  newtypeDataConKey
+
 {- *********************************************************************
 *                                                                      *
                      Class keys
@@ -603,7 +627,7 @@ expTyConKey, matchTyConKey, clauseTyConKey, qTyConKey, expQTyConKey,
     fieldPatQTyConKey, fieldExpQTyConKey, funDepTyConKey, predTyConKey,
     predQTyConKey, decsQTyConKey, ruleBndrQTyConKey, tySynEqnQTyConKey,
     roleTyConKey, tExpTyConKey, injAnnTyConKey, kindTyConKey,
-    overlapTyConKey :: Unique
+    overlapTyConKey, derivClauseQTyConKey, derivStrategyTyConKey :: Unique
 expTyConKey             = mkPreludeTyConUnique 200
 matchTyConKey           = mkPreludeTyConUnique 201
 clauseTyConKey          = mkPreludeTyConUnique 202
@@ -638,6 +662,8 @@ tExpTyConKey            = mkPreludeTyConUnique 230
 injAnnTyConKey          = mkPreludeTyConUnique 231
 kindTyConKey            = mkPreludeTyConUnique 232
 overlapTyConKey         = mkPreludeTyConUnique 233
+derivClauseQTyConKey    = mkPreludeTyConUnique 234
+derivStrategyTyConKey   = mkPreludeTyConUnique 235
 
 {- *********************************************************************
 *                                                                      *
@@ -678,6 +704,12 @@ overlappableDataConKey = mkPreludeDataConUnique 109
 overlappingDataConKey  = mkPreludeDataConUnique 110
 overlapsDataConKey     = mkPreludeDataConUnique 111
 incoherentDataConKey   = mkPreludeDataConUnique 112
+
+-- data DerivStrategy = ...
+stockDataConKey, anyclassDataConKey, newtypeDataConKey :: Unique
+stockDataConKey    = mkPreludeDataConUnique 113
+anyclassDataConKey = mkPreludeDataConUnique 114
+newtypeDataConKey  = mkPreludeDataConUnique 115
 
 {- *********************************************************************
 *                                                                      *
@@ -727,23 +759,24 @@ liftStringIdKey :: Unique
 liftStringIdKey     = mkPreludeMiscIdUnique 230
 
 -- data Pat = ...
-litPIdKey, varPIdKey, tupPIdKey, unboxedTupPIdKey, conPIdKey, infixPIdKey,
-  tildePIdKey, bangPIdKey, asPIdKey, wildPIdKey, recPIdKey, listPIdKey,
-  sigPIdKey, viewPIdKey :: Unique
+litPIdKey, varPIdKey, tupPIdKey, unboxedTupPIdKey, unboxedSumPIdKey, conPIdKey,
+  infixPIdKey, tildePIdKey, bangPIdKey, asPIdKey, wildPIdKey, recPIdKey,
+  listPIdKey, sigPIdKey, viewPIdKey :: Unique
 litPIdKey         = mkPreludeMiscIdUnique 240
 varPIdKey         = mkPreludeMiscIdUnique 241
 tupPIdKey         = mkPreludeMiscIdUnique 242
 unboxedTupPIdKey  = mkPreludeMiscIdUnique 243
-conPIdKey         = mkPreludeMiscIdUnique 244
-infixPIdKey       = mkPreludeMiscIdUnique 245
-tildePIdKey       = mkPreludeMiscIdUnique 246
-bangPIdKey        = mkPreludeMiscIdUnique 247
-asPIdKey          = mkPreludeMiscIdUnique 248
-wildPIdKey        = mkPreludeMiscIdUnique 249
-recPIdKey         = mkPreludeMiscIdUnique 250
-listPIdKey        = mkPreludeMiscIdUnique 251
-sigPIdKey         = mkPreludeMiscIdUnique 252
-viewPIdKey        = mkPreludeMiscIdUnique 253
+unboxedSumPIdKey  = mkPreludeMiscIdUnique 244
+conPIdKey         = mkPreludeMiscIdUnique 245
+infixPIdKey       = mkPreludeMiscIdUnique 246
+tildePIdKey       = mkPreludeMiscIdUnique 247
+bangPIdKey        = mkPreludeMiscIdUnique 248
+asPIdKey          = mkPreludeMiscIdUnique 249
+wildPIdKey        = mkPreludeMiscIdUnique 250
+recPIdKey         = mkPreludeMiscIdUnique 251
+listPIdKey        = mkPreludeMiscIdUnique 252
+sigPIdKey         = mkPreludeMiscIdUnique 253
+viewPIdKey        = mkPreludeMiscIdUnique 254
 
 -- type FieldPat = ...
 fieldPatIdKey :: Unique
@@ -759,9 +792,9 @@ clauseIdKey         = mkPreludeMiscIdUnique 262
 
 
 -- data Exp = ...
-varEIdKey, conEIdKey, litEIdKey, appEIdKey, infixEIdKey, infixAppIdKey,
-    sectionLIdKey, sectionRIdKey, lamEIdKey, lamCaseEIdKey, tupEIdKey,
-    unboxedTupEIdKey, condEIdKey, multiIfEIdKey,
+varEIdKey, conEIdKey, litEIdKey, appEIdKey, appTypeEIdKey, infixEIdKey,
+    infixAppIdKey, sectionLIdKey, sectionRIdKey, lamEIdKey, lamCaseEIdKey,
+    tupEIdKey, unboxedTupEIdKey, unboxedSumEIdKey, condEIdKey, multiIfEIdKey,
     letEIdKey, caseEIdKey, doEIdKey, compEIdKey,
     fromEIdKey, fromThenEIdKey, fromToEIdKey, fromThenToEIdKey,
     listEIdKey, sigEIdKey, recConEIdKey, recUpdEIdKey, staticEIdKey,
@@ -770,30 +803,32 @@ varEIdKey         = mkPreludeMiscIdUnique 270
 conEIdKey         = mkPreludeMiscIdUnique 271
 litEIdKey         = mkPreludeMiscIdUnique 272
 appEIdKey         = mkPreludeMiscIdUnique 273
-infixEIdKey       = mkPreludeMiscIdUnique 274
-infixAppIdKey     = mkPreludeMiscIdUnique 275
-sectionLIdKey     = mkPreludeMiscIdUnique 276
-sectionRIdKey     = mkPreludeMiscIdUnique 277
-lamEIdKey         = mkPreludeMiscIdUnique 278
-lamCaseEIdKey     = mkPreludeMiscIdUnique 279
-tupEIdKey         = mkPreludeMiscIdUnique 280
-unboxedTupEIdKey  = mkPreludeMiscIdUnique 281
-condEIdKey        = mkPreludeMiscIdUnique 282
-multiIfEIdKey     = mkPreludeMiscIdUnique 283
-letEIdKey         = mkPreludeMiscIdUnique 284
-caseEIdKey        = mkPreludeMiscIdUnique 285
-doEIdKey          = mkPreludeMiscIdUnique 286
-compEIdKey        = mkPreludeMiscIdUnique 287
-fromEIdKey        = mkPreludeMiscIdUnique 288
-fromThenEIdKey    = mkPreludeMiscIdUnique 289
-fromToEIdKey      = mkPreludeMiscIdUnique 290
-fromThenToEIdKey  = mkPreludeMiscIdUnique 291
-listEIdKey        = mkPreludeMiscIdUnique 292
-sigEIdKey         = mkPreludeMiscIdUnique 293
-recConEIdKey      = mkPreludeMiscIdUnique 294
-recUpdEIdKey      = mkPreludeMiscIdUnique 295
-staticEIdKey      = mkPreludeMiscIdUnique 296
-unboundVarEIdKey  = mkPreludeMiscIdUnique 297
+appTypeEIdKey     = mkPreludeMiscIdUnique 274
+infixEIdKey       = mkPreludeMiscIdUnique 275
+infixAppIdKey     = mkPreludeMiscIdUnique 276
+sectionLIdKey     = mkPreludeMiscIdUnique 277
+sectionRIdKey     = mkPreludeMiscIdUnique 278
+lamEIdKey         = mkPreludeMiscIdUnique 279
+lamCaseEIdKey     = mkPreludeMiscIdUnique 280
+tupEIdKey         = mkPreludeMiscIdUnique 281
+unboxedTupEIdKey  = mkPreludeMiscIdUnique 282
+unboxedSumEIdKey  = mkPreludeMiscIdUnique 283
+condEIdKey        = mkPreludeMiscIdUnique 284
+multiIfEIdKey     = mkPreludeMiscIdUnique 285
+letEIdKey         = mkPreludeMiscIdUnique 286
+caseEIdKey        = mkPreludeMiscIdUnique 287
+doEIdKey          = mkPreludeMiscIdUnique 288
+compEIdKey        = mkPreludeMiscIdUnique 289
+fromEIdKey        = mkPreludeMiscIdUnique 290
+fromThenEIdKey    = mkPreludeMiscIdUnique 291
+fromToEIdKey      = mkPreludeMiscIdUnique 292
+fromThenToEIdKey  = mkPreludeMiscIdUnique 293
+listEIdKey        = mkPreludeMiscIdUnique 294
+sigEIdKey         = mkPreludeMiscIdUnique 295
+recConEIdKey      = mkPreludeMiscIdUnique 296
+recUpdEIdKey      = mkPreludeMiscIdUnique 297
+staticEIdKey      = mkPreludeMiscIdUnique 298
+unboundVarEIdKey  = mkPreludeMiscIdUnique 299
 
 -- type FieldExp = ...
 fieldExpIdKey :: Unique
@@ -822,39 +857,39 @@ funDIdKey, valDIdKey, dataDIdKey, newtypeDIdKey, tySynDIdKey, classDIdKey,
     pragInlDIdKey, pragSpecDIdKey, pragSpecInlDIdKey, pragSpecInstDIdKey,
     pragRuleDIdKey, pragAnnDIdKey, defaultSigDIdKey, dataFamilyDIdKey,
     openTypeFamilyDIdKey, closedTypeFamilyDIdKey, dataInstDIdKey,
-    newtypeInstDIdKey, tySynInstDIdKey, standaloneDerivDIdKey, infixLDIdKey,
-    infixRDIdKey, infixNDIdKey, roleAnnotDIdKey, patSynDIdKey,
+    newtypeInstDIdKey, tySynInstDIdKey, standaloneDerivWithStrategyDIdKey,
+    infixLDIdKey, infixRDIdKey, infixNDIdKey, roleAnnotDIdKey, patSynDIdKey,
     patSynSigDIdKey :: Unique
-funDIdKey                 = mkPreludeMiscIdUnique 320
-valDIdKey                 = mkPreludeMiscIdUnique 321
-dataDIdKey                = mkPreludeMiscIdUnique 322
-newtypeDIdKey             = mkPreludeMiscIdUnique 323
-tySynDIdKey               = mkPreludeMiscIdUnique 324
-classDIdKey               = mkPreludeMiscIdUnique 325
-instanceWithOverlapDIdKey = mkPreludeMiscIdUnique 326
-instanceDIdKey            = mkPreludeMiscIdUnique 327
-sigDIdKey                 = mkPreludeMiscIdUnique 328
-forImpDIdKey              = mkPreludeMiscIdUnique 329
-pragInlDIdKey             = mkPreludeMiscIdUnique 330
-pragSpecDIdKey            = mkPreludeMiscIdUnique 331
-pragSpecInlDIdKey         = mkPreludeMiscIdUnique 332
-pragSpecInstDIdKey        = mkPreludeMiscIdUnique 333
-pragRuleDIdKey            = mkPreludeMiscIdUnique 334
-pragAnnDIdKey             = mkPreludeMiscIdUnique 335
-dataFamilyDIdKey          = mkPreludeMiscIdUnique 336
-openTypeFamilyDIdKey      = mkPreludeMiscIdUnique 337
-dataInstDIdKey            = mkPreludeMiscIdUnique 338
-newtypeInstDIdKey         = mkPreludeMiscIdUnique 339
-tySynInstDIdKey           = mkPreludeMiscIdUnique 340
-closedTypeFamilyDIdKey    = mkPreludeMiscIdUnique 341
-infixLDIdKey              = mkPreludeMiscIdUnique 342
-infixRDIdKey              = mkPreludeMiscIdUnique 343
-infixNDIdKey              = mkPreludeMiscIdUnique 344
-roleAnnotDIdKey           = mkPreludeMiscIdUnique 345
-standaloneDerivDIdKey     = mkPreludeMiscIdUnique 346
-defaultSigDIdKey          = mkPreludeMiscIdUnique 347
-patSynDIdKey              = mkPreludeMiscIdUnique 348
-patSynSigDIdKey           = mkPreludeMiscIdUnique 349
+funDIdKey                         = mkPreludeMiscIdUnique 320
+valDIdKey                         = mkPreludeMiscIdUnique 321
+dataDIdKey                        = mkPreludeMiscIdUnique 322
+newtypeDIdKey                     = mkPreludeMiscIdUnique 323
+tySynDIdKey                       = mkPreludeMiscIdUnique 324
+classDIdKey                       = mkPreludeMiscIdUnique 325
+instanceWithOverlapDIdKey         = mkPreludeMiscIdUnique 326
+instanceDIdKey                    = mkPreludeMiscIdUnique 327
+sigDIdKey                         = mkPreludeMiscIdUnique 328
+forImpDIdKey                      = mkPreludeMiscIdUnique 329
+pragInlDIdKey                     = mkPreludeMiscIdUnique 330
+pragSpecDIdKey                    = mkPreludeMiscIdUnique 331
+pragSpecInlDIdKey                 = mkPreludeMiscIdUnique 332
+pragSpecInstDIdKey                = mkPreludeMiscIdUnique 333
+pragRuleDIdKey                    = mkPreludeMiscIdUnique 334
+pragAnnDIdKey                     = mkPreludeMiscIdUnique 335
+dataFamilyDIdKey                  = mkPreludeMiscIdUnique 336
+openTypeFamilyDIdKey              = mkPreludeMiscIdUnique 337
+dataInstDIdKey                    = mkPreludeMiscIdUnique 338
+newtypeInstDIdKey                 = mkPreludeMiscIdUnique 339
+tySynInstDIdKey                   = mkPreludeMiscIdUnique 340
+closedTypeFamilyDIdKey            = mkPreludeMiscIdUnique 341
+infixLDIdKey                      = mkPreludeMiscIdUnique 342
+infixRDIdKey                      = mkPreludeMiscIdUnique 343
+infixNDIdKey                      = mkPreludeMiscIdUnique 344
+roleAnnotDIdKey                   = mkPreludeMiscIdUnique 345
+standaloneDerivWithStrategyDIdKey = mkPreludeMiscIdUnique 346
+defaultSigDIdKey                  = mkPreludeMiscIdUnique 347
+patSynDIdKey                      = mkPreludeMiscIdUnique 348
+patSynSigDIdKey                   = mkPreludeMiscIdUnique 349
 
 -- type Cxt = ...
 cxtIdKey :: Unique
@@ -907,27 +942,27 @@ infixPatSynIdKey  = mkPreludeMiscIdUnique 370
 recordPatSynIdKey = mkPreludeMiscIdUnique 371
 
 -- data Type = ...
-forallTIdKey, varTIdKey, conTIdKey, tupleTIdKey, unboxedTupleTIdKey, arrowTIdKey,
-    listTIdKey, appTIdKey, sigTIdKey, equalityTIdKey, litTIdKey,
-    promotedTIdKey, promotedTupleTIdKey,
-    promotedNilTIdKey, promotedConsTIdKey,
-    wildCardTIdKey :: Unique
+forallTIdKey, varTIdKey, conTIdKey, tupleTIdKey, unboxedTupleTIdKey,
+    unboxedSumTIdKey, arrowTIdKey, listTIdKey, appTIdKey, sigTIdKey,
+    equalityTIdKey, litTIdKey, promotedTIdKey, promotedTupleTIdKey,
+    promotedNilTIdKey, promotedConsTIdKey, wildCardTIdKey :: Unique
 forallTIdKey        = mkPreludeMiscIdUnique 380
 varTIdKey           = mkPreludeMiscIdUnique 381
 conTIdKey           = mkPreludeMiscIdUnique 382
 tupleTIdKey         = mkPreludeMiscIdUnique 383
 unboxedTupleTIdKey  = mkPreludeMiscIdUnique 384
-arrowTIdKey         = mkPreludeMiscIdUnique 385
-listTIdKey          = mkPreludeMiscIdUnique 386
-appTIdKey           = mkPreludeMiscIdUnique 387
-sigTIdKey           = mkPreludeMiscIdUnique 388
-equalityTIdKey      = mkPreludeMiscIdUnique 389
-litTIdKey           = mkPreludeMiscIdUnique 390
-promotedTIdKey      = mkPreludeMiscIdUnique 391
-promotedTupleTIdKey = mkPreludeMiscIdUnique 392
-promotedNilTIdKey   = mkPreludeMiscIdUnique 393
-promotedConsTIdKey  = mkPreludeMiscIdUnique 394
-wildCardTIdKey      = mkPreludeMiscIdUnique 395
+unboxedSumTIdKey    = mkPreludeMiscIdUnique 385
+arrowTIdKey         = mkPreludeMiscIdUnique 386
+listTIdKey          = mkPreludeMiscIdUnique 387
+appTIdKey           = mkPreludeMiscIdUnique 388
+sigTIdKey           = mkPreludeMiscIdUnique 389
+equalityTIdKey      = mkPreludeMiscIdUnique 390
+litTIdKey           = mkPreludeMiscIdUnique 391
+promotedTIdKey      = mkPreludeMiscIdUnique 392
+promotedTupleTIdKey = mkPreludeMiscIdUnique 393
+promotedNilTIdKey   = mkPreludeMiscIdUnique 394
+promotedConsTIdKey  = mkPreludeMiscIdUnique 395
+wildCardTIdKey      = mkPreludeMiscIdUnique 396
 
 -- data TyLit = ...
 numTyLitIdKey, strTyLitIdKey :: Unique
@@ -1013,6 +1048,10 @@ valueAnnotationIdKey, typeAnnotationIdKey, moduleAnnotationIdKey :: Unique
 valueAnnotationIdKey  = mkPreludeMiscIdUnique 490
 typeAnnotationIdKey   = mkPreludeMiscIdUnique 491
 moduleAnnotationIdKey = mkPreludeMiscIdUnique 492
+
+-- type DerivPred = ...
+derivClauseIdKey :: Unique
+derivClauseIdKey = mkPreludeMiscIdUnique 493
 
 {-
 ************************************************************************

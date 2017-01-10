@@ -448,8 +448,11 @@ classInstances (InstEnvs { ie_global = pkg_ie, ie_local = home_ie, ie_visible = 
 -- We use this when we do signature checking in TcRnDriver
 memberInstEnv :: InstEnv -> ClsInst -> Bool
 memberInstEnv inst_env ins_item@(ClsInst { is_cls_nm = cls_nm } ) =
-    maybe False (\(ClsIE items) -> any (identicalClsInstHead ins_item) items)
+    maybe False (\(ClsIE items) -> any (identicalDFunType ins_item) items)
           (lookupUDFM inst_env cls_nm)
+ where
+  identicalDFunType cls1 cls2 =
+    eqType (varType (is_dfun cls1)) (varType (is_dfun cls2))
 
 extendInstEnvList :: InstEnv -> [ClsInst] -> InstEnv
 extendInstEnvList inst_env ispecs = foldl extendInstEnv inst_env ispecs
@@ -962,8 +965,8 @@ incoherent instances as long as there are others.
 -}
 
 instanceBindFun :: TyCoVar -> BindFlag
-instanceBindFun tv | isTcTyVar tv && isOverlappableTyVar tv = Skolem
-                   | otherwise                              = BindMe
+instanceBindFun tv | isOverlappableTyVar tv = Skolem
+                   | otherwise              = BindMe
    -- Note [Binding when looking up instances]
 
 {-

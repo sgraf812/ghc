@@ -54,7 +54,6 @@ import NameSet
 import RdrName
 import TyCon
 import Type
-import TysPrim        ( tYPE )
 import TcEvidence
 import VarSet
 import TysWiredIn
@@ -141,7 +140,7 @@ tcInferSigma expr = addErrCtxt (exprCtxt expr) (tcInferSigmaNC expr)
 
 tcInferSigmaNC (L loc expr)
   = setSrcSpan loc $
-    do { (expr', sigma) <- tcInfer (tcExpr expr)
+    do { (expr', sigma) <- tcInferNoInst (tcExpr expr)
        ; return (L loc expr', sigma) }
 
 tcInferRho, tcInferRhoNC :: LHsExpr Name -> TcM (LHsExpr TcId, TcRhoType)
@@ -307,7 +306,7 @@ People write
 so much, where
    runST :: (forall s. ST s a) -> a
 that I have finally given in and written a special type-checking
-rule just for saturated appliations of ($).
+rule just for saturated applications of ($).
   * Infer the type of the first argument
   * Decompose it; should be of form (arg2_ty -> res_ty),
        where arg2_ty might be a polytype
@@ -1176,14 +1175,10 @@ tcInferFun (L loc (HsRecFld f))
        ; return (L loc fun, ty) }
 
 tcInferFun fun
-  = do { (fun, fun_ty) <- tcInferSigma fun
+  = tcInferSigma fun
+      -- NB: tcInferSigma; see TcUnify
+      -- Note [Deep instantiation of InferResult]
 
-         -- Zonk the function type carefully, to expose any polymorphism
-         -- E.g. (( \(x::forall a. a->a). blah ) e)
-         -- We can see the rank-2 type of the lambda in time to generalise e
-       ; fun_ty' <- zonkTcType fun_ty
-
-       ; return (fun, fun_ty') }
 
 ----------------
 -- | Type-check the arguments to a function, possibly including visible type
@@ -1212,7 +1207,7 @@ tcArgs fun orig_fun_ty fun_orig orig_args herald
                           kind = tyVarKind tv
                     ; MASSERT2( vis == Specified
                         , (vcat [ ppr fun_ty, ppr upsilon_ty, ppr tvb
-                                , ppr inner_ty, pprTvBndr tv
+                                , ppr inner_ty, pprTyVar tv
                                 , ppr vis ]) )
                     ; ty_arg <- tcHsTypeApp hs_ty_arg kind
                     ; let insted_ty = substTyWithUnchecked [tv] [ty_arg] inner_ty
@@ -1267,7 +1262,7 @@ tcTupArgs args tys
 tcSyntaxOp :: CtOrigin
            -> SyntaxExpr Name
            -> [SyntaxOpType]           -- ^ shape of syntax operator arguments
-           -> ExpType                  -- ^ overall result type
+           -> ExpRhoType               -- ^ overall result type
            -> ([TcSigmaType] -> TcM a) -- ^ Type check any arguments
            -> TcM (a, SyntaxExpr TcId)
 -- ^ Typecheck a syntax operator
@@ -1365,7 +1360,7 @@ tcSynArgE orig sigma_ty syn_ty thing_inside
         herald = text "This rebindable syntax expects a function with"
 
     go rho_ty (SynType the_ty)
-      = do { wrap   <- tcSubTypeET orig the_ty rho_ty
+      = do { wrap   <- tcSubTypeET orig GenSigCtxt the_ty rho_ty
            ; result <- thing_inside []
            ; return (result, wrap) }
 
@@ -1507,8 +1502,7 @@ tcExprSig expr sig@(PartialSig { psig_name = name, sig_loc = loc })
                  then return idHsWrapper  -- Fast path; also avoids complaint when we infer
                                           -- an ambiguouse type and have AllowAmbiguousType
                                           -- e..g infer  x :: forall a. F a -> Int
-                 else tcSubType_NC ExprSigCtxt inferred_sigma
-                                   (mkCheckExpType my_sigma)
+                 else tcSubType_NC ExprSigCtxt inferred_sigma my_sigma
 
        ; traceTc "tcExpSig" (ppr qtvs $$ ppr givens $$ ppr inferred_sigma $$ ppr my_sigma)
        ; let poly_wrap = wrap
@@ -1581,6 +1575,7 @@ tcInferRecSelId (Ambiguous lbl _)
 ------------------------
 tcInferId :: Name -> TcM (HsExpr TcId, TcSigmaType)
 -- Look up an occurrence of an Id
+-- Do not instantiate its type
 tcInferId id_name
   | id_name `hasKey` tagToEnumKey
   = failWithTc (text "tagToEnum# must appear applied to one argument")
@@ -1658,22 +1653,23 @@ tc_infer_id lbl id_name
 
 
 tcUnboundId :: UnboundVar -> ExpRhoType -> TcM (HsExpr TcId)
--- Typechedk an occurrence of an unbound Id
+-- Typecheck an occurrence of an unbound Id
 --
--- Some of these started life as a true hole "_".  Others might simply
--- be variables that accidentally have no binding site
+-- Some of these started life as a true expression hole "_".
+-- Others might simply be variables that accidentally have no binding site
 --
 -- We turn all of them into HsVar, since HsUnboundVar can't contain an
 -- Id; and indeed the evidence for the CHoleCan does bind it, so it's
 -- not unbound any more!
 tcUnboundId unbound res_ty
- = do { ty <- newFlexiTyVarTy liftedTypeKind
+ = do { ty <- newOpenFlexiTyVarTy  -- Allow Int# etc (Trac #12531)
       ; let occ = unboundVarOcc unbound
       ; name <- newSysName occ
       ; let ev = mkLocalId name ty
       ; loc <- getCtLocM HoleOrigin Nothing
       ; let can = CHoleCan { cc_ev = CtWanted { ctev_pred = ty
                                               , ctev_dest = EvVarDest ev
+                                              , ctev_nosh = WDeriv
                                               , ctev_loc  = loc}
                            , cc_hole = ExprHole unbound }
       ; emitInsoluble can
@@ -1747,10 +1743,10 @@ tcSeq loc fun_name args res_ty
 
         ; (arg1, arg2, arg2_exp_ty) <- case args1 of
             [Right hs_ty_arg2, Left term_arg1, Left term_arg2]
-              -> do { rr_ty <- newFlexiTyVarTy runtimeRepTy
-                    ; ty_arg2 <- tcHsTypeApp hs_ty_arg2 (tYPE rr_ty)
+              -> do { arg2_kind <- newOpenTypeKind
+                    ; ty_arg2 <- tcHsTypeApp hs_ty_arg2 arg2_kind
                                    -- see Note [Typing rule for seq]
-                    ; _ <- tcSubTypeDS GenSigCtxt noThing ty_arg2 res_ty
+                    ; _ <- tcSubTypeDS (OccurrenceOf fun_name) GenSigCtxt ty_arg2 res_ty
                     ; return (term_arg1, term_arg2, mkCheckExpType ty_arg2) }
             [Left term_arg1, Left term_arg2]
               -> return (term_arg1, term_arg2, res_ty)
@@ -1773,7 +1769,7 @@ tcTagToEnum loc fun_name args res_ty
        ; arg <- case args of
            [Right hs_ty_arg, Left term_arg]
              -> do { ty_arg <- tcHsTypeApp hs_ty_arg liftedTypeKind
-                   ; _ <- tcSubTypeDS GenSigCtxt noThing ty_arg res_ty
+                   ; _ <- tcSubTypeDS (OccurrenceOf fun_name) GenSigCtxt ty_arg res_ty
                      -- other than influencing res_ty, we just
                      -- don't care about a type arg passed in.
                      -- So drop the evidence.
@@ -1943,7 +1939,7 @@ getFixedTyVars upd_fld_occs univ_tvs cons
                                     -- Universally-quantified tyvars that
                                     -- appear in any of the *implicit*
                                     -- arguments to the constructor are fixed
-                                    -- See Note [Implict type sharing]
+                                    -- See Note [Implicit type sharing]
 
                             fixed_tys = [ty | (fl, ty) <- zip flds arg_tys
                                             , not (flLabel fl `elem` upd_fld_occs)]

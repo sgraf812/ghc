@@ -17,21 +17,15 @@ TcSplice: Template Haskell splices
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module TcSplice(
-     -- These functions are defined in stage1 and stage2
-     -- The raise civilised errors in stage1
      tcSpliceExpr, tcTypedBracket, tcUntypedBracket,
 --     runQuasiQuoteExpr, runQuasiQuotePat,
 --     runQuasiQuoteDecl, runQuasiQuoteType,
      runAnnotation,
 
-#ifdef GHCI
-     -- These ones are defined only in stage2, and are
-     -- called only in stage2 (ie GHCI is on)
      runMetaE, runMetaP, runMetaT, runMetaD, runQuasi,
      tcTopSpliceExpr, lookupThName_maybe,
      defaultRunMeta, runMeta', runRemoteModFinalizers,
      finishTH
-#endif
       ) where
 
 #include "HsVersions.h"
@@ -51,7 +45,6 @@ import TcEnv
 
 import Control.Monad
 
-#ifdef GHCI
 import GHCi.Message
 import GHCi.RemoteTypes
 import GHCi
@@ -130,7 +123,6 @@ import Data.Typeable ( typeOf, Typeable, TypeRep, typeRep )
 import Data.Data (Data)
 import Data.Proxy    ( Proxy (..) )
 import GHC.Exts         ( unsafeCoerce# )
-#endif
 
 {-
 ************************************************************************
@@ -238,16 +230,6 @@ quotationCtxtDoc br_body
          2 (ppr br_body)
 
 
-#ifndef GHCI
-tcSpliceExpr  e _      = failTH e "Template Haskell splice"
-
--- runQuasiQuoteExpr q = failTH q "quasiquote"
--- runQuasiQuotePat  q = failTH q "pattern quasiquote"
--- runQuasiQuoteType q = failTH q "type quasiquote"
--- runQuasiQuoteDecl q = failTH q "declaration quasiquote"
-runAnnotation   _ q = failTH q "annotation"
-
-#else
   -- The whole of the rest of the file is the else-branch (ie stage2 only)
 
 {-
@@ -441,7 +423,7 @@ When a variable is used, we compare
 ************************************************************************
 -}
 
-tcSpliceExpr splice@(HsTypedSplice name expr) res_ty
+tcSpliceExpr splice@(HsTypedSplice _ name expr) res_ty
   = addErrCtxt (spliceCtxtDoc splice) $
     setSrcSpan (getLoc expr)    $ do
     { stage <- getStage
@@ -879,7 +861,7 @@ instance TH.Quasi TcM where
 
         -- For qRecover, discard error messages if
         -- the recovery action is chosen.  Otherwise
-        -- we'll only fail higher up.  c.f. tryTcLIE_
+        -- we'll only fail higher up.
   qRecover recover main = do { (msgs, mb_res) <- tryTcErrs main
                              ; case mb_res of
                                  Just val -> do { addMessages msgs      -- There might be warnings
@@ -962,16 +944,12 @@ addModFinalizerRef finRef = do
         pprPanic "addModFinalizer was called when no finalizers were collected"
                  (ppr th_stage)
 
--- | Run all module finalizers
+-- | Releases the external interpreter state.
 finishTH :: TcM ()
 finishTH = do
-  tcg <- getGblEnv
-  let th_modfinalizers_var = tcg_th_modfinalizers tcg
-  modfinalizers <- readTcRef th_modfinalizers_var
-  writeTcRef th_modfinalizers_var []
-  sequence_ modfinalizers
   dflags <- getDynFlags
-  when (gopt Opt_ExternalInterpreter dflags) $
+  when (gopt Opt_ExternalInterpreter dflags) $ do
+    tcg <- getGblEnv
     writeTcRef (tcg_th_remote_state tcg) Nothing
 
 runTHExp :: ForeignHValue -> TcM TH.Exp
@@ -1283,7 +1261,8 @@ tcLookupTh name
                 Just thing -> return (AGlobal thing);
                 Nothing    ->
 
-          if nameIsLocalOrFrom (tcg_mod gbl_env) name
+          -- EZY: I don't think this choice matters, no TH in signatures!
+          if nameIsLocalOrFrom (tcg_semantic_mod gbl_env) name
           then  -- It's defined in this module
                 failWithTc (notInEnv name)
 
@@ -1360,11 +1339,16 @@ reifyThing thing = pprPanic "reifyThing" (pprTcTyThingCategory thing)
 
 -------------------------------------------
 reifyAxBranch :: TyCon -> CoAxBranch -> TcM TH.TySynEqn
-reifyAxBranch fam_tc (CoAxBranch { cab_lhs = args, cab_rhs = rhs })
+reifyAxBranch fam_tc (CoAxBranch { cab_lhs = lhs, cab_rhs = rhs })
             -- remove kind patterns (#8884)
-  = do { args' <- mapM reifyType (filterOutInvisibleTypes fam_tc args)
+  = do { let lhs_types_only = filterOutInvisibleTypes fam_tc lhs
+       ; lhs' <- reifyTypes lhs_types_only
+       ; annot_th_lhs <- zipWith3M annotThType (mkIsPolyTvs fam_tvs)
+                                   lhs_types_only lhs'
        ; rhs'  <- reifyType rhs
-       ; return (TH.TySynEqn args' rhs') }
+       ; return (TH.TySynEqn annot_th_lhs rhs') }
+  where
+    fam_tvs = filterOutInvisibleTyVars fam_tc (tyConTyVars fam_tc)
 
 reifyTyCon :: TyCon -> TcM TH.Info
 reifyTyCon tc
@@ -1819,7 +1803,9 @@ reify_tc_app tc tys
     tc_binders  = tyConBinders tc
     tc_res_kind = tyConResKind tc
 
-    r_tc | isUnboxedTupleTyCon tc         = TH.UnboxedTupleT (arity `div` 2)
+    r_tc | isUnboxedSumTyCon tc           = TH.UnboxedSumT (arity `div` 2)
+         | isUnboxedTupleTyCon tc         = TH.UnboxedTupleT (arity `div` 2)
+         | isPromotedTupleTyCon tc        = TH.PromotedTupleT (arity `div` 2)
              -- See Note [Unboxed tuple RuntimeRep vars] in TyCon
          | isTupleTyCon tc                = if isPromotedDataCon tc
                                             then TH.PromotedTupleT arity
@@ -1830,6 +1816,7 @@ reify_tc_app tc tys
          | tc `hasKey` heqTyConKey        = TH.EqualityT
          | tc `hasKey` eqPrimTyConKey     = TH.EqualityT
          | tc `hasKey` eqReprPrimTyConKey = TH.ConT (reifyName coercibleTyCon)
+         | isPromotedDataCon tc           = TH.PromotedT (reifyName tc)
          | otherwise                      = TH.ConT (reifyName tc)
 
     -- See Note [Kind annotations on TyConApps]
@@ -1843,18 +1830,16 @@ reify_tc_app tc tys
 
     needs_kind_sig
       | GT <- compareLength tys tc_binders
-      , tcIsTyVarTy tc_res_kind
-      = True
+      = tcIsTyVarTy tc_res_kind
       | otherwise
-      = not $
-        isEmptyVarSet $
+      = not . isEmptyVarSet $
         filterVarSet isTyVar $
         tyCoVarsOfType $
         mkTyConKind (dropList tys tc_binders) tc_res_kind
 
 reifyPred :: TyCoRep.PredType -> TcM TH.Pred
 reifyPred ty
-  -- We could reify the invisible paramter as a class but it seems
+  -- We could reify the invisible parameter as a class but it seems
   -- nicer to support them properly...
   | isIPPred ty = noTH (sLit "implicit parameters") (ppr ty)
   | otherwise   = reifyType ty
@@ -1971,6 +1956,7 @@ reifyModule (TH.Module (TH.PkgName pkgString) (TH.ModName mString)) = do
       usageToModule _ (UsageFile {}) = Nothing
       usageToModule this_pkg (UsageHomeModule { usg_mod_name = mn }) = Just $ mkModule this_pkg mn
       usageToModule _ (UsagePackageModule { usg_mod = m }) = Just m
+      usageToModule _ (UsageMergedRequirement { usg_mod = m }) = Just m
 
 ------------------------------
 mkThAppTs :: TH.Type -> [TH.Type] -> TH.Type
@@ -2011,5 +1997,3 @@ such fields defined in the module (see the test case
 overloadedrecflds/should_fail/T11103.hs).  The "proper" fix requires changes to
 the TH AST to make it able to represent duplicate record fields.
 -}
-
-#endif  /* GHCI */

@@ -1017,7 +1017,7 @@ is given, the following additional differences apply:
 -  Rule 2 above is relaxed thus: *All* of the classes ``Ci`` are
    single-parameter type classes.
 
--  Rule 3 above is relaxed this: At least one of the classes ``Ci`` is
+-  Rule 3 above is relaxed thus: At least one of the classes ``Ci`` is
    an *interactive class* (defined below).
 
 -  The unit type ``()`` and the list type ``[]`` are added to the start of
@@ -1900,6 +1900,17 @@ GHCi and load the program whose topmost module is in the file
 Most of the command-line options accepted by GHC (see :ref:`using-ghc`)
 also make sense in interactive mode. The ones that don't make sense are
 mostly obvious.
+
+.. ghc-flag:: -flocal-ghci-history
+
+  By default, GHCi keeps global history in ``~/.ghc/ghci_history`` or
+  ``%APPDATA%/<app>/ghci_history``, but you can use current directory, e.g.:
+
+  .. code-block:: none
+
+      $ ghci -flocal-ghci-history
+
+  It will create ``.ghci-history`` in current folder where GHCi is launched.
 
 Packages
 ~~~~~~~~

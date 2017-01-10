@@ -13,6 +13,8 @@ module GHC (
         defaultErrorHandler,
         defaultCleanupHandler,
         prettyPrintGhcErrors,
+        withSignalHandlers,
+        withCleanupSession,
 
         -- * GHC Monad
         Ghc, GhcT, GhcMonad(..), HscEnv,
@@ -89,7 +91,6 @@ module GHC (
 
         -- * Interactive evaluation
 
-#ifdef GHCI
         -- ** Executing statements
         execStmt, ExecOptions(..), execOptions, ExecResult(..),
         resumeExec,
@@ -101,11 +102,10 @@ module GHC (
         parseImportDecl,
         setContext, getContext,
         setGHCiMonad, getGHCiMonad,
-#endif
+
         -- ** Inspecting the current context
         getBindings, getInsts, getPrintUnqual,
         findModule, lookupModule,
-#ifdef GHCI
         isModuleTrusted, moduleTrustReqs,
         getNamesInScope,
         getRdrNamesInScope,
@@ -121,9 +121,8 @@ module GHC (
 
         -- ** Looking up a Name
         parseName,
-#endif
         lookupName,
-#ifdef GHCI
+
         -- ** Compiling expressions
         HValue, parseExpr, compileParsedExpr,
         InteractiveEval.compileExpr, dynCompileExpr,
@@ -152,7 +151,6 @@ module GHC (
         RunResult(..),
         runStmt, runStmtWithLocation,
         resume,
-#endif
 
         -- * Abstract syntax elements
 
@@ -217,7 +215,7 @@ module GHC (
         pprParendType, pprTypeApp,
         Kind,
         PredType,
-        ThetaType, pprForAll, pprForAllImplicit, pprThetaArrowTy,
+        ThetaType, pprForAll, pprThetaArrowTy,
 
         -- ** Entities
         TyThing(..),
@@ -230,6 +228,7 @@ module GHC (
         defaultFixity, maxPrecedence,
         negateFixity,
         compareFixity,
+        LexicalFixity(..),
 
         -- ** Source locations
         SrcLoc(..), RealSrcLoc,
@@ -287,14 +286,12 @@ module GHC (
 
 #include "HsVersions.h"
 
-#ifdef GHCI
 import ByteCodeTypes
 import InteractiveEval
 import InteractiveEvalTypes
 import TcRnDriver       ( runTcInteractive )
 import GHCi
 import GHCi.RemoteTypes
-#endif
 
 import PprTyThing       ( pprFamInst )
 import HscMain
@@ -436,11 +433,9 @@ runGhc :: Maybe FilePath  -- ^ See argument to 'initGhcMonad'.
 runGhc mb_top_dir ghc = do
   ref <- newIORef (panic "empty session")
   let session = Session ref
-  flip unGhc session $ do
+  flip unGhc session $ withSignalHandlers $ do -- catch ^C
     initGhcMonad mb_top_dir
     withCleanupSession ghc
-
-  -- XXX: unregister interrupt handlers here?
 
 -- | Run function for 'GhcT' monad transformer.
 --
@@ -455,7 +450,7 @@ runGhcT :: ExceptionMonad m =>
 runGhcT mb_top_dir ghct = do
   ref <- liftIO $ newIORef (panic "empty session")
   let session = Session ref
-  flip unGhcT session $ do
+  flip unGhcT session $ withSignalHandlers $ do -- catch ^C
     initGhcMonad mb_top_dir
     withCleanupSession ghct
 
@@ -468,9 +463,7 @@ withCleanupSession ghc = ghc `gfinally` cleanup
       liftIO $ do
           cleanTempFiles dflags
           cleanTempDirs dflags
-#ifdef GHCI
           stopIServ hsc_env -- shut down the IServ
-#endif
           --  exceptions will be blocked while we clean the temporary files,
           -- so there shouldn't be any difficulty if we receive further
           -- signals.
@@ -490,8 +483,7 @@ withCleanupSession ghc = ghc `gfinally` cleanup
 initGhcMonad :: GhcMonad m => Maybe FilePath -> m ()
 initGhcMonad mb_top_dir
   = do { env <- liftIO $
-                do { installSignalHandlers  -- catch ^C
-                   ; initStaticOpts
+                do { initStaticOpts
                    ; mySettings <- initSysTools mb_top_dir
                    ; dflags <- initDynFlags (defaultDynFlags mySettings)
                    ; checkBrokenTablesNextToCode dflags
@@ -573,7 +565,7 @@ checkBrokenTablesNextToCode' dflags
 -- flags.  If you are not doing linking or doing static linking, you
 -- can ignore the list of packages returned.
 --
-setSessionDynFlags :: GhcMonad m => DynFlags -> m [UnitId]
+setSessionDynFlags :: GhcMonad m => DynFlags -> m [InstalledUnitId]
 setSessionDynFlags dflags = do
   dflags' <- checkNewDynFlags dflags
   (dflags'', preload) <- liftIO $ initPackages dflags'
@@ -583,7 +575,7 @@ setSessionDynFlags dflags = do
   return preload
 
 -- | Sets the program 'DynFlags'.
-setProgramDynFlags :: GhcMonad m => DynFlags -> m [UnitId]
+setProgramDynFlags :: GhcMonad m => DynFlags -> m [InstalledUnitId]
 setProgramDynFlags dflags = do
   dflags' <- checkNewDynFlags dflags
   (dflags'', preload) <- liftIO $ initPackages dflags'
@@ -889,10 +881,8 @@ typecheckModule pmod = do
            minf_rdr_env   = Just (tcg_rdr_env tc_gbl_env),
            minf_instances = fixSafeInstances safe $ md_insts details,
            minf_iface     = Nothing,
-           minf_safe      = safe
-#ifdef GHCI
-          ,minf_modBreaks = emptyModBreaks
-#endif
+           minf_safe      = safe,
+           minf_modBreaks = emptyModBreaks
          }}
 
 -- | Desugar a typechecked module.
@@ -1080,10 +1070,8 @@ data ModuleInfo = ModuleInfo {
         minf_rdr_env   :: Maybe GlobalRdrEnv,   -- Nothing for a compiled/package mod
         minf_instances :: [ClsInst],
         minf_iface     :: Maybe ModIface,
-        minf_safe      :: SafeHaskellMode
-#ifdef GHCI
-       ,minf_modBreaks :: ModBreaks
-#endif
+        minf_safe      :: SafeHaskellMode,
+        minf_modBreaks :: ModBreaks
   }
         -- We don't want HomeModInfo here, because a ModuleInfo applies
         -- to package modules too.
@@ -1106,7 +1094,6 @@ getModuleInfo mdl = withSession $ \hsc_env -> do
    -- exist... hence the isHomeModule test here.  (ToDo: reinstate)
 
 getPackageModuleInfo :: HscEnv -> Module -> IO (Maybe ModuleInfo)
-#ifdef GHCI
 getPackageModuleInfo hsc_env mdl
   = do  eps <- hscEPS hsc_env
         iface <- hscGetModuleInterface hsc_env mdl
@@ -1125,11 +1112,6 @@ getPackageModuleInfo hsc_env mdl
                         minf_safe      = getSafeMode $ mi_trust iface,
                         minf_modBreaks = emptyModBreaks
                 }))
-#else
--- bogusly different for non-GHCI (ToDo)
-getPackageModuleInfo _hsc_env _mdl = do
-  return Nothing
-#endif
 
 getHomeModuleInfo :: HscEnv -> Module -> IO (Maybe ModuleInfo)
 getHomeModuleInfo hsc_env mdl =
@@ -1145,9 +1127,7 @@ getHomeModuleInfo hsc_env mdl =
                         minf_instances = md_insts details,
                         minf_iface     = Just iface,
                         minf_safe      = getSafeMode $ mi_trust iface
-#ifdef GHCI
                        ,minf_modBreaks = getModBreaks hmi
-#endif
                         }))
 
 -- | The list of top-level entities defined in a module
@@ -1196,10 +1176,8 @@ modInfoIface = minf_iface
 modInfoSafe :: ModuleInfo -> SafeHaskellMode
 modInfoSafe = minf_safe
 
-#ifdef GHCI
 modInfoModBreaks :: ModuleInfo -> ModBreaks
 modInfoModBreaks = minf_modBreaks
-#endif
 
 isDictonaryId :: Id -> Bool
 isDictonaryId id
@@ -1219,11 +1197,9 @@ findGlobalAnns deserialize target = withSession $ \hsc_env -> do
     ann_env <- liftIO $ prepareAnnotations hsc_env Nothing
     return (findAnns deserialize ann_env target)
 
-#ifdef GHCI
 -- | get the GlobalRdrEnv for a session
 getGRE :: GhcMonad m => m GlobalRdrEnv
 getGRE = withSession $ \hsc_env-> return $ ic_rn_gbl_env (hsc_IC hsc_env)
-#endif
 
 -- -----------------------------------------------------------------------------
 
@@ -1422,7 +1398,6 @@ lookupLoadedHomeModule mod_name = withSession $ \hsc_env ->
     Just mod_info      -> return (Just (mi_module (hm_iface mod_info)))
     _not_a_home_module -> return Nothing
 
-#ifdef GHCI
 -- | Check that a module is safe to import (according to Safe Haskell).
 --
 -- We return True to indicate the import is safe and False otherwise
@@ -1432,7 +1407,7 @@ isModuleTrusted m = withSession $ \hsc_env ->
     liftIO $ hscCheckSafe hsc_env m noSrcSpan
 
 -- | Return if a module is trusted and the pkgs it depends on to be trusted.
-moduleTrustReqs :: GhcMonad m => Module -> m (Bool, [UnitId])
+moduleTrustReqs :: GhcMonad m => Module -> m (Bool, [InstalledUnitId])
 moduleTrustReqs m = withSession $ \hsc_env ->
     liftIO $ hscGetSafe hsc_env m noSrcSpan
 
@@ -1464,7 +1439,6 @@ obtainTermFromId :: GhcMonad m => Int -> Bool -> Id -> m Term
 obtainTermFromId bound force id = withSession $ \hsc_env ->
     liftIO $ InteractiveEval.obtainTermFromId hsc_env bound force id
 
-#endif
 
 -- | Returns the 'TyThing' for a 'Name'.  The 'Name' may refer to any
 -- entity known to GHC, including 'Name's defined using 'runStmt'.

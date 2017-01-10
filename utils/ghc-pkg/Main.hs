@@ -26,7 +26,9 @@ import Distribution.ParseUtils
 import Distribution.Package hiding (installedUnitId)
 import Distribution.Text
 import Distribution.Version
+import Distribution.Backpack
 import Distribution.Simple.Utils (fromUTF8, toUTF8, writeUTF8File, readUTF8File)
+import qualified Data.Version as Version
 import System.FilePath as FilePath
 import qualified System.FilePath.Posix as FilePath.Posix
 import System.Directory ( getAppUserDataDirectory, createDirectoryIfMissing,
@@ -51,6 +53,8 @@ import System.IO.Error
 import GHC.IO.Exception (IOErrorType(InappropriateType))
 import Data.List
 import Control.Concurrent
+import qualified Data.Set as Set
+import qualified Data.Map as Map
 
 import qualified Data.ByteString.Char8 as BS
 
@@ -226,8 +230,8 @@ usageHeader prog = substProg prog $
   "    Register the package, overwriting any other package with the\n" ++
   "    same name. The input file should be encoded in UTF-8.\n" ++
   "\n" ++
-  "  $p unregister {pkg-id}\n" ++
-  "    Unregister the specified package.\n" ++
+  "  $p unregister [pkg-id] \n" ++
+  "    Unregister the specified packages in the order given.\n" ++
   "\n" ++
   "  $p expose {pkg-id}\n" ++
   "    Expose the specified package.\n" ++
@@ -324,8 +328,8 @@ data AsPackageArg
 
 -- | Represents how a package may be specified by a user on the command line.
 data PackageArg
-    -- | A package identifier foo-0.1; the version might be a glob.
-    = Id PackageIdentifier
+    -- | A package identifier foo-0.1, or a glob foo-*
+    = Id GlobPackageIdentifier
     -- | An installed package ID foo-0.1-HASH.  This is guaranteed to uniquely
     -- match a single entry in the package database.
     | IUId UnitId
@@ -422,9 +426,10 @@ runit verbosity cli nonopts = do
         registerPackage filename verbosity cli
                         multi_instance
                         expand_env_vars True force
-    ["unregister", pkgarg_str] -> do
-        pkgarg <- readPackageArg as_arg pkgarg_str
-        unregisterPackage pkgarg verbosity cli force
+    "unregister" : pkgarg_strs@(_:_) -> do
+        forM_ pkgarg_strs $ \pkgarg_str -> do
+          pkgarg <- readPackageArg as_arg pkgarg_str
+          unregisterPackage pkgarg verbosity cli force
     ["expose", pkgarg_str] -> do
         pkgarg <- readPackageArg as_arg pkgarg_str
         exposePackage pkgarg verbosity cli force
@@ -486,25 +491,31 @@ parseCheck parser str what =
     [x] -> return x
     _ -> die ("cannot parse \'" ++ str ++ "\' as a " ++ what)
 
-readGlobPkgId :: String -> IO PackageIdentifier
+-- | Either an exact 'PackageIdentifier', or a glob for all packages
+-- matching 'PackageName'.
+data GlobPackageIdentifier
+    = ExactPackageIdentifier PackageIdentifier
+    | GlobPackageIdentifier  PackageName
+
+displayGlobPkgId :: GlobPackageIdentifier -> String
+displayGlobPkgId (ExactPackageIdentifier pid) = display pid
+displayGlobPkgId (GlobPackageIdentifier pn) = display pn ++ "-*"
+
+readGlobPkgId :: String -> IO GlobPackageIdentifier
 readGlobPkgId str = parseCheck parseGlobPackageId str "package identifier"
 
-parseGlobPackageId :: ReadP r PackageIdentifier
+parseGlobPackageId :: ReadP r GlobPackageIdentifier
 parseGlobPackageId =
-  parse
+  fmap ExactPackageIdentifier parse
      +++
   (do n <- parse
       _ <- string "-*"
-      return (PackageIdentifier{ pkgName = n, pkgVersion = globVersion }))
+      return (GlobPackageIdentifier n))
 
 readPackageArg :: AsPackageArg -> String -> IO PackageArg
 readPackageArg AsUnitId str =
     parseCheck (IUId `fmap` parse) str "installed package id"
 readPackageArg AsDefault str = Id `fmap` readGlobPkgId str
-
--- globVersion means "all versions"
-globVersion :: Version
-globVersion = Version [] ["*"]
 
 -- -----------------------------------------------------------------------------
 -- Package databases
@@ -811,6 +822,7 @@ mungePackagePaths top_dir pkgroot pkg =
       importDirs  = munge_paths (importDirs pkg),
       includeDirs = munge_paths (includeDirs pkg),
       libraryDirs = munge_paths (libraryDirs pkg),
+      libraryDynDirs = munge_paths (libraryDynDirs pkg),
       frameworkDirs = munge_paths (frameworkDirs pkg),
       haddockInterfaces = munge_paths (haddockInterfaces pkg),
                      -- haddock-html is allowed to be either a URL or a file
@@ -987,7 +999,9 @@ registerPackage input verbosity my_flags multi_instance
      removes = [ RemovePackage p
                | not multi_instance,
                  p <- packages db_to_operate_on,
-                 sourcePackageId p == sourcePackageId pkg ]
+                 sourcePackageId p == sourcePackageId pkg,
+                 -- Only remove things that were instantiated the same way!
+                 instantiatedWith p == instantiatedWith pkg ]
   --
   changeDB verbosity (removes ++ [AddPackage pkg]) db_to_operate_on
 
@@ -1075,27 +1089,32 @@ updateDBCache verbosity db = do
       hPutChar handle c
 
 type PackageCacheFormat = GhcPkg.InstalledPackageInfo
+                            ComponentId
                             PackageIdentifier
                             PackageName
                             UnitId
+                            OpenUnitId
                             ModuleName
-                            Module
+                            OpenModule
 
 convertPackageInfoToCacheFormat :: InstalledPackageInfo -> PackageCacheFormat
 convertPackageInfoToCacheFormat pkg =
     GhcPkg.InstalledPackageInfo {
        GhcPkg.unitId             = installedUnitId pkg,
+       GhcPkg.componentId        = installedComponentId pkg,
+       GhcPkg.instantiatedWith   = instantiatedWith pkg,
        GhcPkg.sourcePackageId    = sourcePackageId pkg,
        GhcPkg.packageName        = packageName pkg,
-       GhcPkg.packageVersion     = packageVersion pkg,
+       GhcPkg.packageVersion     = Version.Version (versionNumbers (packageVersion pkg)) [],
        GhcPkg.depends            = depends pkg,
-       GhcPkg.abiHash            = let AbiHash abi = abiHash pkg
-                                   in abi,
+       GhcPkg.abiDepends         = map (\(AbiDependency k v) -> (k,unAbiHash v)) (abiDepends pkg),
+       GhcPkg.abiHash            = unAbiHash (abiHash pkg),
        GhcPkg.importDirs         = importDirs pkg,
        GhcPkg.hsLibraries        = hsLibraries pkg,
        GhcPkg.extraLibraries     = extraLibraries pkg,
        GhcPkg.extraGHCiLibraries = extraGHCiLibraries pkg,
        GhcPkg.libraryDirs        = libraryDirs pkg,
+       GhcPkg.libraryDynDirs     = libraryDynDirs pkg,
        GhcPkg.frameworks         = frameworks pkg,
        GhcPkg.frameworkDirs      = frameworkDirs pkg,
        GhcPkg.ldOptions          = ldOptions pkg,
@@ -1106,23 +1125,24 @@ convertPackageInfoToCacheFormat pkg =
        GhcPkg.haddockHTMLs       = haddockHTMLs pkg,
        GhcPkg.exposedModules     = map convertExposed (exposedModules pkg),
        GhcPkg.hiddenModules      = hiddenModules pkg,
+       GhcPkg.indefinite         = indefinite pkg,
        GhcPkg.exposed            = exposed pkg,
        GhcPkg.trusted            = trusted pkg
     }
   where convertExposed (ExposedModule n reexport) = (n, reexport)
 
+instance GhcPkg.BinaryStringRep ComponentId where
+  fromStringRep = mkComponentId . fromStringRep
+  toStringRep   = toStringRep . display
+
 instance GhcPkg.BinaryStringRep PackageName where
-  fromStringRep = PackageName . fromStringRep
+  fromStringRep = mkPackageName . fromStringRep
   toStringRep   = toStringRep . display
 
 instance GhcPkg.BinaryStringRep PackageIdentifier where
   fromStringRep = fromMaybe (error "BinaryStringRep PackageIdentifier")
                 . simpleParse . fromStringRep
   toStringRep = toStringRep . display
-
-instance GhcPkg.BinaryStringRep UnitId where
-  fromStringRep = mkUnitId . fromStringRep
-  toStringRep (SimpleUnitId (ComponentId cid_str)) = toStringRep cid_str
 
 instance GhcPkg.BinaryStringRep ModuleName where
   fromStringRep = ModuleName.fromString . fromStringRep
@@ -1132,9 +1152,21 @@ instance GhcPkg.BinaryStringRep String where
   fromStringRep = fromUTF8 . BS.unpack
   toStringRep   = BS.pack . toUTF8
 
-instance GhcPkg.DbModuleRep UnitId ModuleName Module where
-  fromDbModule (GhcPkg.DbModule uid mod_name) = Module uid mod_name
-  toDbModule (Module uid mod_name) = GhcPkg.DbModule uid mod_name
+instance GhcPkg.BinaryStringRep UnitId where
+  fromStringRep = mkUnitId . fromStringRep
+  toStringRep   = toStringRep . display
+
+instance GhcPkg.DbUnitIdModuleRep UnitId ComponentId OpenUnitId ModuleName OpenModule where
+  fromDbModule (GhcPkg.DbModule uid mod_name) = OpenModule uid mod_name
+  fromDbModule (GhcPkg.DbModuleVar mod_name) = OpenModuleVar mod_name
+  toDbModule (OpenModule uid mod_name) = GhcPkg.DbModule uid mod_name
+  toDbModule (OpenModuleVar mod_name) = GhcPkg.DbModuleVar mod_name
+  fromDbUnitId (GhcPkg.DbUnitId cid insts) = IndefFullUnitId cid (Map.fromList insts)
+  fromDbUnitId (GhcPkg.DbInstalledUnitId uid)
+    = DefiniteUnitId (unsafeMkDefUnitId uid)
+  toDbUnitId (IndefFullUnitId cid insts) = GhcPkg.DbUnitId cid (Map.toList insts)
+  toDbUnitId (DefiniteUnitId def_uid)
+    = GhcPkg.DbInstalledUnitId (unDefUnitId def_uid)
 
 -- -----------------------------------------------------------------------------
 -- Exposing, Hiding, Trusting, Distrusting, Unregistering are all similar
@@ -1339,7 +1371,7 @@ showPackageDot verbosity myflags = do
 
 -- ToDo: This is no longer well-defined with unit ids, because the
 -- dependencies may be varying versions
-latestPackage ::  Verbosity -> [Flag] -> PackageIdentifier -> IO ()
+latestPackage ::  Verbosity -> [Flag] -> GlobPackageIdentifier -> IO ()
 latestPackage verbosity my_flags pkgid = do
   (_, _, flag_db_stack) <-
      getPkgDatabases verbosity False{-modify-} False{-use user-}
@@ -1400,18 +1432,16 @@ findPackagesByDB db_stack pkgarg
         [] -> die ("cannot find package " ++ pkg_msg pkgarg)
         ps -> return ps
   where
-        pkg_msg (Id pkgid)           = display pkgid
+        pkg_msg (Id pkgid)           = displayGlobPkgId pkgid
         pkg_msg (IUId ipid)          = display ipid
         pkg_msg (Substring pkgpat _) = "matching " ++ pkgpat
 
-matches :: PackageIdentifier -> PackageIdentifier -> Bool
-pid `matches` pid'
-  = (pkgName pid == pkgName pid')
-    && (pkgVersion pid == pkgVersion pid' || not (realVersion pid))
-
-realVersion :: PackageIdentifier -> Bool
-realVersion pkgid = versionBranch (pkgVersion pkgid) /= []
-  -- when versionBranch == [], this is a glob
+matches :: GlobPackageIdentifier -> PackageIdentifier -> Bool
+GlobPackageIdentifier pn `matches` pid'
+  = (pn == pkgName pid')
+ExactPackageIdentifier pid `matches` pid'
+  = pkgName pid == pkgName pid' &&
+    (pkgVersion pid == pkgVersion pid' || pkgVersion pid == nullVersion)
 
 matchesPkg :: PackageArg -> InstalledPackageInfo -> Bool
 (Id pid)        `matchesPkg` pkg = pid `matches` sourcePackageId pkg
@@ -1597,6 +1627,7 @@ checkPackageConfig pkg verbosity db_stack
   checkDuplicateDepends (depends pkg)
   mapM_ (checkDir False "import-dirs")  (importDirs pkg)
   mapM_ (checkDir True  "library-dirs") (libraryDirs pkg)
+  mapM_ (checkDir True  "dynamic-library-dirs") (libraryDynDirs pkg)
   mapM_ (checkDir True  "include-dirs") (includeDirs pkg)
   mapM_ (checkDir True  "framework-dirs") (frameworkDirs pkg)
   mapM_ (checkFile   True "haddock-interfaces") (haddockInterfaces pkg)
@@ -1604,7 +1635,8 @@ checkPackageConfig pkg verbosity db_stack
   checkDuplicateModules pkg
   checkExposedModules db_stack pkg
   checkOtherModules pkg
-  mapM_ (checkHSLib verbosity (libraryDirs pkg)) (hsLibraries pkg)
+  let has_code = Set.null (openModuleSubstFreeHoles (Map.fromList (instantiatedWith pkg)))
+  when has_code $ mapM_ (checkHSLib verbosity (libraryDirs pkg ++ libraryDynDirs pkg)) (hsLibraries pkg)
   -- ToDo: check these somehow?
   --    extra_libraries :: [String],
   --    c_includes      :: [String],
@@ -1780,13 +1812,15 @@ checkDuplicateModules pkg
 -- question is NOT a signature (however, if it is a reexport, then it's fine
 -- for the original module to be a signature.)
 checkModule :: String
-                    -> PackageDBStack
-                    -> InstalledPackageInfo
-                    -> Module
-                    -> Validate ()
+            -> PackageDBStack
+            -> InstalledPackageInfo
+            -> OpenModule
+            -> Validate ()
+checkModule _ _ _ (OpenModuleVar _) = error "Impermissible reexport"
 checkModule field_name db_stack pkg
-    (Module definingPkgId definingModule) =
-  let mpkg = if definingPkgId == installedUnitId pkg
+    (OpenModule (DefiniteUnitId def_uid) definingModule) =
+  let definingPkgId = unDefUnitId def_uid
+      mpkg = if definingPkgId == installedUnitId pkg
               then Just pkg
               else PackageIndex.lookupUnitId ipix definingPkgId
   in case mpkg of
@@ -1816,7 +1850,6 @@ checkModule field_name db_stack pkg
                                "that is reexported but not defined in the " ++
                                "defining package " ++ display definingPkgId)
             _ -> return ()
-
   where
     all_pkgs = allPackagesInStack db_stack
     ipix     = PackageIndex.fromList all_pkgs
@@ -1827,6 +1860,10 @@ checkModule field_name db_stack pkg
       return (Graph.path depgraph thispkg otherpkg)
     (depgraph, _, graphVertex) =
       PackageIndex.dependencyGraph (PackageIndex.insert pkg ipix)
+
+checkModule _ _ _ (OpenModule (IndefFullUnitId _ _) _) =
+    -- TODO: add some checks here
+    return ()
 
 
 -- ---------------------------------------------------------------------------

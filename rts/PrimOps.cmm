@@ -1739,6 +1739,13 @@ loop:
 }
 
 
+// NOTE: there is another implementation of this function in
+// Threads.c:performTryPutMVar().  Keep them in sync!  It was
+// measurably slower to call the C function from here (70% for a
+// tight loop doing tryPutMVar#).
+//
+// TODO: we could kill the duplication by making tryPutMVar# into an
+// inline primop that expands into a C call to performTryPutMVar().
 stg_tryPutMVarzh ( P_ mvar, /* :: MVar a */
                    P_ val,  /* :: a */ )
 {
@@ -1811,6 +1818,7 @@ loop:
     unlockClosure(mvar, info);
     return (1);
 }
+
 
 stg_readMVarzh ( P_ mvar, /* :: MVar a */ )
 {
@@ -1917,137 +1925,6 @@ stg_deRefStablePtrzh ( P_ sp )
 }
 
 /* -----------------------------------------------------------------------------
-   CompactNFData primitives
-
-   See Note [Compact Normal Forms]
-   -------------------------------------------------------------------------  */
-
-stg_compactNewzh ( W_ size )
-{
-    P_ str;
-
-    again: MAYBE_GC(again);
-
-    ("ptr" str) = ccall compactNew(MyCapability() "ptr", size);
-    return (str);
-}
-
-stg_compactAppendzh ( P_ str, P_ val , W_ share)
-{
-    P_ root;
-
-    again: MAYBE_GC(again);
-
-     ("ptr" root) = ccall compactAppend(MyCapability() "ptr", str "ptr", val "ptr", share);
-    return (root);
-}
-
-stg_compactResizzezh ( P_ str, W_ new_size )
-{
-    again: MAYBE_GC(again);
-
-    ccall compactResize(MyCapability() "ptr", str "ptr", new_size);
-    return ();
-}
-
-stg_compactContainszh ( P_ str, P_ val )
-{
-    W_ rval;
-
-    (rval) = ccall compactContains(str "ptr", val "ptr");
-    return (rval);
-}
-
-stg_compactContainsAnyzh ( P_ val )
-{
-    W_ rval;
-
-    (rval) = ccall compactContains(0 "ptr", val "ptr");
-    return (rval);
-}
-
-stg_compactGetFirstBlockzh ( P_ str )
-{
-    /* W_, not P_, because it is not a gc pointer */
-    W_ block;
-    W_ bd;
-    W_ size;
-
-    block = str - SIZEOF_StgCompactNFDataBlock::W_;
-    ASSERT (StgCompactNFDataBlock_owner(block) == str);
-
-    bd = Bdescr(str);
-    size = bdescr_free(bd) - bdescr_start(bd);
-    ASSERT (size <= TO_W_(bdescr_blocks(bd)) * BLOCK_SIZE);
-
-    return (block, size);
-}
-
-stg_compactGetNextBlockzh ( P_ str, W_ block )
-{
-    /* str is a pointer to the closure holding the Compact#
-       it is there primarily to keep everything reachable from
-       the GC: by having it on the stack of type P_, the GC will
-       see all the blocks as live (any pointer in the Compact#
-       keeps it alive), and will not collect the block
-       We don't run a GC inside this primop, but it could
-       happen right after, or we could be preempted.
-
-       str is also useful for debugging, as it can be casted
-       to a useful C struct from the gdb command line and all
-       blocks can be inspected
-    */
-    W_ bd;
-    W_ next_block;
-    W_ size;
-
-    next_block = StgCompactNFDataBlock_next(block);
-
-    if (next_block == 0::W_) {
-        return (0::W_, 0::W_);
-    }
-
-    ASSERT (StgCompactNFDataBlock_owner(next_block) == str ||
-            StgCompactNFDataBlock_owner(next_block) == NULL);
-
-    bd = Bdescr(next_block);
-    size = bdescr_free(bd) - bdescr_start(bd);
-    ASSERT (size <= TO_W_(bdescr_blocks(bd)) * BLOCK_SIZE);
-
-    return (next_block, size);
-}
-
-stg_compactAllocateBlockzh ( W_ size, W_ previous )
-{
-    W_ actual_block;
-
-    again: MAYBE_GC(again);
-
-    ("ptr" actual_block) = ccall compactAllocateBlock(MyCapability(),
-                                                      size,
-                                                      previous "ptr");
-
-    return (actual_block);
-}
-
-stg_compactFixupPointerszh ( W_ first_block, W_ root )
-{
-    W_ str;
-    P_ gcstr;
-    W_ ok;
-
-    str = first_block + SIZEOF_StgCompactNFDataBlock::W_;
-    (ok) = ccall compactFixupPointers (str "ptr", root "ptr");
-
-    // Now we can let the GC know about str, because it was linked
-    // into the generation list and the book-keeping pointers are
-    // guaranteed to be valid
-    // (this is true even if the fixup phase failed)
-    gcstr = str;
-    return (gcstr, ok);
-}
-
-/* -----------------------------------------------------------------------------
    Bytecode object primitives
    -------------------------------------------------------------------------  */
 
@@ -2111,8 +1988,9 @@ stg_mkApUpd0zh ( P_ bco )
 
 stg_unpackClosurezh ( P_ closure )
 {
-    W_ info, ptrs, nptrs, p, ptrs_arr, nptrs_arr;
-    info  = %GET_STD_INFO(UNTAG(closure));
+    W_ clos, info, ptrs, nptrs, p, ptrs_arr, nptrs_arr;
+    clos  = UNTAG(closure);
+    info  = %GET_STD_INFO(clos);
 
     // Some closures have non-standard layout, so we omit those here.
     W_ type;
@@ -2134,17 +2012,14 @@ stg_unpackClosurezh ( P_ closure )
         nptrs = TO_W_(%INFO_NPTRS(info));
         goto out;
     }}
-out:
 
+out:
     W_ ptrs_arr_sz, ptrs_arr_cards, nptrs_arr_sz;
     nptrs_arr_sz = SIZEOF_StgArrBytes   + WDS(nptrs);
     ptrs_arr_cards = mutArrPtrsCardWords(ptrs);
     ptrs_arr_sz  = SIZEOF_StgMutArrPtrs + WDS(ptrs) + WDS(ptrs_arr_cards);
 
     ALLOC_PRIM_P (ptrs_arr_sz + nptrs_arr_sz, stg_unpackClosurezh, closure);
-
-    W_ clos;
-    clos = UNTAG(closure);
 
     ptrs_arr  = Hp - nptrs_arr_sz - ptrs_arr_sz + WDS(1);
     nptrs_arr = Hp - nptrs_arr_sz + WDS(1);
@@ -2154,11 +2029,12 @@ out:
     StgMutArrPtrs_size(ptrs_arr) = ptrs + ptrs_arr_cards;
 
     p = 0;
-for:
+
+write_ptrs:
     if(p < ptrs) {
          W_[ptrs_arr + SIZEOF_StgMutArrPtrs + WDS(p)] = StgClosure_payload(clos,p);
          p = p + 1;
-         goto for;
+         goto write_ptrs;
     }
     /* We can leave the card table uninitialised, since the array is
        allocated in the nursery.  The GC will fill it in if/when the array
@@ -2167,12 +2043,14 @@ for:
     SET_HDR(nptrs_arr, stg_ARR_WORDS_info, CCCS);
     StgArrBytes_bytes(nptrs_arr) = WDS(nptrs);
     p = 0;
-for2:
+
+write_nptrs:
     if(p < nptrs) {
          W_[BYTE_ARR_CTS(nptrs_arr) + WDS(p)] = StgClosure_payload(clos, p+ptrs);
          p = p + 1;
-         goto for2;
+         goto write_nptrs;
     }
+
     return (info, ptrs_arr, nptrs_arr);
 }
 

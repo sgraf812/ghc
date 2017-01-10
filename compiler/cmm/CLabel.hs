@@ -20,10 +20,8 @@ module CLabel (
         mkEntryLabel,
         mkSlowEntryLabel,
         mkConEntryLabel,
-        mkStaticConEntryLabel,
         mkRednCountsLabel,
         mkConInfoTableLabel,
-        mkStaticInfoTableLabel,
         mkLargeSRTLabel,
         mkApEntryLabel,
         mkApInfoTableLabel,
@@ -33,9 +31,7 @@ module CLabel (
         mkLocalInfoTableLabel,
         mkLocalEntryLabel,
         mkLocalConEntryLabel,
-        mkLocalStaticConEntryLabel,
         mkLocalConInfoTableLabel,
-        mkLocalStaticInfoTableLabel,
         mkLocalClosureTableLabel,
 
         mkReturnPtLabel,
@@ -390,8 +386,6 @@ data IdLabelInfo
 
   | ConEntry            -- ^ Constructor entry point
   | ConInfoTable        -- ^ Corresponding info table
-  | StaticConEntry      -- ^ Static constructor entry point
-  | StaticInfoTable     -- ^ Corresponding info table
 
   | ClosureTable        -- ^ Table of closures for Enum tycons
 
@@ -479,25 +473,17 @@ mkEntryLabel                :: Name -> CafInfo -> CLabel
 mkClosureTableLabel         :: Name -> CafInfo -> CLabel
 mkLocalConInfoTableLabel    :: CafInfo -> Name -> CLabel
 mkLocalConEntryLabel        :: CafInfo -> Name -> CLabel
-mkLocalStaticInfoTableLabel :: CafInfo -> Name -> CLabel
-mkLocalStaticConEntryLabel  :: CafInfo -> Name -> CLabel
 mkConInfoTableLabel         :: Name -> CafInfo -> CLabel
-mkStaticInfoTableLabel      :: Name -> CafInfo -> CLabel
 mkClosureLabel name         c     = IdLabel name c Closure
 mkInfoTableLabel name       c     = IdLabel name c InfoTable
 mkEntryLabel name           c     = IdLabel name c Entry
 mkClosureTableLabel name    c     = IdLabel name c ClosureTable
 mkLocalConInfoTableLabel    c con = IdLabel con c ConInfoTable
 mkLocalConEntryLabel        c con = IdLabel con c ConEntry
-mkLocalStaticInfoTableLabel c con = IdLabel con c StaticInfoTable
-mkLocalStaticConEntryLabel  c con = IdLabel con c StaticConEntry
 mkConInfoTableLabel name    c     = IdLabel name c ConInfoTable
-mkStaticInfoTableLabel name c     = IdLabel name c StaticInfoTable
 
 mkConEntryLabel       :: Name -> CafInfo -> CLabel
-mkStaticConEntryLabel :: Name -> CafInfo -> CLabel
 mkConEntryLabel name        c     = IdLabel name c ConEntry
-mkStaticConEntryLabel name  c     = IdLabel name c StaticConEntry
 
 -- Constructing Cmm Labels
 mkDirty_MUT_VAR_Label, mkSplitMarkerLabel, mkUpdInfoLabel,
@@ -677,7 +663,6 @@ toSlowEntryLbl l = pprPanic "toSlowEntryLbl" (ppr l)
 toEntryLbl :: CLabel -> CLabel
 toEntryLbl (IdLabel n c LocalInfoTable)  = IdLabel n c LocalEntry
 toEntryLbl (IdLabel n c ConInfoTable)    = IdLabel n c ConEntry
-toEntryLbl (IdLabel n c StaticInfoTable) = IdLabel n c StaticConEntry
 toEntryLbl (IdLabel n c _)               = IdLabel n c Entry
 toEntryLbl (CaseLabel n CaseReturnInfo)  = CaseLabel n CaseReturnPt
 toEntryLbl (CmmLabel m str CmmInfo)      = CmmLabel m str CmmEntry
@@ -688,7 +673,6 @@ toInfoLbl :: CLabel -> CLabel
 toInfoLbl (IdLabel n c Entry)          = IdLabel n c InfoTable
 toInfoLbl (IdLabel n c LocalEntry)     = IdLabel n c LocalInfoTable
 toInfoLbl (IdLabel n c ConEntry)       = IdLabel n c ConInfoTable
-toInfoLbl (IdLabel n c StaticConEntry) = IdLabel n c StaticInfoTable
 toInfoLbl (IdLabel n c _)              = IdLabel n c InfoTable
 toInfoLbl (CaseLabel n CaseReturnPt)   = CaseLabel n CaseReturnInfo
 toInfoLbl (CmmLabel m str CmmEntry)    = CmmLabel m str CmmInfo
@@ -858,7 +842,12 @@ math_funs = mkUniqSet [
         (fsLit "significand"),  (fsLit "significandf"), (fsLit "significandl"),
         (fsLit "y0"),           (fsLit "y0f"),          (fsLit "y0l"),
         (fsLit "y1"),           (fsLit "y1f"),          (fsLit "y1l"),
-        (fsLit "yn"),           (fsLit "ynf"),          (fsLit "ynl")
+        (fsLit "yn"),           (fsLit "ynf"),          (fsLit "ynl"),
+
+        -- These functions are described in IEEE Std 754-2008 -
+        -- Standard for Floating-Point Arithmetic and ISO/IEC TS 18661
+        (fsLit "nextup"),       (fsLit "nextupf"),      (fsLit "nextupl"),
+        (fsLit "nextdown"),     (fsLit "nextdownf"),    (fsLit "nextdownl")
     ]
 
 -- -----------------------------------------------------------------------------
@@ -944,7 +933,6 @@ idInfoLabelType info =
     LocalInfoTable -> DataLabel
     Closure       -> GcPtrLabel
     ConInfoTable  -> DataLabel
-    StaticInfoTable -> DataLabel
     ClosureTable  -> DataLabel
     RednCounts    -> DataLabel
     _             -> CodeLabel
@@ -958,13 +946,13 @@ idInfoLabelType info =
 -- @labelDynamic@ returns @True@ if the label is located
 -- in a DLL, be it a data reference or not.
 
-labelDynamic :: DynFlags -> UnitId -> Module -> CLabel -> Bool
-labelDynamic dflags this_pkg this_mod lbl =
+labelDynamic :: DynFlags -> Module -> CLabel -> Bool
+labelDynamic dflags this_mod lbl =
   case lbl of
    -- is the RTS in a DLL or not?
    RtsLabel _           -> (WayDyn `elem` ways dflags) && (this_pkg /= rtsUnitId)
 
-   IdLabel n _ _        -> isDllName dflags this_pkg this_mod n
+   IdLabel n _ _        -> isDllName dflags this_mod n
 
    -- When compiling in the "dyn" way, each package is to be linked into
    -- its own shared library.
@@ -1001,7 +989,9 @@ labelDynamic dflags this_pkg this_mod lbl =
 
    -- Note that DynamicLinkerLabels do NOT require dynamic linking themselves.
    _                 -> False
-  where os = platformOS (targetPlatform dflags)
+  where
+    os = platformOS (targetPlatform dflags)
+    this_pkg = moduleUnitId this_mod
 
 
 -----------------------------------------------------------------------------
@@ -1099,6 +1089,10 @@ pprCLabel _ PicBaseLabel
 pprCLabel platform (DeadStripPreventer lbl)
  | cGhcWithNativeCodeGen == "YES"
    = pprCLabel platform lbl <> text "_dsp"
+
+pprCLabel _ (StringLitLabel u)
+ | cGhcWithNativeCodeGen == "YES"
+  = pprUnique u <> ptext (sLit "_str")
 
 pprCLabel platform lbl
    = getPprStyle $ \ sty ->
@@ -1239,8 +1233,6 @@ ppIdFlavor x = pp_cSEP <>
                        RednCounts       -> text "ct"
                        ConEntry         -> text "con_entry"
                        ConInfoTable     -> text "con_info"
-                       StaticConEntry   -> text "static_entry"
-                       StaticInfoTable  -> text "static_info"
                        ClosureTable     -> text "closure_tbl"
                       )
 

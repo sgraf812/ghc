@@ -49,16 +49,12 @@ module CoreMonad (
     debugTraceMsg, debugTraceMsgS,
     dumpIfSet_dyn,
 
-#ifdef GHCI
     -- * Getting 'Name's
     thNameToGhcName
-#endif
   ) where
 
-#ifdef GHCI
 import Name( Name )
 import TcRnMonad        ( initTcForLookup )
-#endif
 import CoreSyn
 import HscTypes
 import Module
@@ -79,6 +75,7 @@ import Maybes
 import UniqSupply
 import UniqFM       ( UniqFM, mapUFM, filterUFM )
 import MonadUtils
+import NameCache
 import SrcLoc
 import ListSetOps       ( runs )
 import Data.List
@@ -93,18 +90,8 @@ import Control.Applicative ( Alternative(..) )
 
 import Prelude hiding   ( read )
 
-#ifdef GHCI
-import Control.Concurrent.MVar (MVar)
-import Linker ( PersistentLinkerState, saveLinkerGlobals, restoreLinkerGlobals )
 import {-# SOURCE #-} TcSplice ( lookupThName_maybe )
 import qualified Language.Haskell.TH as TH
-#else
-saveLinkerGlobals :: IO ()
-saveLinkerGlobals = return ()
-
-restoreLinkerGlobals :: () -> IO ()
-restoreLinkerGlobals () = return ()
-#endif
 
 {-
 ************************************************************************
@@ -238,22 +225,6 @@ runMaybe (Just x) f = f x
 runMaybe Nothing  _ = CoreDoNothing
 
 {-
-Note [RULEs enabled in SimplGently]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-RULES are enabled when doing "gentle" simplification.  Two reasons:
-
-  * We really want the class-op cancellation to happen:
-        op (df d1 d2) --> $cop3 d1 d2
-    because this breaks the mutual recursion between 'op' and 'df'
-
-  * I wanted the RULE
-        lift String ===> ...
-    to work in Template Haskell when simplifying
-    splices, so we get simpler code for literal strings
-
-But watch out: list fusion can prevent floating.  So use phase control
-to switch off those rules until after floating.
-
 
 ************************************************************************
 *                                                                      *
@@ -524,12 +495,7 @@ data CoreReader = CoreReader {
         cr_print_unqual        :: PrintUnqualified,
         cr_loc                 :: SrcSpan,   -- Use this for log/error messages so they
                                              -- are at least tagged with the right source file
-        cr_visible_orphan_mods :: !ModuleSet,
-#ifdef GHCI
-        cr_globals :: (MVar PersistentLinkerState, Bool)
-#else
-        cr_globals :: ()
-#endif
+        cr_visible_orphan_mods :: !ModuleSet
 }
 
 -- Note: CoreWriter used to be defined with data, rather than newtype.  If it
@@ -601,15 +567,13 @@ runCoreM :: HscEnv
          -> CoreM a
          -> IO (a, SimplCount)
 runCoreM hsc_env rule_base us mod orph_imps print_unqual loc m
-  = do { glbls <- saveLinkerGlobals
-       ; liftM extract $ runIOEnv (reader glbls) $ unCoreM m state }
+  = liftM extract $ runIOEnv reader $ unCoreM m state
   where
-    reader glbls = CoreReader {
+    reader = CoreReader {
             cr_hsc_env = hsc_env,
             cr_rule_base = rule_base,
             cr_module = mod,
             cr_visible_orphan_mods = orph_imps,
-            cr_globals = glbls,
             cr_print_unqual = print_unqual,
             cr_loc = loc
         }
@@ -705,59 +669,9 @@ getPackageFamInstEnv = do
     eps <- liftIO $ hscEPS hsc_env
     return $ eps_fam_inst_env eps
 
-{-
-************************************************************************
-*                                                                      *
-             Initializing globals
-*                                                                      *
-************************************************************************
-
-This is a rather annoying function. When a plugin is loaded, it currently
-gets linked against a *newly loaded* copy of the GHC package. This would
-not be a problem, except that the new copy has its own mutable state
-that is not shared with that state that has already been initialized by
-the original GHC package.
-
-(NB This mechanism is sufficient for granting plugins read-only access to
-globals that are guaranteed to be initialized before the plugin is loaded.  If
-any further synchronization is necessary, I would suggest using the more
-sophisticated mechanism involving GHC.Conc.Sync.sharedCAF and rts/Globals.c to
-share a single instance of the global variable among the compiler and the
-plugins.  Perhaps we should migrate all global variables to use that mechanism,
-for robustness... -- NSF July 2013)
-
-This leads to loaded plugins calling GHC code which pokes the static flags,
-and then dying with a panic because the static flags *it* sees are uninitialized.
-
-There are two possible solutions:
-  1. Export the symbols from the GHC executable from the GHC library and link
-     against this existing copy rather than a new copy of the GHC library
-  2. Carefully ensure that the global state in the two copies of the GHC
-     library matches
-
-I tried 1. and it *almost* works (and speeds up plugin load times!) except
-on Windows. On Windows the GHC library tends to export more than 65536 symbols
-(see #5292) which overflows the limit of what we can export from the EXE and
-causes breakage.
-
-(Note that if the GHC executable was dynamically linked this wouldn't be a
-problem, because we could share the GHC library it links to.)
-
-We are going to try 2. instead. Unfortunately, this means that every plugin
-will have to say `reinitializeGlobals` before it does anything, but never mind.
-
-I've threaded the cr_globals through CoreM rather than giving them as an
-argument to the plugin function so that we can turn this function into
-(return ()) without breaking any plugins when we eventually get 1. working.
--}
-
+{-# DEPRECATED reinitializeGlobals "It is not necessary to call reinitializeGlobals. Since GHC 8.2, this function is a no-op and will be removed in GHC 8.4" #-}
 reinitializeGlobals :: CoreM ()
-reinitializeGlobals = do
-    linker_globals <- read cr_globals
-    hsc_env <- getHscEnv
-    let dflags = hsc_dflags hsc_env
-    liftIO $ restoreLinkerGlobals linker_globals
-    liftIO $ setUnsafeGlobalDynFlags dflags
+reinitializeGlobals = return ()
 
 {-
 ************************************************************************
@@ -892,7 +806,6 @@ instance MonadThings CoreM where
 ************************************************************************
 -}
 
-#ifdef GHCI
 -- | Attempt to convert a Template Haskell name to one that GHC can
 -- understand. Original TH names such as those you get when you use
 -- the @'foo@ syntax will be translated to their equivalent GHC name
@@ -903,4 +816,3 @@ thNameToGhcName :: TH.Name -> CoreM (Maybe Name)
 thNameToGhcName th_name = do
     hsc_env <- getHscEnv
     liftIO $ initTcForLookup hsc_env (lookupThName_maybe th_name)
-#endif

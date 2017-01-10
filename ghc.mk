@@ -430,11 +430,9 @@ else # CLEANING
 # programs such as GHC and ghc-pkg, that we do not assume the stage0
 # compiler already has installed (or up-to-date enough).
 
-PACKAGES_STAGE0 = binary Cabal/Cabal hpc ghc-boot-th ghc-boot hoopl transformers template-haskell
+PACKAGES_STAGE0 = binary Cabal/Cabal hpc ghc-boot-th ghc-boot hoopl transformers template-haskell ghci
 ifeq "$(Windows_Host)" "NO"
-ifneq "$(HostOS_CPP)" "ios"
 PACKAGES_STAGE0 += terminfo
-endif
 endif
 
 PACKAGES_STAGE1 += ghc-prim
@@ -472,9 +470,7 @@ PACKAGES_STAGE1 += xhtml
 endif
 
 ifeq "$(Windows_Target)" "NO"
-ifneq "$(TargetOS_CPP)" "ios"
 PACKAGES_STAGE1 += terminfo
-endif
 endif
 PACKAGES_STAGE1 += haskeline
 PACKAGES_STAGE1 += ghci
@@ -563,6 +559,7 @@ ghc/stage2/package-data.mk: compiler/stage2/package-data.mk
 utils/haddock/dist/package-data.mk: compiler/stage2/package-data.mk
 utils/ghctags/dist-install/package-data.mk: compiler/stage2/package-data.mk
 utils/check-api-annotations/dist-install/package-data.mk: compiler/stage2/package-data.mk
+utils/check-ppr/dist-install/package-data.mk: compiler/stage2/package-data.mk
 utils/mkUserGuidePart/dist/package-data.mk: compiler/stage2/package-data.mk
 
 # add the final package.conf dependency: ghc-prim depends on RTS
@@ -591,6 +588,9 @@ ifeq "$(BuildSharedLibs)" "YES"
 ALL_STAGE1_LIBS += $(foreach lib,$(PACKAGES_STAGE1),$(libraries/$(lib)_dist-install_dyn_LIB))
 endif
 BOOT_LIBS = $(foreach lib,$(PACKAGES_STAGE0),$(libraries/$(lib)_dist-boot_v_LIB))
+
+# Only build internal interpreter support for the stage2 ghci lib
+libraries/ghci_dist-install_CONFIGURE_OPTS += --flags=ghci
 
 # ----------------------------------------
 # Special magic for the ghc-prim package
@@ -681,6 +681,7 @@ BUILD_DIRS += utils/ghc-pkg
 BUILD_DIRS += utils/testremove
 BUILD_DIRS += utils/ghctags
 BUILD_DIRS += utils/check-api-annotations
+BUILD_DIRS += utils/check-ppr
 BUILD_DIRS += utils/dll-split
 BUILD_DIRS += utils/ghc-cabal
 BUILD_DIRS += utils/hpc
@@ -712,6 +713,7 @@ BUILD_DIRS := $(filter-out utils/haddock,$(BUILD_DIRS))
 BUILD_DIRS := $(filter-out utils/haddock/doc,$(BUILD_DIRS))
 endif
 ifeq "$(BUILD_SPHINX_HTML) $(BUILD_SPHINX_PDF)" "NO NO"
+BUILD_DIRS := $(filter-out docs/users_guide,$(BUILD_DIRS))
 # Don't to build this little utility if we're not building the User's Guide.
 BUILD_DIRS := $(filter-out utils/mkUserGuidePart,$(BUILD_DIRS))
 endif
@@ -733,6 +735,7 @@ ifneq "$(CrossCompiling) $(Stage1Only)" "NO NO"
 # See Note [Stage1Only vs stage=1] in mk/config.mk.in.
 BUILD_DIRS := $(filter-out utils/ghctags,$(BUILD_DIRS))
 BUILD_DIRS := $(filter-out utils/check-api-annotations,$(BUILD_DIRS))
+BUILD_DIRS := $(filter-out utils/check-ppr,$(BUILD_DIRS))
 endif
 endif # CLEANING
 
