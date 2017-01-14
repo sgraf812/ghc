@@ -918,19 +918,19 @@ bindLHsTyVarBndr :: HsDocContext
 bindLHsTyVarBndr doc mb_assoc kv_names tv_names hs_tv_bndr thing_inside
   = case hs_tv_bndr of
       L loc (UserTyVar lrdr@(L lv rdr)) ->
-        do { check_dup loc rdr
+        do { check_dup loc rdr []
            ; nm <- newTyVarNameRn mb_assoc lrdr
            ; bindLocalNamesFV [nm] $
              thing_inside [] emptyNameSet (L loc (UserTyVar (L lv nm))) }
       L loc (KindedTyVar lrdr@(L lv rdr) kind) ->
-        do { check_dup lv rdr
+        do { free_kvs <- freeKiTyVarsAllVars <$> extractHsTyRdrTyVars kind
+           ; check_dup lv rdr (map unLoc free_kvs)
 
              -- check for -XKindSignatures
            ; sig_ok <- xoptM LangExt.KindSignatures
            ; unless sig_ok (badKindSigErr doc kind)
 
              -- deal with kind vars in the user-written kind
-           ; free_kvs <- freeKiTyVarsAllVars <$> extractHsTyRdrTyVars kind
            ; bindImplicitKvs doc mb_assoc free_kvs tv_names $
              \ new_kv_nms other_kv_nms ->
              do { (kind', fvs1) <- rnLHsKind doc kind
@@ -943,9 +943,15 @@ bindLHsTyVarBndr doc mb_assoc kv_names tv_names hs_tv_bndr thing_inside
       -- make sure that the RdrName isn't in the sets of
       -- names. We can't just check that it's not in scope at all
       -- because we might be inside an associated class.
-    check_dup :: SrcSpan -> RdrName -> RnM ()
-    check_dup loc rdr
-      = do { m_name <- lookupLocalOccRn_maybe rdr
+    check_dup :: SrcSpan -> RdrName -> [RdrName] -> RnM ()
+    check_dup loc rdr kindFreeVars
+      = do { -- Disallow use of a type variable name in its
+             -- kind signature (#11592).
+             when (rdr `elem` kindFreeVars) $
+             addErrAt loc (vcat [ ki_ty_self_err rdr
+                                , pprHsDocContext doc ])
+
+           ; m_name <- lookupLocalOccRn_maybe rdr
            ; whenIsJust m_name $ \name ->
         do { when (name `elemNameSet` kv_names) $
              addErrAt loc (vcat [ ki_ty_err_msg name
@@ -956,6 +962,10 @@ bindLHsTyVarBndr doc mb_assoc kv_names tv_names hs_tv_bndr thing_inside
     ki_ty_err_msg n = text "Variable" <+> quotes (ppr n) <+>
                       text "used as a kind variable before being bound" $$
                       text "as a type variable. Perhaps reorder your variables?"
+
+    ki_ty_self_err n = text "Variable" <+> quotes (ppr n) <+>
+                       text "is used in the kind signature of its" $$
+                       text "declaration as a type variable."
 
 
 bindImplicitKvs :: HsDocContext
@@ -1520,7 +1530,7 @@ extractHsTyRdrTyVars :: LHsType RdrName -> RnM FreeKiTyVars
 -- It's used when making the for-alls explicit.
 -- Does not return any wildcards
 -- When the same name occurs multiple times in the types, only the first
--- occurence is returned.
+-- occurrence is returned.
 -- See Note [Kind and type-variable binders]
 extractHsTyRdrTyVars ty
   = do { FKTV kis k_set tys t_set all <- extract_lty TypeLevel ty emptyFKTV
@@ -1530,20 +1540,20 @@ extractHsTyRdrTyVars ty
 
 -- | Extracts free type and kind variables from types in a list.
 -- When the same name occurs multiple times in the types, only the first
--- occurence is returned and the rest is filtered out.
+-- occurrence is returned and the rest is filtered out.
 -- See Note [Kind and type-variable binders]
 extractHsTysRdrTyVars :: [LHsType RdrName] -> RnM FreeKiTyVars
 extractHsTysRdrTyVars tys
   = rmDupsInRdrTyVars <$> extractHsTysRdrTyVarsDups tys
 
 -- | Extracts free type and kind variables from types in a list.
--- When the same name occurs multiple times in the types, all occurences
+-- When the same name occurs multiple times in the types, all occurrences
 -- are returned.
 extractHsTysRdrTyVarsDups :: [LHsType RdrName] -> RnM FreeKiTyVars
 extractHsTysRdrTyVarsDups tys
   = extract_ltys TypeLevel tys emptyFKTV
 
--- | Removes multiple occurences of the same name from FreeKiTyVars.
+-- | Removes multiple occurrences of the same name from FreeKiTyVars.
 rmDupsInRdrTyVars :: FreeKiTyVars -> FreeKiTyVars
 rmDupsInRdrTyVars (FKTV kis k_set tys t_set all)
   = FKTV (nubL kis) k_set (nubL tys) t_set (nubL all)

@@ -214,12 +214,7 @@ import qualified Data.IntSet as IntSet
 import GHC.Foreign (withCString, peekCString)
 import qualified GHC.LanguageExtensions as LangExt
 
-#if __GLASGOW_HASKELL__ >= 709
-import Foreign
-#else
-import Foreign.Safe
-#endif
-
+import Foreign (Ptr) -- needed for 2nd stage
 
 -- Note [Updating flag description in the User's Guide]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1697,8 +1692,8 @@ defaultFatalMessager = hPutStrLn stderr
 defaultLogAction :: LogAction
 defaultLogAction dflags reason severity srcSpan style msg
     = case severity of
-      SevOutput      -> printSDoc msg style
-      SevDump        -> printSDoc (msg $$ blankLine) style
+      SevOutput      -> printOut msg style
+      SevDump        -> printOut (msg $$ blankLine) style
       SevInteractive -> putStrSDoc msg style
       SevInfo        -> printErrs msg style
       SevFatal       -> printErrs msg style
@@ -1714,7 +1709,7 @@ defaultLogAction dflags reason severity srcSpan style msg
                            -- whereas converting to string first and using
                            -- hPutStr would just emit the low 8 bits of
                            -- each unicode char.
-    where printSDoc  = defaultLogActionHPrintDoc  dflags stdout
+    where printOut   = defaultLogActionHPrintDoc  dflags stdout
           printErrs  = defaultLogActionHPrintDoc  dflags stderr
           putStrSDoc = defaultLogActionHPutStrDoc dflags stdout
           -- Pretty print the warning flag, if any (#10752)
@@ -1731,17 +1726,16 @@ defaultLogAction dflags reason severity srcSpan style msg
                         groups -> " (in " ++ intercalate ", " (map ("-W"++) groups) ++ ")"
               | otherwise = ""
 
+-- | Like 'defaultLogActionHPutStrDoc' but appends an extra newline.
 defaultLogActionHPrintDoc :: DynFlags -> Handle -> SDoc -> PprStyle -> IO ()
 defaultLogActionHPrintDoc dflags h d sty
  = defaultLogActionHPutStrDoc dflags h (d $$ text "") sty
-      -- Adds a newline
 
 defaultLogActionHPutStrDoc :: DynFlags -> Handle -> SDoc -> PprStyle -> IO ()
 defaultLogActionHPutStrDoc dflags h d sty
-  = Pretty.printDoc_ Pretty.PageMode (pprCols dflags) h doc
-  where   -- Don't add a newline at the end, so that successive
-          -- calls to this log-action can output all on the same line
-    doc = runSDoc d (initSDocContext dflags sty)
+  -- Don't add a newline at the end, so that successive
+  -- calls to this log-action can output all on the same line
+  = printSDoc Pretty.PageMode dflags h sty d
 
 newtype FlushOut = FlushOut (IO ())
 

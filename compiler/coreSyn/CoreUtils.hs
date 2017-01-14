@@ -48,13 +48,13 @@ module CoreUtils (
         stripTicksE, stripTicksT,
 
         -- * StaticPtr
-        collectStaticPtrSatArgs
+        collectMakeStaticArgs
     ) where
 
 #include "HsVersions.h"
 
 import CoreSyn
-import PrelNames ( staticPtrDataConName )
+import PrelNames ( makeStaticName )
 import PprCore
 import CoreFVs( exprFreeVars )
 import Var
@@ -591,7 +591,7 @@ filterAlts _tycon inst_tys imposs_cons alts
     impossible_alt _  _                         = False
 
 refineDefaultAlt :: [Unique] -> TyCon -> [Type]
-                 -> [AltCon]  -- Constructors tha cannot match the DEFAULT (if any)
+                 -> [AltCon]  -- Constructors that cannot match the DEFAULT (if any)
                  -> [CoreAlt]
                  -> (Bool, [CoreAlt])
 -- Refine the default alterantive to a DataAlt,
@@ -1595,12 +1595,10 @@ dataConInstPat fss uniqs con inst_tys
       -- Make value vars, instantiating types
     arg_ids = zipWith4 mk_id_var id_uniqs id_fss arg_tys arg_strs
     mk_id_var uniq fs ty str
-      = mkLocalIdOrCoVarWithInfo name (Type.substTy full_subst ty) info
+      = setCaseBndrEvald str $  -- See Note [Mark evaluated arguments]
+        mkLocalIdOrCoVar name (Type.substTy full_subst ty)
       where
         name = mkInternalName uniq (mkVarOccFS fs) noSrcSpan
-        info | isMarkedStrict str = vanillaIdInfo `setUnfoldingInfo` evaldUnfolding
-             | otherwise          = vanillaIdInfo
-             -- See Note [Mark evaluated arguments]
 
 {-
 Note [Mark evaluated arguments]
@@ -2217,16 +2215,13 @@ isEmptyTy ty
 *****************************************************
 -}
 
--- | @collectStaticPtrSatArgs e@ yields @Just (s, args)@ when @e = s args@
--- and @s = StaticPtr@ and the application of @StaticPtr@ is saturated.
+-- | @collectMakeStaticArgs (makeStatic t srcLoc e)@ yields
+-- @Just (makeStatic, t, srcLoc, e)@.
 --
--- Yields @Nothing@ otherwise.
-collectStaticPtrSatArgs :: Expr b -> Maybe (Expr b, [Arg b])
-collectStaticPtrSatArgs e
-    | (fun@(Var b), args, _) <- collectArgsTicks (const True) e
-    , Just con <- isDataConId_maybe b
-    , dataConName con == staticPtrDataConName
-    , length args == 5
-    = Just (fun, args)
-collectStaticPtrSatArgs _
-    = Nothing
+-- Returns @Nothing@ for every other expression.
+collectMakeStaticArgs
+  :: CoreExpr -> Maybe (CoreExpr, Type, CoreExpr, CoreExpr)
+collectMakeStaticArgs e
+    | (fun@(Var b), [Type t, loc, arg], _) <- collectArgsTicks (const True) e
+    , idName b == makeStaticName = Just (fun, t, loc, arg)
+collectMakeStaticArgs _          = Nothing

@@ -581,6 +581,7 @@ tcExpr (HsProc pat cmd) res_ty
         ; return $ mkHsWrapCo coi (HsProc pat' cmd') }
 
 -- Typechecks the static form and wraps it with a call to 'fromStaticPtr'.
+-- See Note [Grand plan for static forms] in StaticPtrTable for an overview.
 tcExpr (HsStatic fvs expr) res_ty
   = do  { res_ty          <- expTypeToType res_ty
         ; (co, (p_ty, expr_ty)) <- matchExpectedAppTy res_ty
@@ -604,8 +605,8 @@ tcExpr (HsStatic fvs expr) res_ty
                              [liftedTypeKind, expr_ty]
         -- Insert the constraints of the static form in a global list for later
         -- validation.
-        ; stWC <- tcg_static_wc <$> getGblEnv
-        ; updTcRef stWC (andWC lie)
+        ; emitStaticConstraints lie
+
         -- Wrap the static form with the 'fromStaticPtr' call.
         ; fromStaticPtr <- newMethodFromName StaticOrigin fromStaticPtrName p_ty
         ; let wrap = mkWpTyApps [expr_ty]

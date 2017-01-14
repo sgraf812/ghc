@@ -81,7 +81,7 @@ module TcRnTypes(
 
         WantedConstraints(..), insolubleWC, emptyWC, isEmptyWC,
         andWC, unionsWC, mkSimpleWC, mkImplicWC,
-        addInsols, getInsolubles, addSimples, addImplics,
+        addInsols, getInsolubles, insolublesOnly, addSimples, addImplics,
         tyCoVarsOfWC, dropDerivedWC, dropDerivedSimples, dropDerivedInsols,
         tyCoVarsOfWCList,
         isDroppableDerivedLoc, insolubleImplic,
@@ -320,6 +320,13 @@ data IfLclEnv
                 -- plus which bit is currently being examined
 
         if_nsubst :: Maybe NameShape,
+
+        -- This field is used to make sure "implicit" declarations
+        -- (anything that cannot be exported in mi_exports) get
+        -- wired up correctly in typecheckIfacesForMerging.  Most
+        -- of the time it's @Nothing@.  See Note [The implicit TypeEnv]
+        -- in TcIface.
+        if_implicits_env :: Maybe TypeEnv,
 
         if_tv_env  :: FastStringEnv TyVar,     -- Nested tyvar bindings
         if_id_env  :: FastStringEnv Id         -- Nested id binding
@@ -2099,6 +2106,10 @@ addInsols wc cts
 
 getInsolubles :: WantedConstraints -> Cts
 getInsolubles = wc_insol
+
+insolublesOnly :: WantedConstraints -> WantedConstraints
+-- Keep only the insolubles
+insolublesOnly wc = wc { wc_simple = emptyBag, wc_impl = emptyBag }
 
 dropDerivedWC :: WantedConstraints -> WantedConstraints
 -- See Note [Dropping derived constraints]

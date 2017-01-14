@@ -66,6 +66,7 @@ import TcExpr
 import TcRnMonad
 import TcRnExports
 import TcEvidence
+import qualified BooleanFormula as BF
 import PprTyThing( pprTyThing )
 import MkIface( tyThingToIfaceDecl )
 import Coercion( pprCoAxiom )
@@ -149,6 +150,7 @@ tcRnModule hsc_env hsc_src save_rn_syntax
               (const ()) $
    initTc hsc_env hsc_src save_rn_syntax this_mod real_loc $
           withTcPlugins hsc_env $
+
           tcRnModuleTcRnM hsc_env hsc_src parsedModule pair
 
   | otherwise
@@ -371,13 +373,10 @@ tcRnSrcDecls explicit_mod_hdr decls
               do { (tcg_env, tcl_env) <- tc_rn_src_decls decls
 
                    -- Check for the 'main' declaration
-                   -- Must do this inside the captureConstraints
+                   -- Must do this inside the captureTopConstraints
                  ; tcg_env <- setEnvs (tcg_env, tcl_env) $
                               checkMain explicit_mod_hdr
                  ; return (tcg_env, tcl_env) }
-
-        -- Emit Typeable bindings
-      ; tcg_env <- setGblEnv tcg_env mkTypeableBinds
 
       ; setEnvs (tcg_env, tcl_env) $ do {
 
@@ -393,9 +392,12 @@ tcRnSrcDecls explicit_mod_hdr decls
       ; new_ev_binds <- {-# SCC "simplifyTop" #-}
                         simplifyTop lie
 
+        -- Emit Typeable bindings
+      ; tcg_env <- mkTypeableBinds
+
         -- Finalizers must run after constraints are simplified, or some types
         -- might not be complete when using reify (see #12777).
-      ; (tcg_env, tcl_env) <- run_th_modfinalizers
+      ; (tcg_env, tcl_env) <- setGblEnv tcg_env run_th_modfinalizers
       ; setEnvs (tcg_env, tcl_env) $ do {
 
       ; finishTH
@@ -559,7 +561,7 @@ tcRnHsBootDecls hsc_src decls
               <- rnTopSrcDecls first_group
         -- The empty list is for extra dependencies coming from .hs-boot files
         -- See Note [Extra dependencies from .hs-boot files] in RnSource
-        ; (gbl_env, lie) <- captureConstraints $ setGblEnv tcg_env $ do {
+        ; (gbl_env, lie) <- captureTopConstraints $ setGblEnv tcg_env $ do {
 
 
                 -- Check for illegal declarations
@@ -905,9 +907,13 @@ checkBootTyCon is_boot tc1 tc2
            check (eqTypeX env op_ty1 op_ty2)
                  (text "The types of" <+> pname1 <+>
                   text "are different") `andThenCheck`
-           check (eqMaybeBy eqDM def_meth1 def_meth2)
-                 (text "The default methods associated with" <+> pname1 <+>
-                  text "are different")
+           if is_boot
+               then check (eqMaybeBy eqDM def_meth1 def_meth2)
+                          (text "The default methods associated with" <+> pname1 <+>
+                           text "are different")
+               else check (subDM op_ty1 def_meth1 def_meth2)
+                          (text "The default methods associated with" <+> pname1 <+>
+                           text "are not compatible")
          where
           name1 = idName id1
           name2 = idName id2
@@ -926,6 +932,26 @@ checkBootTyCon is_boot tc1 tc2
        eqDM (_, VanillaDM)    (_, VanillaDM)    = True
        eqDM (_, GenericDM t1) (_, GenericDM t2) = eqTypeX env t1 t2
        eqDM _ _ = False
+
+       -- NB: first argument is from hsig, second is from real impl.
+       -- Order of pattern matching matters.
+       subDM _ Nothing _ = True
+       subDM _ _ Nothing = False
+       -- If the hsig wrote:
+       --
+       --   f :: a -> a
+       --   default f :: a -> a
+       --
+       -- this should be validly implementable using an old-fashioned
+       -- vanilla default method.
+       subDM t1 (Just (_, GenericDM t2)) (Just (_, VanillaDM))
+        = eqTypeX env t1 t2
+       -- This case can occur when merging signatures
+       subDM t1 (Just (_, VanillaDM)) (Just (_, GenericDM t2))
+        = eqTypeX env t1 t2
+       subDM _ (Just (_, VanillaDM)) (Just (_, VanillaDM)) = True
+       subDM _ (Just (_, GenericDM t1)) (Just (_, GenericDM t2))
+        = eqTypeX env t1 t2
 
        -- Ignore the location of the defaults
        eqATDef Nothing             Nothing             = True
@@ -948,7 +974,9 @@ checkBootTyCon is_boot tc1 tc2
     check (eqListBy (eqTypeX env) sc_theta1 sc_theta2)
           (text "The class constraints do not match") `andThenCheck`
     checkListBy eqSig op_stuff1 op_stuff2 (text "methods") `andThenCheck`
-    checkListBy eqAT ats1 ats2 (text "associated types")
+    checkListBy eqAT ats1 ats2 (text "associated types") `andThenCheck`
+    check (classMinimalDef c1 `BF.implies` classMinimalDef c2)
+        (text "The MINIMAL pragmas are not compatible")
 
   | Just syn_rhs1 <- synTyConRhs_maybe tc1
   , Just syn_rhs2 <- synTyConRhs_maybe tc2
@@ -1039,6 +1067,8 @@ checkBootTyCon is_boot tc1 tc2
   = ASSERT(tc1 == tc2)
     let eqFamFlav OpenSynFamilyTyCon   OpenSynFamilyTyCon = True
         eqFamFlav (DataFamilyTyCon {}) (DataFamilyTyCon {}) = True
+        -- This case only happens for hsig merging:
+        eqFamFlav AbstractClosedSynFamilyTyCon AbstractClosedSynFamilyTyCon = True
         eqFamFlav AbstractClosedSynFamilyTyCon (ClosedSynFamilyTyCon {}) = True
         eqFamFlav (ClosedSynFamilyTyCon {}) AbstractClosedSynFamilyTyCon = True
         eqFamFlav (ClosedSynFamilyTyCon ax1) (ClosedSynFamilyTyCon ax2)
@@ -1050,8 +1080,11 @@ checkBootTyCon is_boot tc1 tc2
     in
     -- check equality of roles, family flavours and injectivity annotations
     check (roles1 == roles2) roles_msg `andThenCheck`
-    check (eqFamFlav fam_flav1 fam_flav2) empty `andThenCheck`
-    check (injInfo1 == injInfo2) empty
+    check (eqFamFlav fam_flav1 fam_flav2)
+        (ifPprDebug $
+            text "Family flavours" <+> ppr fam_flav1 <+> text "and" <+> ppr fam_flav2 <+>
+            text "do not match") `andThenCheck`
+    check (injInfo1 == injInfo2) (text "Injectivities do not match")
 
   | isAlgTyCon tc1 && isAlgTyCon tc2
   , Just env <- eqVarBndrs emptyRnEnv2 (tyConTyVars tc1) (tyConTyVars tc2)
@@ -1960,18 +1993,15 @@ tcGhciStmts stmts
 
         -- OK, we're ready to typecheck the stmts
         traceTc "TcRnDriver.tcGhciStmts: tc stmts" empty ;
-        ((tc_stmts, ids), lie) <- captureConstraints $
+        ((tc_stmts, ids), lie) <- captureTopConstraints $
                                   tc_io_stmts $ \ _ ->
                                   mapM tcLookupId names  ;
                         -- Look up the names right in the middle,
                         -- where they will all be in scope
 
-        -- wanted constraints from static forms
-        stWC <- tcg_static_wc <$> getGblEnv >>= readTcRef ;
-
         -- Simplify the context
         traceTc "TcRnDriver.tcGhciStmts: simplify ctxt" empty ;
-        const_binds <- checkNoErrs (simplifyInteractive (andWC stWC lie)) ;
+        const_binds <- checkNoErrs (simplifyInteractive lie) ;
                 -- checkNoErrs ensures that the plan fails if context redn fails
 
         traceTc "TcRnDriver.tcGhciStmts: done" empty ;
@@ -2061,19 +2091,17 @@ tcRnExpr hsc_env mode rdr_expr
                   else return expr_ty } ;
 
     -- Generalise
-    ((qtvs, dicts, _), lie_top) <- captureConstraints $
+    ((qtvs, dicts, _), lie_top) <- captureTopConstraints $
                                    {-# SCC "simplifyInfer" #-}
                                    simplifyInfer tclvl
                                                  infer_mode
                                                  []    {- No sig vars -}
                                                  [(fresh_it, res_ty)]
                                                  lie ;
-    -- Wanted constraints from static forms
-    stWC <- tcg_static_wc <$> getGblEnv >>= readTcRef ;
 
     -- Ignore the dictionary bindings
     _ <- perhaps_disable_default_warnings $
-         simplifyInteractive (andWC stWC lie_top) ;
+         simplifyInteractive lie_top ;
 
     let { all_expr_ty = mkInvForAllTys qtvs (mkLamTypes dicts res_ty) } ;
     ty <- zonkTcType all_expr_ty ;
@@ -2505,3 +2533,4 @@ loadTcPlugins hsc_env =
   where
     load_plugin (_, plug, opts) = tcPlugin plug opts
 #endif
+

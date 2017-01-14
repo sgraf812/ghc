@@ -384,7 +384,8 @@ In this situation you should use @case@ rather than a @let@. The function
 alternatively use 'MkCore.mkCoreLet' rather than this constructor directly,
 which will generate a @case@ if necessary
 
-Th let/app invariant is initially enforced by DsUtils.mkCoreLet and mkCoreApp
+The let/app invariant is initially enforced by mkCoreLet and mkCoreApp in
+coreSyn/MkCore.
 
 Note [CoreSyn case invariants]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -556,7 +557,7 @@ data Tickish id =
   -- valid. Note that it is still undesirable though, as this reduces
   -- their usefulness for debugging and profiling. Therefore we will
   -- generally try only to make use of this property where it is
-  -- neccessary to enable optimizations.
+  -- necessary to enable optimizations.
   | SourceNote
     { sourceSpan :: RealSrcSpan -- ^ Source covered
     , sourceName :: String      -- ^ Name for source location

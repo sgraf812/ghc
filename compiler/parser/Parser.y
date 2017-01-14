@@ -643,7 +643,12 @@ unitdecl :: { LHsUnitDecl PackageName }
              { sL1 $2 $ DeclD SignatureD $3 Nothing }
         | 'dependency' unitid mayberns
              { sL1 $1 $ IncludeD (IncludeDecl { idUnitId = $2
-                                              , idModRenaming = $3 }) }
+                                              , idModRenaming = $3
+                                              , idSignatureInclude = False }) }
+        | 'dependency' 'signature' unitid
+             { sL1 $1 $ IncludeD (IncludeDecl { idUnitId = $3
+                                              , idModRenaming = Nothing
+                                              , idSignatureInclude = True }) }
 
 -----------------------------------------------------------------------------
 -- Module Header
@@ -1716,8 +1721,8 @@ ctype   :: { LHsType RdrName }
                                          >> return (sLL $1 $> $
                                             HsQualTy { hst_ctxt = $1
                                                      , hst_body = $3 }) }
-        | ipvar '::' type             {% ams (sLL $1 $> (HsIParamTy (unLoc $1) $3))
-                                             [mj AnnVal $1,mu AnnDcolon $2] }
+        | ipvar '::' type             {% ams (sLL $1 $> (HsIParamTy $1 $3))
+                                             [mu AnnDcolon $2] }
         | type                        { $1 }
 
 ----------------------
@@ -1741,8 +1746,8 @@ ctypedoc :: { LHsType RdrName }
                                          >> return (sLL $1 $> $
                                             HsQualTy { hst_ctxt = $1
                                                      , hst_body = $3 }) }
-        | ipvar '::' type             {% ams (sLL $1 $> (HsIParamTy (unLoc $1) $3))
-                                             [mj AnnVal $1,mu AnnDcolon $2] }
+        | ipvar '::' type             {% ams (sLL $1 $> (HsIParamTy $1 $3))
+                                             [mu AnnDcolon $2] }
         | typedoc                     { $1 }
 
 ----------------------

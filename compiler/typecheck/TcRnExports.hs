@@ -1,7 +1,7 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE OverloadedStrings #-}
-module TcRnExports (tcRnExports) where
+module TcRnExports (tcRnExports, exports_from_avail) where
 
 import HsSyn
 import PrelNames
@@ -115,7 +115,8 @@ tcRnExports :: Bool       -- False => no 'module M(..) where' header at all
 tcRnExports explicit_mod exports
           tcg_env@TcGblEnv { tcg_mod     = this_mod,
                               tcg_rdr_env = rdr_env,
-                              tcg_imports = imports }
+                              tcg_imports = imports,
+                              tcg_src     = hsc_src }
  = unsetWOptM Opt_WarnWarningsDeprecations $
        -- Do not report deprecations arising from the export
        -- list, to avoid bleating about re-exporting a deprecated
@@ -136,8 +137,14 @@ tcRnExports explicit_mod exports
                         -- ToDo: the 'noLoc' here is unhelpful if 'main'
                         --       turns out to be out of scope
 
+        ; let do_it = exports_from_avail real_exports rdr_env imports this_mod
         ; (rn_exports, final_avails)
-            <- exports_from_avail real_exports rdr_env imports this_mod
+            <- if hsc_src == HsigFile
+                then do (msgs, mb_r) <- tryTc do_it
+                        case mb_r of
+                            Just r  -> return r
+                            Nothing -> addMessages msgs >> failM
+                else checkNoErrs $ do_it
         ; let final_ns     = availsToNameSetWithSelectors final_avails
 
         ; traceRn "rnExports: Exports:" (ppr final_avails)
@@ -185,7 +192,7 @@ exports_from_avail Nothing rdr_env _imports _this_mod
 
 exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
   = do ExportAccum ie_names _ exports
-        <-  checkNoErrs $ foldAndRecoverM do_litem emptyExportAccum rdr_items
+        <-  foldAndRecoverM do_litem emptyExportAccum rdr_items
        let final_exports = nubAvails exports -- Combine families
        return (Just ie_names, final_exports)
   where
@@ -396,7 +403,7 @@ instance Outputable ChildLookupResult where
   ppr (FoundFL fls) = text "FoundFL:" <+> ppr fls
   ppr (NameErr _) = text "Error"
 
--- Left biased accumulation monoid. Chooses the left-most positive occurence.
+-- Left biased accumulation monoid. Chooses the left-most positive occurrence.
 instance Monoid ChildLookupResult where
   mempty = NameNotFound
   NameNotFound `mappend` m2 = m2
@@ -469,13 +476,13 @@ lookupExportChild parent rdr_name
   -- `checkPatSynParent`.
   traceRn "lookupExportChild original_gres:" (ppr original_gres)
   case picked_gres original_gres of
-    NoOccurence ->
+    NoOccurrence ->
       noMatchingParentErr original_gres
-    UniqueOccurence g ->
+    UniqueOccurrence g ->
       checkPatSynParent parent (gre_name g)
-    DisambiguatedOccurence g ->
+    DisambiguatedOccurrence g ->
       checkFld g
-    AmbiguousOccurence gres ->
+    AmbiguousOccurrence gres ->
       mkNameClashErr gres
     where
         -- Convert into FieldLabel if necessary
@@ -540,42 +547,42 @@ lookupExportChild parent rdr_name
         right_parent p
           | Just cur_parent <- getParent p
             = if parent == cur_parent
-                then DisambiguatedOccurence p
-                else NoOccurence
+                then DisambiguatedOccurrence p
+                else NoOccurrence
           | otherwise
-            = UniqueOccurence p
+            = UniqueOccurrence p
 
 -- This domain specific datatype is used to record why we decided it was
 -- possible that a GRE could be exported with a parent.
 data DisambigInfo
-       = NoOccurence
+       = NoOccurrence
           -- The GRE could never be exported. It has the wrong parent.
-       | UniqueOccurence GlobalRdrElt
+       | UniqueOccurrence GlobalRdrElt
           -- The GRE has no parent. It could be a pattern synonym.
-       | DisambiguatedOccurence GlobalRdrElt
+       | DisambiguatedOccurrence GlobalRdrElt
           -- The parent of the GRE is the correct parent
-       | AmbiguousOccurence [GlobalRdrElt]
+       | AmbiguousOccurrence [GlobalRdrElt]
           -- For example, two normal identifiers with the same name are in
-          -- scope. They will both be resolved to "UniqueOccurence" and the
+          -- scope. They will both be resolved to "UniqueOccurrence" and the
           -- monoid will combine them to this failing case.
 
 instance Monoid DisambigInfo where
-  mempty = NoOccurence
-  -- This is the key line: We prefer disambiguated occurences to other
+  mempty = NoOccurrence
+  -- This is the key line: We prefer disambiguated occurrences to other
   -- names.
-  UniqueOccurence _ `mappend` DisambiguatedOccurence g' = DisambiguatedOccurence g'
-  DisambiguatedOccurence g' `mappend` UniqueOccurence _ = DisambiguatedOccurence g'
+  UniqueOccurrence _ `mappend` DisambiguatedOccurrence g' = DisambiguatedOccurrence g'
+  DisambiguatedOccurrence g' `mappend` UniqueOccurrence _ = DisambiguatedOccurrence g'
 
 
-  NoOccurence `mappend` m = m
-  m `mappend` NoOccurence = m
-  UniqueOccurence g `mappend` UniqueOccurence g' = AmbiguousOccurence [g, g']
-  UniqueOccurence g `mappend` AmbiguousOccurence gs = AmbiguousOccurence (g:gs)
-  DisambiguatedOccurence g `mappend` DisambiguatedOccurence g'  = AmbiguousOccurence [g, g']
-  DisambiguatedOccurence g `mappend` AmbiguousOccurence gs = AmbiguousOccurence (g:gs)
-  AmbiguousOccurence gs `mappend` UniqueOccurence g' = AmbiguousOccurence (g':gs)
-  AmbiguousOccurence gs `mappend` DisambiguatedOccurence g' = AmbiguousOccurence (g':gs)
-  AmbiguousOccurence gs `mappend` AmbiguousOccurence gs' = AmbiguousOccurence (gs ++ gs')
+  NoOccurrence `mappend` m = m
+  m `mappend` NoOccurrence = m
+  UniqueOccurrence g `mappend` UniqueOccurrence g' = AmbiguousOccurrence [g, g']
+  UniqueOccurrence g `mappend` AmbiguousOccurrence gs = AmbiguousOccurrence (g:gs)
+  DisambiguatedOccurrence g `mappend` DisambiguatedOccurrence g'  = AmbiguousOccurrence [g, g']
+  DisambiguatedOccurrence g `mappend` AmbiguousOccurrence gs = AmbiguousOccurrence (g:gs)
+  AmbiguousOccurrence gs `mappend` UniqueOccurrence g' = AmbiguousOccurrence (g':gs)
+  AmbiguousOccurrence gs `mappend` DisambiguatedOccurrence g' = AmbiguousOccurrence (g':gs)
+  AmbiguousOccurrence gs `mappend` AmbiguousOccurrence gs' = AmbiguousOccurrence (gs ++ gs')
 
 
 
