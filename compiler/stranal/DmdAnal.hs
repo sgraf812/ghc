@@ -1,3 +1,6 @@
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE TupleSections #-}
+
 {-
 (c) The GRASP/AQUA Project, Glasgow University, 1993-1998
 
@@ -35,6 +38,73 @@ import TysPrim          ( realWorldStatePrimTy )
 import ErrUtils         ( dumpIfSet_dyn )
 import Name             ( getName, stableNameCmp )
 import Data.Function    ( on )
+import Worklist
+import Data.IntMap.Lazy (IntMap)
+import qualified Data.IntMap.Lazy as IntMap
+import Data.Map.Strict   (Map)
+import qualified Data.Map.Strict as Map
+import Data.Maybe
+import qualified Data.Set as Set
+import Control.Monad.Fix
+import Control.Monad.Trans.State.Strict
+
+{-
+************************************************************************
+*                                                                      *
+\subsection{Data flow framework related boilerplate}
+*                                                                      *
+************************************************************************
+-}
+
+type AnalResult = (DmdType, CoreExpr)
+
+newtype FrameworkNode
+  = FrameworkNode Int
+  deriving (Show, Eq, Ord, Outputable)
+
+type TransferFunction' a = TransferFunction (FrameworkNode, CleanDemand) AnalResult a
+type ChangeDetector' = ChangeDetector (FrameworkNode, CleanDemand) AnalResult
+type DataFlowFramework' = DataFlowFramework (FrameworkNode, CleanDemand) AnalResult
+
+newtype FrameworkBuilder a
+  = FB { unFB :: State (IntMap (CleanDemand -> TransferFunction' AnalResult, ChangeDetector')) a }
+  deriving (Functor, Applicative, Monad)
+
+buildFramework :: FrameworkBuilder a -> (a, DataFlowFramework')
+buildFramework (FB state) = (res, DFF dff)
+  where
+    (res, env) = runState state IntMap.empty
+    dff (FrameworkNode node, dmd) = case IntMap.lookup node env of
+      Nothing -> pprPanic "CallArity.buildFramework" (ppr node)
+      Just (transfer, detectChange) -> (transfer dmd, detectChange)
+
+data RequestedPriority
+  = LowerThan FrameworkNode
+  | HighestAvailable
+
+registerTransferFunction
+  :: RequestedPriority
+  -> (FrameworkNode -> FrameworkBuilder (a, (CleanDemand -> TransferFunction' AnalResult, ChangeDetector')))
+  -> FrameworkBuilder a
+registerTransferFunction prio f = FB $ do
+  nodes <- get
+  let node = case prio of
+        HighestAvailable -> 2 * IntMap.size nodes
+        LowerThan (FrameworkNode node)
+          | not (IntMap.member (node - 1) nodes) -> node - 1
+          | otherwise -> pprPanic "registerTransferFunction" (text "There was already a node registered with priority" <+> ppr (node - 1))
+  (result, _) <- mfix $ \ ~(_, entry) -> do
+    -- Using mfix so that we can spare an unnecessary Int counter in the state
+    modify' (IntMap.insert node entry)
+    unFB (f (FrameworkNode node))
+  return result
+
+dependOn' :: (FrameworkNode, CleanDemand) -> TransferFunction' (Maybe AnalResult)
+dependOn' (node, dmd) = do
+  --pprTrace "dependOn':before" (text "node:" <+> ppr node <+> text "dmd:" <+> ppr dmd) $ return ()
+  res <- dependOn (node, dmd)
+  --pprTrace "dependOn':after" (vcat [text "node:" <+> ppr node, text "dmd:" <+> ppr dmd, text "res:" <+> ppr res]) $ return ()
+  return res
 
 {-
 ************************************************************************
@@ -119,6 +189,266 @@ dmdAnalStar env dmd e
   | (defer_and_use, cd) <- toCleanDmd dmd (exprType e)
   , (dmd_ty, e')        <- dmdAnal env cd e
   = (postProcessDmdType defer_and_use dmd_ty, e')
+
+-- Do not process absent demands
+-- Otherwise act like in a normal demand analysis
+-- See |-* relation in the companion paper
+dmdAnalStar'
+  :: AnalEnv
+  -> CoreExpr
+  -> FrameworkBuilder (Demand -> TransferFunction' (BothDmdArg, CoreExpr))
+dmdAnalStar' env e
+  = wrapTransfer <$> dmdAnalExpr env e
+  where
+    wrapTransfer transfer dmd = do
+      let (defer_and_use, cd) = toCleanDmd dmd (exprType e)
+      (dmd_ty, e') <- transfer cd
+      return (postProcessDmdType defer_and_use dmd_ty, e')
+
+-- Main Demand Analysis machinery
+dmdAnalExpr, dmdAnalExpr'
+  :: AnalEnv
+  -> CoreExpr
+  -> FrameworkBuilder (CleanDemand -> TransferFunction' AnalResult)
+
+-- The CleanDemand is always strict and not absent
+--    See Note [Ensure demand is strict]
+
+dmdAnalExpr env e = debugWrapper <$> dmdAnalExpr' env e
+  where
+    debugWrapper transfer d = -- pprTrace "dmdAnal" (ppr d <+> ppr e) $
+                              transfer d
+
+dmdAnalExprTrivial
+  :: CoreExpr
+  -> FrameworkBuilder (CleanDemand -> TransferFunction' AnalResult)
+dmdAnalExprTrivial e = return $ const $ return (nopDmdType, e)
+
+dmdAnalExprTransparent
+  :: AnalEnv
+  -> (CoreExpr -> a)
+  -> CoreExpr
+  -> FrameworkBuilder (CleanDemand -> TransferFunction' (DmdType, a))
+dmdAnalExprTrivial e = return $ const $ return (nopDmdType, e)
+dmdAnalExprTransparent env f e
+  = transfer' <$> dmdAnalExpr env e
+  where
+    transfer' transfer dmd = do
+      (cat, e') <- transfer dmd
+      return (cat, f e')
+
+dmdAnalExpr' _ e@(Lit _)
+  = dmdAnalExprTrivial e
+dmdAnalExpr' _ e@(Type _)
+  = dmdAnalExprTrivial e -- Doesn't happen, in fact
+dmdAnalExpr' _ e@(Coercion _)
+  = return $ \_ -> return (unitDmdType (coercionDmdEnv co), e)
+
+dmdAnalExpr' env e@(Var var)
+  = return $ \dmd -> return (dmdTransform env var dmd, e)
+
+dmdAnalExpr' env (Cast e co) = return $ \dmd -> do
+  let (dmd_ty, e') = dmdAnal env dmd e
+  return (dmd_ty `bothDmdType` mkBothDmdArg (coercionDmdEnv co), Cast e' co)
+
+dmdAnalExpr' env (Tick t e)
+  = dmdAnalExprTransparent env (Tick t) e
+
+dmdAnalExpr' env (App fun (Type ty))
+  = dmdAnalExprTransparent env (flip App (Type ty)) fun
+
+-- Lots of the other code is there to make this
+-- beautiful, compositional, application rule :-)
+dmdAnalExpr' env (App fun arg)
+  = do
+    transfer_fun <- dmdAnalExpr env fun
+    transfer_arg <- dmdAnalExpr env arg
+    return $ \dmd -> do
+      -- This case handles value arguments (type args handled above)
+      -- Crucially, coercions /are/ handled here, because they are
+      -- value arguments (Trac #10288)
+      let call_dmd = mkCallDmd dmd
+      (fun_ty, fun') <- transfer_fun call_dmd
+      let (arg_dmd, res_ty) = splitDmdTy fun_ty
+      (arg_ty, arg') <- transfer_arg (dmdTransformThunkDmd arg arg_dmd)
+--    pprTrace "dmdAnal:app" (vcat
+--         [ text "dmd =" <+> ppr dmd
+--         , text "expr =" <+> ppr (App fun arg)
+--         , text "fun dmd_ty =" <+> ppr fun_ty
+--         , text "arg dmd =" <+> ppr arg_dmd
+--         , text "arg dmd_ty =" <+> ppr arg_ty
+--         , text "res dmd_ty =" <+> ppr res_ty
+--         , text "overall res dmd_ty =" <+> ppr (res_ty `bothDmdType` arg_ty) ]) $ return ()
+      return (res_ty `bothDmdType` arg_ty, App fun' arg')
+
+-- this is an anonymous lambda, since @dmdAnalRhsLetDown@ uses @collectBinders@
+-- TODO: Take this into account. Probably refactor stuff so that we don't do that anymore.
+dmdAnalExpr' env (Lam var body)
+  | isTyVar var
+  = dmdAnalExprTransparent env (Lam var) body
+
+  | otherwise
+  = do
+    transfer_body <- dmdAnal (extendSigsWithLam env var) body
+    return $ \dmd -> do
+      let (body_dmd, defer_and_use) = peelCallDmd dmd
+      -- body_dmd: a demand to analyze the body
+      (body_ty, body') <- transfer_body body_dmd
+      let (lam_ty, var') = annotateLamIdBndr env notArgOfDfun body_ty var
+      return (postProcessUnsat defer_and_use lam_ty, Lam var' body')
+
+dmdAnalExpr' env (Case scrut case_bndr ty [(DataAlt dc, bndrs, rhs)])
+  -- Only one alternative with a product constructor
+  | let tycon = dataConTyCon dc
+  , isJust (isDataProductTyCon_maybe tycon)
+  , Just rec_tc' <- checkRecTc (ae_rec_tc env) tycon
+  = do
+    let env_w_tc = env { ae_rec_tc = rec_tc' }
+        env_alt  = extendEnvForProdAlt env_w_tc scrut case_bndr dc bndrs
+    transfer_rhs <- dmdAnalExpr env_alt rhs
+    transfer_scrut <- dmdAnal env scrut
+    return $ \dmd -> do
+      (rhs_ty, rhs') <- transfer_rhs dmd
+      let (alt_ty1, dmds)          = findBndrsDmds env rhs_ty bndrs
+          (alt_ty2, case_bndr_dmd) = findBndrDmd env False alt_ty1 case_bndr
+          id_dmds                  = addCaseBndrDmd case_bndr_dmd dmds
+          alt_ty3 | io_hack_reqd scrut dc bndrs = deferAfterIO alt_ty2
+                  | otherwise                   = alt_ty2
+
+          -- Compute demand on the scrutinee
+          -- See Note [Demand on scrutinee of a product case]
+          scrut_dmd          = mkProdDmd (addDataConStrictness dc id_dmds)
+      (scrut_ty, scrut') <- transfer_scrut scrut_dmd
+      let res_ty             = alt_ty3 `bothDmdType` toBothDmdArg scrut_ty
+          case_bndr'         = setIdDemandInfo case_bndr case_bndr_dmd
+          bndrs'             = setBndrsDemandInfo bndrs id_dmds
+          case_bndr'         = setIdDemandInfo case_bndr case_bndr_dmd
+--    pprTrace "dmdAnal:Case1" (vcat [ text "scrut" <+> ppr scrut
+--                                   , text "dmd" <+> ppr dmd
+--                                   , text "case_bndr_dmd" <+> ppr (idDemandInfo case_bndr')
+--                                   , text "scrut_dmd" <+> ppr scrut_dmd
+--                                   , text "scrut_ty" <+> ppr scrut_ty
+--                                   , text "alt_ty" <+> ppr alt_ty2
+--                                   , text "res_ty" <+> ppr res_ty ]) $ return ()
+      return (res_ty, Case scrut' case_bndr' ty [(DataAlt dc, bndrs', rhs')])
+
+dmdAnal' env (Case scrut case_bndr ty alts)  -- Case expression with multiple alternatives
+  = do
+    transfer_alts <- mapM (dmdAnalAlt' env case_bndr) alts
+    transfer_scrut <- dmdAnalExpr' env scrut
+    return $ \dmd -> do
+      (alt_tys, alts') <- mapAndUnzipM ($ dmd) transfer_alts
+      (scrut_ty, scrut') <- transfer_scrut cleanEvalDmd
+      let (alt_ty, case_bndr') = annotateBndr env (foldr lubDmdType botDmdType alt_tys) case_bndr
+                                 -- NB: Base case is botDmdType, for empty case alternatives
+                                 --     This is a unit for lubDmdType, and the right result
+                                 --     when there really are no alternatives
+          res_ty               = alt_ty `bothDmdType` toBothDmdArg scrut_ty
+--    pprTrace "dmdAnal:Case2" (vcat [ text "scrut" <+> ppr scrut
+--                                   , text "scrut_ty" <+> ppr scrut_ty
+--                                   , text "alt_tys" <+> ppr alt_tys
+--                                   , text "alt_ty" <+> ppr alt_ty
+--                                   , text "res_ty" <+> ppr res_ty ]) $ return ()
+      return (res_ty, Case scrut' case_bndr' ty alts')
+
+-- Let bindings can be processed in two ways:
+-- Down (RHS before body) or Up (body before RHS).
+-- The following case handle the up variant.
+--
+-- It is very simple. For  let x = rhs in body
+--   * Demand-analyse 'body' in the current environment
+--   * Find the demand, 'rhs_dmd' placed on 'x' by 'body'
+--   * Demand-analyse 'rhs' in 'rhs_dmd'
+--
+-- This is used for a non-recursive local let without manifest lambdas.
+-- This is the LetUp rule in the paper “Higher-Order Cardinality Analysis”.
+dmdAnalExpr' env (Let (NonRec id rhs) body)
+  | useLetUp rhs
+  , Nothing <- unpackTrivial rhs
+      -- dmdAnalRhsLetDown treats trivial right hand sides specially
+      -- so if we have a trival right hand side, fall through to that.
+  = do
+    transfer_body <- dmdAnalExpr env body
+    transfer_rhs <- dmdAnalStar' env rhs
+    return $ \dmd -> do
+      (body_ty, body') <- transfer_body dmd
+      let (body_ty', id_dmd) = findBndrDmd env notArgOfDfun body_ty id
+          id'                = setIdDemandInfo id id_dmd
+      (rhs_ty, rhs') <- transfer_rhs (dmdTransformThunkDmd rhs id_dmd)
+      let final_ty           = body_ty' `bothDmdType` rhs_ty
+      return (final_ty, Let (NonRec id' rhs') body')
+
+dmdAnalExpr' env (Let (NonRec id rhs) body)
+  = do
+    (body_ty2, Let (NonRec id2 rhs') body')
+  where
+    (lazy_fv, id1, rhs') = dmdAnalRhsLetDown NotTopLevel Nothing env id rhs
+    env1                 = extendAnalEnv NotTopLevel env id1 (idStrictness id1)
+    (body_ty, body')     = dmdAnal env1 dmd body
+    (body_ty1, id2)      = annotateBndr env body_ty id1
+    body_ty2             = addLazyFVs body_ty1 lazy_fv -- see Note [Lazy and unleasheable free variables]
+
+        -- If the actual demand is better than the vanilla call
+        -- demand, you might think that we might do better to re-analyse
+        -- the RHS with the stronger demand.
+        -- But (a) That seldom happens, because it means that *every* path in
+        --         the body of the let has to use that stronger demand
+        -- (b) It often happens temporarily in when fixpointing, because
+        --     the recursive function at first seems to place a massive demand.
+        --     But we don't want to go to extra work when the function will
+        --     probably iterate to something less demanding.
+        -- In practice, all the times the actual demand on id2 is more than
+        -- the vanilla call demand seem to be due to (b).  So we don't
+        -- bother to re-analyse the RHS.
+
+dmdAnalBind ::
+  :: TopLevelFlag
+  -> AnalEnv
+  -> [(Id, CoreExpr)]
+  -> FrameworkBuilder AnalEnv
+dmdAnalBind top_lvl = go
+  where
+    go env [] = return env
+    go env ((id, rhs):binds) =
+      registerTransferFunction HighestAvailable $ \letdown_node -> do
+        env' <- go (extendAnalEnv' top_lvl env id letdown_node) binds
+        dmdAnalRhsLetDown' top_lvl env rhs
+        -- this is partly stolen from RhsLetDown. This is also the only interesting
+        -- case where we really need fixed-point iteration (so far).
+        (bndrs, body)    = collectBinders rhs
+        env_body         = foldl extendSigsWithLam env bndrs
+        transfer_body <- dmdAnalExpr env' body
+        let transfer_down _ = do -- TODO: use the actual incoming demand
+              transfer_down'
+        let transfer_up arity = do
+              --pprTrace "Bind:Before" (text "id:" <+> ppr id <+> text "arity:" <+> ppr arity) $ return ()
+              res <- transfer_up' arity
+              --pprTrace "Bind:Finished" (ppr res) $ return ()
+              return res
+        let transfer_down arity = fromMaybe (unusedArgsArityType arity, rhs) <$> dependOn' (letup_node, arity)
+        let change_detector_down _ (old, _) (new, _) =
+              -- The only reason we split the transfer fuctions up is cheap
+              -- change detection for the LetDown case. This implies that
+              -- use sites of the LetDown component may only use the cat_args
+              -- component!
+              -- FIXME: Encode this in the FrameworkNode type somehow, but I
+              -- don't think it's worth the trouble.
+              --pprTrace "change_detector_down" (ppr (cat_args old) <+> ppr (cat_args new) <+> ppr (cat_args old /= cat_args new)) $
+              cat_args old /= cat_args new
+        let ret = (letdown_nodes', letup_nodes') -- What we return from callArityBind
+        let letup = (transfer_up, alwaysChangeDetector) -- What we register for letup_node
+        let letdown = (transfer_down, change_detector_down) -- What we register for letdown_node
+        return ((ret, letup), letdown) -- registerTransferFunction  will peel `snd`s away for registration
+
+dmdAnal' env dmd (Let (Rec pairs) body)
+  = let
+        (env', lazy_fv, pairs') = dmdFix NotTopLevel env pairs
+        (body_ty, body')        = dmdAnal env' dmd body
+        body_ty1                = deleteFVs body_ty (map fst pairs)
+        body_ty2                = addLazyFVs body_ty1 lazy_fv -- see Note [Lazy and unleasheable free variables]
+    in
+    body_ty2 `seq`
+    (body_ty2,  Let (Rec pairs') body')
 
 -- Main Demand Analsysis machinery
 dmdAnal, dmdAnal' :: AnalEnv
@@ -325,6 +655,23 @@ io_hack_reqd scrut con bndrs
       _     -> True
   | otherwise
   = False
+
+dmdAnalAlt'
+  :: AnalEnv
+  -> Id
+  -> Alt Var
+  -> FrameworkBuilder (CleanDemand -> TransferFunction' (DmdType, Alt Var))
+dmdAnalAlt' env case_bndr (con,bndrs,rhs)
+  = do
+    transfer_rhs <- dmdAnalExprTransparent env (con, bndrs,) rhs
+    if null bndrs
+      then transfer_rhs
+      else \dmd -> do
+        (rhs_ty, rhs') <- transfer_rhs dmd
+        let (alt_ty, dmds) = findBndrsDmds env rhs_ty bndrs
+            case_bndr_dmd  = findIdDemand alt_ty case_bndr
+            id_dmds        = addCaseBndrDmd case_bndr_dmd dmds
+        return (alt_ty, (con, setBndrsDemandInfo bndrs id_dmds, rhs'))
 
 dmdAnalAlt :: AnalEnv -> CleanDemand -> Id -> Alt Var -> (DmdType, Alt Var)
 dmdAnalAlt env dmd case_bndr (con,bndrs,rhs)
@@ -591,6 +938,55 @@ dmdAnalTrivialRhs env id rhs fn
 -- Local non-recursive definitions without a lambda are handled with LetUp.
 --
 -- This is the LetDown rule in the paper “Higher-Order Cardinality Analysis”.
+dmdAnalRhsLetDown' :: TopLevelFlag
+           -> Maybe [Id]   -- Just bs <=> recursive, Nothing <=> non-recursive
+           -> AnalEnv -> Id -> CoreExpr
+           -> (DmdEnv, Id, CoreExpr)
+-- Process the RHS of the binding, add the strictness signature
+-- to the Id, and augment the environment with the signature as well.
+dmdAnalRhsLetDown top_lvl rec_flag env id rhs
+  | Just fn <- unpackTrivial rhs   -- See Note [Demand analysis for trivial right-hand sides]
+  = dmdAnalTrivialRhs env id rhs fn
+
+  | otherwise
+  = (lazy_fv, id', mkLams bndrs' body')
+  where
+    (bndrs, body)    = collectBinders rhs
+    env_body         = foldl extendSigsWithLam env bndrs
+    (body_ty, body') = dmdAnal env_body body_dmd body
+    body_ty'         = removeDmdTyArgs body_ty -- zap possible deep CPR info
+    (DmdType rhs_fv rhs_dmds rhs_res, bndrs')
+                     = annotateLamBndrs env (isDFunId id) body_ty' bndrs
+    sig_ty           = mkStrictSig (mkDmdType sig_fv rhs_dmds rhs_res')
+    id'              = set_idStrictness env id sig_ty
+        -- See Note [NOINLINE and strictness]
+
+    -- See Note [Product demands for function body]
+    body_dmd = case deepSplitProductType_maybe (ae_fam_envs env) (exprType body) of
+                 Nothing            -> cleanEvalDmd
+                 Just (dc, _, _, _) -> cleanEvalProdDmd (dataConRepArity dc)
+
+    -- See Note [Aggregated demand for cardinality]
+    rhs_fv1 = case rec_flag of
+                Just bs -> reuseEnv (delVarEnvList rhs_fv bs)
+                Nothing -> rhs_fv
+
+    -- See Note [Lazy and unleashable free variables]
+    (lazy_fv, sig_fv) = splitFVs is_thunk rhs_fv1
+
+    rhs_res'  = trimCPRInfo trim_all trim_sums rhs_res
+    trim_all  = is_thunk && not_strict
+    trim_sums = not (isTopLevel top_lvl) -- See Note [CPR for sum types]
+
+    -- See Note [CPR for thunks]
+    is_thunk = not (exprIsHNF rhs)
+    not_strict
+       =  isTopLevel top_lvl  -- Top level and recursive things don't
+       || isJust rec_flag     -- get their demandInfo set at all
+       || not (isStrictDmd (idDemandInfo id) || ae_virgin env)
+          -- See Note [Optimistic CPR in the "virgin" case]
+
+
 dmdAnalRhsLetDown :: TopLevelFlag
            -> Maybe [Id]   -- Just bs <=> recursive, Nothing <=> non-recursive
            -> AnalEnv -> Id -> CoreExpr

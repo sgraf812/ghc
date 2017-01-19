@@ -85,7 +85,7 @@ import DataCon         ( splitDataProductType_maybe )
 -}
 
 data JointDmd s u = JD { sd :: s, ud :: u }
-  deriving ( Eq, Show )
+  deriving ( Eq, Ord, Show )
 
 getStrDmd :: JointDmd s u -> s
 getStrDmd = sd
@@ -184,21 +184,21 @@ data StrDmd
                          -- A polymorphic demand: used for values of all types,
                          --                       including a type variable
 
-  deriving ( Eq, Show )
+  deriving ( Eq, Ord, Show )
 
 type ArgStr = Str StrDmd
 
 data Str s = Lazy         -- Lazy
                           -- Top of the lattice
            | Str ExnStr s
-  deriving ( Eq, Show )
+  deriving ( Eq, Ord, Show )
 
 data ExnStr  -- See Note [Exceptions and strictness]
   = VanStr   -- "Vanilla" case, ordinary strictness
 
   | ExnStr   -- (Str ExnStr d) means be strict like 'd' but then degrade
              --                the Termination info ThrowsExn to Dunno
-  deriving( Eq, Show )
+  deriving( Eq, Ord, Show )
 
 -- Well-formedness preserving constructors for the Strictness domain
 strBot, strTop :: ArgStr
@@ -348,7 +348,7 @@ data UseDmd
 
   | Used                 -- May be used; and its sub-components may be used
                          -- Top of the lattice
-  deriving ( Eq, Show )
+  deriving ( Eq, Ord, Show )
 
 -- Extended usage demand for absence and counting
 type ArgUse = Use UseDmd
@@ -358,11 +358,11 @@ data Use u
                     -- Bottom of the lattice
 
   | Use Count u     -- May be used with some cardinality
-  deriving ( Eq, Show )
+  deriving ( Eq, Ord, Show )
 
 -- Abstract counting of usages
 data Count = One | Many
-  deriving ( Eq, Show )
+  deriving ( Eq, Ord, Show )
 
 -- Pretty-printing
 instance Outputable ArgUse where
