@@ -1569,6 +1569,7 @@ tcIdInfo ignore_prags name ty info = do
     tcPrag info HsNoCafRefs        = return (info `setCafInfo`   NoCafRefs)
     tcPrag info (HsArity arity)    = return (info `setArityInfo` arity)
     tcPrag info (HsStrictness str) = return (info `setStrictnessInfo` str)
+    tcPrag info (HsCardinality card) = return (info `setCallArityInfo` card)
     tcPrag info (HsInline prag)    = return (info `setInlinePragInfo` prag)
     tcPrag info HsLevity           = return (info `setNeverLevPoly` ty)
 

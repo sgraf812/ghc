@@ -328,6 +328,7 @@ data IfaceIdInfo
 data IfaceInfoItem
   = HsArity         Arity
   | HsStrictness    StrictSig
+  | HsCardinality   CardinalitySig
   | HsInline        InlinePragma
   | HsUnfold        Bool             -- True <=> isStrongLoopBreaker is true
                     IfaceUnfolding   -- See Note [Expose recursive functions]
@@ -1222,7 +1223,8 @@ instance Outputable IfaceInfoItem where
                               <> colon <+> ppr unf
   ppr (HsInline prag)       = text "Inline:" <+> ppr prag
   ppr (HsArity arity)       = text "Arity:" <+> int arity
-  ppr (HsStrictness str) = text "Strictness:" <+> pprIfaceStrictSig str
+  ppr (HsStrictness str)    = text "Strictness:" <+> pprIfaceStrictSig str
+  ppr (HsCardinality card)  = text "Cardinality:" <+> pprIfaceCardinalitySig card
   ppr HsNoCafRefs           = text "HasNoCafRefs"
   ppr HsLevity              = text "Never levity-polymorphic"
 
@@ -1965,20 +1967,22 @@ instance Binary IfaceIdInfo where
 instance Binary IfaceInfoItem where
     put_ bh (HsArity aa)          = putByte bh 0 >> put_ bh aa
     put_ bh (HsStrictness ab)     = putByte bh 1 >> put_ bh ab
-    put_ bh (HsUnfold lb ad)      = putByte bh 2 >> put_ bh lb >> put_ bh ad
-    put_ bh (HsInline ad)         = putByte bh 3 >> put_ bh ad
-    put_ bh HsNoCafRefs           = putByte bh 4
-    put_ bh HsLevity              = putByte bh 5
+    put_ bh (HsCardinality ac)    = putByte bh 2 >> put_ bh ac
+    put_ bh (HsUnfold lb ad)      = putByte bh 3 >> put_ bh lb >> put_ bh ad
+    put_ bh (HsInline ad)         = putByte bh 4 >> put_ bh ad
+    put_ bh HsNoCafRefs           = putByte bh 5
+    put_ bh HsLevity              = putByte bh 6
     get bh = do
         h <- getByte bh
         case h of
             0 -> liftM HsArity $ get bh
             1 -> liftM HsStrictness $ get bh
-            2 -> do lb <- get bh
+            2 -> liftM HsCardinality $ get bh
+            3 -> do lb <- get bh
                     ad <- get bh
                     return (HsUnfold lb ad)
-            3 -> liftM HsInline $ get bh
-            4 -> return HsNoCafRefs
+            4 -> liftM HsInline $ get bh
+            5 -> return HsNoCafRefs
             _ -> return HsLevity
 
 instance Binary IfaceUnfolding where

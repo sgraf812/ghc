@@ -98,6 +98,7 @@ import Outputable
 import Module
 import Demand
 import Util
+import CallArity.Types
 
 -- infixl so you can say (id `set` a `set` b)
 infixl  1 `setRuleInfo`,
@@ -247,8 +248,8 @@ data IdInfo
         strictnessInfo  :: StrictSig,      --  ^ A strictness signature
 
         demandInfo      :: Demand,       -- ^ ID demand information
-        callArityInfo   :: !ArityInfo,   -- ^ How this is called.
-                                         -- n <=> all calls have at least n arguments
+        callArityInfo   :: !CardinalitySig -- ^ How this is uses its arguments.
+                                           -- length of n <=> all calls have at least n arguments
 
         levityInfo      :: LevityInfo    -- ^ when applied, will this Id ever have a levity-polymorphic type?
     }
@@ -273,8 +274,8 @@ setUnfoldingInfo info uf
 
 setArityInfo :: IdInfo -> ArityInfo -> IdInfo
 setArityInfo      info ar  = info { arityInfo = ar  }
-setCallArityInfo :: IdInfo -> ArityInfo -> IdInfo
-setCallArityInfo info ar  = info { callArityInfo = ar  }
+setCallArityInfo :: IdInfo -> CardinalitySig -> IdInfo
+setCallArityInfo info sig  = info { callArityInfo = sig }
 setCafInfo :: IdInfo -> CafInfo -> IdInfo
 setCafInfo        info caf = info { cafInfo = caf }
 
@@ -300,7 +301,7 @@ vanillaIdInfo
             occInfo             = noOccInfo,
             demandInfo          = topDmd,
             strictnessInfo      = nopSig,
-            callArityInfo       = unknownArity,
+            callArityInfo       = topCardinalitySig,
             levityInfo          = NoLevityInfo
            }
 

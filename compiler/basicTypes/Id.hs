@@ -618,11 +618,11 @@ idArity id = arityInfo (idInfo id)
 setIdArity :: Id -> Arity -> Id
 setIdArity id arity = modifyIdInfo (`setArityInfo` arity) id
 
-idCallArity :: Id -> Arity
+idCallArity :: Id -> CardinalitySig
 idCallArity id = callArityInfo (idInfo id)
 
-setIdCallArity :: Id -> Arity -> Id
-setIdCallArity id arity = modifyIdInfo (`setCallArityInfo` arity) id
+setIdCallArity :: Id -> CardinalitySig -> Id
+setIdCallArity id sig = modifyIdInfo (`setCallArityInfo` sig) id
 
 idFunRepArity :: Id -> RepArity
 idFunRepArity x = countFunRepArgs (idArity x) (idType x)
