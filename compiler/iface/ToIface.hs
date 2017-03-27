@@ -365,9 +365,14 @@ toIfaceIdInfo id_info
 
     ------------  Strictness  --------------
         -- No point in explicitly exporting TopSig
-    sig_info = strictnessInfo id_info
-    strict_hsinfo | not (isTopSig sig_info) = Just (HsStrictness sig_info)
+    str_info = strictnessInfo id_info
+    strict_hsinfo | not (isTopSig str_info) = Just (HsStrictness str_info)
                   | otherwise               = Nothing
+
+    ------------  Cardinality --------------
+    sig_info = callArityInfo id_info
+    strict_hsinfo | card_info /= topCardinality = Just (HsCardinality card_info)
+                  | otherwise                   = Nothing
 
     ------------  Unfolding  --------------
     unfold_hsinfo = toIfUnfolding loop_breaker (unfoldingInfo id_info)

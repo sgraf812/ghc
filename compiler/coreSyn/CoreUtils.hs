@@ -1046,6 +1046,10 @@ Note that exprIsHNF does not imply exprIsCheap.  Eg
         let x = fac 20 in Just x
 This responds True to exprIsHNF (you can discard a seq), but
 False to exprIsCheap.
+
+Note [exprIsCheap and exprIsTrivial]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+It is however the case that @exprIsTrivial@ implies @exprIsCheap@.
 -}
 
 exprIsCheap :: CoreExpr -> Bool
