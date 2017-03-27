@@ -1077,6 +1077,10 @@ Note that exprIsHNF does not imply exprIsCheap.  Eg
 This responds True to exprIsHNF (you can discard a seq), but
 False to exprIsCheap.
 
+Note [exprIsCheap and exprIsTrivial]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+It is however the case that @exprIsTrivial@ implies @exprIsCheap@.
+
 Note [exprIsExpandable]
 ~~~~~~~~~~~~~~~~~~~~~~~
 An expression is "expandable" if we are willing to dupicate it, if doing
@@ -1098,7 +1102,6 @@ q's inlining should not be expandable, else exprIsConApp_maybe will
 say that (q @ Float) expands to (Ptr a (a +# b)), and that will
 duplicate the (a +# b) primop, which we should not do lightly.
 (It's quite hard to trigger this bug, but T13155 does so for GHC 8.0.)
-
 
 Note [Arguments in exprIsOk]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
