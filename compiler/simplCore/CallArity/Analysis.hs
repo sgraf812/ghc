@@ -496,7 +496,12 @@ callArityExpr nodes e@(Var v) = return transfer
         return ((unitArityType v arity) { cat_args = cat_args cat_callee }, e)
 
       | isInteresting v
-      --, isGlobalId v -- TODO: lookup sig if present
+      , isGlobalId v
+      = return (unitArityType v arity { cat_args = idCallArity v }, e)
+
+      | isInteresting v
+      -- LocalId, not present in @nodes@, e.g. a lambda-bound variable.
+      -- We are only second-order, so we don't model signatures for parameters!
       = return (unitArityType v arity, e)
 
       | otherwise
@@ -648,8 +653,6 @@ callArityBind letdown_nodes = go letdown_nodes emptyVarEnv
           let letdown = (transfer_down, change_detector_down) -- What we register for letdown_node
           return ((ret, letup), letdown) -- registerTransferFunction  will peel `snd`s away for registration
 
-{-|
--}
 unleashLet
   :: Bool
   -> [(Id, CoreExpr)]
