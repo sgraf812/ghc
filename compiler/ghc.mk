@@ -480,19 +480,16 @@ compiler_stage2_dll0_MODULES = \
 	HsExpr \
 	HsImpExp \
 	HsLit \
-	PlaceHolder \
-	PmExpr \
 	HsPat \
 	HsSyn \
 	HsTypes \
 	HsUtils \
 	HscTypes \
-	IOEnv \
-  NameCache \
 	Id \
 	IdInfo \
 	IfaceSyn \
 	IfaceType \
+	IOEnv \
 	ToIface \
 	InstEnv \
 	Kind \
@@ -506,6 +503,7 @@ compiler_stage2_dll0_MODULES = \
 	Module \
 	MonadUtils \
 	Name \
+	NameCache \
 	NameEnv \
 	NameSet \
 	OccName \
@@ -519,8 +517,10 @@ compiler_stage2_dll0_MODULES = \
 	Panic \
 	PatSyn \
 	PipelineMonad \
+	PlaceHolder \
 	Platform \
 	PlatformConstants \
+	PmExpr \
 	PprCore \
 	PrelNames \
 	PrelRules \
@@ -549,6 +549,7 @@ compiler_stage2_dll0_MODULES = \
 	UniqSet \
 	UniqSupply \
 	Unique \
+	Usage \
 	Util \
 	Var \
 	VarEnv \
