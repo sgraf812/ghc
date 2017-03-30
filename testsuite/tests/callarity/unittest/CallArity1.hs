@@ -4,7 +4,7 @@ import CoreUtils
 import Id
 import Type
 import MkCore
-import CallArity (callArityRHS)
+import CallArity.Analysis (callArityRHS)
 import MkId
 import SysTools
 import DynFlags
@@ -41,7 +41,7 @@ go, go2, x, d, n, y, z, scrutf, scruta :: Id
 
 exprs :: [(String, CoreExpr)]
 exprs =
-  [ ("go2",) $ -- pprTraceIt "go2" $
+  [ ("go2",) $ pprTraceIt "go2" $
      mkRFun go [x]
         (mkLet d (mkACase (Var go `mkVarApps` [x])
                           (mkLams [y] $ Var y)
