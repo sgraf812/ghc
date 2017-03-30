@@ -1468,7 +1468,7 @@ tcIdInfo ignore_prags name ty info = do
     tcPrag info HsNoCafRefs        = return (info `setCafInfo`   NoCafRefs)
     tcPrag info (HsArity arity)    = return (info `setArityInfo` arity)
     tcPrag info (HsStrictness str) = return (info `setStrictnessInfo` str)
-    tcPrag info (HsCardinality card) = return (info `setCallArityInfo` card)
+    tcPrag info (HsUsage usg)      = return (info `setArgUsageInfo` usg)
     tcPrag info (HsInline prag)    = return (info `setInlinePragInfo` prag)
 
         -- The next two are lazy, so they don't transitively suck stuff in

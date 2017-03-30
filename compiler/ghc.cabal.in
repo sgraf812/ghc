@@ -207,6 +207,7 @@ Library
         SrcLoc
         UniqSupply
         Unique
+        Usage
         Var
         VarEnv
         VarSet
@@ -410,6 +411,9 @@ Library
         StgLint
         StgSyn
         CallArity
+        CallArity.Types
+        CallArity.FrameworkBuilder
+        CallArity.Analysis
         DmdAnal
         WorkWrap
         WwLib

@@ -85,27 +85,28 @@ module Id (
 
         -- ** Reading 'IdInfo' fields
         idArity,
-        idCallArity,
         idUnfolding, realIdUnfolding,
         idSpecialisation, idCoreRules, idHasRules,
         idCafInfo,
         idOneShotInfo, idStateHackOneShotInfo,
         idOccInfo,
+        idCallArity,
+        idArgUsage,
+        idDemandInfo,
+        idStrictness,
 
         -- ** Writing 'IdInfo' fields
         setIdUnfolding, setCaseBndrEvald,
         setIdArity,
-        setIdCallArity,
 
         setIdSpecialisation,
         setIdCafInfo,
         setIdOccInfo, zapIdOccInfo,
 
+        setIdCallArity,
+        setIdArgUsage,
         setIdDemandInfo,
         setIdStrictness,
-
-        idDemandInfo,
-        idStrictness,
 
     ) where
 
@@ -128,6 +129,7 @@ import Type
 import TysPrim
 import DataCon
 import Demand
+import Usage
 import Name
 import Module
 import Class
@@ -145,7 +147,6 @@ import StaticFlags
 -- infixl so you can say (id `set` a `set` b)
 infixl  1 `setIdUnfolding`,
           `setIdArity`,
-          `setIdCallArity`,
           `setIdOccInfo`,
           `setIdOneShotInfo`,
 
@@ -155,7 +156,9 @@ infixl  1 `setIdUnfolding`,
           `idCafInfo`,
 
           `setIdDemandInfo`,
-          `setIdStrictness`
+          `setIdStrictness`,
+          `setIdCallArity`,
+          `setIdArgUsage`
 
 {-
 ************************************************************************
@@ -557,11 +560,17 @@ idArity id = arityInfo (idInfo id)
 setIdArity :: Id -> Arity -> Id
 setIdArity id arity = modifyIdInfo (`setArityInfo` arity) id
 
-idCallArity :: Id -> CardinalitySig
+idCallArity :: Id -> Usage
 idCallArity id = callArityInfo (idInfo id)
 
-setIdCallArity :: Id -> CardinalitySig -> Id
-setIdCallArity id sig = modifyIdInfo (`setCallArityInfo` sig) id
+setIdCallArity :: Id -> Usage -> Id
+setIdCallArity id used = modifyIdInfo (`setCallArityInfo` used) id
+
+idArgUsage :: Id -> UsageSig
+idArgUsage id = argUsageInfo (idInfo id)
+
+setIdArgUsage :: Id -> UsageSig -> Id
+setIdArgUsage id sig = modifyIdInfo (`setArgUsageInfo` sig) id
 
 -- | Returns true if an application to n args would diverge
 isBottomingId :: Id -> Bool

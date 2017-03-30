@@ -31,6 +31,8 @@ module IdInfo (
         unknownArity,
         arityInfo, setArityInfo, ppArityInfo,
 
+        -- ** Usage info
+        argUsageInfo, setArgUsageInfo,
         callArityInfo, setCallArityInfo,
 
         -- ** Demand and strictness Info
@@ -82,7 +84,7 @@ import ForeignCall
 import Outputable
 import Module
 import Demand
-import CallArity.Types
+import Usage
 
 -- infixl so you can say (id `set` a `set` b)
 infixl  1 `setRuleInfo`,
@@ -93,7 +95,9 @@ infixl  1 `setRuleInfo`,
           `setOccInfo`,
           `setCafInfo`,
           `setStrictnessInfo`,
-          `setDemandInfo`
+          `setDemandInfo`,
+          `setCallArityInfo`,
+          `setArgUsageInfo`
 
 {-
 ************************************************************************
@@ -219,12 +223,51 @@ data IdInfo
         inlinePragInfo  :: InlinePragma,        -- ^ Any inline pragma atached to the 'Id'
         occInfo         :: OccInfo,             -- ^ How the 'Id' occurs in the program
 
-        strictnessInfo  :: StrictSig,      --  ^ A strictness signature
+        strictnessInfo  :: !StrictSig,
+        demandInfo      :: !Demand,
+        argUsageInfo    :: !UsageSig,
+        callArityInfo   :: !Usage
 
-        demandInfo      :: Demand,       -- ^ ID demand information
-        callArityInfo   :: !CardinalitySig -- ^ How this is uses its arguments.
-                                           -- length of n <=> all calls have at least n arguments
+        --cardinalityInfo :: CardinalityInfo      -- ^ Evaluation cardinality of the binder and its arguments
     }
+
+-- | Cardinality information about a binder.
+--
+-- The cardinality of a binder represents how often it is evaluated/called.
+-- Interesting cardinalities are {0, 1, $\omega$}, where $\omega$ means
+-- multiple times.
+--
+-- Strictness and usage analysis compute approximations to the
+-- actual runtime cardinality: Strictness analysis will compute a *lower* bound
+-- for the cadinality (e.g. 'is this evaluated at least once?'), whereas
+-- usage analysis computes upper bounds for cardinality (e.g. 'not used at all',
+-- 'used at most once'). The results are saved in @ci_demanded@ and @ci_used@.
+--
+-- For second-order strictness and usage analysis, we also store signatures of
+-- how the binder evaluates *its arguments* on evaluation. These signatures are
+-- stored in @ci_argStrictness@ and @ci_argUsage@ and persisted in interface
+-- files for analysis information flow across module boundaries.
+data CardinalityInfo
+  = CardinalityInfo {
+        ci_argStrictness :: !StrictSig,
+        -- ^ What strictness is unleashed upon *arguments* if this @Id@ is called
+        ci_argUsage      :: !UsageSig,
+        -- ^ What usage is unleashed upon *arguments* if this @Id@ is called
+        ci_demanded      :: !Demand,
+        -- ^ Is this binding used *at least* once (e.g. strict)?
+        ci_used          :: !Usage
+        -- ^ Is this binding used *at most* never, once or multiple times?
+        -- What is the minimum number of arguments it was called with?
+  }
+
+emptyCardinalityInfo :: CardinalityInfo
+emptyCardinalityInfo
+  = CardinalityInfo {
+        ci_argStrictness = nopSig,
+        ci_argUsage      = topUsageSig,
+        ci_demanded      = topDmd,
+        ci_used          = topUsage
+  }
 
 -- Setters
 
@@ -246,8 +289,7 @@ setUnfoldingInfo info uf
 
 setArityInfo :: IdInfo -> ArityInfo -> IdInfo
 setArityInfo      info ar  = info { arityInfo = ar  }
-setCallArityInfo :: IdInfo -> CardinalitySig -> IdInfo
-setCallArityInfo info sig  = info { callArityInfo = sig }
+
 setCafInfo :: IdInfo -> CafInfo -> IdInfo
 setCafInfo        info caf = info { cafInfo = caf }
 
@@ -255,10 +297,16 @@ setOneShotInfo :: IdInfo -> OneShotInfo -> IdInfo
 setOneShotInfo      info lb = {-lb `seq`-} info { oneShotInfo = lb }
 
 setDemandInfo :: IdInfo -> Demand -> IdInfo
-setDemandInfo info dd = dd `seq` info { demandInfo = dd }
+setDemandInfo info dd = info { demandInfo = dd }
 
 setStrictnessInfo :: IdInfo -> StrictSig -> IdInfo
-setStrictnessInfo info dd = dd `seq` info { strictnessInfo = dd }
+setStrictnessInfo info dd = info { strictnessInfo = dd }
+
+setArgUsageInfo :: IdInfo -> UsageSig -> IdInfo
+setArgUsageInfo info sig = info { argUsageInfo = sig }
+
+setCallArityInfo :: IdInfo -> Usage -> IdInfo
+setCallArityInfo info used = info { callArityInfo = used }
 
 -- | Basic 'IdInfo' that carries no useful information whatsoever
 vanillaIdInfo :: IdInfo
@@ -271,9 +319,11 @@ vanillaIdInfo
             oneShotInfo         = NoOneShotInfo,
             inlinePragInfo      = defaultInlinePragma,
             occInfo             = NoOccInfo,
-            demandInfo          = topDmd,
             strictnessInfo      = nopSig,
-            callArityInfo       = topCardinalitySig,
+            demandInfo          = topDmd,
+            argUsageInfo           = topUsageSig,
+            callArityInfo       = topUsage
+            --cardinalityInfo     = emptyCardinalityInfo
            }
 
 -- | More informative 'IdInfo' we can use when we know the 'Id' has no CAF references

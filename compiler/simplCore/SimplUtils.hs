@@ -49,6 +49,7 @@ import Name
 import Id
 import Var
 import Demand
+import Usage
 import SimplMonad
 import Type     hiding( substTy )
 import Coercion hiding( substCo )
@@ -64,6 +65,7 @@ import PrelRules
 import Literal
 
 import Control.Monad    ( when )
+import Data.Maybe ( fromMaybe )
 
 {-
 ************************************************************************
@@ -1408,7 +1410,7 @@ tryEtaExpandRhs env bndr rhs
 
       | sm_eta_expand (getMode env)      -- Provided eta-expansion is on
       , let new_arity1 = findRhsArity dflags bndr rhs old_arity
-            new_arity2 = idCallArity bndr
+            new_arity2 = fromMaybe new_arity1 (use (idCallArity bndr))
             new_arity  = max new_arity1 new_arity2
       , new_arity > old_arity      -- And the current manifest arity isn't enough
       = do { tick (EtaExpansion bndr)
