@@ -694,7 +694,7 @@ unleashCall is_recursive ut_usage (id, rhs) transfer_rhs
       let ut_rhs' = finish_ut_rhs ut_rhs
       let id' = id
             `setIdArgUsage` ut_args ut_rhs'
-            `setIdCallArity` lookupUsage ut_rhs' id
+            `setIdCallArity` trimmed_use
       return (ut_rhs', (id', rhs'))
 
 -- | See Note [What is a thunk].
