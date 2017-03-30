@@ -10,7 +10,6 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Maybe (fromMaybe)
 import Control.Monad (forM_)
-import Debug.Trace
 
 newtype TransferFunction node lattice a
   = TFM (State (WorklistState node lattice) a)

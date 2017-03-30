@@ -23,6 +23,7 @@ import Var
 import Id
 import IdInfo
 import Demand
+import Usage
 import DataCon
 import TyCon
 import Type
@@ -458,7 +459,8 @@ ppIdInfo id info
     showAttributes
     [ (True, pp_scope <> ppr (idDetails id))
     , (has_arity,        text "Arity=" <> int arity)
-    , (has_called_arity, text "CallArity=" <> int called_arity)
+    , (has_arg_usage,    text "Usg=" <> ppr called_arity)
+    , (has_called_arity, text "CallArity=" <> ppr called_arity)
     , (has_caf_info,     text "Caf=" <> ppr caf_info)
     , (has_str_info,     text "Str=" <> pprStrictness str_info)
     , (has_unf,          text "Unf=" <> ppr unf_info)
@@ -475,7 +477,10 @@ ppIdInfo id info
     has_arity = arity /= 0
 
     called_arity = callArityInfo info
-    has_called_arity = called_arity /= 0
+    has_called_arity = called_arity /= topUsage
+
+    arg_usage = argUsageInfo info
+    has_arg_usage = arg_usage /= topUsageSig
 
     caf_info = cafInfo info
     has_caf_info = not (mayHaveCafRefs caf_info)

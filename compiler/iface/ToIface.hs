@@ -67,6 +67,7 @@ import VarEnv
 import VarSet
 import TyCoRep
 import Demand ( isTopSig )
+import Usage ( topUsageSig )
 
 import Data.Maybe ( catMaybes )
 
@@ -370,7 +371,7 @@ toIfaceIdDetails other = pprTrace "toIfaceIdDetails" (ppr other)
 toIfaceIdInfo :: IdInfo -> IfaceIdInfo
 toIfaceIdInfo id_info
   = case catMaybes [arity_hsinfo, caf_hsinfo, strict_hsinfo,
-                    inline_hsinfo,  unfold_hsinfo, levity_hsinfo] of
+                    usage_hsinfo, inline_hsinfo,  unfold_hsinfo, levity_hsinfo] of
        []    -> NoInfo
        infos -> HasInfo infos
                -- NB: strictness and arity must appear in the list before unfolding
@@ -393,10 +394,10 @@ toIfaceIdInfo id_info
     strict_hsinfo | not (isTopSig str_info) = Just (HsStrictness str_info)
                   | otherwise               = Nothing
 
-    ------------  Cardinality --------------
-    sig_info = callArityInfo id_info
-    strict_hsinfo | card_info /= topCardinality = Just (HsCardinality card_info)
-                  | otherwise                   = Nothing
+    ------------  Usage --------------
+    usg_info = argUsageInfo id_info
+    usage_hsinfo | usg_info /= topUsageSig = Just (HsUsage usg_info)
+                 | otherwise               = Nothing
 
     ------------  Unfolding  --------------
     unfold_hsinfo = toIfUnfolding loop_breaker (unfoldingInfo id_info)
