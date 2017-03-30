@@ -46,6 +46,7 @@ import BinFingerprint
 import CoreSyn( IsOrphan, isOrphan )
 import PprCore()            -- Printing DFunArgs
 import Demand
+import Usage
 import Class
 import FieldLabel
 import NameSet
@@ -328,7 +329,7 @@ data IfaceIdInfo
 data IfaceInfoItem
   = HsArity         Arity
   | HsStrictness    StrictSig
-  | HsCardinality   CardinalitySig
+  | HsUsage         UsageSig
   | HsInline        InlinePragma
   | HsUnfold        Bool             -- True <=> isStrongLoopBreaker is true
                     IfaceUnfolding   -- See Note [Expose recursive functions]
@@ -1224,7 +1225,7 @@ instance Outputable IfaceInfoItem where
   ppr (HsInline prag)       = text "Inline:" <+> ppr prag
   ppr (HsArity arity)       = text "Arity:" <+> int arity
   ppr (HsStrictness str)    = text "Strictness:" <+> pprIfaceStrictSig str
-  ppr (HsCardinality card)  = text "Cardinality:" <+> pprIfaceCardinalitySig card
+  ppr (HsUsage usg)         = text "Usage:" <+> ppr usg
   ppr HsNoCafRefs           = text "HasNoCafRefs"
   ppr HsLevity              = text "Never levity-polymorphic"
 
@@ -1967,7 +1968,7 @@ instance Binary IfaceIdInfo where
 instance Binary IfaceInfoItem where
     put_ bh (HsArity aa)          = putByte bh 0 >> put_ bh aa
     put_ bh (HsStrictness ab)     = putByte bh 1 >> put_ bh ab
-    put_ bh (HsCardinality ac)    = putByte bh 2 >> put_ bh ac
+    put_ bh (HsUsage ac)          = putByte bh 2 >> put_ bh ac
     put_ bh (HsUnfold lb ad)      = putByte bh 3 >> put_ bh lb >> put_ bh ad
     put_ bh (HsInline ad)         = putByte bh 4 >> put_ bh ad
     put_ bh HsNoCafRefs           = putByte bh 5
@@ -1977,7 +1978,7 @@ instance Binary IfaceInfoItem where
         case h of
             0 -> liftM HsArity $ get bh
             1 -> liftM HsStrictness $ get bh
-            2 -> liftM HsCardinality $ get bh
+            2 -> liftM HsUsage $ get bh
             3 -> do lb <- get bh
                     ad <- get bh
                     return (HsUnfold lb ad)

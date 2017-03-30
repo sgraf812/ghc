@@ -89,28 +89,30 @@ module Id (
 
         -- ** Reading 'IdInfo' fields
         idArity,
-        idCallArity, idFunRepArity,
+        idFunRepArity,
         idUnfolding, realIdUnfolding,
         idSpecialisation, idCoreRules, idHasRules,
         idCafInfo,
         idOneShotInfo, idStateHackOneShotInfo,
         idOccInfo,
         isNeverLevPolyId,
+        idCallArity,
+        idArgUsage,
+        idDemandInfo,
+        idStrictness,
 
         -- ** Writing 'IdInfo' fields
         setIdUnfolding, setCaseBndrEvald,
         setIdArity,
-        setIdCallArity,
 
         setIdSpecialisation,
         setIdCafInfo,
         setIdOccInfo, zapIdOccInfo,
 
+        setIdCallArity,
+        setIdArgUsage,
         setIdDemandInfo,
         setIdStrictness,
-
-        idDemandInfo,
-        idStrictness,
 
     ) where
 
@@ -135,6 +137,7 @@ import RepType
 import TysPrim
 import DataCon
 import Demand
+import Usage
 import Name
 import Module
 import Class
@@ -151,7 +154,6 @@ import Util
 -- infixl so you can say (id `set` a `set` b)
 infixl  1 `setIdUnfolding`,
           `setIdArity`,
-          `setIdCallArity`,
           `setIdOccInfo`,
           `setIdOneShotInfo`,
 
@@ -164,7 +166,10 @@ infixl  1 `setIdUnfolding`,
           `setIdStrictness`,
 
           `asJoinId`,
-          `asJoinId_maybe`
+          `asJoinId_maybe`,
+
+          `setIdCallArity`,
+          `setIdArgUsage`
 
 {-
 ************************************************************************
@@ -618,11 +623,17 @@ idArity id = arityInfo (idInfo id)
 setIdArity :: Id -> Arity -> Id
 setIdArity id arity = modifyIdInfo (`setArityInfo` arity) id
 
-idCallArity :: Id -> CardinalitySig
+idCallArity :: Id -> Usage
 idCallArity id = callArityInfo (idInfo id)
 
-setIdCallArity :: Id -> CardinalitySig -> Id
-setIdCallArity id sig = modifyIdInfo (`setCallArityInfo` sig) id
+setIdCallArity :: Id -> Usage -> Id
+setIdCallArity id used = modifyIdInfo (`setCallArityInfo` used) id
+
+idArgUsage :: Id -> UsageSig
+idArgUsage id = argUsageInfo (idInfo id)
+
+setIdArgUsage :: Id -> UsageSig -> Id
+setIdArgUsage id sig = modifyIdInfo (`setArgUsageInfo` sig) id
 
 idFunRepArity :: Id -> RepArity
 idFunRepArity x = countFunRepArgs (idArity x) (idType x)

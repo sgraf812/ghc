@@ -8,25 +8,24 @@ module CallArity.Analysis where
 import CallArity.Types
 import CallArity.FrameworkBuilder
 
-import DynFlags      (DynFlags)
+import DynFlags      ( DynFlags )
 import Maybes
 import VarEnv
 
-import Data.Map.Strict   (Map)
-import qualified Data.Map.Strict as Map
-import Data.Maybe
+import Control.Monad ( forM )
 import qualified Data.Set as Set
 
 import BasicTypes
 import CoreSyn
 import CoreArity ( typeArity )
 import CoreUtils ( exprIsCheap )
+import Demand
 import MkCore
 import Id
-import Outputable
-import Demand
 import UniqFM
 import UnVarGraph
+import Usage
+import Var ( isTyVar )
 
 
 {-
@@ -283,12 +282,12 @@ Note [Analysis type signature]
 The work-hourse of the analysis is the function `callArityAnal`, with the
 following type:
 
-    type CallArityType = (UnVarGraph, VarEnv Arity)
+    type UsageType = (UnVarGraph, VarEnv Arity)
     callArityAnal ::
         Arity ->  -- The arity this expression is called with
         VarSet -> -- The set of interesting variables
         CoreExpr ->  -- The expression to analyse
-        (CallArityType, CoreExpr)
+        (UsageType, CoreExpr)
 
 and the following specification:
 
@@ -323,7 +322,7 @@ If we decide that the variable bound in `let x = e1 in e2` is not interesting,
 the analysis of `e2` will not report anything about `x`. To ensure that
 `callArityBind` does still do the right thing we have to take that into account
 everytime we look up up `x` in the analysis result of `e2`.
-  * Instead of calling lookupCallArityType, we return (0, True), indicating
+  * Instead of calling lookupUsage, we return (0, True), indicating
     that this variable might be called many times with no arguments.
   * Instead of checking `calledWith x`, we assume that everything can be called
     with it.
@@ -342,7 +341,7 @@ Note [Recursion and fixpointing]
 For a mutually recursive let, we begin by
  1. analysing the body, using the same incoming arity as for the whole expression.
  2. Then we iterate, memoizing for each of the bound variables the last
-    analysis call, i.e. incoming arity, whether it is called once, and the CallArityType.
+    analysis call, i.e. incoming arity, whether it is called once, and the UsageType.
  3. We combine the analysis result from the body and the memoized results for
     the arguments (if already present).
  4. For each variable, we find out the incoming arity and whether it is called
@@ -377,7 +376,7 @@ Note [Analysing top-level binds]
 We can eta-expand top-level-binds if they are not exported, as we see all calls
 to them. The plan is as follows: Treat the top-level binds as nested lets around
 a body representing “all external calls”, which returns a pessimistic
-CallArityType (the co-call graph is the complete graph, all arityies 0).
+UsageType (the co-call graph is the complete graph, all arityies 0).
 
 Note [Trimming arity]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -436,42 +435,30 @@ callArityAnalProgram :: DynFlags -> CoreProgram -> CoreProgram
 callArityAnalProgram _dflags = exprToModule . callArityRHS . moduleToExpr
 
 callArityRHS :: CoreExpr -> CoreExpr
-callArityRHS e = lookup_expr (runFramework fw (Set.singleton (node, 0)))
-  where
-    (node, fw) = buildFramework $
-      registerTransferFunction (LowerThan (FrameworkNode 0)) $ \node -> do
-        transfer <- callArityExpr emptyVarEnv e
-        -- We only get away with using alwaysChangeDetector because this won't
-        -- introduce a cycle.
-        return (node, (transfer, alwaysChangeDetector))
-
-    lookup_expr :: Map (FrameworkNode, Arity) AnalResult -> CoreExpr
-    lookup_expr result_map = case Map.lookup (node, 0) result_map of
-      Nothing -> pprPanic "callArityRHS" empty
-      Just (_, e) -> e
+callArityRHS e = snd (buildAndRun (callArityExpr emptyVarEnv e) topUse)
 
 -- | The main analysis function. See Note [Analysis type signature]
 callArityExpr
   :: VarEnv FrameworkNode
   -> CoreExpr
-  -> FrameworkBuilder (Arity -> TransferFunction AnalResult)
+  -> FrameworkBuilder (Use -> TransferFunction AnalResult)
 
 callArityExprTrivial
   :: CoreExpr
-  -> FrameworkBuilder (Arity -> TransferFunction AnalResult)
+  -> FrameworkBuilder (Use -> TransferFunction AnalResult)
 callArityExprTrivial e
-  = return (\_ -> return (emptyArityType, e))
+  = return (\_ -> return (emptyUsageType, e))
 
 callArityExprMap
   :: VarEnv FrameworkNode
   -> (CoreExpr -> a)
   -> CoreExpr
-  -> FrameworkBuilder (Arity -> TransferFunction (CallArityType, a)) -- @a@ instead of @CoreExpr@
+  -> FrameworkBuilder (Use -> TransferFunction (UsageType, a)) -- @a@ instead of @CoreExpr@
 callArityExprMap nodes f e
   = transfer' <$> callArityExpr nodes e
   where
-    transfer' transfer arity = do
-      (cat, e') <- transfer arity
+    transfer' transfer use = do
+      (cat, e') <- transfer use
       return (cat, f e')
 
 -- The trivial base cases
@@ -484,35 +471,35 @@ callArityExpr nodes (Tick t e) = callArityExprMap nodes (Tick t) e
 callArityExpr nodes (Cast e c) = callArityExprMap nodes (flip Cast c) e
 
 -- The interesting cases: Variables, Lambdas, Lets, Applications, Cases
-callArityExpr nodes e@(Var v) = return transfer
+callArityExpr nodes e@(Var id) = return transfer
   where
-    transfer arity
-      | isInteresting v
-      , Just node <- lookupVarEnv nodes v
+    transfer use
+      | isInteresting id
+      , Just node <- lookupVarEnv nodes id
       = do
-        (cat_callee, _) <- dependOnWithDefault (unusedArgsArityType arity, e) (node, arity)
-        -- It is crucial that we only use cat_args here, as every other field
+        (ut_callee, _) <- dependOnWithDefault (unusedArgsUsageType use, e) (node, use)
+        -- It is crucial that we only use ut_args here, as every other field
         -- might be unstable and thus too optimistic.
-        return ((unitArityType v arity) { cat_args = cat_args cat_callee }, e)
+        return ((unitUsageType id use) { ut_args = ut_args ut_callee }, e)
 
-      | isInteresting v
-      , isGlobalId v
-      = return (unitArityType v arity { cat_args = idCallArity v }, e)
+      | isInteresting id
+      , isGlobalId id
+      = return ((unitUsageType id use) { ut_args = idArgUsage id }, e)
 
-      | isInteresting v
+      | isInteresting id
       -- LocalId, not present in @nodes@, e.g. a lambda-bound variable.
       -- We are only second-order, so we don't model signatures for parameters!
-      = return (unitArityType v arity, e)
+      = return (unitUsageType id use, e)
 
       | otherwise
       -- We don't track uninteresting vars and implicitly assume they are called
       -- multiple times with every other variable.
       -- See Note [Taking boring variables into account]
-      = return (emptyArityType, e)
+      = return (emptyUsageType, e)
 
-callArityExpr nodes (Lam v e)
-  | isTyVar v = callArityExprMap nodes (Lam v) e -- Non-value lambdas are ignored
-  | otherwise = transfer' <$> callArityExpr nodes e
+callArityExpr nodes (Lam id e)
+  | isTyVar id = callArityExprMap nodes (Lam id) e -- Non-value lambdas are ignored
+  | otherwise  = transfer' <$> callArityExpr nodes e
   where
     transfer' transfer 0 = do
       -- We have a lambda that may be called multiple times, so its free variables
@@ -520,12 +507,13 @@ callArityExpr nodes (Lam v e)
       -- Also regardless of the variable not being interesting,
       -- we have to add the var as an argument.
       (cat, e') <- transfer 0
-      return (makeIdArg v (calledMultipleTimes cat), Lam v e')
+      return (makeIdArg id (calledMultipleTimes cat), Lam id e')
 
-    transfer' transfer arity = do
+    transfer' transfer use = do
       -- We have a lambda that we are applying to. decrease arity.
-      (cat, e') <- transfer (arity - 1)
-      return (makeIdArg v cat, Lam v e')
+      (cat, e') <- transfer (use - 1)
+      -- TODO: annotate id
+      return (makeIdArg id cat, Lam id e')
 
 callArityExpr nodes (App f (Type t)) = callArityExprMap nodes (flip App (Type t)) f
 
@@ -534,24 +522,23 @@ callArityExpr nodes (App f (Type t)) = callArityExprMap nodes (flip App (Type t)
 callArityExpr nodes (App f a) = do
   transfer_f <- callArityExpr nodes f
   transfer_a <- callArityExpr nodes a
-  return $ \arity -> do
-    (cat_f, f') <- transfer_f (arity + 1)
-    --pprTrace "App:f'" (ppr (cat_f, f')) $ return ()
+  return $ \use -> do
+    (ut_f, f') <- transfer_f (use + 1)
+    --pprTrace "App:f'" (ppr (ut_f, f')) $ return ()
     -- peel off one argument from the type
-    let (arg_usage, cat_f') = peelCallArityType cat_f
+    let (arg_usage, ut_f') = peelUsageType ut_f
+    let called_once = id
+    let analyse finish_ut_a use = do
+          (ut_a, a') <- transfer_a use
+          --pprTrace "App:a'" (text "safe_arity:" <+> ppr safe_arity <+> ppr (ut_a, a')) $ return ()
+          let ut_a' = finish_ut_a ut_a
+          return (ut_f' `both` ut_a', App f' a')
     -- In call-by-need, arguments are evaluated at most once, so they qualify as
     -- thunk.
-    case oneifyCardinalityIfThunk a arg_usage of
-      Zero -> return (cat_f', App f' a) -- TODO: Visit a, too? Seems unnecessary, wasn't called at all
-      One arity -> analyse calledOnce arity
-      Many arity -> analyse calledMultipleTimes arity
-        where
-          calledOnce = id
-          analyse finish_cat_a arity = do
-            (cat_a, a') <- transfer_a arity
-            --pprTrace "App:a'" (text "safe_arity:" <+> ppr safe_arity <+> ppr (cat_a, a')) $ return ()
-            let cat_a' = finish_cat_a cat_a
-            return (cat_f' `both` cat_a', App f' a')
+    case oneifyUsageIfThunk a arg_usage of
+      Zero -> return (ut_f', App f' a) -- TODO: Visit a, too? Seems unnecessary, wasn't called at all
+      One use -> analyse called_once use
+      Many use -> analyse calledMultipleTimes use
 
 -- Case expression.
 callArityExpr nodes (Case scrut bndr ty alts) = do
@@ -561,60 +548,63 @@ callArityExpr nodes (Case scrut bndr ty alts) = do
     --       We also shouldn't track them in the co call graph (they are boring)
   transfer_alts <- forM alts $ \(dc, bndrs, e) ->
     callArityExprMap nodes (dc, bndrs,) e
-  return $ \arity -> do
-    (cat_scrut, scrut') <- transfer_scrut 0
-    (cat_alts, alts') <- unzip <$> mapM ($ arity) transfer_alts
-    let cat = trimArgs arity (lubTypes cat_alts) `both` cat_scrut
+  return $ \use -> do
+    (ut_scrut, scrut') <- transfer_scrut 0
+    (ut_alts, alts') <- unzip <$> mapM ($ use) transfer_alts
+    let cat = trimArgs use (lubTypes ut_alts) `both` ut_scrut
     -- TODO: Think harder about the diverging case (e.g. matching on `undefined`).
     --       In that case we will declare all arguments as unused from the alts.
     -- pprTrace "callArityExpr:Case"
     --          (vcat [ppr scrut, ppr cat])
-    --pprTrace "Case" (vcat [text "cat_scrut:" <+> ppr cat_scrut, text "cat_alts:" <+> ppr cat_alts, text "cat:" <+> ppr cat]) (return ())
+    --pprTrace "Case" (vcat [text "ut_scrut:" <+> ppr ut_scrut, text "ut_alts:" <+> ppr ut_alts, text "cat:" <+> ppr cat]) (return ())
     return (cat, Case scrut' bndr ty alts')
 
 callArityExpr letdown_nodes (Let bind e) = do
   let initial_binds = flattenBinds [bind]
+  let ids = map fst initial_binds
   -- The order in which we call callArityExpr here is important: This makes sure
   -- the FP iteration will first stabilize bindings before analyzing the body.
   -- Nope, in fact it does exactly the opposite!
-  (letdown_nodes', letup_nodes) <- callArityBind letdown_nodes binds
+  (letdown_nodes', letup_nodes) <- callArityBind letdown_nodes initial_binds
   let lookup_letup_node id = expectJust ": the RHS of id wasn't registered" (lookupVarEnv letup_nodes id)
-  let transfer_rhs (id, rhs) arity =
-        dependOnWithDefault (unusedArgsArityType arity, rhs) (lookup_letup_node id, arity)
+  let transfer_rhs (id, rhs) use =
+        dependOnWithDefault (unusedArgsUsageType use, rhs) (lookup_letup_node id, use)
   transfer_body <- callArityExpr letdown_nodes' e
 
   case bind of
     NonRec _ _ ->
       -- We don't need to dependOn ourselves here, because only the let body can't
       -- call id. Thus we also can spare to allocate a new @FrameworkNode@.
-      return $ \arity -> do
-        (cat_body, e') <- transfer_body arity
-        (cat, [(id', rhs')]) <- unleashLet False initial_binds transfer_rhs cat_body cat_body
-        return (typeDelList (bindersOf bind) cat, Let (NonRec id' rhs') e')
+      return $ \use -> do
+        (ut_body, e') <- transfer_body use
+        (ut, [(id', rhs')]) <- unleashLet False initial_binds transfer_rhs ut_body ut_body
+        return (typeDelList (bindersOf bind) ut, Let (NonRec id' rhs') e')
     Rec _ -> do -- The binding group stored in the @Rec@ constructor is always the initial one!
       -- This is a little more complicated, as we'll introduce a new FrameworkNode
       -- which we'll depend on ourselves.
       node <- registerTransferFunction (LowerThan (minimum (eltsUFM letup_nodes))) $ \node -> do
-        let transfer arity = do
-              (cat_body, e') <- transfer_body arity
+        let transfer :: Use -> TransferFunction AnalResult
+            transfer use = do
+              (ut_body, e') <- transfer_body use
               -- This is the actual fixed-point iteration: we depend on usage
               -- results from the previous iteration, defaulting to just the body.
-              (cat_usage, Let (Rec old_bind) _) <- dependOnWithDefault (cat_body, Let bind e') (node, arity)
-              (cat, bind') <- unleashLet True old_bind transfer_rhs cat_usage cat_body
-              return (cat, Let (Rec bind') e')
+              (ut_usage, Let (Rec old_bind) _) <- dependOnWithDefault (ut_body, Let bind e') (node, use)
+              (ut, bind') <- unleashLet True old_bind transfer_rhs ut_usage ut_body
+              return (ut, Let (Rec bind') e')
 
-        let change_detector changed_refs (old, _) (new, _) =
+        let change_detector :: ChangeDetector
+            change_detector changed_refs (old, _) (new, _) =
               -- since we only care for arity and called once information of the
               -- previous iteration, we can efficiently test for changes.
               --pprTrace "change_detector" (vcat[ppr node, ppr changed_refs, ppr old, ppr new])
               map fst (Set.toList changed_refs) /= [node]
-              || any (\id -> lookupCallArityType old id /= lookupCallArityType new id) (map fst binds)
+              || any (\id -> lookupUsage old id /= lookupUsage new id) ids
 
         return (node, (transfer, change_detector))
 
       -- Now for the actual TransferFunction of this expr...
-      return $ \arity -> do
-        (cat, let') <- dependOnWithDefault (emptyArityType, Let bind e) (node, arity)
+      return $ \use -> do
+        (cat, let') <- dependOnWithDefault (emptyUsageType, Let bind e) (node, use)
         --pprTrace "Let" (ppr (cat, let')) $ return ()
         return (typeDelList (bindersOf bind) cat, let')
 
@@ -633,21 +623,21 @@ callArityBind letdown_nodes = go letdown_nodes emptyVarEnv
             (extendVarEnv letup_nodes id letup_node)
             binds
           transfer_up' <- callArityExpr letdown_nodes' rhs
-          let transfer_up arity = do
-                --pprTrace "Bind:Before" (text "id:" <+> ppr id <+> text "arity:" <+> ppr arity) $ return ()
-                res <- transfer_up' arity
+          let transfer_up use = do
+                --pprTrace "Bind:Before" (text "id:" <+> ppr id <+> text "use:" <+> ppr use) $ return ()
+                res <- transfer_up' use
                 --pprTrace "Bind:Finished" (ppr res) $ return ()
                 return res
-          let transfer_down arity = dependOnWithDefault (unusedArgsArityType arity, rhs) (letup_node, arity)
+          let transfer_down use = dependOnWithDefault (unusedArgsUsageType use, rhs) (letup_node, use)
           let change_detector_down _ (old, _) (new, _) =
                 -- The only reason we split the transfer fuctions up is cheap
                 -- change detection for the LetDown case. This implies that
-                -- use sites of the LetDown component may only use the cat_args
+                -- use sites of the LetDown component may only use the ut_args
                 -- component!
                 -- FIXME: Encode this in the FrameworkNode type somehow, but I
                 -- don't think it's worth the trouble.
-                --pprTrace "change_detector_down" (ppr (cat_args old) <+> ppr (cat_args new) <+> ppr (cat_args old /= cat_args new)) $
-                cat_args old /= cat_args new
+                --pprTrace "change_detector_down" (ppr (ut_args old) <+> ppr (ut_args new) <+> ppr (ut_args old /= ut_args new)) $
+                ut_args old /= ut_args new
           let ret = (letdown_nodes', letup_nodes') -- What we return from callArityBind
           let letup = (transfer_up, alwaysChangeDetector) -- What we register for letup_node
           let letdown = (transfer_down, change_detector_down) -- What we register for letdown_node
@@ -656,52 +646,56 @@ callArityBind letdown_nodes = go letdown_nodes emptyVarEnv
 unleashLet
   :: Bool
   -> [(Id, CoreExpr)]
-  -> (Id, CoreExpr) -> Arity -> TransferFunction AnalResult
-  -> CallArityType
-  -> CallArityType
-  -> TransferFunction (CallArityType, [(Id, CoreExpr)])
-unleashLet is_recursive binds transfer_rhs cat_usage cat_body = do
-  (cat_rhss, binds') <- unzip <$> forM binds $ \bind ->
-    unleashCall is_recursive cat_usage bind (transfer_rhs bind)
+  -> ((Id, CoreExpr) -> Use -> TransferFunction AnalResult)
+  -> UsageType
+  -> UsageType
+  -> TransferFunction (UsageType, [(Id, CoreExpr)])
+unleashLet is_recursive binds transfer_rhs ut_usage ut_body = do
+  (ut_rhss, binds') <- fmap unzip $ forM binds $ \bind ->
+    unleashCall is_recursive ut_usage bind (transfer_rhs bind)
   let ids = map fst binds'
-  let cat_final = callArityLetEnv (zip ids cat_rhss) cat_body
-  return (cat_final, binds')
+  let ut_final = callArityLetEnv (zip ids ut_rhss) ut_body
+  return (ut_final, binds')
 
 unleashCall
   :: Bool
-  -> CallArityType
+  -> UsageType
   -> (Id, CoreExpr)
-  -> Arity -> TransferFunction AnalResult
-  -> TransferFunction (CallArityType, (Id, CoreExpr))
-unleashCall is_recursive cat_usage (id, rhs) transfer_rhs
+  -> (Use -> TransferFunction AnalResult)
+  -> TransferFunction (UsageType, (Id, CoreExpr))
+unleashCall is_recursive ut_usage (id, rhs) transfer_rhs
   | Zero <- usage
-  = return (emptyArityType, (id, rhs)) -- No call to @id@ (yet)
-  | One arity <- usage
-  = analyse calledOnce arity
-  | Many arity <- usage
-  = analyse calledMultipleTimes arity
+  = return (emptyUsageType, (id, rhs)) -- No call to @id@ (yet)
+  | One use <- usage
+  = analyse called_once use
+  | Many use <- usage
+  = analyse calledMultipleTimes use
   where
     usage =
-      oneifyCardinalityIfThunk rhs
+      oneifyUsageIfThunk rhs
       -- See Note [Thunks in recursive groups]
       -- @is_recursive@ implies @not called_once@ (otherwise, why would it be
       -- recursive?), although the co-call graph doesn't model it that way.
       -- Self-edges in the co-call graph correspond to non-linear recursion.
-      . if is_recursive then manifyCardinality else id
-      . lookupCallArityType cat_usage
+      . apply_when is_recursive manifyUsage
+      . lookupUsage ut_usage
       $ id
-    calledOnce u = u
-    analyse finish_cat_rhs arity = do
+    apply_when b f = if b then f else Prelude.id
+    called_once u = u
+    analyse finish_ut_rhs use = do
       -- See Note [Trimming arity]
-      let trimmed_arity = trimArity id arity
-      -- TODO: Find out if (where) we need the trimmed_arity here or not
-      -- We probably want to analyze with arity und annotate trimmed_arity.
-      -- Although CA analyzes with trimmed_arity, so we do that for now
+      let trimmed_use = mapUseArity (trimArity id) use
+      -- TODO: Find out if (where) we need the trimmed_use here or not
+      -- We probably want to analyze with arity und annotate trimmed_use.
+      -- Although CA analyzes with trimmed_use, so we do that for now
       -- Also if we analysed with arity, we would need to analyze again with
-      -- trimmed_arity nonetheless for the signature!
-      (cat_rhs, rhs') <- transfer_rhs trimmed_arity
-      let cat_rhs' = finish_cat_rhs cat_rhs
-      return (cat_rhs', (id `setIdCallArity` cat_args cat_rhs', rhs'))
+      -- trimmed_use nonetheless for the signature!
+      (ut_rhs, rhs') <- transfer_rhs trimmed_use
+      let ut_rhs' = finish_ut_rhs ut_rhs
+      let id' = id
+            `setIdArgUsage` ut_args ut_rhs'
+            `setIdCallArity` lookupUsage ut_rhs' id
+      return (ut_rhs', (id', rhs'))
 
 -- | See Note [What is a thunk].
 isThunk :: CoreExpr -> Bool
@@ -717,8 +711,8 @@ isThunk = not . exprIsCheap
 
     This function should be used anywhere expressions are to be let-bound.
 -}
-oneifyCardinalityIfThunk :: -> CoreExpr -> Cardinality -> Cardinality
-oneifyCardinalityIfThunk e (Many arity)
+oneifyUsageIfThunk :: CoreExpr -> Usage -> Usage
+oneifyUsageIfThunk e (Many use)
   -- A thunk was called multiple times! Do not eta-expand
   | isThunk e = One 0
   -- In case e is cheap and we use the let-bound var of e with @Many 0@, this
@@ -727,48 +721,43 @@ oneifyCardinalityIfThunk e (Many arity)
   -- I'm not sure if this actually buys us anything, @e@ is cheap after all.
   -- But it may still be non-@exprIsTrivial@, so just leaving it here for the
   -- time being.
-  | arity == 0 = One 0
-oneifyCardinalityIfThunk _ u = u
+  | use == 0 = One 0
+oneifyUsageIfThunk _ u = u
 
--- | Multiplies with @Many@; $\omega*_$ formally. @manifyCardinality Zero = Zero@ still!
-manifyCardinality :: Cardinality -> Cardinality
-manifyCardinality (One arity) = Many arity
-manifyCardinality u = u
-
--- Which bindings should we look at?
--- See Note [Which variables are interesting]
-isInteresting :: Var -> Bool
-isInteresting v = not $ null (typeArity (idType v))
+-- | Multiplies with @Many@; $\omega*_$ formally. @manifyUsage Zero = Zero@ still!
+manifyUsage :: Usage -> Usage
+manifyUsage (One use) = Many use
+manifyUsage u = u
 
 -- Combining the results from body and rhs of a let binding
 -- See Note [Analysis II: The Co-Called analysis]
 callArityLetEnv
-  :: [(Id, CallArityType)]
-  -> CallArityType
-  -> CallArityType
-callArityLetEnv cat_rhss cat_body
+  :: [(Id, UsageType)]
+  -> UsageType
+  -> UsageType
+callArityLetEnv ut_rhss ut_body
     = -- (if length ae_rhss > 300 then pprTrace "callArityLetEnv" (vcat [ppr ae_rhss, ppr ae_body, ppr ae_new]) else id) $
-      cat_new
+      ut_new
   where
-    ids = map fst cat_rhss
+    ids = map fst ut_rhss
 
     -- This is already the complete type, but with references from the current
     -- binding group not resolved.
-    -- For the non-recursive case, at least cat_body may refer to some bound var
-    -- which we have to handle, for the recursive case even any of cat_rhss may.
+    -- For the non-recursive case, at least ut_body may refer to some bound var
+    -- which we have to handle, for the recursive case even any of ut_rhss may.
     -- This is why we have to union in appropriate cross_calls, which basically
-    -- perform substitution of Id to CallArityType.
-    cat_combined = lubTypes (cat_body : map (unusedArgs . snd) cat_rhss)
+    -- perform substitution of Id to UsageType.
+    ut_combined = lubTypes (ut_body : map (unusedArgs . snd) ut_rhss)
 
     cross_calls
         -- Calculating cross_calls is expensive. Simply be conservative
         -- if the mutually recursive group becomes too large.
         -- TODO: I *think* 5 is enough here, but this used to be 25.
-        | length cat_rhss > 5 = completeGraph (domType cat_combined)
-        | otherwise            = unionUnVarGraphs $ map cross_call cat_rhss
-    cross_call (id, cat_rhs) = completeBipartiteGraph called_by_id called_with_id
+        | length ut_rhss > 5 = completeGraph (domType ut_combined)
+        | otherwise            = unionUnVarGraphs $ map cross_call ut_rhss
+    cross_call (id, ut_rhs) = completeBipartiteGraph called_by_id called_with_id
       where
-        is_thunk = length (idCallArity id) == 0 -- This is a new annotation, from this FP iteration!
+        is_thunk = use (idCallArity id) == Just 0 -- This is a new annotation, from this FP iteration!
         -- We only add self cross calls if we really can recurse into ourselves.
         -- This is not the case for thunks (and non-recursive bindings, but
         -- then there won't be any mention of id in the rhs).
@@ -777,15 +766,15 @@ callArityLetEnv cat_rhss cat_body
         -- What rhs are relevant as happening before (or after) calling id?
         --    If id doesn't recurse into itself, everything from all the _other_ variables
         --    If id is self-recursive, everything can happen.
-        cat_before_id
-            | is_thunk  = lubTypes (cat_body : map (unusedArgs . snd) (filter ((/= id) . fst) cat_rhss))
-            | otherwise = cat_combined
+        ut_before_id
+            | is_thunk  = lubTypes (ut_body : map (unusedArgs . snd) (filter ((/= id) . fst) ut_rhss))
+            | otherwise = ut_combined
         -- What do we want to know from these?
         -- Which calls can happen next to any recursive call.
-        called_with_id = unionUnVarSets $ map (calledWith cat_before_id) vars
-        called_by_id = domType cat_rhs
+        called_with_id = unionUnVarSets $ map (calledWith ut_before_id) ids
+        called_by_id = domType ut_rhs
 
-    cat_new = modifyCoCalls (cross_calls `unionUnVarGraph`) cat_combined
+    ut_new = modifyCoCalls (cross_calls `unionUnVarGraph`) ut_combined
 
 -- See Note [Trimming arity]
 trimArity :: Id -> Arity -> Arity
