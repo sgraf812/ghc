@@ -73,9 +73,9 @@ makeIdArg id ut = typeDel id (modifyArgs (consUsageSig (lookupUsage ut id)) ut)
 -- at most once.
 lookupUsage :: UsageType -> Id -> Usage
 lookupUsage (UT g ae _) id = case lookupVarEnv ae id of
-  Just a
-    | id `elemUnVarSet` neighbors g id -> Many a
-    | otherwise -> One a
+  Just use
+    | id `elemUnVarSet` neighbors g id -> Used Many use
+    | otherwise -> Used Once use
   Nothing
     | isInteresting id -> botUsage
     -- If v is boring, we will not find it in ut_usage, but always assume topUsage.
@@ -94,8 +94,9 @@ addCrossCoCalls set1 set2
   = modifyCoCalls (completeBipartiteGraph set1 set2 `unionUnVarGraph`)
 
 -- Replaces the co-call graph by a complete graph (i.e. no information)
-calledMultipleTimes :: UsageType -> UsageType
-calledMultipleTimes res = modifyCoCalls (const (completeGraph (domType res))) res
+multiplyFreeVarUsages :: Multiplicity -> UsageType -> UsageType
+multiplyFreeVarUsages Once res = res
+multiplyFreeVarUsages Many res = modifyCoCalls (const (completeGraph (domType res))) res
 
 -- Used for application and cases
 both :: UsageType -> UsageType -> UsageType
