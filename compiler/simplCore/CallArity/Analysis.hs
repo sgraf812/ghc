@@ -19,7 +19,7 @@ import BasicTypes
 import CoreSyn
 import CoreArity ( typeArity )
 import CoreUtils ( exprIsCheap )
-import Demand
+import Demand ( isBotRes, splitStrictSig )
 import MkCore
 import Id
 import UniqFM
@@ -507,7 +507,7 @@ callArityExpr nodes (Lam id e)
       -- Also regardless of the variable not being interesting,
       -- we have to add the var as an argument.
       (cat, e') <- transfer 0
-      return (makeIdArg id (calledMultipleTimes cat), Lam id e')
+      return (makeIdArg id (multiplyFreeVarUsages Many cat), Lam id e')
 
     transfer' transfer use = do
       -- We have a lambda that we are applying to. decrease arity.
@@ -527,7 +527,6 @@ callArityExpr nodes (App f a) = do
     --pprTrace "App:f'" (ppr (ut_f, f')) $ return ()
     -- peel off one argument from the type
     let (arg_usage, ut_f') = peelUsageType ut_f
-    let called_once = id
     let analyse finish_ut_a use = do
           (ut_a, a') <- transfer_a use
           --pprTrace "App:a'" (text "safe_arity:" <+> ppr safe_arity <+> ppr (ut_a, a')) $ return ()
@@ -536,9 +535,8 @@ callArityExpr nodes (App f a) = do
     -- In call-by-need, arguments are evaluated at most once, so they qualify as
     -- thunk.
     case oneifyUsageIfThunk a arg_usage of
-      Zero -> return (ut_f', App f' a) -- TODO: Visit a, too? Seems unnecessary, wasn't called at all
-      One use -> analyse called_once use
-      Many use -> analyse calledMultipleTimes use
+      Absent -> return (ut_f', App f' a) -- TODO: Visit a, too? Seems unnecessary, wasn't called at all
+      Used multi use -> analyse (multiplyFreeVarUsages multi) use
 
 -- Case expression.
 callArityExpr nodes (Case scrut bndr ty alts) = do
@@ -664,25 +662,30 @@ unleashCall
   -> (Use -> TransferFunction AnalResult)
   -> TransferFunction (UsageType, (Id, CoreExpr))
 unleashCall is_recursive ut_usage (id, rhs) transfer_rhs
-  | Zero <- usage
-  = return (emptyUsageType, (id, rhs)) -- No call to @id@ (yet)
-  | One use <- usage
-  = analyse called_once use
-  | Many use <- usage
-  = analyse calledMultipleTimes use
+  | Absent <- usage_rhs
+  = return (emptyUsageType, (id `setIdCallArity` Absent, rhs)) -- No call to @id@ (yet)
+  | Used multi use <- usage_rhs
+  = analyse multi use
   where
-    usage =
-      oneifyUsageIfThunk rhs
+    usage_id =
+      -- How @id@ was used in its scope.
+      --
       -- See Note [Thunks in recursive groups]
-      -- @is_recursive@ implies @not called_once@ (otherwise, why would it be
+      -- @is_recursive@ implies multiplicity @Many@ (otherwise, why would it be
       -- recursive?), although the co-call graph doesn't model it that way.
       -- Self-edges in the co-call graph correspond to non-linear recursion.
-      . apply_when is_recursive manifyUsage
+      -- Kind-of a leaky abstraction, maybe we could somehow merge the
+      -- @is_recursive@ flag into the analysis environment.
+      apply_when is_recursive manifyUsage
       . lookupUsage ut_usage
       $ id
     apply_when b f = if b then f else Prelude.id
-    called_once u = u
-    analyse finish_ut_rhs use = do
+    -- The usage propagated to the let-binding is another one, as we might
+    -- decide to share the work needed to get the RHS to WHNF. See
+    -- @oneifyUsageIfThunk@. We use this usage to analyse the RHS, but annotate
+    -- with @usage_id@, which represents how the binder was used in its scope.
+    usage_rhs = oneifyUsageIfThunk rhs usage_id
+    analyse multi use = do
       -- See Note [Trimming arity]
       let trimmed_use = mapUseArity (trimArity id) use
       -- TODO: Find out if (where) we need the trimmed_use here or not
@@ -691,10 +694,10 @@ unleashCall is_recursive ut_usage (id, rhs) transfer_rhs
       -- Also if we analysed with arity, we would need to analyze again with
       -- trimmed_use nonetheless for the signature!
       (ut_rhs, rhs') <- transfer_rhs trimmed_use
-      let ut_rhs' = finish_ut_rhs ut_rhs
+      let ut_rhs' = multiplyFreeVarUsages multi ut_rhs
       let id' = id
-            `setIdArgUsage` ut_args ut_rhs'
-            `setIdCallArity` trimmed_use
+            `setIdCallArity` usage_id -- How the *binder* was used
+            `setIdArgUsage` ut_args ut_rhs' -- How the *rhs* uses its args
       return (ut_rhs', (id', rhs'))
 
 -- | See Note [What is a thunk].
@@ -712,21 +715,22 @@ isThunk = not . exprIsCheap
     This function should be used anywhere expressions are to be let-bound.
 -}
 oneifyUsageIfThunk :: CoreExpr -> Usage -> Usage
-oneifyUsageIfThunk e (Many use)
+oneifyUsageIfThunk e (Used Many use)
   -- A thunk was called multiple times! Do not eta-expand
-  | isThunk e = One 0
-  -- In case e is cheap and we use the let-bound var of e with @Many 0@, this
-  -- allows us to at least analyze the cheap RHS with cardinality 1 before we
-  -- potentially hit a lambda binder, were we proceed normally with @Many 0@.
+  | isThunk e = Used Once 0
+  -- In case e is cheap and we use the let-bound var of e with @Used Many 0@, this
+  -- allows us to at least analyze the cheap RHS with multiplicity @Once@ before we
+  -- potentially hit a lambda binder, where we proceed normally with @Used Many 0@.
   -- I'm not sure if this actually buys us anything, @e@ is cheap after all.
   -- But it may still be non-@exprIsTrivial@, so just leaving it here for the
   -- time being.
-  | use == 0 = One 0
+  | use == 0 = Used Once 0
 oneifyUsageIfThunk _ u = u
 
--- | Multiplies with @Many@; $\omega*_$ formally. @manifyUsage Zero = Zero@ still!
+-- | Multiplies with @Many@; $\omega*_$ formally. @manifyUsage Absent = Absent@
+-- still!
 manifyUsage :: Usage -> Usage
-manifyUsage (One use) = Many use
+manifyUsage (Used Once use) = Used Many use
 manifyUsage u = u
 
 -- Combining the results from body and rhs of a let binding
