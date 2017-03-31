@@ -11,15 +11,18 @@ import Data.Function ( on )
 
 type Use = Arity
 
+data Multiplicity
+  = Once
+  | Many
+  deriving (Eq, Ord, Show)
+
 data Usage
-  = Zero
-  | One {-# UNPACK #-} !Use
-  | Many {-# UNPACK #-} !Use
+  = Absent
+  | Used Multiplicity {-# UNPACK #-} !Use
   deriving (Eq, Show)
 
 use :: Usage -> Maybe Use
-use (One u) = Just u
-use (Many u) = Just u
+use (Used _ u) = Just u
 use _ = Nothing
 
 data UsageSig
@@ -30,28 +33,36 @@ data UsageSig
 
 -- * Lattice operations
 
-topUse :: Use
-topUse = 0
-
 -- TODO: decide if botUse would be valuable, and if so, change @Use@ to an
 -- appropriate integer type with pos. Inf.
+
+topUse :: Use
+topUse = 0
 
 lubUse :: Use -> Use -> Use
 lubUse = min
 
+botMultiplicity :: Multiplicity
+botMultiplicity = Once
+
+topMultiplicity :: Multiplicity
+topMultiplicity = Many
+
+lubMultiplicity :: Multiplicity -> Multiplicity -> Multiplicity
+lubMultiplicity Once m = m
+lubMultiplicity m Once = m
+lubMultiplicity _ _    = Many
+
 botUsage :: Usage
-botUsage = Zero
+botUsage = Absent
 
 topUsage :: Usage
-topUsage = Many topUse
+topUsage = Used topMultiplicity topUse
 
 lubUsage :: Usage -> Usage -> Usage
-lubUsage Zero u = u
-lubUsage u Zero = u
-lubUsage (One u1) (One u2) = One (lubUse u1 u2)
-lubUsage u1 u2 = Many (extractAndLubUse u1 u2)
-  where
-    extractAndLubUse = lubUse `on` expectJust ": Zero has no use" . use
+lubUsage Absent u = u
+lubUsage u Absent = u
+lubUsage (Used m1 u1) (Used m2 u2) = Used (lubMultiplicity m1 m2) (lubUse u1 u2)
 
 botUsageSig :: UsageSig
 botUsageSig = BotUsageSig
@@ -103,29 +114,40 @@ pprUse :: Use -> SDoc
 pprUse 0 = text "U"
 pprUse u = text "C" <> parens (pprUse (u - 1))
 
+instance Outputable Multiplicity where
+  ppr Once = text "1"
+  ppr Many = text "ω"
+
 instance Outputable Usage where
-  ppr Zero = text "A"
-  ppr (One u) = text "1*" <> pprUse u
-  ppr (Many u) = pprUse u
+  ppr Absent = text "A"
+  ppr (Used multi use) = ppr multi <> char '*' <> pprUse use
 
 instance Outputable UsageSig where
-  ppr BotUsageSig = text "AA.."
-  ppr TopUsageSig = text "UU.."
-  ppr (ArgUsage u sig) = ppr u <> ppr sig
+  ppr BotUsageSig = text "A,A.."
+  ppr TopUsageSig = text "U,U.."
+  ppr (ArgUsage u sig) = ppr u <> char ',' <> ppr sig
 
 -- * Serialization
 
 -- | Mostly important for serializing @UsageSig@ in interface files.
-instance Binary Usage where
-  put_ bh Zero = putByte bh 0
-  put_ bh (One use) = putByte bh 1 >> put_ bh use
-  put_ bh (Many use) = putByte bh 2 >> put_ bh use
+instance Binary Multiplicity where
+  put_ bh Once = putByte bh 0
+  put_ bh Many = putByte bh 1
   get  bh = do
     h <- getByte bh
     case h of
-      0 -> return Zero
-      1 -> One <$> get bh
-      _ -> Many <$> get bh
+      0 -> return Once
+      _ -> return Many
+
+-- | Mostly important for serializing @UsageSig@ in interface files.
+instance Binary Usage where
+  put_ bh Absent = putByte bh 0
+  put_ bh (Used multi use) = putByte bh 1 >> put_ bh multi >> put_ bh use
+  get  bh = do
+    h <- getByte bh
+    case h of
+      0 -> return Absent
+      _ -> Used <$> get bh <*> get bh
 
 instance Binary UsageSig where
   put_ bh BotUsageSig = putByte bh 0
