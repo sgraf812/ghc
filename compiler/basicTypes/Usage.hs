@@ -21,6 +21,10 @@ data Usage
   | Used Multiplicity {-# UNPACK #-} !Use
   deriving (Eq, Show)
 
+multiplicity :: Usage -> Maybe Multiplicity
+multiplicity (Used m _) = Just m
+multiplicity _ = Nothing
+
 use :: Usage -> Maybe Use
 use (Used _ u) = Just u
 use _ = Nothing
@@ -79,8 +83,9 @@ lubUsageSig (ArgUsage u1 s1) (ArgUsage u2 s2) = ArgUsage (lubUsage u1 u2) (lubUs
 
 -- * Working with @Use@, @Usage@ and @UsageSig@
 
-mapUseArity :: (Arity -> Arity) -> Use -> Use
-mapUseArity f use = f use
+mapUsageArity :: (Arity -> Arity) -> Usage -> Usage
+mapUsageArity f (Used multi use) = Used multi (f use)
+mapUsageArity f u = u
 
 consUsageSig :: Usage -> UsageSig -> UsageSig
 consUsageSig u s
