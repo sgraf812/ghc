@@ -1410,7 +1410,16 @@ tryEtaExpandRhs env bndr rhs
 
       | sm_eta_expand (getMode env)      -- Provided eta-expansion is on
       , let new_arity1 = findRhsArity dflags bndr rhs old_arity
-            new_arity2 = fromMaybe new_arity1 (use (idCallArity bndr))
+            usage = idCallArity bndr
+            -- This should always be in sync with @CallArity.Analysis.isThunk@
+            -- and @CallArity.Analysis.oneifyUsageIfThunk@.
+            -- TODO: Also figure out if CoreArity yields better results at all.
+            new_arity2
+              | Just arity <- use usage
+              , exprIsCheap rhs || Just Once == multiplicity usage
+              = arity
+              | otherwise
+              = 0
             new_arity  = max new_arity1 new_arity2
       , new_arity > old_arity      -- And the current manifest arity isn't enough
       = do { tick (EtaExpansion bndr)

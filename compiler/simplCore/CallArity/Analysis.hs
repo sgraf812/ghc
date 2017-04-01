@@ -458,8 +458,8 @@ callArityExprMap nodes f e
   = transfer' <$> callArityExpr nodes e
   where
     transfer' transfer use = do
-      (cat, e') <- transfer use
-      return (cat, f e')
+      (ut, e') <- transfer use
+      return (ut, f e')
 
 -- The trivial base cases
 callArityExpr _ e@(Lit _) = callArityExprTrivial e
@@ -467,6 +467,7 @@ callArityExpr _ e@(Type _) = callArityExprTrivial e
 callArityExpr _ e@(Coercion _) = callArityExprTrivial e
 
 -- The transparent cases
+-- TODO: What if @tickishIsCode@? See CoreArity
 callArityExpr nodes (Tick t e) = callArityExprMap nodes (Tick t) e
 callArityExpr nodes (Cast e c) = callArityExprMap nodes (flip Cast c) e
 
@@ -474,28 +475,30 @@ callArityExpr nodes (Cast e c) = callArityExprMap nodes (flip Cast c) e
 callArityExpr nodes e@(Var id) = return transfer
   where
     transfer use
-      | isInteresting id
-      , Just node <- lookupVarEnv nodes id
+      | not (isInteresting id)
+      -- We don't track uninteresting vars and implicitly assume they are called
+      -- multiple times with every other variable.
+      -- See Note [Taking boring variables into account]
+      = return (emptyUsageType, e)
+
+      | Just node <- lookupVarEnv nodes id
+      -- A local let-binding.
       = do
         (ut_callee, _) <- dependOnWithDefault (unusedArgsUsageType use, e) (node, use)
         -- It is crucial that we only use ut_args here, as every other field
         -- might be unstable and thus too optimistic.
         return ((unitUsageType id use) { ut_args = ut_args ut_callee }, e)
 
-      | isInteresting id
-      , isGlobalId id
+      | isGlobalId id
+      -- A global id from another module which has a usage signature.
       = return ((unitUsageType id use) { ut_args = idArgUsage id }, e)
 
-      | isInteresting id
-      -- LocalId, not present in @nodes@, e.g. a lambda-bound variable.
-      -- We are only second-order, so we don't model signatures for parameters!
-      = return (unitUsageType id use, e)
-
       | otherwise
-      -- We don't track uninteresting vars and implicitly assume they are called
-      -- multiple times with every other variable.
-      -- See Note [Taking boring variables into account]
-      = return (emptyUsageType, e)
+      -- interesting LocalId, not present in @nodes@, e.g. a lambda-bound variable.
+      -- We are only second-order, so we don't model signatures for parameters!
+      -- Their usage is interesting to note nonetheless for annotating lambda
+      -- binders.
+      = return (unitUsageType id use, e)
 
 callArityExpr nodes (Lam id e)
   | isTyVar id = callArityExprMap nodes (Lam id) e -- Non-value lambdas are ignored
@@ -506,14 +509,14 @@ callArityExpr nodes (Lam id e)
       -- can all be co-called.
       -- Also regardless of the variable not being interesting,
       -- we have to add the var as an argument.
-      (cat, e') <- transfer 0
-      return (makeIdArg id (multiplyFreeVarUsages Many cat), Lam id e')
+      (ut, e') <- transfer 0
+      return (makeIdArg id (multiplyFreeVarUsages Many ut), Lam id e')
 
     transfer' transfer use = do
       -- We have a lambda that we are applying to. decrease arity.
-      (cat, e') <- transfer (use - 1)
+      (ut, e') <- transfer (use - 1)
       -- TODO: annotate id
-      return (makeIdArg id cat, Lam id e')
+      return (makeIdArg id ut, Lam id e')
 
 callArityExpr nodes (App f (Type t)) = callArityExprMap nodes (flip App (Type t)) f
 
@@ -527,16 +530,18 @@ callArityExpr nodes (App f a) = do
     --pprTrace "App:f'" (ppr (ut_f, f')) $ return ()
     -- peel off one argument from the type
     let (arg_usage, ut_f') = peelUsageType ut_f
-    let analyse finish_ut_a use = do
-          (ut_a, a') <- transfer_a use
-          --pprTrace "App:a'" (text "safe_arity:" <+> ppr safe_arity <+> ppr (ut_a, a')) $ return ()
-          let ut_a' = finish_ut_a ut_a
-          return (ut_f' `both` ut_a', App f' a')
     -- In call-by-need, arguments are evaluated at most once, so they qualify as
     -- thunk.
+    -- This 'lifts' the transfer function of @a@ into one taking a @Usage@ instead
+    -- of just a single @Use@ by multipliying the analysis result with the
+    -- @Usage@s inherent @Multiplicity@.
     case oneifyUsageIfThunk a arg_usage of
       Absent -> return (ut_f', App f' a) -- TODO: Visit a, too? Seems unnecessary, wasn't called at all
-      Used multi use -> analyse (multiplyFreeVarUsages multi) use
+      Used multi use -> do
+          (ut_a, a') <- transfer_a use
+          --pprTrace "App:a'" (text "safe_arity:" <+> ppr safe_arity <+> ppr (ut_a, a')) $ return ()
+          let ut_a' = multiplyFreeVarUsages multi ut_a
+          return (ut_f' `both` ut_a', App f' a')
 
 -- Case expression.
 callArityExpr nodes (Case scrut bndr ty alts) = do
@@ -549,13 +554,13 @@ callArityExpr nodes (Case scrut bndr ty alts) = do
   return $ \use -> do
     (ut_scrut, scrut') <- transfer_scrut 0
     (ut_alts, alts') <- unzip <$> mapM ($ use) transfer_alts
-    let cat = trimArgs use (lubTypes ut_alts) `both` ut_scrut
+    let ut = trimArgs use (lubTypes ut_alts) `both` ut_scrut
     -- TODO: Think harder about the diverging case (e.g. matching on `undefined`).
     --       In that case we will declare all arguments as unused from the alts.
     -- pprTrace "callArityExpr:Case"
-    --          (vcat [ppr scrut, ppr cat])
+    --          (vcat [ppr scrut, ppr ut])
     --pprTrace "Case" (vcat [text "ut_scrut:" <+> ppr ut_scrut, text "ut_alts:" <+> ppr ut_alts, text "cat:" <+> ppr cat]) (return ())
-    return (cat, Case scrut' bndr ty alts')
+    return (ut, Case scrut' bndr ty alts')
 
 callArityExpr letdown_nodes (Let bind e) = do
   let initial_binds = flattenBinds [bind]
@@ -602,9 +607,9 @@ callArityExpr letdown_nodes (Let bind e) = do
 
       -- Now for the actual TransferFunction of this expr...
       return $ \use -> do
-        (cat, let') <- dependOnWithDefault (emptyUsageType, Let bind e) (node, use)
-        --pprTrace "Let" (ppr (cat, let')) $ return ()
-        return (typeDelList (bindersOf bind) cat, let')
+        (ut, let') <- dependOnWithDefault (emptyUsageType, Let bind e) (node, use)
+        --pprTrace "Let" (ppr (ut, let')) $ return ()
+        return (typeDelList (bindersOf bind) ut, let')
 
 callArityBind
   :: VarEnv FrameworkNode
@@ -661,23 +666,24 @@ unleashCall
   -> (Id, CoreExpr)
   -> (Use -> TransferFunction AnalResult)
   -> TransferFunction (UsageType, (Id, CoreExpr))
-unleashCall is_recursive ut_usage (id, rhs) transfer_rhs
+unleashCall is_recursive ut_scope (id, rhs) transfer_rhs
   | Absent <- usage_rhs
   = return (emptyUsageType, (id `setIdCallArity` Absent, rhs)) -- No call to @id@ (yet)
   | Used multi use <- usage_rhs
   = analyse multi use
   where
-    usage_id =
-      -- How @id@ was used in its scope.
-      --
+    usage_id = -- How @id@ was used in its scope.
+      -- ... except for bottoms, where we can't eta-expand.
+      -- See Note [Trimming arity]
+      mapUsageArity (trimArity id)
       -- See Note [Thunks in recursive groups]
       -- @is_recursive@ implies multiplicity @Many@ (otherwise, why would it be
       -- recursive?), although the co-call graph doesn't model it that way.
       -- Self-edges in the co-call graph correspond to non-linear recursion.
       -- Kind-of a leaky abstraction, maybe we could somehow merge the
       -- @is_recursive@ flag into the analysis environment.
-      apply_when is_recursive manifyUsage
-      . lookupUsage ut_usage
+      . apply_when is_recursive manifyUsage
+      . lookupUsage ut_scope
       $ id
     apply_when b f = if b then f else Prelude.id
     -- The usage propagated to the let-binding is another one, as we might
@@ -686,21 +692,16 @@ unleashCall is_recursive ut_usage (id, rhs) transfer_rhs
     -- with @usage_id@, which represents how the binder was used in its scope.
     usage_rhs = oneifyUsageIfThunk rhs usage_id
     analyse multi use = do
-      -- See Note [Trimming arity]
-      let trimmed_use = mapUseArity (trimArity id) use
-      -- TODO: Find out if (where) we need the trimmed_use here or not
-      -- We probably want to analyze with arity und annotate trimmed_use.
-      -- Although CA analyzes with trimmed_use, so we do that for now
-      -- Also if we analysed with arity, we would need to analyze again with
-      -- trimmed_use nonetheless for the signature!
-      (ut_rhs, rhs') <- transfer_rhs trimmed_use
+      (ut_rhs, rhs') <- transfer_rhs use
       let ut_rhs' = multiplyFreeVarUsages multi ut_rhs
       let id' = id
             `setIdCallArity` usage_id -- How the *binder* was used
-            `setIdArgUsage` ut_args ut_rhs' -- How the *rhs* uses its args
+            `setIdArgUsage` ut_args ut_rhs' -- How the *RHS* uses its args
       return (ut_rhs', (id', rhs'))
 
 -- | See Note [What is a thunk].
+-- This should always be in sync with @SimplUtils.tryEtaExpandRhs@.
+-- TODO: Factor out @exprIsCheap@ into the environment, like in CoreArity.
 isThunk :: CoreExpr -> Bool
 isThunk = not . exprIsCheap
 
