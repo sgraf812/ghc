@@ -504,19 +504,20 @@ callArityExpr nodes (Lam id e)
   | isTyVar id = callArityExprMap nodes (Lam id) e -- Non-value lambdas are ignored
   | otherwise  = transfer' <$> callArityExpr nodes e
   where
-    transfer' transfer 0 = do
-      -- We have a lambda that may be called multiple times, so its free variables
-      -- can all be co-called.
-      -- Also regardless of the variable not being interesting,
-      -- we have to add the var as an argument.
-      (ut, e') <- transfer 0
-      return (makeIdArg id (multiplyFreeVarUsages Many ut), Lam id e')
-
-    transfer' transfer use = do
-      -- We have a lambda that we are applying to. decrease arity.
-      (ut, e') <- transfer (use - 1)
-      -- TODO: annotate id
-      return (makeIdArg id ut, Lam id e')
+    transfer' transfer use
+      | Absent <- applyUse use
+      = return (emptyUsageType, Lam id e)
+      | Used multi bodyUse <- applyUse use
+      = do
+        -- We have a lambda that may be called multiple times, so its free variables
+        -- can all be co-called.
+        -- Also regardless of the variable not being interesting,
+        -- we have to add the var as an argument.
+        (ut, e') <- transfer bodyUse
+        let id' | Once <- multi = id `setIdOneShotInfo` OneShotLam
+                | otherwise = id
+        let ut' = multiplyFreeVarUsages multi ut
+        return (makeIdArg id' ut', Lam id' e')
 
 callArityExpr nodes (App f (Type t)) = callArityExprMap nodes (flip App (Type t)) f
 
@@ -525,8 +526,8 @@ callArityExpr nodes (App f (Type t)) = callArityExprMap nodes (flip App (Type t)
 callArityExpr nodes (App f a) = do
   transfer_f <- callArityExpr nodes f
   transfer_a <- callArityExpr nodes a
-  return $ \use -> do
-    (ut_f, f') <- transfer_f (use + 1)
+  return $ \result_use -> do
+    (ut_f, f') <- transfer_f (abstractUse result_use)
     --pprTrace "App:f'" (ppr (ut_f, f')) $ return ()
     -- peel off one argument from the type
     let (arg_usage, ut_f') = peelUsageType ut_f
@@ -536,9 +537,9 @@ callArityExpr nodes (App f a) = do
     -- of just a single @Use@ by multipliying the analysis result with the
     -- @Usage@s inherent @Multiplicity@.
     case oneifyUsageIfThunk a arg_usage of
-      Absent -> return (ut_f', App f' a) -- TODO: Visit a, too? Seems unnecessary, wasn't called at all
-      Used multi use -> do
-          (ut_a, a') <- transfer_a use
+      Absent -> return (ut_f', App f' a) -- TODO: Visit a, too? Seems unnecessary, wasn't called at all and should be taken care of by WW.
+      Used multi arg_use -> do
+          (ut_a, a') <- transfer_a arg_use
           --pprTrace "App:a'" (text "safe_arity:" <+> ppr safe_arity <+> ppr (ut_a, a')) $ return ()
           let ut_a' = multiplyFreeVarUsages multi ut_a
           return (ut_f' `both` ut_a', App f' a')
@@ -552,7 +553,7 @@ callArityExpr nodes (Case scrut bndr ty alts) = do
   transfer_alts <- forM alts $ \(dc, bndrs, e) ->
     callArityExprMap nodes (dc, bndrs,) e
   return $ \use -> do
-    (ut_scrut, scrut') <- transfer_scrut 0
+    (ut_scrut, scrut') <- transfer_scrut topUse
     (ut_alts, alts') <- unzip <$> mapM ($ use) transfer_alts
     let ut = trimArgs use (lubTypes ut_alts) `both` ut_scrut
     -- TODO: Think harder about the diverging case (e.g. matching on `undefined`).
@@ -675,7 +676,7 @@ unleashCall is_recursive ut_scope (id, rhs) transfer_rhs
     usage_id = -- How @id@ was used in its scope.
       -- ... except for bottoms, where we can't eta-expand.
       -- See Note [Trimming arity]
-      mapUsageArity (trimArity id)
+      trimUsage (trimmedArity id)
       -- See Note [Thunks in recursive groups]
       -- @is_recursive@ implies multiplicity @Many@ (otherwise, why would it be
       -- recursive?), although the co-call graph doesn't model it that way.
@@ -718,14 +719,14 @@ isThunk = not . exprIsCheap
 oneifyUsageIfThunk :: CoreExpr -> Usage -> Usage
 oneifyUsageIfThunk e (Used Many use)
   -- A thunk was called multiple times! Do not eta-expand
-  | isThunk e = Used Once 0
+  | isThunk e = Used Once topUse
   -- In case e is cheap and we use the let-bound var of e with @Used Many 0@, this
   -- allows us to at least analyze the cheap RHS with multiplicity @Once@ before we
   -- potentially hit a lambda binder, where we proceed normally with @Used Many 0@.
   -- I'm not sure if this actually buys us anything, @e@ is cheap after all.
   -- But it may still be non-@exprIsTrivial@, so just leaving it here for the
   -- time being.
-  | use == 0 = Used Once 0
+  | use == topUse = Used Once topUse
 oneifyUsageIfThunk _ u = u
 
 -- | Multiplies with @Many@; $\omega*_$ formally. @manifyUsage Absent = Absent@
@@ -762,7 +763,7 @@ callArityLetEnv ut_rhss ut_body
         | otherwise            = unionUnVarGraphs $ map cross_call ut_rhss
     cross_call (id, ut_rhs) = completeBipartiteGraph called_by_id called_with_id
       where
-        is_thunk = use (idCallArity id) == Just 0 -- This is a new annotation, from this FP iteration!
+        is_thunk = use (idCallArity id) == Just topUse -- This is a new annotation, from this FP iteration!
         -- We only add self cross calls if we really can recurse into ourselves.
         -- This is not the case for thunks (and non-recursive bindings, but
         -- then there won't be any mention of id in the rhs).
@@ -782,12 +783,12 @@ callArityLetEnv ut_rhss ut_body
     ut_new = modifyCoCalls (cross_calls `unionUnVarGraph`) ut_combined
 
 -- See Note [Trimming arity]
-trimArity :: Id -> Arity -> Arity
-trimArity id a = minimum [a, max_arity_by_type, max_arity_by_strsig]
+trimmedArity :: Id -> Arity
+trimmedArity id = minimum [max_arity_by_type, max_arity_by_strsig]
   where
     max_arity_by_type = length (typeArity (idType id))
     max_arity_by_strsig
         | isBotRes result_info = length demands
-        | otherwise = a
+        | otherwise = maxBound
 
     (demands, result_info) = splitStrictSig (idStrictness id)

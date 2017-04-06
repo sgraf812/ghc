@@ -1,6 +1,5 @@
 module CallArity.Types where
 
-import BasicTypes
 import CoreArity ( typeArity )
 import CoreSyn
 import Id
@@ -48,14 +47,14 @@ emptyUsageType = UT emptyUnVarGraph emptyVarEnv topUsageSig
 unitUsageType :: Id -> Use -> UsageType
 unitUsageType id use = emptyUsageType { ut_uses = unitVarEnv id use }
 
-unusedArgsUsageType :: Arity -> UsageType
-unusedArgsUsageType arity = trimArgs arity (unusedArgs emptyUsageType)
+unusedArgsUsageType :: Use -> UsageType
+unusedArgsUsageType use = trimArgs use (unusedArgs emptyUsageType)
 
 unusedArgs :: UsageType -> UsageType
 unusedArgs ut = ut { ut_args = botUsageSig }
 
-trimArgs :: Int -> UsageType -> UsageType
-trimArgs arity = modifyArgs (trimUsageSig arity)
+trimArgs :: Use -> UsageType -> UsageType
+trimArgs use = modifyArgs (trimUsageSig use)
 
 typeDelList :: [Id] -> UsageType -> UsageType
 typeDelList ids ae = foldr typeDel ae ids
