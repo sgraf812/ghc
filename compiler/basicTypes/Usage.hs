@@ -1,25 +1,45 @@
-module Usage where
+module Usage
+  ( Multiplicity (..)
+  , botMultiplicity, topMultiplicity, lubMultiplicity
+  , Use
+  , topUse, lubUse, abstractUse, applyUse
+  , Usage (..)
+  , multiplicity, use, botUsage, topUsage, lubUsage
+  , UsageSig
+  , botUsageSig, topUsageSig, lubUsageSig, consUsageSig, unconsUsageSig
+  , useArity
+  , trimUse, trimUsage, trimUsageSig
+  ) where
 
 import BasicTypes
 import Binary
-import Maybes ( expectJust )
 import Outputable
 
-import Data.Function ( on )
-
 -- * Types
-
-type Use = Arity
 
 data Multiplicity
   = Once
   | Many
   deriving (Eq, Ord, Show)
 
+-- | The @Ord@ instance is incompatible with the lattice and only used when
+-- acting as a key type in a map.
+data Use
+  = TopUse
+  -- ^ A single use where we don't know any further details of how
+  --
+  --     * a potential nested lambda body is used
+  --     * potential product components are used
+  | Call !Usage
+  -- ^ A single use where the lambda body is used according to @Usage@.
+  deriving (Eq, Ord, Show)
+
+-- | The @Ord@ instance is incompatible with the lattice and only used when
+-- acting as a key type in a map.
 data Usage
   = Absent
-  | Used Multiplicity {-# UNPACK #-} !Use
-  deriving (Eq, Show)
+  | Used !Multiplicity !Use
+  deriving (Eq, Ord, Show)
 
 multiplicity :: Usage -> Maybe Multiplicity
 multiplicity (Used m _) = Just m
@@ -29,6 +49,8 @@ use :: Usage -> Maybe Use
 use (Used _ u) = Just u
 use _ = Nothing
 
+-- | The constructors should not be exported. Use @consUsageSig@ and
+-- @unconsUsageSig@ instead, or else the derived @Eq@ instance is invalid.
 data UsageSig
   = BotUsageSig -- ^ All further args absent
   | TopUsageSig -- ^ All further args used many times
@@ -41,10 +63,12 @@ data UsageSig
 -- appropriate integer type with pos. Inf.
 
 topUse :: Use
-topUse = 0
+topUse = TopUse
 
 lubUse :: Use -> Use -> Use
-lubUse = min
+lubUse TopUse _ = TopUse
+lubUse _ TopUse = TopUse
+lubUse (Call u1) (Call u2) = Call (lubUsage u1 u2)
 
 botMultiplicity :: Multiplicity
 botMultiplicity = Once
@@ -83,9 +107,31 @@ lubUsageSig (ArgUsage u1 s1) (ArgUsage u2 s2) = ArgUsage (lubUsage u1 u2) (lubUs
 
 -- * Working with @Use@, @Usage@ and @UsageSig@
 
-mapUsageArity :: (Arity -> Arity) -> Usage -> Usage
-mapUsageArity f (Used multi use) = Used multi (f use)
-mapUsageArity f u = u
+-- | Abstracts the given @Use@ as a singular body @Usage@ behind a
+-- lambda binder. This is useful in the @App@lication rule and the only way
+-- to introduce a call use.
+abstractUse :: Use -> Use
+abstractUse use = Call (Used Once use)
+
+-- | Dual to @abstractUse@, this will return the @Usage@ of the lambda body,
+-- relative to the given single @Use@ of the outer expression. Useful in the
+-- @Lam@bda rule and the only meaningful way to eliminate a call use.
+applyUse :: Use -> Usage
+applyUse (Call usage) = usage
+applyUse _ = topUsage
+
+useArity :: Use -> Arity
+useArity (Call (Used _ u)) = 1 + useArity u
+useArity _ = 0
+
+trimUse :: Arity -> Use -> Use
+trimUse arity (Call usage)
+  | arity > 0 = Call (trimUsage (arity - 1) usage)
+trimUse _ _ = topUse
+
+trimUsage :: Arity -> Usage -> Usage
+trimUsage arity (Used multi use) = Used multi (trimUse arity use)
+trimUsage _ u = u
 
 consUsageSig :: Usage -> UsageSig -> UsageSig
 consUsageSig u s
@@ -105,27 +151,32 @@ unconsUsageSig BotUsageSig = (botUsage, BotUsageSig)
 unconsUsageSig TopUsageSig = (topUsage, TopUsageSig)
 unconsUsageSig (ArgUsage u s) = (u, s)
 
-trimUsageSig :: Arity -> UsageSig -> UsageSig
-trimUsageSig 0 _ = topUsageSig
-trimUsageSig _ TopUsageSig = topUsageSig
-trimUsageSig arity sig = consUsageSig headUsage (trimUsageSig (arity - 1) tailUsage)
+-- | Trims a @UsageSig@ by looking at how the associated value is used.
+--
+-- The resulting @UsageSig@ will only have as many arguments as the @Use@ has
+-- call nestings.
+trimUsageSig :: Use -> UsageSig -> UsageSig
+trimUsageSig _ BotUsageSig = BotUsageSig
+trimUsageSig (Call Absent) _ = BotUsageSig -- Since the result isn't forced, no further argument will
+trimUsageSig _ TopUsageSig = TopUsageSig
+trimUsageSig (Call (Used _ u)) sig = consUsageSig head_usage (trimUsageSig u tail_usage)
   where
-    (headUsage, tailUsage) = unconsUsageSig sig
+    (head_usage, tail_usage) = unconsUsageSig sig
+trimUsageSig _ _ = TopUsageSig
 
 -- * Pretty-printing
-
--- | Formats use like a Call demand.
-pprUse :: Use -> SDoc
-pprUse 0 = text "U"
-pprUse u = text "C" <> parens (pprUse (u - 1))
 
 instance Outputable Multiplicity where
   ppr Once = text "1"
   ppr Many = text "ω"
 
+instance Outputable Use where
+  ppr TopUse = text "U"
+  ppr (Call usage) = text "C" <> parens (ppr usage)
+
 instance Outputable Usage where
   ppr Absent = text "A"
-  ppr (Used multi use) = ppr multi <> char '*' <> pprUse use
+  ppr (Used multi use) = ppr multi <> char '*' <> ppr use
 
 instance Outputable UsageSig where
   ppr BotUsageSig = text "A,A.."
@@ -145,6 +196,16 @@ instance Binary Multiplicity where
       _ -> return Many
 
 -- | Mostly important for serializing @UsageSig@ in interface files.
+instance Binary Use where
+  put_ bh TopUse = putByte bh 0
+  put_ bh (Call usage) = putByte bh 1 >> put_ bh usage
+  get  bh = do
+    h <- getByte bh
+    case h of
+      0 -> return TopUse
+      _ -> Call <$> get bh
+
+-- | Mostly important for serializing @UsageSig@ in interface files.
 instance Binary Usage where
   put_ bh Absent = putByte bh 0
   put_ bh (Used multi use) = putByte bh 1 >> put_ bh multi >> put_ bh use
@@ -154,6 +215,7 @@ instance Binary Usage where
       0 -> return Absent
       _ -> Used <$> get bh <*> get bh
 
+-- | Mostly important for serializing @UsageSig@ in interface files.
 instance Binary UsageSig where
   put_ bh BotUsageSig = putByte bh 0
   put_ bh TopUsageSig = putByte bh 1

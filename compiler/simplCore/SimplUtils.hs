@@ -1435,7 +1435,7 @@ tryEtaExpandRhs env is_rec bndr rhs
             -- and @CallArity.Analysis.oneifyUsageIfThunk@.
             -- TODO: Also figure out if CoreArity yields better results at all.
             new_arity2
-              | Just arity <- use usage
+              | Just arity <- useArity <$> use usage
               , exprIsCheap rhs || Just Once == multiplicity usage
               = arity
               | otherwise
