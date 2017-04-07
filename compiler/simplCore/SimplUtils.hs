@@ -67,7 +67,6 @@ import Literal
 
 import Control.Monad    ( when )
 import Data.List        ( sortBy )
-import Data.Maybe ( fromMaybe )
 
 {-
 ************************************************************************
@@ -1429,18 +1428,12 @@ tryEtaExpandRhs env is_rec bndr rhs
       = return (exprArity rhs, rhs)
 
       | sm_eta_expand (getMode env)      -- Provided eta-expansion is on
-      , let new_arity1 = findRhsArity dflags bndr rhs old_arity
+      , let cheap_arity = findRhsArity dflags bndr rhs old_arity
             usage = idCallArity bndr
             -- This should always be in sync with @CallArity.Analysis.isThunk@
             -- and @CallArity.Analysis.oneifyUsageIfThunk@.
             -- TODO: Also figure out if CoreArity yields better results at all.
-            new_arity2
-              | Just arity <- useArity <$> use usage
-              , exprIsCheap rhs || Just Once == multiplicity usage
-              = arity
-              | otherwise
-              = 0
-            new_arity  = max new_arity1 new_arity2
+            new_arity = expandArity usage cheap_arity
       , new_arity > old_arity      -- And the current manifest arity isn't enough
       = if is_rec == Recursive && isJoinId bndr
            then WARN(True, text "Can't eta-expand recursive join point:" <+>
