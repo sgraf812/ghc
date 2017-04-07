@@ -31,11 +31,11 @@ newtype FrameworkNode
   = FrameworkNode Int
   deriving (Show, Eq, Ord, Outputable)
 
-type TransferFunction a = Worklist.TransferFunction (FrameworkNode, Use) AnalResult a
-type ChangeDetector = Worklist.ChangeDetector (FrameworkNode, Use) AnalResult
-type DataFlowFramework = Worklist.DataFlowFramework (FrameworkNode, Use) AnalResult
+type TransferFunction a = Worklist.TransferFunction (FrameworkNode, SingleUse) AnalResult a
+type ChangeDetector = Worklist.ChangeDetector (FrameworkNode, SingleUse) AnalResult
+type DataFlowFramework = Worklist.DataFlowFramework (FrameworkNode, SingleUse) AnalResult
 -- | Maps @FrameworkNode@ to incoming usage dependent @TransferFunction@s
-type NodeTransferEnv = IntMap (Use -> TransferFunction AnalResult, ChangeDetector)
+type NodeTransferEnv = IntMap (SingleUse -> TransferFunction AnalResult, ChangeDetector)
 
 newtype FrameworkBuilder a
   = FB { unFB :: State NodeTransferEnv a }
@@ -55,7 +55,7 @@ data RequestedPriority
 
 registerTransferFunction
   :: RequestedPriority
-  -> (FrameworkNode -> FrameworkBuilder (a, (Use -> TransferFunction AnalResult, ChangeDetector)))
+  -> (FrameworkNode -> FrameworkBuilder (a, (SingleUse -> TransferFunction AnalResult, ChangeDetector)))
   -> FrameworkBuilder a
 registerTransferFunction prio f = FB $ do
   nodes <- get
@@ -74,14 +74,14 @@ registerTransferFunction prio f = FB $ do
     unFB (f (FrameworkNode node))
   return result
 
-dependOnWithDefault :: AnalResult -> (FrameworkNode, Use) -> TransferFunction AnalResult
+dependOnWithDefault :: AnalResult -> (FrameworkNode, SingleUse) -> TransferFunction AnalResult
 dependOnWithDefault def which = do
   --pprTrace "dependOnWithDefault:before" (text "node:" <+> ppr node <+> text "use:" <+> ppr use) $ return ()
   res <- fromMaybe def <$> Worklist.dependOn which
   --pprTrace "dependOnWithDefault:after" (vcat [text "node:" <+> ppr node, text "use:" <+> ppr use, text "res:" <+> ppr res]) $ return ()
   return res
 
-buildAndRun :: FrameworkBuilder (Use -> TransferFunction AnalResult) -> Use -> AnalResult
+buildAndRun :: FrameworkBuilder (SingleUse -> TransferFunction AnalResult) -> SingleUse -> AnalResult
 buildAndRun buildTransfer use = lookup_result (Worklist.runFramework fw (Set.singleton (node, use)))
   where
     (node, fw) = buildFramework $
@@ -91,7 +91,7 @@ buildAndRun buildTransfer use = lookup_result (Worklist.runFramework fw (Set.sin
         -- introduce a cycle.
         return (node, (transfer, Worklist.alwaysChangeDetector))
 
-    lookup_result :: Map (FrameworkNode, Use) AnalResult -> AnalResult
+    lookup_result :: Map (FrameworkNode, SingleUse) AnalResult -> AnalResult
     lookup_result result_map = case Map.lookup (node, use) result_map of
       Nothing -> pprPanic "CallArity.FrameworkBuilder.buildAndRun" empty
       Just res -> res

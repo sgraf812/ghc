@@ -20,7 +20,7 @@ data UsageType
   { ut_cocalled :: !UnVarGraph
   -- ^ Models cardinality, e.g. at most {1, many} via the co-call relation for
   -- _interesting_ variables
-  , ut_uses :: !(VarEnv Use)
+  , ut_uses :: !(VarEnv SingleUse)
   -- ^ Models per var usage and absence (card 0)
   , ut_args :: !UsageSig
   -- ^ Collects the signature for captured lambda binders
@@ -44,16 +44,16 @@ isInteresting v = not $ null (typeArity (idType v))
 emptyUsageType :: UsageType
 emptyUsageType = UT emptyUnVarGraph emptyVarEnv topUsageSig
 
-unitUsageType :: Id -> Use -> UsageType
+unitUsageType :: Id -> SingleUse -> UsageType
 unitUsageType id use = emptyUsageType { ut_uses = unitVarEnv id use }
 
-unusedArgsUsageType :: Use -> UsageType
+unusedArgsUsageType :: SingleUse -> UsageType
 unusedArgsUsageType use = trimArgs use (unusedArgs emptyUsageType)
 
 unusedArgs :: UsageType -> UsageType
 unusedArgs ut = ut { ut_args = botUsageSig }
 
-trimArgs :: Use -> UsageType -> UsageType
+trimArgs :: SingleUse -> UsageType -> UsageType
 trimArgs use = modifyArgs (trimUsageSig use)
 
 typeDelList :: [Id] -> UsageType -> UsageType
@@ -88,26 +88,41 @@ calledWith ut id
   | otherwise
   = domType ut
 
-addCrossCoCalls :: UnVarSet -> UnVarSet -> UsageType -> UsageType
-addCrossCoCalls set1 set2
-  = modifyCoCalls (completeBipartiteGraph set1 set2 `unionUnVarGraph`)
-
 -- Replaces the co-call graph by a complete graph (i.e. no information)
 multiplyFreeVarUsages :: Multiplicity -> UsageType -> UsageType
-multiplyFreeVarUsages Once res = res
-multiplyFreeVarUsages Many res = modifyCoCalls (const (completeGraph (domType res))) res
+multiplyFreeVarUsages Once ut = ut
+multiplyFreeVarUsages Many ut@(UT _ u args)
+  = UT
+  { ut_cocalled = completeGraph (domType ut)
+  , ut_uses = mapVarEnv (\use -> bothSingleUse use use) u
+  , ut_args = manifyUsageSig args
+  }
 
--- Used for application and cases
+-- | Corresponds to sequential composition of expressions.
+-- Used for application and cases.
+-- Note this returns the @UsageSig@ from the first argument.
 both :: UsageType -> UsageType -> UsageType
-both r1 r2 = addCrossCoCalls (domType r1) (domType r2) ((r1 `lubType` r2) { ut_args = ut_args r1 })
+both ut1@(UT g1 u1 args) ut2@(UT g2 u2 _)
+  = UT
+  { ut_cocalled = unionUnVarGraphs [g1, g2, completeBipartiteGraph (domType ut1) (domType ut2)]
+  , ut_uses = bothUseEnv u1 u2
+  , ut_args = args
+  }
 
--- Used when combining results from alternative cases; take the minimum
+-- | Used when combining results from alternative cases; take the minimum
 lubType :: UsageType -> UsageType -> UsageType
-lubType (UT g1 ae1 args1) (UT g2 ae2 args2)
-  = UT (g1 `unionUnVarGraph` g2) (ae1 `lubUseEnv` ae2) (lubUsageSig args1 args2)
+lubType (UT g1 u1 args1) (UT g2 u2 args2)
+  = UT
+  { ut_cocalled = unionUnVarGraph g1 g2
+  , ut_uses = lubUseEnv u1 u2
+  , ut_args = lubUsageSig args1 args2
+  }
 
-lubUseEnv :: VarEnv Use -> VarEnv Use -> VarEnv Use
-lubUseEnv = plusVarEnv_C lubUse
+lubUseEnv :: VarEnv SingleUse -> VarEnv SingleUse -> VarEnv SingleUse
+lubUseEnv = plusVarEnv_C lubSingleUse
+
+bothUseEnv :: VarEnv SingleUse -> VarEnv SingleUse -> VarEnv SingleUse
+bothUseEnv = plusVarEnv_C bothSingleUse
 
 lubTypes :: [UsageType] -> UsageType
 lubTypes = foldl lubType (unusedArgs emptyUsageType)
