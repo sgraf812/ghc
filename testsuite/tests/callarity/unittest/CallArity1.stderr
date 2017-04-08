@@ -1,77 +1,77 @@
 go2:
-    go ω*C(C(U))
-    d 1*C(U)
+    go ω*C^ω(C^1(U))
+    d 1*C^1(U)
 nested_go2:
-    go ω*C(C(U))
-    go2 1*C(C(U))
-    d 1*C(U)
-    n 1*C(U)
-d0 (go _*C(C(U)) would be bad):
-    go ω*C(U)
-    d ω*C(U)
+    go ω*C^ω(C^1(U))
+    go2 1*C^1(C^1(U))
+    d 1*C^1(U)
+    n 1*C^1(U)
+d0 (go _*C^1(C^1(U)) would be bad):
+    go ω*U
+    d ω*U
 go2 (in case crut):
-    go ω*C(C(U))
-    d 1*C(U)
+    go ω*C^ω(C^1(U))
+    d 1*C^1(U)
 go2 (in function call):
-    go ω*C(C(U))
-    d 1*C(U)
+    go ω*C^ω(C^1(U))
+    d 1*C^1(U)
 go2 (using surrounding interesting let):
-    go ω*C(C(U))
-    d 1*C(U)
-    n 1*C(U)
+    go ω*C^ω(C^1(U))
+    d 1*C^1(U)
+    n 1*C^1(U)
 go2 (using surrounding boring let):
-    go ω*C(C(U))
-    d 1*C(U)
+    go ω*C^ω(C^1(U))
+    d 1*C^1(U)
     z ω*U
 two calls, one from let and from body (d 1*_ would be bad):
-    go 1*C(C(U))
-    d ω*C(U)
+    go 1*C^1(C^1(U))
+    d ω*C^1(U)
 a thunk in a recursion (d 1*_ would be bad):
     d ω*U
     n ω*U
 two thunks, one called multiple times (both 1*_ would be bad!):
-    d ω*C(U)
-    n 1*C(U)
+    d ω*U
+    n 1*C^1(U)
 two functions, not thunks:
-    go 1*C(C(U))
-    go2 1*C(C(U))
+    go 1*C^1(C^1(U))
+    go2 1*C^1(C^1(U))
 a thunk, called multiple times via a forking recursion (d 1*_ would be bad!):
-    go2 ω*C(C(U))
-    d ω*C(U)
+    go2 ω*C^ω(C^1(U))
+    d ω*U
 a function, one called multiple times via a forking recursion:
-    go ω*C(C(U))
-    go2 ω*C(C(U))
+    go ω*C^ω(C^1(U))
+    go2 ω*C^ω(C^1(U))
 two functions (recursive):
-    go ω*C(C(U))
-    go2 ω*C(C(U))
+    go ω*C^ω(C^1(U))
+    go2 ω*C^ω(C^1(U))
 mutual recursion (thunks), called mutiple times (both 1*_ would be bad!):
     d ω*U
     n ω*U
 mutual recursion (functions), but no thunks:
-    go ω*C(C(U))
-    go2 ω*C(C(U))
+    go ω*C^ω(C^1(U))
+    go2 ω*C^ω(C^1(U))
 mutual recursion (functions), one boring (d 1*_ would be bad):
-    go ω*C(C(U))
-    go2 ω*C(C(U))
-    d ω*C(U)
+    go ω*C^ω(C^1(U))
+    go2 ω*C^ω(C^1(U))
+    d ω*U
 a thunk (non-function-type), called twice, still calls once:
     x ω*U
-    d 1*C(U)
+    d 1*C^1(U)
 a thunk (function type), called multiple times, still calls once:
-    d 1*C(U)
-    n ω*C(U)
+    d 1*C^1(U)
+    n ω*U
 a thunk (non-function-type), in mutual recursion, still calls once (d ω*_ would be bad):
-    go ω*C(C(U))
+    go ω*C^ω(C^1(U))
     x ω*U
-    d 1*C(U)
+    d 1*C^1(U)
 a thunk (non-function-type), in mutual recursion, causes many calls (d 1*_ would be bad):
-    go ω*C(C(U))
+    go ω*C^ω(C^1(U))
     x ω*U
-    d ω*C(U)
+    d ω*U
 a thunk (function type), in mutual recursion, still calls once (d 1*_ would be good):
-    go ω*C(U)
-    d 1*C(U)
+    go ω*U
+    d 1*C^1(U)
     n ω*U
 a thunk (non-function-type) co-calls with the body (d 1*_ would be bad):
     x ω*U
-    d ω*C(U)
+    d ω*C^1(U)
