@@ -2,7 +2,7 @@ module Usage
   ( Multiplicity (..)
   , botMultiplicity, topMultiplicity, lubMultiplicity
   , SingleUse
-  , topSingleUse, lubSingleUse, bothSingleUse, abstractSingleUse, applySingleUse
+  , topSingleUse, lubSingleUse, bothSingleUse, abstractSingleUse, applySingleUse, singleCallUse
   , Usage (..)
   , multiplicity, botUsage, topUsage, lubUsage, bothUsage, manifyUsage, expandArity
   , UsageSig
@@ -164,6 +164,10 @@ applySingleUse :: SingleUse -> Usage
 applySingleUse HeadUse = Absent -- The lambda will be reduced to WHNF, but the body will stay untouched.
 applySingleUse (Call multi use) = Used multi use
 applySingleUse _ = topUsage
+
+singleCallUse :: Arity -> SingleUse
+singleCallUse 0 = topSingleUse
+singleCallUse arity = mkCall Once (singleCallUse (arity - 1))
 
 trimSingleUse :: Arity -> SingleUse -> SingleUse
 trimSingleUse arity (Call m body)
