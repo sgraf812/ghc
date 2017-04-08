@@ -89,9 +89,9 @@ calledWith ut id
   = domType ut
 
 -- Replaces the co-call graph by a complete graph (i.e. no information)
-multiplyFreeVarUsages :: Multiplicity -> UsageType -> UsageType
-multiplyFreeVarUsages Once ut = ut
-multiplyFreeVarUsages Many ut@(UT _ u args)
+multiplyUsages :: Multiplicity -> UsageType -> UsageType
+multiplyUsages Once ut = ut
+multiplyUsages Many ut@(UT _ u args)
   = UT
   { ut_cocalled = completeGraph (domType ut)
   , ut_uses = mapVarEnv (\use -> bothSingleUse use use) u

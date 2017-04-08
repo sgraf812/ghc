@@ -472,6 +472,7 @@ callArityExpr nodes (Tick t e) = callArityExprMap nodes (Tick t) e
 callArityExpr nodes (Cast e c) = callArityExprMap nodes (flip Cast c) e
 
 -- The interesting cases: Variables, Lambdas, Lets, Applications, Cases
+
 callArityExpr nodes e@(Var id) = return transfer
   where
     transfer use
@@ -479,10 +480,12 @@ callArityExpr nodes e@(Var id) = return transfer
       -- We don't track uninteresting vars and implicitly assume they are called
       -- multiple times with every other variable.
       -- See Note [Taking boring variables into account]
+      -- TODO: Do we really need this? Those uninteresting vars aren't that
+      -- uninteresting after all...
       = return (emptyUsageType, e)
 
       | Just node <- lookupVarEnv nodes id
-      -- A local let-binding.
+      -- A local let-binding, e.g. a binding from this module.
       = do
         (ut_callee, _) <- dependOnWithDefault (unusedArgsUsageType use, e) (node, use)
         -- It is crucial that we only use ut_args here, as every other field
@@ -490,13 +493,16 @@ callArityExpr nodes e@(Var id) = return transfer
         return ((unitUsageType id use) { ut_args = ut_args ut_callee }, e)
 
       | isGlobalId id
-      , use `lubSingleUse` singleCallUse (idArity id) == singleCallUse (idArity id)
-      -- TODO: Instead manify the UsageSig
       -- A global id from another module which has a usage signature.
-      = return ((unitUsageType id use) { ut_args = idArgUsage id }, e)
+      -- We don't need to track the id itself, though.
+      = return (emptyUsageType { ut_args = sig }, e)
+          where
+            call = singleCallUse (idArity id)
+            sig | use `lubSingleUse` call == call = idArgUsage id
+                | otherwise = topUsageSig
 
       | otherwise
-      -- interesting LocalId, not present in @nodes@, e.g. a lambda-bound variable.
+      -- An interesting LocalId, not present in @nodes@, e.g. a lambda-bound variable.
       -- We are only second-order, so we don't model signatures for parameters!
       -- Their usage is interesting to note nonetheless for annotating lambda
       -- binders.
@@ -504,7 +510,8 @@ callArityExpr nodes e@(Var id) = return transfer
 
 callArityExpr nodes (Lam id body)
   | isTyVar id
-  = callArityExprMap nodes (Lam id) body -- Non-value lambdas are ignored
+  -- Non-value lambdas are ignored
+  = callArityExprMap nodes (Lam id) body
   | otherwise
   = do
     transfer_body <- callArityExpr nodes body
@@ -515,7 +522,10 @@ callArityExpr nodes (Lam id body)
           (ut_body, body') <- transfer_body body_use
           let id' | Once <- multi = id `setIdOneShotInfo` OneShotLam
                   | otherwise = id
-          let ut = multiplyFreeVarUsages multi ut_body
+          -- TODO: This *should* be OK: free vars are manified,
+          --       closed vars are not. Argument usages are manified,
+          --       which should be conservative enough.
+          let ut = multiplyUsages multi ut_body
           return (makeIdArg id' ut, Lam id' body')
 
 callArityExpr nodes (App f (Type t)) = callArityExprMap nodes (flip App (Type t)) f
@@ -554,7 +564,7 @@ callArityExpr nodes (Case scrut bndr ty alts) = do
   transfer_alts <- forM alts $ \(dc, bndrs, e) ->
     callArityExprMap nodes (dc, bndrs,) e
   return $ \use -> do
-    (ut_scrut, scrut') <- transfer_scrut topSingleUse
+    (ut_scrut, scrut') <- transfer_scrut topSingleUse -- TODO: Product component usage
     (ut_alts, alts') <- unzip <$> mapM ($ use) transfer_alts
     let ut = trimArgs use (lubTypes ut_alts) `both` ut_scrut
     -- TODO: Think harder about the diverging case (e.g. matching on `undefined`).
@@ -701,35 +711,6 @@ unleashCall is_recursive ut_scope (id, rhs) transfer_rhs
             `setIdCallArity` usage_id -- How the binder was used
             `setIdArgUsage` ut_args ut_sig -- How a single call uses its args
       return (ut_rhs, (id', rhs'))
-
--- | See Note [What is a thunk].
--- This should always be in sync with @SimplUtils.tryEtaExpandRhs@.
--- TODO: Factor out @exprIsCheap@ into the environment, like in CoreArity.
-isThunk :: CoreExpr -> Bool
-isThunk = not . exprIsCheap
-
-{-| If a (future, in the case of arguments) let-bound expression is a thunk, we
-    need to make sure that we don't accidentally duplicate work by eta-expansion.
-    Which we do if we expand a thunk which we use multiple times.
-
-    So: If we use a thunk @Many 2@, we must be sure that we are OK with
-    losing shared work by eta-expansion (@exprIsCheap@). Otherwise we have to
-    fall back to @One 0@.
-
-    This function should be used anywhere expressions are to be let-bound.
--}
-oneifyUsageIfThunk :: CoreExpr -> Usage -> Usage
-oneifyUsageIfThunk e (Used Many use)
-  -- A thunk was called multiple times! Do not eta-expand
-  | isThunk e = Used Once topSingleUse
-  -- In case e is cheap and we use the let-bound var of e with @Used Many 0@, this
-  -- allows us to at least analyze the cheap RHS with multiplicity @Once@ before we
-  -- potentially hit a lambda binder, where we proceed normally with @Used Many 0@.
-  -- I'm not sure if this actually buys us anything, @e@ is cheap after all.
-  -- But it may still be non-@exprIsTrivial@, so just leaving it here for the
-  -- time being.
-  | use == topSingleUse = Used Once topSingleUse
-oneifyUsageIfThunk _ u = u
 
 -- Combining the results from body and rhs of a let binding
 -- See Note [Analysis II: The Co-Called analysis]
