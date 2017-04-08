@@ -490,6 +490,8 @@ callArityExpr nodes e@(Var id) = return transfer
         return ((unitUsageType id use) { ut_args = ut_args ut_callee }, e)
 
       | isGlobalId id
+      , use `lubSingleUse` singleCallUse (idArity id) == singleCallUse (idArity id)
+      -- TODO: Instead manify the UsageSig
       -- A global id from another module which has a usage signature.
       = return ((unitUsageType id use) { ut_args = idArgUsage id }, e)
 
@@ -694,9 +696,10 @@ unleashCall is_recursive ut_scope (id, rhs) transfer_rhs
     apply_when b f = if b then f else Prelude.id
     analyse use = do
       (ut_rhs, rhs') <- transfer_rhs use
+      (ut_sig, _) <- transfer_rhs (singleCallUse (idArity id)) -- no need to expand that Arity... This is used for exported globals only
       let id' = id
-            `setIdCallArity` usage_id -- How the *binder* was used
-            `setIdArgUsage` ut_args ut_rhs -- How the *RHS* uses its args
+            `setIdCallArity` usage_id -- How the binder was used
+            `setIdArgUsage` ut_args ut_sig -- How a single call uses its args
       return (ut_rhs, (id', rhs'))
 
 -- | See Note [What is a thunk].
