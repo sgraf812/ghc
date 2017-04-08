@@ -43,13 +43,19 @@ data SingleUse
   --
   -- Use @abstractSingleUse@ to introduce this constructor and
   -- @abstractSingleUse@ to eliminate @Call@s.
-  | TopUse
+  | UnknownUse
   -- ^ A @SingleUse@ where, after hitting WHNF of the expression,
   -- we don't know any further details of how
   --
   --     * a resulting nested lambda body is used
   --     * resulting product components are used
   deriving (Eq, Ord, Show)
+
+-- | A smart constructor for @Call@ which normalizes according to the equivalence
+-- @Many UnknownUse = UnknownUse@.
+mkCall :: Multiplicity -> SingleUse -> SingleUse
+mkCall Many UnknownUse = UnknownUse
+mkCall m u = Call m u
 
 -- | @Id@entifiers can be used multiple times and are the only means to
 -- introduce sharing of work, evaluating expressions into WHNF, that is.
@@ -96,22 +102,22 @@ botSingleUse :: SingleUse
 botSingleUse = HeadUse
 
 topSingleUse :: SingleUse
-topSingleUse = TopUse
+topSingleUse = UnknownUse
 
 lubSingleUse :: SingleUse -> SingleUse -> SingleUse
-lubSingleUse TopUse _ = TopUse
-lubSingleUse _ TopUse = TopUse
+lubSingleUse UnknownUse _ = UnknownUse
+lubSingleUse _ UnknownUse = UnknownUse
 lubSingleUse HeadUse u = u
 lubSingleUse u HeadUse = u
-lubSingleUse (Call m1 u1) (Call m2 u2) = Call (lubMultiplicity m1 m2) (lubSingleUse u1 u2)
+lubSingleUse (Call m1 u1) (Call m2 u2) = mkCall (lubMultiplicity m1 m2) (lubSingleUse u1 u2)
 
 -- | Think 'plus' on @SingleUse@s, for sequential composition.
 bothSingleUse :: SingleUse -> SingleUse -> SingleUse
-bothSingleUse TopUse _ = TopUse
-bothSingleUse _ TopUse = TopUse
+bothSingleUse UnknownUse _ = UnknownUse
+bothSingleUse _ UnknownUse = UnknownUse
 bothSingleUse HeadUse u = u
 bothSingleUse u HeadUse = u
-bothSingleUse (Call _ u1) (Call _ u2) = Call Many (lubSingleUse u1 u2)
+bothSingleUse (Call _ u1) (Call _ u2) = mkCall Many (lubSingleUse u1 u2)
 
 botUsage :: Usage
 botUsage = Absent
@@ -149,7 +155,7 @@ lubUsageSig (ArgUsage u1 s1) (ArgUsage u2 s2) = ArgUsage (lubUsage u1 u2) (lubUs
 -- | Abstracts the given @SingleUse@ as a singular body @Usage@ behind a
 -- lambda binder. This is useful in the @App@lication rule.
 abstractSingleUse :: SingleUse -> SingleUse
-abstractSingleUse use = Call Once use
+abstractSingleUse use = mkCall Once use
 
 -- | Dual to @abstractSingleUse@, this will return the @Usage@ of the lambda body,
 -- relative to the given single @Use@ of the outer expression. Useful in the
@@ -161,7 +167,7 @@ applySingleUse _ = topUsage
 
 trimSingleUse :: Arity -> SingleUse -> SingleUse
 trimSingleUse arity (Call m body)
-  | arity > 0 = Call m (trimSingleUse (arity - 1) body)
+  | arity > 0 = mkCall m (trimSingleUse (arity - 1) body)
 trimSingleUse _ _ = topSingleUse
 
 trimUsage :: Arity -> Usage -> Usage
@@ -186,7 +192,7 @@ expandArity Absent cheap_arity
 expandArity (Used Many _) 0
   -- This is a special case, accounting for the fact that let-bindings
   -- are evaluated at most once. Consider @f `seq` ... f x ... @: @seq@ makes
-  -- it possible to end up with an @Usage@ of @Used Many (Call Once TopUse)@,
+  -- it possible to end up with an @Usage@ of @Used Many (Call Once UnknownUse)@,
   -- where the outer @Multiplicity@ and the top-level one-shot @Multiplicity@
   -- are out of sync. Eta-expansion would be counter-intuitive, as the lifted
   -- abstraction would hide the work which we wanted to evaluate strictly.
@@ -198,7 +204,7 @@ expandArity (Used _ u) cheap_arity
     impl HeadUse cheap_arity -- the application expression we accumulated does non-trivial work, so
       -- Same reason as for the above @Absent@ case
       = cheap_arity
-    impl TopUse cheap_arity
+    impl UnknownUse cheap_arity
       -- No chance we can expand anything
       = cheap_arity
     impl (Call Many u) 0
@@ -258,7 +264,7 @@ instance Outputable Multiplicity where
 
 instance Outputable SingleUse where
   ppr HeadUse = text "HU"
-  ppr TopUse = text "U"
+  ppr UnknownUse = text "U"
   ppr (Call multi body) = text "C^" <> ppr multi <> parens (ppr body)
 
 instance Outputable Usage where
@@ -288,13 +294,13 @@ instance Binary Multiplicity where
 -- | Mostly important for serializing @UsageSig@ in interface files.
 instance Binary SingleUse where
   put_ bh HeadUse = putByte bh 0
-  put_ bh TopUse = putByte bh 1
+  put_ bh UnknownUse = putByte bh 1
   put_ bh (Call multi use) = putByte bh 2 >> put_ bh multi >> put_ bh use
   get  bh = do
     h <- getByte bh
     case h of
       0 -> return HeadUse
-      1 -> return TopUse
+      1 -> return UnknownUse
       _ -> Call <$> get bh <*> get bh
 
 -- | Mostly important for serializing @UsageSig@ in interface files.

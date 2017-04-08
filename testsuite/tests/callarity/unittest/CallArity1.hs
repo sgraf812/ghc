@@ -59,7 +59,7 @@ exprs =
                         mkLams [z] $ Var d `mkVarApps` [x] )$
                     Var go2 `mkApps` [mkLit 1] ) $
         go `mkLApps` [0, 0]
-  , ("d0 (go _*C(C(U)) would be bad)",) $
+  , ("d0 (go _*C^1(C^1(U)) would be bad)",) $
      mkRFun go [x]
         (mkNrLet d (mkACase (Var go `mkVarApps` [x])
                           (mkLams [y] $ Var y)
