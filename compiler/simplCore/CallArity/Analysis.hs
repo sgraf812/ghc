@@ -495,11 +495,7 @@ callArityExpr nodes e@(Var id) = return transfer
       | isGlobalId id
       -- A global id from another module which has a usage signature.
       -- We don't need to track the id itself, though.
-      = return (emptyUsageType { ut_args = sig }, e)
-          where
-            call = singleCallUse (idArity id)
-            sig | use `lubSingleUse` call == call = idArgUsage id
-                | otherwise = topUsageSig
+      = return (unleashUsageSig id use, e)
 
       | otherwise
       -- An interesting LocalId, not present in @nodes@, e.g. a lambda-bound variable.
@@ -622,6 +618,14 @@ callArityExpr letdown_nodes (Let bind e) = do
         (ut, let') <- dependOnWithDefault (emptyUsageType, Let bind e) (node, use)
         --pprTrace "Let" (ppr (ut, let')) $ return ()
         return (typeDelList (bindersOf bind) ut, let')
+
+unleashUsageSig :: Id -> SingleUse -> UsageType
+unleashUsageSig id use
+  = emptyUsageType { ut_args = sig }
+  where
+    call = singleCallUse (idArity id)
+    sig | (use `lubSingleUse` call) == call = idArgUsage id
+        | otherwise = topUsageSig
 
 callArityBind
   :: VarEnv FrameworkNode

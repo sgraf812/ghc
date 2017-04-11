@@ -2,7 +2,7 @@ module Usage
   ( Multiplicity (..)
   , botMultiplicity, topMultiplicity, lubMultiplicity
   , SingleUse
-  , topSingleUse, lubSingleUse, bothSingleUse, abstractSingleUse, applySingleUse, singleCallUse
+  , topSingleUse, lubSingleUse, bothSingleUse, abstractSingleUse, applySingleUse, singleCallUse, mkProductSingleUse
   , Usage (..)
   , multiplicity, botUsage, topUsage, lubUsage, bothUsage, manifyUsage, expandArity
   , UsageSig
@@ -43,6 +43,9 @@ data SingleUse
   --
   -- Use @abstractSingleUse@ to introduce this constructor and
   -- @abstractSingleUse@ to eliminate @Call@s.
+  | Product ![Usage]
+  -- ^ A @SingleUse@ which, after evaluating a product constructor, will use the
+  -- product's components according to the @Usage@s given.
   | UnknownUse
   -- ^ A @SingleUse@ where, after hitting WHNF of the expression,
   -- we don't know any further details of how
@@ -52,10 +55,17 @@ data SingleUse
   deriving (Eq, Ord, Show)
 
 -- | A smart constructor for @Call@ which normalizes according to the equivalence
--- @Many UnknownUse = UnknownUse@.
-mkCall :: Multiplicity -> SingleUse -> SingleUse
-mkCall Many UnknownUse = UnknownUse
-mkCall m u = Call m u
+-- @Call Many UnknownUse = UnknownUse@.
+mkCallSingleUse :: Multiplicity -> SingleUse -> SingleUse
+mkCallSingleUse Many UnknownUse = UnknownUse
+mkCallSingleUse m u = Call m u
+
+-- | A smart constructor for @Product@ which normalizes according to the equivalence
+-- @Product [topUsage, topUsage..] = UnknownUse@.
+mkProductSingleUse :: [Usage] -> SingleUse
+mkProductSingleUse components
+  | all (== topUsage) components = UnknownUse
+  | otherwise = Product components
 
 -- | @Id@entifiers can be used multiple times and are the only means to
 -- introduce sharing of work, evaluating expressions into WHNF, that is.
@@ -109,7 +119,11 @@ lubSingleUse UnknownUse _ = UnknownUse
 lubSingleUse _ UnknownUse = UnknownUse
 lubSingleUse HeadUse u = u
 lubSingleUse u HeadUse = u
-lubSingleUse (Call m1 u1) (Call m2 u2) = mkCall (lubMultiplicity m1 m2) (lubSingleUse u1 u2)
+lubSingleUse (Product c1) (Product c2)
+  = mkProductSingleUse (zipWith lubUsage c1 c2)
+lubSingleUse (Call m1 u1) (Call m2 u2)
+  = mkCallSingleUse (lubMultiplicity m1 m2) (lubSingleUse u1 u2)
+lubSingleUse _ _ = UnknownUse
 
 -- | Think 'plus' on @SingleUse@s, for sequential composition.
 bothSingleUse :: SingleUse -> SingleUse -> SingleUse
@@ -117,7 +131,10 @@ bothSingleUse UnknownUse _ = UnknownUse
 bothSingleUse _ UnknownUse = UnknownUse
 bothSingleUse HeadUse u = u
 bothSingleUse u HeadUse = u
-bothSingleUse (Call _ u1) (Call _ u2) = mkCall Many (lubSingleUse u1 u2)
+bothSingleUse (Product c1) (Product c2)
+  = mkProductSingleUse (zipWith bothUsage c1 c2)
+bothSingleUse (Call _ u1) (Call _ u2)
+  = mkCallSingleUse Many (lubSingleUse u1 u2)
 
 botUsage :: Usage
 botUsage = Absent
@@ -155,7 +172,7 @@ lubUsageSig (ArgUsage u1 s1) (ArgUsage u2 s2) = ArgUsage (lubUsage u1 u2) (lubUs
 -- | Abstracts the given @SingleUse@ as a singular body @Usage@ behind a
 -- lambda binder. This is useful in the @App@lication rule.
 abstractSingleUse :: SingleUse -> SingleUse
-abstractSingleUse use = mkCall Once use
+abstractSingleUse use = mkCallSingleUse Once use
 
 -- | Dual to @abstractSingleUse@, this will return the @Usage@ of the lambda body,
 -- relative to the given single @Use@ of the outer expression. Useful in the
@@ -167,11 +184,11 @@ applySingleUse _ = topUsage
 
 singleCallUse :: Arity -> SingleUse
 singleCallUse 0 = topSingleUse
-singleCallUse arity = mkCall Once (singleCallUse (arity - 1))
+singleCallUse arity = mkCallSingleUse Once (singleCallUse (arity - 1))
 
 trimSingleUse :: Arity -> SingleUse -> SingleUse
 trimSingleUse arity (Call m body)
-  | arity > 0 = mkCall m (trimSingleUse (arity - 1) body)
+  | arity > 0 = mkCallSingleUse m (trimSingleUse (arity - 1) body)
 trimSingleUse _ _ = topSingleUse
 
 trimUsage :: Arity -> Usage -> Usage
@@ -210,6 +227,9 @@ expandArity (Used _ u) cheap_arity
       = cheap_arity
     impl UnknownUse cheap_arity
       -- No chance we can expand anything
+      = cheap_arity
+    impl (Product _) cheap_arity
+      -- This doesn't really make sense anyway.
       = cheap_arity
     impl (Call Many u) 0
       -- the application expression we accumulated does non-trivial work,
@@ -269,6 +289,7 @@ instance Outputable Multiplicity where
 instance Outputable SingleUse where
   ppr HeadUse = text "HU"
   ppr UnknownUse = text "U"
+  ppr (Product components) = text "U" <> parens (hcat (punctuate (char ',') (map ppr components)))
   ppr (Call multi body) = text "C^" <> ppr multi <> parens (ppr body)
 
 instance Outputable Usage where
@@ -299,12 +320,14 @@ instance Binary Multiplicity where
 instance Binary SingleUse where
   put_ bh HeadUse = putByte bh 0
   put_ bh UnknownUse = putByte bh 1
-  put_ bh (Call multi use) = putByte bh 2 >> put_ bh multi >> put_ bh use
+  put_ bh (Product components) = putByte bh 2 >> put_ bh components
+  put_ bh (Call multi use) = putByte bh 3 >> put_ bh multi >> put_ bh use
   get  bh = do
     h <- getByte bh
     case h of
       0 -> return HeadUse
       1 -> return UnknownUse
+      2 -> Product <$> get bh
       _ -> Call <$> get bh <*> get bh
 
 -- | Mostly important for serializing @UsageSig@ in interface files.
