@@ -418,12 +418,16 @@ Call Arity considers everything that is not cheap (`exprIsCheap`) as a thunk.
 -- Represents the fact that a CoreProgram is like a sequence of
 -- nested lets, where the exports are returned in the inner-most let
 -- as a tuple. As a result, all exported identifiers are handled as called
--- with each other, with arity 0.
+-- with each other, with @topUsage@.
 moduleToExpr :: CoreProgram -> CoreExpr
 moduleToExpr = impl []
   where
-    impl exported [] = mkBigCoreTup (map Var exported)
-    impl exported (bind:prog) = Let bind (impl (filter isExportedId (bindersOf bind) ++ exported) prog)
+    impl exported []
+      -- @duplicate@, otherwise those Vars appear to be used once
+      = mkBigCoreTup (map Var (duplicate exported))
+    impl exported (bind:prog)
+      = Let bind (impl (filter isExportedId (bindersOf bind) ++ exported) prog)
+    duplicate = concatMap (replicate 2)
 
 -- | The left inverse to @moduleToExpr@: @exprToModule . moduleToExpr = id \@CoreProgram@
 exprToModule :: CoreExpr -> CoreProgram
