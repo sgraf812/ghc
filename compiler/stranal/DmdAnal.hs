@@ -1066,7 +1066,7 @@ type DFunFlag = Bool  -- indicates if the lambda being considered is in the
 notArgOfDfun :: DFunFlag
 notArgOfDfun = False
 
--- ^ Holds all (mostly read-only) state of the analysis.
+-- | Holds all (mostly read-only) state of the analysis.
 data AnalEnv
   = AE { ae_dflags :: DynFlags
        -- ^ Compiler flags

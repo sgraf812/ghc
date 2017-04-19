@@ -1430,10 +1430,9 @@ tryEtaExpandRhs env is_rec bndr rhs
       | sm_eta_expand (getMode env)      -- Provided eta-expansion is on
       , let cheap_arity = findRhsArity dflags bndr rhs old_arity
             usage = idCallArity bndr
-            -- This should always be in sync with @CallArity.Analysis.isThunk@
-            -- and @CallArity.Analysis.oneifyUsageIfThunk@.
-            -- TODO: Also figure out if CoreArity yields better results at all.
-            new_arity = expandArity usage cheap_arity
+            expanded_arity = expandArity usage cheap_arity
+            -- See Note [Trimming arity]
+            new_arity = min expanded_arity (maxArity bndr)
       , new_arity > old_arity      -- And the current manifest arity isn't enough
       = if is_rec == Recursive && isJoinId bndr
            then WARN(True, text "Can't eta-expand recursive join point:" <+>
@@ -1446,6 +1445,17 @@ tryEtaExpandRhs env is_rec bndr rhs
 
     old_arity    = exprArity rhs -- See Note [Do not expand eta-expand PAPs]
     old_id_arity = idArity bndr
+
+-- See Note [Trimming arity]
+maxArity :: Id -> Arity
+maxArity id = minimum [max_arity_by_type, max_arity_by_strsig]
+  where
+    max_arity_by_type = length (typeArity (idType id))
+    max_arity_by_strsig
+        | isBotRes result_info = length demands
+        | otherwise = maxBound
+
+    (demands, result_info) = splitStrictSig (idStrictness id)
 
 {-
 Note [Eta-expanding at let bindings]
@@ -1495,6 +1505,27 @@ But note that this won't eta-expand, say
 Does it matter not eta-expanding such functions?  I'm not sure.  Perhaps
 strictness analysis will have less to bite on?
 
+Note [Trimming arity]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Further eta-expansion based on usage information may yield an arity that is
+incompatible with type and strictness information.
+
+ 1. We need to ensure the invariant
+      expanded_arity e <= typeArity (exprType e)
+    for the same reasons that exprArity needs this invariant (see Note
+    [exprArity invariant] in CoreArity).
+
+    If we are not doing that, a too-high arity annotation will be stored with
+    the id, confusing the simplifier later on.
+
+ 2. Eta-expanding a right hand side might invalidate existing annotations. In
+    particular, if an id has a strictness annotation of <...><...>b, then
+    passing two arguments to it will definitely bottom out, so the simplifier
+    will throw away additional parameters. This conflicts with eta-expansion! So
+    we ensure that we never expand such a value beyond the number of
+    arguments mentioned in the strictness signature.
+    See #10176 for a real-world-example.
 
 ************************************************************************
 *                                                                      *
