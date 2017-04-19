@@ -437,7 +437,7 @@ doCorePass CoreDoStaticArgs          = {-# SCC "StaticArgs" #-}
                                        doPassU doStaticArgs
 
 doCorePass CoreDoCallArity           = {-# SCC "CallArity" #-}
-                                       doPassD callArityAnalProgram
+                                       doPassDFM callArityAnalProgram
 
 doCorePass CoreDoStrictness          = {-# SCC "NewStranal" #-}
                                        doPassDFM dmdAnalProgram

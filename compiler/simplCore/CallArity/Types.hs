@@ -9,7 +9,7 @@ import Usage
 import VarEnv
 
 ---------------------------------------
--- Functions related to UsageType --
+-- Functions related to UsageType    --
 ---------------------------------------
 
 -- Result type for the two analyses.
@@ -44,29 +44,26 @@ isInteresting v = not $ null (typeArity (idType v))
 emptyUsageType :: UsageType
 emptyUsageType = UT emptyUnVarGraph emptyVarEnv topUsageSig
 
+botUsageType :: UsageType
+botUsageType = unusedArgs emptyUsageType
+
 unitUsageType :: Id -> SingleUse -> UsageType
 unitUsageType id use = emptyUsageType { ut_uses = unitVarEnv id use }
-
-unusedArgsUsageType :: SingleUse -> UsageType
-unusedArgsUsageType use = trimArgs use (unusedArgs emptyUsageType)
 
 unusedArgs :: UsageType -> UsageType
 unusedArgs ut = ut { ut_args = botUsageSig }
 
-trimArgs :: SingleUse -> UsageType -> UsageType
-trimArgs use = modifyArgs (trimUsageSig use)
+delUsageTypes :: [Id] -> UsageType -> UsageType
+delUsageTypes ids ae = foldr delUsageType ae ids
 
-typeDelList :: [Id] -> UsageType -> UsageType
-typeDelList ids ae = foldr typeDel ae ids
-
-typeDel :: Id -> UsageType -> UsageType
-typeDel id (UT g ae args) = UT (g `delNode` id) (ae `delVarEnv` id) args
+delUsageType :: Id -> UsageType -> UsageType
+delUsageType id (UT g ae args) = UT (g `delNode` id) (ae `delVarEnv` id) args
 
 domType :: UsageType -> UnVarSet
-domType ca_type = varEnvDom (ut_uses ca_type)
+domType ut = varEnvDom (ut_uses ut)
 
 makeIdArg :: Id -> UsageType -> UsageType
-makeIdArg id ut = typeDel id (modifyArgs (consUsageSig (lookupUsage ut id)) ut)
+makeIdArg id ut = delUsageType id (modifyArgs (consUsageSig (lookupUsage ut id)) ut)
 
 -- In the result, find out the minimum arity and whether the variable is called
 -- at most once.
@@ -101,17 +98,17 @@ multiplyUsages Many ut@(UT _ u args)
 -- | Corresponds to sequential composition of expressions.
 -- Used for application and cases.
 -- Note this returns the @UsageSig@ from the first argument.
-both :: UsageType -> UsageType -> UsageType
-both ut1@(UT g1 u1 args) ut2@(UT g2 u2 _)
+bothUsageType :: UsageType -> UsageType -> UsageType
+bothUsageType ut1@(UT g1 u1 args) ut2@(UT g2 u2 _)
   = UT
   { ut_cocalled = unionUnVarGraphs [g1, g2, completeBipartiteGraph (domType ut1) (domType ut2)]
   , ut_uses = bothUseEnv u1 u2
   , ut_args = args
   }
 
--- | Used when combining results from alternative cases; take the minimum
-lubType :: UsageType -> UsageType -> UsageType
-lubType (UT g1 u1 args1) (UT g2 u2 args2)
+-- | Used when combining results from alternative cases
+lubUsageType :: UsageType -> UsageType -> UsageType
+lubUsageType (UT g1 u1 args1) (UT g2 u2 args2)
   = UT
   { ut_cocalled = unionUnVarGraph g1 g2
   , ut_uses = lubUseEnv u1 u2
@@ -124,13 +121,13 @@ lubUseEnv = plusVarEnv_C lubSingleUse
 bothUseEnv :: VarEnv SingleUse -> VarEnv SingleUse -> VarEnv SingleUse
 bothUseEnv = plusVarEnv_C bothSingleUse
 
-lubTypes :: [UsageType] -> UsageType
-lubTypes = foldl lubType (unusedArgs emptyUsageType)
+lubUsageTypes :: [UsageType] -> UsageType
+lubUsageTypes = foldl lubUsageType botUsageType
 
 -- | Peels off a single argument usage from the signature, corresponding to how
 -- @App f a@ uses @a@ under the given incoming arity.
-peelUsageType :: UsageType -> (Usage, UsageType)
-peelUsageType ut = (usg, ut { ut_args = args' })
+peelArgUsage :: UsageType -> (Usage, UsageType)
+peelArgUsage ut = (usg, ut { ut_args = args' })
   where
     (usg, args') = unconsUsageSig (ut_args ut)
 
