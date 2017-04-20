@@ -16,6 +16,7 @@ import FamInstEnv
 import Id
 import Maybes ( expectJust, fromMaybe, isJust )
 import MkCore
+import Outputable
 import TyCon ( isDataProductTyCon_maybe )
 import UniqFM
 import UnVarGraph
@@ -697,8 +698,8 @@ findBndrUsage fam_envs ut id
   = (delUsageType id ut, usage')
   where
     usage = lookupUsage ut id
-    shape = findTypeShape fam_envs (idType id)
     -- See Note [Trimming a demand to a type] in Demand.hs
+    shape = findTypeShape fam_envs (idType id)
     usage' = trimUsage shape usage
 
 findBndrsUsages :: FamInstEnvs -> UsageType -> [Var] -> (UsageType, [Usage])
@@ -720,12 +721,13 @@ addCaseBndrUsage (Used _ use) alt_bndr_usages
   = topUsage <$ alt_bndr_usages
 
 setBndrsUsageInfo :: [Var] -> [Usage] -> [Var]
-setBndrsUsageInfo [] _ = []
+setBndrsUsageInfo [] [] = []
 setBndrsUsageInfo (b:bndrs) (usage:usages)
   | isId b
   = setIdCallArity b usage : setBndrsUsageInfo bndrs usages
 setBndrsUsageInfo (b:bndrs) usages
-  = setBndrsUsageInfo bndrs usages
+  = b : setBndrsUsageInfo bndrs usages
+setBndrsUsageInfo _ usages = pprPanic "No Ids, but a Usage left" (ppr usages)
 
 propagateProductUse
   :: [Alt CoreBndr]
