@@ -22,6 +22,7 @@ import Unique
 import UniqSet
 import CoreLint
 import FastString
+import FamInstEnv
 
 -- Build IDs. use mkTemplateLocal, more predictable than proper uniques
 go, go2, x, d, n, y, z, scrutf, scruta :: Id
@@ -174,7 +175,7 @@ main = do
                 Nothing -> return ()
             putMsg dflags (text n <> char ':')
             -- liftIO $ putMsg dflags (ppr e)
-            let e' = callArityRHS e
+            let e' = callArityRHS emptyFamInstEnvs e
             let bndrs = nonDetEltsUniqSet (allBoundIds e')
               -- It should be OK to use nonDetEltsUniqSet here, if it becomes a
               -- problem we should use DVarSet
