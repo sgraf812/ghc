@@ -6,7 +6,7 @@ module Usage
   , SingleUse
   , botSingleUse, topSingleUse, lubSingleUse, leqSingleUse, bothSingleUse, mkCallUse, peelCallUse, mkProductUse, peelProductUse, boundDepth
   , Usage (..)
-  , multiplicity, botUsage, topUsage, lubUsage, bothUsage, manifyUsage, expandArity
+  , multiplicity, botUsage, topUsage, lubUsage, bothUsage, seqUsage, manifyUsage, expandArity
   , UsageSig
   , botUsageSig, topUsageSig, lubUsageSig, consUsageSig, unconsUsageSig, manifyUsageSig
   , trimSingleUse, trimUsage, trimUsageSig
@@ -195,11 +195,12 @@ peelCallUse (Call multi use) = Just (Used multi use)
 peelCallUse UnknownUse = Just topUsage
 peelCallUse _ = Nothing
 
+-- | @peelProductUse (length comps) (mkProductUse comps) = Just comps@
 peelProductUse :: Arity -> SingleUse -> Maybe [Usage]
 peelProductUse n HeadUse = Just (replicate n botUsage)
 peelProductUse n UnknownUse = Just (replicate n topUsage)
 peelProductUse n (Product comps)
-  = ASSERT2( comps `lengthIs` n, text "peelProductUse" $$ ppr n $$ ppr comps)
+  = ASSERT2(comps `lengthIs` n, text "peelProductUse" $$ ppr n $$ ppr comps)
     Just comps
 peelProductUse _ (Call _ _) = Nothing -- might happen with unsafeCoerce (#9208)
 
@@ -248,6 +249,10 @@ trimSingleUse _ _ = topSingleUse
 trimUsage :: TypeShape -> Usage -> Usage
 trimUsage shape (Used m use) = Used m (trimSingleUse shape use)
 trimUsage _ usg = usg
+
+-- | `Usage` unleashed on `x` in @x `seq` ...@.
+seqUsage :: Usage
+seqUsage = Used Once HeadUse
 
 -- | @manifyUsage u = bothUsage u u@. For when an id is used more than once
 -- with the same `Usage`. This is different than just changing the top-level
