@@ -1408,7 +1408,10 @@ tryEtaExpandRhs env bndr rhs
       = return (exprArity rhs, rhs)
 
       | sm_eta_expand (getMode env)      -- Provided eta-expansion is on
-      , let cheap_arity = findRhsArity dflags bndr rhs old_arity
+      , let trivial_arity = findRhsArity dflags bndr rhs old_arity
+            cheap_arity
+              | exprIsCheap rhs = max 1 trivial_arity
+              | otherwise = trivial_arity
             usage = idCallArity bndr
             expanded_arity = expandArity usage cheap_arity
             -- See Note [Trimming arity]
