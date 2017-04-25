@@ -10,7 +10,7 @@ import CallArity.FrameworkBuilder
 
 import BasicTypes
 import CoreSyn
-import DataCon ( dataConTyCon )
+import DataCon ( DataCon, dataConTyCon, dataConRepStrictness, isMarkedStrict )
 import DynFlags      ( DynFlags )
 import FamInstEnv
 import Id
@@ -743,12 +743,29 @@ propagateProductUse alts scrut_uses
   , isJust (isDataProductTyCon_maybe tycon)
   -- This is a good place to make sure we don't construct an infinitely depth
   -- use, which can happen when analysing e.g. lazy streams.
-  = boundDepth 100 scrut_use
+  -- Also see Note [Demand on scrutinee of a product case] in DmdAnal.hs.
+  = addDataConStrictness dc (boundDepth 100 scrut_use)
 
   | otherwise
   -- We *could* lub the uses from the different branches, but there's not much
   -- to be won there, except for maybe head strictness.
   = topSingleUse
+
+addDataConStrictness :: DataCon -> SingleUse -> SingleUse
+-- See Note [Add demands for strict constructors] in DmdAnal.hs
+addDataConStrictness dc use
+  = maybe use (mkProductUse . add_component_strictness) (peelProductUse arity use)
+  where
+    add_component_strictness :: [Usage] -> [Usage]
+    add_component_strictness = zipWith add strs
+
+    strs = dataConRepStrictness dc
+    arity = length strs
+
+    add str Absent = Absent -- See the note; We want to eliminate these in WW.
+    add str usage@(Used _ _)
+      | isMarkedStrict str = usage `bothUsage` seqUsage
+      | otherwise = usage
 
 registerBindingGroup
   :: AnalEnv
