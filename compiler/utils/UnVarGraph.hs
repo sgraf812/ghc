@@ -16,8 +16,8 @@ equal to g, but twice as expensive and large.
 -}
 module UnVarGraph
     ( UnVarSet
-    , emptyUnVarSet, mkUnVarSet, varEnvDom, unionUnVarSet, unionUnVarSets
-    , delUnVarSet
+    , emptyUnVarSet, mkUnVarSet, varEnvDom, restrictVarEnv_UnVarSet
+    , unionUnVarSet, unionUnVarSets, delUnVarSet
     , elemUnVarSet, isEmptyUnVarSet
     , UnVarGraph
     , emptyUnVarGraph
@@ -67,6 +67,11 @@ mkUnVarSet vs = UnVarSet $ S.fromList $ map k vs
 
 varEnvDom :: VarEnv a -> UnVarSet
 varEnvDom ae = UnVarSet $ ufmToSet_Directly ae
+
+restrictVarEnv_UnVarSet :: VarEnv a -> UnVarSet -> VarEnv a
+restrictVarEnv_UnVarSet env (UnVarSet s) = filterVarEnv_Directly keep env
+  where
+    keep u _ = getKey u `S.member` s
 
 unionUnVarSet :: UnVarSet -> UnVarSet -> UnVarSet
 unionUnVarSet (UnVarSet set1) (UnVarSet set2) = UnVarSet (set1 `S.union` set2)
