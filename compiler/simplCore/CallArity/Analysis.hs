@@ -865,11 +865,11 @@ callArityLetEnv
   :: [(Id, UsageType)]
   -> UsageType
   -> UsageType
-callArityLetEnv ut_rhss ut_body
+callArityLetEnv rhss ut_body
     = -- (if length ae_rhss > 300 then pprTrace "callArityLetEnv" (vcat [ppr ae_rhss, ppr ae_body, ppr ae_new]) else id) $
       ut_new
   where
-    ids = map fst ut_rhss
+    (ids, ut_rhss) = unzip rhss
 
     -- This is already the complete type, but with references from the current
     -- binding group not resolved.
@@ -877,31 +877,24 @@ callArityLetEnv ut_rhss ut_body
     -- which we have to handle, for the recursive case even any of ut_rhss may.
     -- This is why we have to union in appropriate cross_calls, which basically
     -- perform substitution of Id to UsageType.
-    ut_combined = lubUsageTypes (ut_body : map (unusedArgs . snd) ut_rhss)
 
-    cross_calls
-        -- Calculating cross_calls is expensive. Simply be conservative
-        -- if the mutually recursive group becomes too large.
-        -- TODO: I *think* 5 is enough here, but this used to be 25.
-        | length ut_rhss > 5 = completeGraph (domType ut_combined)
-        | otherwise            = unionUnVarGraphs $ map cross_call ut_rhss
-    cross_call (id, ut_rhs) = completeBipartiteGraph called_by_id called_with_id
+    ut_all = ut_body : map unusedArgs ut_rhss
+    ut_combined = lubUsageTypes ut_all
+
+    cross_calls ut_rhs = botUsageType { ut_uses = uses, ut_cocalled = graph }
       where
-        is_thunk = idArity id == 0 -- See Note [Thunks in recursive groups]
-        -- We only add self cross calls if we really can recurse into ourselves.
-        -- This is not the case for thunks (and non-recursive bindings, but
-        -- then there won't be any mention of id in the rhs).
-        -- A thunk is not evaluated more than once, so the only
-        -- relevant calls are from other bindings or the body.
-        -- What rhs are relevant as happening before (or after) calling id?
-        --    If id doesn't recurse into itself, everything from all the _other_ variables
-        --    If id is self-recursive, everything can happen.
-        ut_before_id
-            | is_thunk  = lubUsageTypes (ut_body : map (unusedArgs . snd) (filter ((/= id) . fst) ut_rhss))
-            | otherwise = ut_combined
         -- What do we want to know from these?
         -- Which calls can happen next to any recursive call.
-        called_with_id = unionUnVarSets $ map (calledWith ut_before_id) ids
+        called_with_id = unionUnVarSets $ map (calledWith ut_combined) ids
         called_by_id = domType ut_rhs
+        graph = completeBipartiteGraph called_by_id called_with_id
+        uses = bothUseEnv (ut_uses ut_rhs) (restrict (ut_uses ut_combined) called_with_id)
+        restrict = restrictVarEnv_UnVarSet
 
-    ut_new = modifyCoCalls (cross_calls `unionUnVarGraph`) ut_combined
+    ut_new
+        -- Calculating cross_calls is expensive. Simply be conservative
+        -- if the mutually recursive group becomes too large.
+        -- Combining all rhs and the body with `bothUsageType` corresponds to
+        -- cocalls in the complete graph.
+        | length ut_rhss > 25 = foldr bothUsageType botUsageType ut_all
+        | otherwise           = lubUsageTypes $ ut_combined : map cross_calls ut_rhss
