@@ -471,7 +471,7 @@ callArityExpr _ e@(Type _) = callArityExprTrivial e
 callArityExpr _ e@(Coercion _) = callArityExprTrivial e
 
 -- The transparent cases
--- TODO: What if @tickishIsCode@? See CoreArity
+-- TODO: What if @tickishIsCode@? See CoreArity. Although DmdAnal doesn't handle it
 callArityExpr env (Tick t e) = callArityExprMap env (Tick t) e
 callArityExpr env (Cast e c) = callArityExprMap env (flip Cast c) e
 
@@ -567,15 +567,13 @@ callArityExpr env (Case scrut case_bndr ty alts) = do
 
 callArityExpr env (Let bind e) = do
   let initial_binds = flattenBinds [bind]
-  let ids = map fst initial_binds
-  -- The order in which we call callArityExpr here is important: This makes sure
-  -- the FP iteration will first stabilize bindings before analyzing the body.
-  -- Nope, in fact it does exactly the opposite!
   (env', nodes) <- registerBindingGroup env initial_binds
-  let lookup_node id = expectJust ": the RHS of id wasn't registered" (lookupVarEnv nodes id)
+  let lookup_node id =
+        expectJust ": the RHS of id wasn't registered" (lookupVarEnv nodes id)
   let transfer_rhs (id, rhs) use =
         dependOnWithDefault (botUsageType, rhs) (lookup_node id, use)
   transfer_body <- callArityExpr env' e
+  let ids = map fst initial_binds
 
   case bind of
     NonRec _ _ ->
