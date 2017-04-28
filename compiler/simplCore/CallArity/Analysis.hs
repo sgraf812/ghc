@@ -471,7 +471,6 @@ callArityExpr _ e@(Type _) = callArityExprTrivial e
 callArityExpr _ e@(Coercion _) = callArityExprTrivial e
 
 -- The transparent cases
--- TODO: What if @tickishIsCode@? See CoreArity. Although DmdAnal doesn't handle it
 callArityExpr env (Tick t e) = callArityExprMap env (Tick t) e
 callArityExpr env (Cast e c) = callArityExprMap env (flip Cast c) e
 
@@ -536,8 +535,6 @@ callArityExpr env (App f a) = do
     -- peel off one argument from the type
     let (arg_usage, ut_f') = peelArgUsage ut_f
     case arg_usage of
-      -- TODO: Visit a, too? Seems unnecessary, wasn't called at all and
-      -- should be taken care of by WW.
       Absent -> return (ut_f', App f' a)
       Used _ arg_use -> do
           -- We can ignore the multiplicity, as the work done before the first

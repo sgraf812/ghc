@@ -81,4 +81,9 @@ body cocalls d and n, n calls d (anything other than d w*C^w(U) = w*U would be b
 body calls d and n mutually exclusive, n calls d. d should be called once:
     d 1*C^1(U)
     n 1*C^1(U)
-
+calling the first tuple component once:
+    d 1*C^1(U)
+    n A
+calling the second tuple component twice (expect n 1*U and d w*U by transitivity):
+    d w*U
+    n 1*U
