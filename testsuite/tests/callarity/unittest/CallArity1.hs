@@ -1,10 +1,11 @@
 {-# LANGUAGE TupleSections #-}
+import BasicTypes
 import CoreSyn
 import CoreUtils
 import Id
 import Type
 import MkCore
-import CallArity.Analysis (callArityRHS)
+import CallArity.Analysis ( callArityRHS )
 import MkId
 import SysTools
 import DynFlags
@@ -15,7 +16,7 @@ import Literal
 import GHC
 import Control.Monad
 import Control.Monad.IO.Class
-import System.Environment( getArgs )
+import System.Environment ( getArgs )
 import VarSet
 import PprCore
 import Unique
@@ -25,9 +26,9 @@ import FastString
 import FamInstEnv
 
 -- Build IDs. use mkTemplateLocal, more predictable than proper uniques
-go, go2, x, d, n, y, z, scrutf, scruta :: Id
-[go, go2, x,d, n, y, z, scrutf, scruta, f] = mkTestIds
-    (words "go go2 x d n y z scrutf scruta f")
+go, go2, x, d, n, y, z, scrutf, scruta, f, p, _1, _2 :: Id
+[go, go2, x,d, n, y, z, scrutf, scruta, f, p, _1, _2] = mkTestIds
+    (words "go go2 x d n y z scrutf scruta f p _1 _2")
     [ mkFunTys [intTy, intTy] intTy
     , mkFunTys [intTy, intTy] intTy
     , intTy
@@ -37,8 +38,14 @@ go, go2, x, d, n, y, z, scrutf, scruta :: Id
     , intTy
     , mkFunTys [boolTy] boolTy
     , boolTy
-    , mkFunTys [intTy, intTy] intTy -- protoypical external function
+    , mkFunTys [intTy, intTy] intTy -- protoypical external function, for which there is no signature info
+    , pairType -- implicitly bound to a case binder when matching a pair
+    , mkFunTys [intTy] intTy
+    , mkFunTys [intTy] intTy
     ]
+
+pairType :: Type
+pairType = mkBoxedTupleTy [mkFunTys [intTy] intTy, mkFunTys [intTy] intTy]
 
 exprs :: [(String, CoreExpr)]
 exprs =
@@ -136,7 +143,7 @@ exprs =
     mkNrLet d (f `mkLApps` [0]) $
         mkNrLet n (Var f `mkApps` [d `mkLApps` [1]]) $
             mkLams [x] $ Var n `mkVarApps` [x]
-  , ("a thunk (non-function-type), in mutual recursion, still calls once (d ω*_ would be bad)",) $
+  , ("a thunk (non-function-type), in mutual recursion, still calls once (d w*_ would be bad)",) $
     mkNrLet d (f `mkLApps` [0]) $
         Let (Rec [ (x, Var d `mkApps` [go `mkLApps` [1,2]])
                  , (go, mkLams [y] $ mkACase (mkLams [z] $ Var x) (Var go `mkVarApps` [x]) ) ]) $
@@ -167,7 +174,16 @@ exprs =
   , ("body calls d and n mutually exclusive, n calls d. d should be called once",) $
     mkNrLet d (f `mkLApps` [0]) $
         mkLet n (mkLams [y] $ d `mkLApps` [1]) $
-          mkACase (d `mkLApps` [0]) (n `mkLApps` [0])
+            mkACase (d `mkLApps` [0]) (n `mkLApps` [0])
+  -- Product related tests
+  , ("calling the first tuple component once",) $
+    mkLet d (f `mkLApps` [0]) $
+        mkLet n (mkLams [y] $ d `mkLApps` [1]) $
+            elimPair (mkVarPair d n) (_1 `mkLApps` [0])
+  , ("calling the second tuple component twice (expect n 1*U and d w*U by transitivity)",) $
+    mkLet d (f `mkLApps` [0]) $
+        mkLet n (mkLams [y] $ d `mkLApps` [1]) $
+            elimPair (mkVarPair d n) (Var _2 `mkApps` [_2 `mkLApps` [0]])
   ]
 
 main = do
@@ -214,6 +230,24 @@ mkRFun v xs rhs body = mkRLet v (mkLams xs rhs) body
 
 mkLit :: Integer -> CoreExpr
 mkLit i = Lit (mkLitInteger i intTy)
+
+pairDataCon :: DataCon
+pairDataCon = tupleDataCon Boxed 2
+
+mkPair :: CoreExpr -> CoreExpr -> CoreExpr
+mkPair fst snd = mkCoreConApps pairDataCon
+  [Type (CoreUtils.exprType fst)
+  , Type (CoreUtils.exprType snd)
+  , fst
+  , snd
+  ]
+
+elimPair :: CoreExpr -> CoreExpr -> CoreExpr
+elimPair pair alt
+  = Case pair p (CoreUtils.exprType alt) [(DataAlt pairDataCon, [_1, _2], alt)]
+
+mkVarPair :: Id -> Id -> CoreExpr
+mkVarPair fst snd = mkPair (Var fst) (Var snd)
 
 -- Collects all let-bound IDs
 allBoundIds :: CoreExpr -> VarSet
