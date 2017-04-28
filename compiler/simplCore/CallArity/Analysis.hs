@@ -416,18 +416,18 @@ extendAnalEnv env id node = env { ae_sigs = extendVarEnv (ae_sigs env) id node }
 -- Represents the fact that a CoreProgram is like a sequence of
 -- nested lets, where the exports are returned in the inner-most let
 -- as a tuple. As a result, all exported identifiers are handled as called
--- with each other, with @topUsage@.
+-- with each other, with `topUsage`.
 moduleToExpr :: CoreProgram -> CoreExpr
 moduleToExpr = impl []
   where
     impl exported []
       -- @duplicate@, otherwise those Vars appear to be used once
-      = mkBigCoreTup (map Var (duplicate exported))
+      = mkBigCoreVarTup (duplicate exported)
     impl exported (bind:prog)
       = Let bind (impl (filter isExportedId (bindersOf bind) ++ exported) prog)
     duplicate = concatMap (replicate 2)
 
--- | The left inverse to @moduleToExpr@: @exprToModule . moduleToExpr = id \@CoreProgram@
+-- | The left inverse to `moduleToExpr`: `exprToModule . moduleToExpr = id \@CoreProgram`
 exprToModule :: CoreExpr -> CoreProgram
 exprToModule (Let bind e) = bind : exprToModule e
 exprToModule _ = []
@@ -480,14 +480,6 @@ callArityExpr env (Cast e c) = callArityExprMap env (flip Cast c) e
 callArityExpr env e@(Var id) = return transfer
   where
     transfer use
-      | not (isInteresting id)
-      -- We don't track uninteresting vars and implicitly assume they are called
-      -- multiple times with every other variable.
-      -- See Note [Taking boring variables into account]
-      -- TODO: Do we really need this? Those uninteresting vars aren't that
-      -- uninteresting after all...
-      = return (emptyUsageType, e)
-
       | Just node <- lookupVarEnv (ae_sigs env) id
       -- A local let-binding, e.g. a binding from this module.
       = do
@@ -652,7 +644,7 @@ dataConUsageSig arity use = fromMaybe botUsageSig sig_maybe
     sig_maybe = do
       product_use <- peelSingleShotCalls arity use
       component_usages <- peelProductUse arity product_use
-      return (foldr consUsageSig botUsageSig component_usages)
+      return (foldr consUsageSig topUsageSig component_usages)
 
 globalIdUsageSig :: Id -> SingleUse -> UsageSig
 globalIdUsageSig id use
@@ -852,7 +844,7 @@ unleashCall is_recursive ut_scope (id, rhs) transfer_rhs
       -- Used Many.
       -- Also we can't eta-expand beyond idArity anyway (exported!), so our best
       -- bet is a single call with idArity.
-      let single_call = iterate (mkCallUse Once) botSingleUse !! idArity id
+      let single_call = iterate (mkCallUse Once) topSingleUse !! idArity id
       usage_sig <- ut_args . fst <$> transfer_rhs single_call
       let id' = id
             `setIdCallArity` usage_id -- How the binder was used
@@ -866,10 +858,16 @@ callArityLetEnv
   -> UsageType
   -> UsageType
 callArityLetEnv rhss ut_body
-    = -- (if length ae_rhss > 300 then pprTrace "callArityLetEnv" (vcat [ppr ae_rhss, ppr ae_body, ppr ae_new]) else id) $
+    = --pprTrace "callArityLetEnv" (vcat [ppr rhss, ppr ut_body, ppr ut_new]) $
       ut_new
   where
     (ids, ut_rhss) = unzip rhss
+
+    body_and_rhss good_id
+      = (ut_body :)            -- always include the usage type of the body
+      . map (unusedArgs . snd) -- we are only interested in the usage types
+      . filter (good_id . fst) -- check if the id associated with the usage type is a good_id
+      $ rhss
 
     -- This is already the complete type, but with references from the current
     -- binding group not resolved.
@@ -877,18 +875,28 @@ callArityLetEnv rhss ut_body
     -- which we have to handle, for the recursive case even any of ut_rhss may.
     -- This is why we have to union in appropriate cross_calls, which basically
     -- perform substitution of Id to UsageType.
+    ut_all = body_and_rhss (\id_rhs -> True)
 
-    ut_all = ut_body : map unusedArgs ut_rhss
-    ut_combined = lubUsageTypes ut_all
-
-    cross_calls ut_rhs = botUsageType { ut_uses = uses, ut_cocalled = graph }
+    cross_calls (id, ut_rhs) = botUsageType { ut_uses = uses, ut_cocalled = graph }
       where
-        -- What do we want to know from these?
-        -- Which calls can happen next to any recursive call.
-        called_with_id = unionUnVarSets $ map (calledWith ut_combined) ids
+        -- ut_others excludes the defining rhs itself, because that is already
+        -- accounted for based on the recorded Usage, which is always manified
+        -- for recursive binders.
+        -- This ensures we don't duplicate shared work, while also manifying anything
+        -- under a lambda for recursive groups. In the case of a non-recursive
+        -- binding, there is no mention of the id in the rhs anyway.
+        ut_others = lubUsageTypes (body_and_rhss (\id_rhs -> id /= id_rhs))
+        -- Since Co-Call graphs are not transitive, but recursion is, we have to
+        -- conservatively assume that id was called with every neighbor in
+        -- ut_others of any of the ids of the binding group.
+        called_with_id = unionUnVarSets $ map (calledWith ut_others) ids
         called_by_id = domType ut_rhs
+        -- As long as called_with_id does not contain every node in ut_others,
+        -- the whole Co-Call hassle played out: We can be more precise than
+        -- just smashing everything together with `bothUsageType` (which would
+        -- correspond exactly to the scenario called_with_id = domType ut_others).
         graph = completeBipartiteGraph called_by_id called_with_id
-        uses = bothUseEnv (ut_uses ut_rhs) (restrict (ut_uses ut_combined) called_with_id)
+        uses = bothUseEnv (ut_uses ut_rhs) (restrict (ut_uses ut_others) called_with_id)
         restrict = restrictVarEnv_UnVarSet
 
     ut_new
@@ -897,4 +905,4 @@ callArityLetEnv rhss ut_body
         -- Combining all rhs and the body with `bothUsageType` corresponds to
         -- cocalls in the complete graph.
         | length ut_rhss > 25 = foldr bothUsageType botUsageType ut_all
-        | otherwise           = lubUsageTypes $ ut_combined : map cross_calls ut_rhss
+        | otherwise           = lubUsageTypes (ut_all ++ map cross_calls rhss)
