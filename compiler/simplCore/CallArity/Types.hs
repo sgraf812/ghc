@@ -36,11 +36,6 @@ modifyCoCalls modifier ut = ut { ut_cocalled = modifier (ut_cocalled ut) }
 -- and the elaborated expression with annotated Ids
 type AnalResult = (UsageType, CoreExpr)
 
--- Which bindings should we look at?
--- See Note [Which variables are interesting]
-isInteresting :: Var -> Bool
-isInteresting v = not $ null (typeArity (idType v))
-
 emptyUsageType :: UsageType
 emptyUsageType = UT emptyUnVarGraph emptyVarEnv topUsageSig
 
@@ -72,18 +67,10 @@ lookupUsage (UT g ae _) id = case lookupVarEnv ae id of
   Just use
     | id `elemUnVarSet` neighbors g id -> Used Many use
     | otherwise -> Used Once use
-  Nothing
-    | isInteresting id -> botUsage
-    -- If v is boring, we will not find it in ut_usage, but always assume topUsage.
-    -- See Note [Taking boring variables into account]
-    | otherwise -> topUsage
+  Nothing -> botUsage
 
 calledWith :: UsageType -> Id -> UnVarSet
-calledWith ut id
-  | isInteresting id
-  = neighbors (ut_cocalled ut) id
-  | otherwise
-  = domType ut
+calledWith ut id = neighbors (ut_cocalled ut) id
 
 -- Replaces the co-call graph by a complete graph (i.e. no information)
 multiplyUsages :: Multiplicity -> UsageType -> UsageType

@@ -87,20 +87,13 @@ exprs =
                               (mkLams [y] $ Var y)
                       ) $ mkLams [z] $ Var d `mkVarApps` [x]) $
             Var f `mkApps` [n `mkLApps` [0],  go `mkLApps` [0, 0]]
-  , ("go2 (using surrounding boring let)",) $
-     mkNrLet z (mkLit 0) $
-         mkRFun go [x]
-            (mkNrLet d (mkACase (Var go `mkVarApps` [x])
-                              (mkLams [y] $ Var y)
-                      ) $ mkLams [z] $ Var d `mkVarApps` [x]) $
-            Var f `mkApps` [Var z,  go `mkLApps` [0, 0]]
   , ("two calls, one from let and from body (d 1*_ would be bad)",) $
-     mkNrLet  d (mkACase (mkLams [y] $ mkLit 0) (mkLams [y] $ mkLit 0)) $
+     mkNrLet  d (mkACase (mkLams [y] $ Var y) (mkLams [y] $ Var y)) $
      mkFun go [x,y] (mkVarApps (Var d) [x]) $
      mkApps (Var d) [mkLApps go [1,2]]
   , ("a thunk in a recursion (d 1*_ would be bad)",) $
-     mkRLet n (mkACase (mkLams [y] $ mkLit 0) (Var n)) $
-     mkRLet d (mkACase (mkLams [y] $ mkLit 0) (Var d)) $
+     mkRLet n (mkACase (mkLams [y] $ Var y) (Var n)) $
+     mkRLet d (mkACase (mkLams [y] $ Var y) (Var d)) $
          Var n `mkApps` [d `mkLApps` [0]]
   , ("two thunks, one called multiple times (both 1*_ would be bad!)",) $
      mkNrLet n (mkACase (mkLams [y] $ mkLit 0) (f `mkLApps` [0])) $
@@ -119,8 +112,8 @@ exprs =
      mkRLet go2 (mkLams [x] (mkACase (Var go2 `mkApps` [Var go2 `mkApps` [mkLit 0, mkLit 0]]) (go `mkLApps` [0]))) $
          go2 `mkLApps` [0,1]
   , ("two functions (recursive)",) $
-     mkRLet go  (mkLams [x] (mkACase (mkLams [y] $ mkLit 0) (Var go `mkVarApps` [x]))) $
-     mkRLet go2 (mkLams [x] (mkACase (mkLams [y] $ mkLit 0) (Var go2 `mkVarApps` [x]))) $
+     mkRLet go  (mkLams [x] (mkACase (Var f `mkVarApps` [x]) (Var go `mkVarApps` [x]))) $
+     mkRLet go2 (mkLams [x] (mkACase (Var f `mkVarApps` [x]) (Var go2 `mkVarApps` [x]))) $
          Var go `mkApps` [go2 `mkLApps` [0,1], mkLit 0]
   , ("mutual recursion (thunks), called mutiple times (both 1*_ would be bad!)",) $
      Let (Rec [ (n, mkACase (mkLams [y] $ mkLit 0) (Var d))
@@ -151,17 +144,30 @@ exprs =
   , ("a thunk (non-function-type), in mutual recursion, causes many calls (d 1*_ would be bad)",) $
     mkNrLet d (f `mkLApps` [0]) $
         Let (Rec [ (x, Var go `mkApps` [go `mkLApps` [1,2], go `mkLApps` [1,2]])
-                 , (go, mkLams [x] $ mkACase (Var d) (Var go `mkVarApps` [x]) ) ]) $
+                 , (go, mkLams [y] $ mkACase (Var d) (Var go `mkVarApps` [x]) ) ]) $
             Var go `mkApps` [mkLit 0, go `mkLApps` [0,1]]
-  , ("a thunk (function type), in mutual recursion, still calls once (d 1*_ would be good)",) $
+  , ("a thunk (function type), in mutual recursion, still calls once",) $
     mkNrLet d (f `mkLApps` [0]) $
         Let (Rec [ (n, Var go `mkApps` [d `mkLApps` [1]])
+                 , (go, mkLams [x] $ mkACase (Var f `mkVarApps` [x]) (Var go `mkApps` [Var n `mkVarApps` [x]]) ) ]) $
+            Var go `mkApps` [mkLit 0, go `mkLApps` [0,1]]
+  , ("a thunk (function type), in mutual recursion, absent",) $
+    mkLet d (f `mkLApps` [0]) $
+        Let (Rec [ (n, Var go `mkApps` [d `mkLApps` [1]]) -- FIXME: Check UsageSigs
                  , (go, mkLams [x] $ mkACase (Var n) (Var go `mkApps` [Var n `mkVarApps` [x]]) ) ]) $
             Var go `mkApps` [mkLit 0, go `mkLApps` [0,1]]
   , ("a thunk (non-function-type) co-calls with the body (d 1*_ would be bad)",) $
     mkNrLet d (f `mkLApps` [0]) $
         mkLet x (d `mkLApps` [1]) $
             Var d `mkVarApps` [x]
+  , ("body cocalls d and n, n calls d (anything other than d w*C^w(U) = w*U would be bad)",) $
+    mkNrLet d (f `mkLApps` [0]) $
+        mkLet n (mkLams [y] $ d `mkLApps` [1]) $
+            Var f `mkApps` [d `mkLApps` [0], n `mkLApps` [0]]
+  , ("body calls d and n mutually exclusive, n calls d. d should be called once",) $
+    mkNrLet d (f `mkLApps` [0]) $
+        mkLet n (mkLams [y] $ d `mkLApps` [1]) $
+          mkACase (d `mkLApps` [0]) (n `mkLApps` [0])
   ]
 
 main = do

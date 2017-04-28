@@ -19,13 +19,9 @@ go2 (using surrounding interesting let):
     go ω*C^ω(C^1(U))
     d 1*C^1(U)
     n 1*C^1(U)
-go2 (using surrounding boring let):
-    go ω*C^ω(C^1(U))
-    d 1*C^1(U)
-    z ω*U
 two calls, one from let and from body (d 1*_ would be bad):
     go 1*C^1(C^1(U))
-    d ω*C^1(U)
+    d ω*U
 a thunk in a recursion (d 1*_ would be bad):
     d ω*U
     n ω*U
@@ -66,12 +62,23 @@ a thunk (non-function-type), in mutual recursion, still calls once (d ω*_ would
     d 1*C^1(U)
 a thunk (non-function-type), in mutual recursion, causes many calls (d 1*_ would be bad):
     go ω*C^ω(C^1(U))
-    x ω*U
+    x A
     d ω*U
-a thunk (function type), in mutual recursion, still calls once (d 1*_ would be good):
+a thunk (function type), in mutual recursion, still calls once:
     go ω*U
     d 1*C^1(U)
     n ω*U
+a thunk (function type), in mutual recursion, absent:
+    go ω*U
+    d A
+    n ω*U
 a thunk (non-function-type) co-calls with the body (d 1*_ would be bad):
-    x ω*U
-    d ω*C^1(U)
+    x 1*U
+    d ω*U
+body cocalls d and n, n calls d (anything other than d w*C^w(U) = w*U would be bad):
+    d ω*U
+    n 1*C^1(U)
+body calls d and n mutually exclusive, n calls d. d should be called once:
+    d 1*C^1(U)
+    n 1*C^1(U)
+
