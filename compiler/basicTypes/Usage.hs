@@ -343,7 +343,7 @@ trimUsageSig _ _ = TopUsageSig
 
 instance Outputable Multiplicity where
   ppr Once = text "1"
-  ppr Many = text "ω"
+  ppr Many = text "w"
 
 instance Outputable SingleUse where
   ppr HeadUse = text "HU"
