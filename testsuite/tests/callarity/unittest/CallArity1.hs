@@ -24,11 +24,12 @@ import UniqSet
 import CoreLint
 import FastString
 import FamInstEnv
+import Name
 
 -- Build IDs. use mkTemplateLocal, more predictable than proper uniques
-go, go2, x, d, n, y, z, scrutf, scruta, f, p, _1, _2 :: Id
-[go, go2, x,d, n, y, z, scrutf, scruta, f, p, _1, _2] = mkTestIds
-    (words "go go2 x d n y z scrutf scruta f p _1 _2")
+go, go2, x, d, n, y, z, p, _1, _2 :: Id
+[go,go2, x, d, n, y, z, p, _1, _2] = mkLocalTestIds
+    (words "go go2 x d n y z p _1 _2")
     [ mkFunTys [intTy, intTy] intTy
     , mkFunTys [intTy, intTy] intTy
     , intTy
@@ -36,13 +37,13 @@ go, go2, x, d, n, y, z, scrutf, scruta, f, p, _1, _2 :: Id
     , mkFunTys [intTy] intTy
     , intTy
     , intTy
-    , mkFunTys [boolTy] boolTy
-    , boolTy
-    , mkFunTys [intTy, intTy] intTy -- protoypical external function, for which there is no signature info
     , pairType -- implicitly bound to a case binder when matching a pair
-    , mkFunTys [intTy] intTy
-    , mkFunTys [intTy] intTy
+    , mkFunTys [intTy] intTy -- fst pair selector, implicitly bound in case match
+    , mkFunTys [intTy] intTy -- snd pair selector
     ]
+
+f :: Id -- protoypical external function, for which there is no signature info
+f = mkGlobalTestId 42 "f" (mkFunTys [intTy, intTy] intTy)
 
 pairType :: Type
 pairType = mkBoxedTupleTy [mkFunTys [intTy] intTy, mkFunTys [intTy] intTy]
@@ -192,7 +193,7 @@ main = do
         getSessionDynFlags >>= setSessionDynFlags . flip gopt_set Opt_SuppressUniques
         dflags <- getSessionDynFlags
         liftIO $ forM_ exprs $ \(n,e) -> do
-            case lintExpr dflags [f,scrutf,scruta] e of
+            case lintExpr dflags [f] e of
                 Just msg -> putMsg dflags (msg $$ text "in" <+> text n)
                 Nothing -> return ()
             putMsg dflags (text n <> char ':')
@@ -208,13 +209,16 @@ main = do
 mkLApps :: Id -> [Integer] -> CoreExpr
 mkLApps v = mkApps (Var v) . map mkLit
 
-mkACase = mkIfThenElse (mkVarApps (Var scrutf) [scruta])
+mkACase = mkIfThenElse (Var trueDataConId)
 
-mkTestId :: Int -> String -> Type -> Id
-mkTestId i s ty = mkSysLocal (mkFastString s) (mkBuiltinUnique i) ty
+mkLocalTestId :: Int -> String -> Type -> Id
+mkLocalTestId i s ty = mkSysLocal (mkFastString s) (mkBuiltinUnique i) ty
 
-mkTestIds :: [String] -> [Type] -> [Id]
-mkTestIds ns tys = zipWith3 mkTestId [0..] ns tys
+mkLocalTestIds :: [String] -> [Type] -> [Id]
+mkLocalTestIds ns tys = zipWith3 mkLocalTestId [0..] ns tys
+
+mkGlobalTestId :: Int -> String -> Type -> Id
+mkGlobalTestId i s ty = mkVanillaGlobal (mkSystemVarName (mkBuiltinUnique i) (mkFastString s)) ty
 
 mkNrLet :: Id -> CoreExpr -> CoreExpr -> CoreExpr
 mkNrLet v rhs body = Let (NonRec v rhs) body
@@ -236,7 +240,7 @@ pairDataCon = tupleDataCon Boxed 2
 
 mkPair :: CoreExpr -> CoreExpr -> CoreExpr
 mkPair fst snd = mkCoreConApps pairDataCon
-  [Type (CoreUtils.exprType fst)
+  [ Type (CoreUtils.exprType fst)
   , Type (CoreUtils.exprType snd)
   , fst
   , snd
