@@ -643,12 +643,17 @@ dataConUsageSig arity use = fromMaybe botUsageSig sig_maybe
     sig_maybe = do
       product_use <- peelSingleShotCalls arity use
       component_usages <- peelProductUse arity product_use
-      return (foldr consUsageSig topUsageSig component_usages)
+      return (usageSigFromUsages component_usages)
 
 globalIdUsageSig :: Id -> SingleUse -> UsageSig
 globalIdUsageSig id use
   | use <= no_call -- @f x `seq` ...@ for a GlobalId `f` with arity > 1
   = botUsageSig
+  | use <= single_call
+  , isPrimOpId id
+  -- Reusing the usage declarations in primops.txt.pp for the time being...
+  -- We would annotate them with something isomorphic anyway.
+  = usageSigFromStrictSig (idStrictness id)
   | use <= single_call
   = idArgUsage id
   | otherwise
