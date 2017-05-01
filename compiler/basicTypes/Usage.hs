@@ -6,9 +6,12 @@ module Usage
   , SingleUse
   , botSingleUse, topSingleUse, lubSingleUse, leqSingleUse, bothSingleUse, mkCallUse, peelCallUse, mkProductUse, peelProductUse, boundDepth
   , Usage (..)
-  , multiplicity, botUsage, topUsage, lubUsage, bothUsage, seqUsage, manifyUsage, expandArity
+  , multiplicity, botUsage, topUsage, lubUsage, bothUsage
+  , seqUsage
+  , manifyUsage, expandArity
   , UsageSig
-  , botUsageSig, topUsageSig, lubUsageSig, consUsageSig, unconsUsageSig, manifyUsageSig
+  , botUsageSig, topUsageSig, lubUsageSig
+  , consUsageSig, unconsUsageSig, usageSigFromUsages, manifyUsageSig, usageSigFromStrictSig
   , trimSingleUse, trimUsage, trimUsageSig
   ) where
 
@@ -16,7 +19,8 @@ module Usage
 
 import BasicTypes
 import Binary
-import Demand ( TypeShape(..) )
+import Demand ( TypeShape(..), StrictSig, splitStrictSig )
+import qualified Demand
 import Outputable
 import Util
 
@@ -320,11 +324,36 @@ unconsUsageSig BotUsageSig = (botUsage, BotUsageSig)
 unconsUsageSig TopUsageSig = (topUsage, TopUsageSig)
 unconsUsageSig (ArgUsage u s) = (u, s)
 
+usageSigFromUsages :: [Usage] -> UsageSig
+usageSigFromUsages = foldr consUsageSig topUsageSig
+
 -- | Maps @manifyUsage@ over each argument usage.
 manifyUsageSig :: UsageSig -> UsageSig
 manifyUsageSig TopUsageSig = TopUsageSig
 manifyUsageSig BotUsageSig = BotUsageSig
 manifyUsageSig (ArgUsage u s) = consUsageSig (manifyUsage u) (manifyUsageSig s)
+
+-- | For conveniently working with PrimOps. I've no nerve right now to go through
+-- all entries in primops.txt.pp.
+usageSigFromStrictSig :: StrictSig -> UsageSig
+usageSigFromStrictSig sig
+  = usageSigFromUsages (map (usageFromArgUse . Demand.getUseDmd) dmds)
+  where
+    (dmds, _) = splitStrictSig sig
+
+multiplicityFromCount :: Demand.Count -> Multiplicity
+multiplicityFromCount Demand.One = Once
+multiplicityFromCount Demand.Many = Many
+
+singleUseFromUseDmd :: Demand.UseDmd -> SingleUse
+singleUseFromUseDmd Demand.UHead = topSingleUse
+singleUseFromUseDmd (Demand.UCall c u) = mkCallUse (multiplicityFromCount c) (singleUseFromUseDmd u)
+singleUseFromUseDmd (Demand.UProd comps) = mkProductUse (map usageFromArgUse comps)
+singleUseFromUseDmd Demand.Used = botSingleUse
+
+usageFromArgUse :: Demand.ArgUse -> Usage
+usageFromArgUse Demand.Abs = Absent
+usageFromArgUse (Demand.Use c u) = Used (multiplicityFromCount c) (singleUseFromUseDmd u)
 
 -- | Trims a `UsageSig` by looking at how the associated value is used.
 --
