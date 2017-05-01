@@ -1,9 +1,11 @@
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE CPP, TupleSections #-}
 --
 -- Copyright (c) 2014 Joachim Breitner
 --
 
 module CallArity.Analysis where
+
+#include "HsVersions.h"
 
 import CallArity.Types
 import CallArity.FrameworkBuilder
@@ -21,6 +23,7 @@ import TyCon ( isDataProductTyCon_maybe )
 import UniqFM
 import UnVarGraph
 import Usage
+import Util
 import Var ( isId, isTyVar )
 import VarEnv
 import WwLib ( findTypeShape )
@@ -439,7 +442,9 @@ callArityAnalProgram _dflags fam_envs
 
 callArityRHS :: FamInstEnvs -> CoreExpr -> CoreExpr
 callArityRHS fam_envs e
-  = snd (buildAndRun (callArityExpr (initialAnalEnv fam_envs) e) topSingleUse)
+  = ASSERT2( isEmptyUnVarSet (domType ut), text "Free vars in UsageType:" $$ ppr ut ) e'
+  where
+    (ut, e') = buildAndRun (callArityExpr (initialAnalEnv fam_envs) e) topSingleUse
 
 -- | The main analysis function. See Note [Analysis type signature]
 callArityExpr
@@ -498,10 +503,10 @@ callArityExpr env e@(Var id) = return transfer
       = return (emptyUsageType { ut_args = globalIdUsageSig id use }, e)
 
       | otherwise
-      -- An interesting LocalId, not present in @nodes@, e.g. a lambda-bound variable.
+      -- A LocalId not present in @nodes@, e.g. a lambda or case-bound variable.
       -- We are only second-order, so we don't model signatures for parameters!
       -- Their usage is interesting to note nonetheless for annotating lambda
-      -- binders.
+      -- binders and scrutinees.
       = return (unitUsageType id use, e)
 
 callArityExpr env (Lam id body)
@@ -554,12 +559,11 @@ callArityExpr env (Case scrut case_bndr ty alts) = do
     (ut_alts, alts', scrut_uses) <- unzip3 <$> mapM ($ use) transfer_alts
     let ut_alt = lubUsageTypes ut_alts
     let case_bndr' = setIdCallArity case_bndr (lookupUsage ut_alt case_bndr)
+    let ut_alt' = delUsageType case_bndr ut_alt
     let scrut_use = propagateProductUse alts' scrut_uses
     (ut_scrut, scrut') <- transfer_scrut scrut_use
-    let ut = ut_alt `bothUsageType` ut_scrut
-    -- pprTrace "callArityExpr:Case"
-    --          (vcat [ppr scrut, ppr ut])
-    --pprTrace "Case" (vcat [text "ut_scrut:" <+> ppr ut_scrut, text "ut_alts:" <+> ppr ut_alts, text "cat:" <+> ppr cat]) (return ())
+    let ut = ut_alt' `bothUsageType` ut_scrut
+    --pprTrace "Case" (vcat [text "ut_scrut:" <+> ppr ut_scrut, text "ut_alts:" <+> ppr ut_alts, text "ut:" <+> ppr ut]) (return ())
     return (ut, Case scrut' case_bndr' ty alts')
 
 callArityExpr env (Let bind e) = do
@@ -597,7 +601,7 @@ callArityExpr env (Let bind e) = do
             change_detector changed_refs (old, _) (new, _) =
               -- since we only care for arity and called once information of the
               -- previous iteration, we can efficiently test for changes.
-              --pprTrace "change_detector" (vcat[ppr node, ppr changed_refs, ppr old, ppr new])
+              --pprTrace "change_detector" (vcat[ppr node, ppr changed_refs, ppr old, ppr new]) $
               map fst (Set.toList changed_refs) /= [node]
               || any (\id -> lookupUsage old id /= lookupUsage new id) ids
 
@@ -731,7 +735,7 @@ propagateProductUse alts scrut_uses
   -- This is a good place to make sure we don't construct an infinitely depth
   -- use, which can happen when analysing e.g. lazy streams.
   -- Also see Note [Demand on scrutinee of a product case] in DmdAnal.hs.
-  = addDataConStrictness dc (boundDepth 100 scrut_use)
+  = addDataConStrictness dc (boundDepth 5 scrut_use)
 
   | otherwise
   -- We *could* lub the uses from the different branches, but there's not much
@@ -829,18 +833,22 @@ unleashCall is_recursive ut_scope (id, rhs) transfer_rhs
       . lookupUsage ut_scope
       $ id
     apply_when b f = if b then f else Prelude.id
+    -- make_usage_sig is used for exported globals only. Note that in the case
+    -- where idArity id == 0, there is no interesting @UsageSig@ to be had.
+    -- In that case we *could* try to analyze with arity 1, just for the
+    -- signature.
+    -- TODO: Think harder about UsageSigs and how they should be handled with
+    -- Used Many.
+    -- Also we can't eta-expand beyond idArity anyway (exported!), so our best
+    -- bet is a single call with idArity.
+    single_call = iterate (mkCallUse Once) topSingleUse !! idArity id
+    make_usage_sig use = ut_args . fst <$> transfer_rhs use
     analyse use = do
       (ut_rhs, rhs') <- transfer_rhs use
-      -- sig is used for exported globals only. Note that in the case where
-      -- idArity id == 0, there is no interesting @UsageSig@ to be had.
-      -- In that case we *could* try to analyze with arity 1, just for the
-      -- signature.
-      -- TODO: Think harder about UsageSigs and how they should be handled with
-      -- Used Many.
-      -- Also we can't eta-expand beyond idArity anyway (exported!), so our best
-      -- bet is a single call with idArity.
-      let single_call = iterate (mkCallUse Once) topSingleUse !! idArity id
-      usage_sig <- ut_args . fst <$> transfer_rhs single_call
+      usage_sig <-
+        if isExportedId id
+          then make_usage_sig single_call
+          else return topUsageSig
       let id' = id
             `setIdCallArity` usage_id -- How the binder was used
             `setIdArgUsage` usage_sig -- How a single call uses its args

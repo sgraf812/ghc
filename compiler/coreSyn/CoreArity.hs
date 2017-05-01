@@ -549,7 +549,7 @@ rhsEtaExpandArity :: DynFlags -> CheapAppFun -> CoreExpr -> Arity
 rhsEtaExpandArity dflags cheap_app e
   = case (arityType env e) of
       ATop (os:oss)
-        | isOneShotInfo os || has_lam e -> 1 + length oss
+        | isOneShotInfo os || has_lam e || is_cheap_case e -> 1 + length oss
                                    -- Don't expand PAPs/thunks
                                    -- Note [Eta expanding thunks]
         | otherwise       -> 0
@@ -562,6 +562,10 @@ rhsEtaExpandArity dflags cheap_app e
     has_lam (Tick _ e) = has_lam e
     has_lam (Lam b e)  = isId b || has_lam e
     has_lam _          = False
+
+    -- If the case wasn't cheap, the arityType would return ATop 0.
+    is_cheap_case Case{} = True
+    is_cheap_case _ = False
 
 {-
 Note [Arity analysis]
@@ -624,9 +628,9 @@ We don't eta-expand
 When we see
      f = case y of p -> \x -> blah
 should we eta-expand it? Well, if 'x' is a one-shot state token
-then 'yes' because 'f' will only be applied once.  But otherwise
-we (conservatively) say no.  My main reason is to avoid expanding
-PAPSs
+then 'yes' because 'f' will only be applied once. Also if 'y' is cheap to
+compute. But otherwise we (conservatively) say no.  My main reason is to avoid
+expanding PAPs
         f = g d  ==>  f = \x. g d x
 because that might in turn make g inline (if it has an inline pragma),
 which we might not want.  After all, INLINE pragmas say "inline only
