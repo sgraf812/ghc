@@ -1429,6 +1429,8 @@ tryEtaExpandRhs env is_rec bndr rhs
 
       | sm_eta_expand (getMode env)      -- Provided eta-expansion is on
       , let cheap_arity = findRhsArity dflags bndr rhs old_arity
+            -- The following four lines can go away if CoreArity was aware
+            -- of Usage information
             usage = idCallArity bndr
             expanded_arity = expandArity usage cheap_arity
             -- See Note [Trimming arity]
@@ -1439,14 +1441,7 @@ tryEtaExpandRhs env is_rec bndr rhs
                              ppr bndr)
                 return (old_arity, rhs)
            else do { tick (EtaExpansion bndr)
-                   ; pprTrace "tryEtaExpandRhs" (vcat
-                       [ ppr bndr
-                       , text "old_arity: " <> ppr old_arity
-                       , text "cheap_arity: " <> ppr cheap_arity
-                       , text "usage: " <> ppr usage
-                       , text "expanded_arity: " <> ppr expanded_arity
-                       , text "new_arity: " <> ppr new_arity
-                       ]) (return ())
+                   --; pprTrace "tryEtaExpandRhs" (vcat [ ppr bndr, text "old_arity: " <> ppr old_arity, text "cheap_arity: " <> ppr cheap_arity, text "usage: " <> ppr usage, text "expanded_arity: " <> ppr expanded_arity, text "new_arity: " <> ppr new_arity]) (return ())
                    ; return (new_arity, etaExpand new_arity rhs) }
       | otherwise
       = return (old_arity, rhs)
