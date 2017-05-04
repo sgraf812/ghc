@@ -490,6 +490,7 @@ callArityExpr env e@(Var id) = return transfer
         (ut_callee, _) <- dependOnWithDefault (botUsageType, e) (node, use)
         -- It is crucial that we only use ut_args here, as every other field
         -- might be unstable and thus too optimistic.
+        pprTrace "callArityExpr.Var" (vcat [ppr id, ppr use, ppr (ut_args ut_callee)]) (return ())
         return ((unitUsageType id use) { ut_args = ut_args ut_callee }, e)
 
       | isDataConWorkId id
@@ -536,7 +537,7 @@ callArityExpr env (App f a) = do
   transfer_a <- callArityExpr env a
   return $ \result_use -> do
     (ut_f, f') <- transfer_f (mkCallUse Once result_use)
-    --pprTrace "App:f'" (ppr (ut_f, f')) $ return ()
+    --pprTrace "App:f'" (ppr f') $ return ()
     -- peel off one argument from the type
     let (arg_usage, ut_f') = peelArgUsage ut_f
     case arg_usage of
@@ -558,7 +559,7 @@ callArityExpr env (Case scrut case_bndr ty alts) = do
   return $ \use -> do
     (ut_alts, alts', scrut_uses) <- unzip3 <$> mapM ($ use) transfer_alts
     let ut_alt = lubUsageTypes ut_alts
-    let case_bndr' = setIdCallArity case_bndr (lookupUsage ut_alt case_bndr)
+    let case_bndr' = setIdCallArity case_bndr (lookupUsage NonRecursive ut_alt case_bndr)
     let ut_alt' = delUsageType case_bndr ut_alt
     let scrut_use = propagateProductUse alts' scrut_uses
     (ut_scrut, scrut') <- transfer_scrut scrut_use
@@ -582,7 +583,7 @@ callArityExpr env (Let bind e) = do
       -- call id. Thus we also can spare to allocate a new @FrameworkNode@.
       return $ \use -> do
         (ut_body, e') <- transfer_body use
-        (ut, [(id', rhs')]) <- unleashLet False initial_binds transfer_rhs ut_body ut_body
+        (ut, [(id', rhs')]) <- unleashLet NonRecursive initial_binds transfer_rhs ut_body ut_body
         return (delUsageTypes (bindersOf bind) ut, Let (NonRec id' rhs') e')
     Rec _ -> do -- The binding group stored in the @Rec@ constructor is always the initial one!
       -- This is a little more complicated, as we'll introduce a new FrameworkNode
@@ -594,16 +595,17 @@ callArityExpr env (Let bind e) = do
               -- This is the actual fixed-point iteration: we depend on usage
               -- results from the previous iteration, defaulting to just the body.
               (ut_usage, Let (Rec old_bind) _) <- dependOnWithDefault (ut_body, Let bind e') (node, use)
-              (ut, bind') <- unleashLet True old_bind transfer_rhs ut_usage ut_body
+              (ut, bind') <- unleashLet Recursive old_bind transfer_rhs ut_usage ut_body
               return (ut, Let (Rec bind') e')
 
         let change_detector :: ChangeDetector
             change_detector changed_refs (old, _) (new, _) =
               -- since we only care for arity and called once information of the
               -- previous iteration, we can efficiently test for changes.
+              pprTrace "change_detector" (ppr ids) $
               --pprTrace "change_detector" (vcat[ppr node, ppr changed_refs, ppr old, ppr new]) $
               map fst (Set.toList changed_refs) /= [node]
-              || any (\id -> lookupUsage old id /= lookupUsage new id) ids
+              || any (\id -> lookupUsage Recursive old id /= lookupUsage Recursive new id) ids
 
         return (node, (transfer, change_detector))
 
@@ -693,7 +695,7 @@ findBndrUsage :: FamInstEnvs -> UsageType -> Id -> (UsageType, Usage)
 findBndrUsage fam_envs ut id
   = (delUsageType id ut, usage')
   where
-    usage = lookupUsage ut id
+    usage = lookupUsage NonRecursive ut id
     -- See Note [Trimming a demand to a type] in Demand.hs
     shape = findTypeShape fam_envs (idType id)
     usage' = trimUsage shape usage
@@ -731,7 +733,7 @@ propagateProductUse
   -> SingleUse
 propagateProductUse alts scrut_uses
   -- Only one alternative with a product constructor
-  | [(DataAlt dc, bndrs, rhs)] <- alts
+  | [(DataAlt dc, _, _)] <- alts
   , [scrut_use] <- scrut_uses
   , let tycon = dataConTyCon dc
   -- Don't include newtypes, as they aren't really constructors introducing
@@ -740,7 +742,7 @@ propagateProductUse alts scrut_uses
   -- This is a good place to make sure we don't construct an infinitely depth
   -- use, which can happen when analysing e.g. lazy streams.
   -- Also see Note [Demand on scrutinee of a product case] in DmdAnal.hs.
-  = addDataConStrictness dc (boundDepth 5 scrut_use)
+  = addDataConStrictness dc (boundDepth 3 scrut_use)
 
   | otherwise
   -- We *could* lub the uses from the different branches, but there's not much
@@ -758,7 +760,7 @@ addDataConStrictness dc use
     strs = dataConRepStrictness dc
     arity = length strs
 
-    add str Absent = Absent -- See the note; We want to eliminate these in WW.
+    add _ Absent = Absent -- See the note; We want to eliminate these in WW.
     add str usage@(Used _ _)
       | isMarkedStrict str = usage `bothUsage` seqUsage
       | otherwise = usage
@@ -778,31 +780,39 @@ registerBindingGroup env = go env emptyVarEnv
             (extendVarEnv nodes id node)
             binds
           transfer <- callArityExpr env' rhs
+          let transfer' use = do
+                pprTrace "RHS:begin" (ppr id <+> text "::" <+> ppr use) $ return ()
+                ret@(ut_rhs, e) <- transfer use
+                pprTrace "unleashCall:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut_rhs)]) $ return ()
+                return ret
           let transfer_args use = dependOnWithDefault (botUsageType, rhs) (node, use)
-          let change_detector_args _ (old, _) (new, _) =
+          let change_detector_args node (old, _) (new, _) =
                 -- The only reason we split the transfer fuctions up is cheap
                 -- change detection for the arg usage case. This implies that
                 -- use sites of these sig nodes may only use the ut_args
                 -- component!
                 -- FIXME: Encode this in the FrameworkNode type somehow, but I
                 -- don't think it's worth the trouble.
-                --pprTrace "change_detector_down" (ppr (ut_args old) <+> ppr (ut_args new) <+> ppr (ut_args old /= ut_args new)) $
+                pprTrace "change_detector_down" (vcat [ppr node, ppr id, ppr (ut_args old <= ut_args new), ppr (lubUsageSig (ut_args old) (ut_args new)), ppr (ut_args old), ppr (ut_args new), ppr (ut_args old /= ut_args new)]) $
+                ASSERT2( ut_args old <= ut_args new, text "CallArity.change_detector_down: Not monotone" $$ ppr (ut_args old) $$ ppr (ut_args new) )
                 ut_args old /= ut_args new
+                  where
+                    a <= b = lubUsageSig a b == b
           let ret = (env', nodes') -- What we return from 'registerBindingGroup'
-          let full = (transfer, alwaysChangeDetector) -- What we register for @node@
+          let full = (transfer', alwaysChangeDetector) -- What we register for @node@
           let args = (transfer_args, change_detector_args) -- What we register for @arg_node@
           return ((ret, full), args) -- registerTransferFunction  will peel `snd`s away for registration
 
 unleashLet
-  :: Bool
+  :: RecFlag
   -> [(Id, CoreExpr)]
   -> ((Id, CoreExpr) -> SingleUse -> TransferFunction AnalResult)
   -> UsageType
   -> UsageType
   -> TransferFunction (UsageType, [(Id, CoreExpr)])
-unleashLet is_recursive binds transfer_rhs ut_usage ut_body = do
+unleashLet rec binds transfer_rhs ut_usage ut_body = do
   (ut_rhss, binds') <- fmap unzip $ forM binds $ \bind ->
-    unleashCall is_recursive ut_usage bind (transfer_rhs bind)
+    unleashCall rec ut_usage bind (transfer_rhs bind)
   -- Note that information flows from @unleashCall@ to @callArityLetEnv@
   -- via the annotated @binds'@!
   let ids = map fst binds'
@@ -812,12 +822,12 @@ unleashLet is_recursive binds transfer_rhs ut_usage ut_body = do
   return (ut_final, binds')
 
 unleashCall
-  :: Bool
+  :: RecFlag
   -> UsageType
   -> (Id, CoreExpr)
   -> (SingleUse -> TransferFunction AnalResult)
   -> TransferFunction (UsageType, (Id, CoreExpr))
-unleashCall is_recursive ut_scope (id, rhs) transfer_rhs
+unleashCall rec ut_scope (id, rhs) transfer_rhs
   | Absent <- usage_id
   = return (emptyUsageType, (id `setIdCallArity` Absent, rhs)) -- No call to @id@ (yet)
   | Used _ use <- usage_id
@@ -827,17 +837,14 @@ unleashCall is_recursive ut_scope (id, rhs) transfer_rhs
   -- we don't have to memoize the result.
   = analyse use
   where
-    usage_id = -- How @id@ was used in its scope.
-      -- See Note [Thunks in recursive groups]
-      -- @is_recursive@ implies more than one call (otherwise, why would it be
-      -- recursive?), although the co-call graph doesn't model it that way.
-      -- Self-edges in the co-call graph correspond to non-linear recursion.
-      -- Kind-of a leaky abstraction, maybe we could somehow merge the
-      -- @is_recursive@ flag into @UsageType@.
-      apply_when is_recursive manifyUsage
-      . lookupUsage ut_scope
-      $ id
-    apply_when b f = if b then f else Prelude.id
+    -- How @id@ was used in its scope.
+    -- See Note [Thunks in recursive groups]
+    -- @isRec rec@ implies more than one call (otherwise, why would it be
+    -- recursive?), although the co-call graph doesn't model it that way.
+    -- Self-edges in the co-call graph correspond to non-linear recursion.
+    -- Kind-of a leaky abstraction...
+    usage_id = lookupUsage rec ut_scope id
+
     -- make_usage_sig is used for exported globals only. Note that in the case
     -- where idArity id == 0, there is no interesting @UsageSig@ to be had.
     -- In that case we *could* try to analyze with arity 1, just for the
@@ -866,7 +873,7 @@ callArityLetEnv
   -> UsageType
   -> UsageType
 callArityLetEnv rhss ut_body
-    = --pprTrace "callArityLetEnv" (vcat [ppr rhss, ppr ut_body, ppr ut_new]) $
+    = pprTrace "callArityLetEnv" (vcat [ppr (map fst rhss), ppr (map snd rhss), ppr ut_body, ppr ut_new, ppr (map (lookupUsage Recursive ut_new . fst) rhss)]) $
       ut_new
   where
     (ids, ut_rhss) = unzip rhss
