@@ -1,6 +1,6 @@
 module CallArity.Types where
 
-import CoreArity ( typeArity )
+import BasicTypes
 import CoreSyn
 import Id
 import Outputable
@@ -58,14 +58,18 @@ domType :: UsageType -> UnVarSet
 domType ut = varEnvDom (ut_uses ut)
 
 makeIdArg :: Id -> UsageType -> UsageType
-makeIdArg id ut = delUsageType id (modifyArgs (consUsageSig (lookupUsage ut id)) ut)
+makeIdArg id ut = delUsageType id (modifyArgs (consUsageSig (lookupUsage NonRecursive ut id)) ut)
 
 -- In the result, find out the minimum arity and whether the variable is called
 -- at most once.
-lookupUsage :: UsageType -> Id -> Usage
-lookupUsage (UT g ae _) id = case lookupVarEnv ae id of
+lookupUsage :: RecFlag -> UsageType -> Id -> Usage
+lookupUsage rec (UT g ae _) id = case lookupVarEnv ae id of
   Just use
     | id `elemUnVarSet` neighbors g id -> Used Many use
+    -- we assume recursive bindings to be called multiple times, what's the
+    -- point otherwise? It's a little sad we don't encode it in the co-call
+    -- graph directly, though.
+    | isRec rec -> manifyUsage (Used Once use)
     | otherwise -> Used Once use
   Nothing -> botUsage
 
@@ -124,5 +128,5 @@ instance Outputable UsageType where
   ppr (UT cocalled arities args) = vcat
     [ text "arg usages:" <+> ppr args
     , text "co-calls:" <+> ppr cocalled
-    , text "arities:" <+> ppr arities
+    , text "uses:" <+> ppr arities
     ]

@@ -186,7 +186,7 @@ lubUsageSig BotUsageSig s = s
 lubUsageSig s BotUsageSig = s
 lubUsageSig TopUsageSig _ = TopUsageSig
 lubUsageSig _ TopUsageSig = TopUsageSig
-lubUsageSig (ArgUsage u1 s1) (ArgUsage u2 s2) = ArgUsage (lubUsage u1 u2) (lubUsageSig s1 s2)
+lubUsageSig (ArgUsage u1 s1) (ArgUsage u2 s2) = consUsageSig (lubUsage u1 u2) (lubUsageSig s1 s2)
 
 -- * Working with `SingleUse`, `Usage` and `UsageSig`
 
@@ -235,10 +235,10 @@ boundDepth max_height use = snd (boundUse 0 use)
         impl height (Product comps)
           | height < max_height
           , (changed, comps') <- mapAndUnzip (boundUsage (height + 1)) comps
-          = (or changed, Product comps')
+          = (or changed, mkProductUse comps')
           | otherwise
           = (True, topSingleUse)
-        impl height (Call m u) = second (Call m) (boundUse height u)
+        impl height (Call m u) = second (mkCallUse m) (boundUse height u)
         impl _ u = (False, u)
 
 trimSingleUse :: TypeShape -> SingleUse -> SingleUse
