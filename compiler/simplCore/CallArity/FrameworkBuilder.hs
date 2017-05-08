@@ -75,10 +75,10 @@ registerTransferFunction prio f = FB $ do
   return result
 
 dependOnWithDefault :: AnalResult -> (FrameworkNode, SingleUse) -> TransferFunction AnalResult
-dependOnWithDefault def which = do
-  --pprTrace "dependOnWithDefault:before" (text "node:" <+> ppr node <+> text "use:" <+> ppr use) $ return ()
-  res <- fromMaybe def <$> Worklist.dependOn which
-  --pprTrace "dependOnWithDefault:after" (vcat [text "node:" <+> ppr node, text "use:" <+> ppr use, text "res:" <+> ppr res]) $ return ()
+dependOnWithDefault def (node, use) = do
+  --use <- pprTrace "dependOnWithDefault:before" (text "node:" <+> ppr node <+> text "use:" <+> ppr use) $ return use
+  res <- fromMaybe def <$> Worklist.dependOn (node, use)
+  --res <- pprTrace "dependOnWithDefault:after" (vcat [text "node:" <+> ppr node, text "use:" <+> ppr use]) $ return res
   return res
 
 buildAndRun :: FrameworkBuilder (SingleUse -> TransferFunction AnalResult) -> SingleUse -> AnalResult
@@ -87,8 +87,6 @@ buildAndRun buildTransfer use = lookup_result (Worklist.runFramework fw (Set.sin
     (node, fw) = buildFramework $
       registerTransferFunction (LowerThan (FrameworkNode 0)) $ \node -> do
         transfer <- buildTransfer
-        -- We only get away with using alwaysChangeDetector because this won't
-        -- introduce a cycle.
         return (node, (transfer, Worklist.alwaysChangeDetector))
 
     lookup_result :: Map (FrameworkNode, SingleUse) AnalResult -> AnalResult

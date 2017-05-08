@@ -69,6 +69,7 @@ lookupUsage rec (UT g ae _) id = case lookupVarEnv ae id of
     -- we assume recursive bindings to be called multiple times, what's the
     -- point otherwise? It's a little sad we don't encode it in the co-call
     -- graph directly, though.
+    -- See Note [Thunks in recursive groups]
     | isRec rec -> manifyUsage (Used Once use)
     | otherwise -> Used Once use
   Nothing -> botUsage
