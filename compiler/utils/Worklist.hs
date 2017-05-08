@@ -3,15 +3,14 @@
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 module Worklist where
 
+import Control.Arrow (first)
 import Control.Monad (forM_)
 import Control.Monad.Trans.State.Strict
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.Maybe (isJust, fromMaybe)
-import Dequeue (BankersDequeue)
-import qualified Dequeue as Dequeue
+import Data.Maybe (fromMaybe)
 import Outputable
 
 newtype TransferFunction node lattice a
@@ -50,42 +49,11 @@ emptyNodeInfo = NodeInfo Nothing Set.empty Set.empty
 
 type Graph node lattice = Map node (NodeInfo node lattice)
 
-data QueuedMap k v
-  = QueuedMap
-  { queue :: !(BankersDequeue k)
-  , mapping :: !(Map k v)
-  }
-
-emptyQueuedMap :: QueuedMap k v
-emptyQueuedMap = QueuedMap Dequeue.empty Map.empty
-
-enqueueUpdating :: Ord k => k -> v -> (v -> v) -> QueuedMap k v -> QueuedMap k v
-enqueueUpdating k v updater qm = qm { queue = queue', mapping = mapping' }
-  where
-    queue'
-      -- | Map.member k (mapping qm) = queue qm
-      | True = queue qm
-      | otherwise = Dequeue.pushBack (queue qm) k
-    mapping' = Map.alter (Just . maybe v updater) k (mapping qm)
-
-dequeue :: Ord k => QueuedMap k v -> (Maybe (k, v), QueuedMap k v)
-dequeue qm
-  -- | Just (k, queue') <- Dequeue.popFront (queue qm)
-  --, (mv, mapping') <- Map.updateLookupWithKey (\_ _ -> Nothing) k (mapping qm)
-  | Just ((k, v), mapping') <- Map.maxViewWithKey (mapping qm)
-  -- = case mv of
-      -- Nothing -> pprPanic "queue and mapping should have the same keys" $
-        --ppr (length (queue qm)) <+> text " vs. " <+> ppr (Map.size (mapping qm))
-      --Just v -> (Just (k, v), qm { queue = queue', mapping = mapping' })
-  = (Just (k, v), qm { mapping = mapping' })
-  | otherwise
-  = (Nothing, qm)
-
 data WorklistState node lattice
   = WorklistState
   { framework :: !(DataFlowFramework node lattice)
   , graph :: !(Graph node lattice)
-  , unstable :: !(QueuedMap node (Set node)) -- unstable nodes and its changed references
+  , unstable :: !(Map node (Set node)) -- unstable nodes and their changed references
   , callStack :: !(Set node)
   , referencedNodes :: !(Set node)
   , loopBreakers :: !(Set node)
@@ -96,7 +64,7 @@ zoomGraph modifyGraph = state $ \st ->
   let (res, g) = runState modifyGraph (graph st)
   in  (res, st { graph = g })
 
-zoomUnstable :: State (QueuedMap node (Set node)) a -> State (WorklistState node lattice) a
+zoomUnstable :: State (Map node (Set node)) a -> State (WorklistState node lattice) a
 zoomUnstable modifyUnstable = state $ \st ->
   let (res, u) = runState modifyUnstable (unstable st)
   in  (res, st { unstable = u })
@@ -112,7 +80,7 @@ zoomLoopBreakers modifier = state $ \st ->
   in  (res, st { loopBreakers = lb })
 
 initialWorklistState
-  :: QueuedMap node (Set node)
+  :: Map node (Set node)
   -> DataFlowFramework node lattice
   -> WorklistState node lattice
 initialWorklistState unstable fw =
@@ -121,7 +89,7 @@ initialWorklistState unstable fw =
 dependOn :: Ord node => node -> TransferFunction node lattice (Maybe lattice)
 dependOn node = TFM $ do
   loopDetected <- Set.member node <$> gets callStack
-  isNotYetStable <- Map.member node <$> gets (mapping . unstable)
+  isNotYetStable <- Map.member node <$> gets unstable
   maybeNodeInfo <- Map.lookup node <$> gets graph
   zoomReferencedNodes (modify' (Set.insert node)) -- save that we depend on this value
   case maybeNodeInfo of
@@ -135,8 +103,6 @@ dependOn node = TFM $ do
       fmap (\(val, _, _) -> Just val) (recompute node)
 --    Just _ | isNotYetStable && not loopDetected -> do
 --      fmap (\(val, _, _) -> Just val) (recompute (trace "Just, not stable" node))
---    Just info | isNotYetStable -> do
---      return (value (trace "Just, looping" info))
     Just info -> do
       return (value info)
 
@@ -197,10 +163,11 @@ recompute node = do
 
 enqueueUnstable :: Ord node => node -> Set node -> State (WorklistState node lattice) ()
 enqueueUnstable reference referrers_ = zoomUnstable $ modify' $
-  enqueueUpdating reference referrers_ (Set.union referrers_)
+  Map.alter (Just . maybe referrers_ (Set.union referrers_)) reference
 
 dequeueUnstable :: Ord node => State (WorklistState node lattice) (Maybe (node, Set node))
-dequeueUnstable = zoomUnstable (state dequeue)
+dequeueUnstable = zoomUnstable $ state $ \m ->
+  maybe (Nothing, m) (first Just) (Map.maxViewWithKey m)
 
 lookupReferrers :: Ord node => node -> Graph node lattice -> Set node
 lookupReferrers node = maybe Set.empty referrers . Map.lookup node
@@ -212,7 +179,6 @@ work = do
     Nothing -> return ()
     Just (node, changedRefs) -> do
       modify' $ \st -> st { loopBreakers = Set.empty, callStack = Set.empty, referencedNodes = Set.empty }
-      --pprTrace "work:recompute" (text "len:" <+> ppr len) (pure ())
       (newVal, oldInfo, detectChange) <- recompute node
       -- We have to enqueue all referrers to loop breakers, e.g. nodes which we
       -- returned `Nothing` from `dependOn` to break cyclic dependencies.
@@ -234,6 +200,5 @@ runFramework
   -> Map node lattice
 runFramework framework_ interestingNodes = run framework_
   where
-    queuedMapOf = foldr (\n -> enqueueUpdating n Set.empty (const Set.empty)) emptyQueuedMap
-    unstable = queuedMapOf interestingNodes
+    unstable = Map.fromSet (const Set.empty) interestingNodes
     run = Map.mapMaybe value . graph . execState work . initialWorklistState unstable
