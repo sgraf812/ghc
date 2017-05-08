@@ -457,7 +457,6 @@ compiler_stage2_dll0_MODULES = \
 	CostCentre \
 	DataCon \
 	Demand \
-	Dequeue \
 	Digraph \
 	DriverPhases \
 	DynFlags \
