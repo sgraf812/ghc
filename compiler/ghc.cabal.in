@@ -481,6 +481,7 @@ Library
         Binary
         BooleanFormula
         BufWrite
+        Dequeue
         Digraph
         Encoding
         FastFunctions

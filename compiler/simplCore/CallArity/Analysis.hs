@@ -490,7 +490,7 @@ callArityExpr env e@(Var id) = return transfer
         (ut_callee, _) <- dependOnWithDefault (botUsageType, e) (node, use)
         -- It is crucial that we only use ut_args here, as every other field
         -- might be unstable and thus too optimistic.
-        pprTrace "callArityExpr.Var" (vcat [ppr id, ppr use, ppr (ut_args ut_callee)]) (return ())
+        --pprTrace "callArityExpr.Var" (vcat [ppr id, ppr use, ppr (ut_args ut_callee)]) (return ())
         return ((unitUsageType id use) { ut_args = ut_args ut_callee }, e)
 
       | isDataConWorkId id
@@ -568,14 +568,16 @@ callArityExpr env (Case scrut case_bndr ty alts) = do
     return (ut, Case scrut' case_bndr' ty alts')
 
 callArityExpr env (Let bind e) = do
+  let fam_envs = ae_fam_envs env
   let initial_binds = flattenBinds [bind]
+  let ids = map fst initial_binds
   (env', nodes) <- registerBindingGroup env initial_binds
   let lookup_node id =
         expectJust ": the RHS of id wasn't registered" (lookupVarEnv nodes id)
   let transfer_rhs (id, rhs) use =
         dependOnWithDefault (botUsageType, rhs) (lookup_node id, use)
+  let transferred_bind b@(id, rhs) = (id, (rhs, transfer_rhs b))
   transfer_body <- callArityExpr env' e
-  let ids = map fst initial_binds
 
   case bind of
     NonRec _ _ ->
@@ -583,7 +585,8 @@ callArityExpr env (Let bind e) = do
       -- call id. Thus we also can spare to allocate a new @FrameworkNode@.
       return $ \use -> do
         (ut_body, e') <- transfer_body use
-        (ut, [(id', rhs')]) <- unleashLet NonRecursive initial_binds transfer_rhs ut_body ut_body
+        let transferred_binds = map transferred_bind initial_binds
+        (ut, [(id', rhs')]) <- unleashLet NonRecursive fam_envs transferred_binds ut_body ut_body
         return (delUsageTypes (bindersOf bind) ut, Let (NonRec id' rhs') e')
     Rec _ -> do -- The binding group stored in the @Rec@ constructor is always the initial one!
       -- This is a little more complicated, as we'll introduce a new FrameworkNode
@@ -591,18 +594,21 @@ callArityExpr env (Let bind e) = do
       node <- registerTransferFunction (LowerThan (minimum (eltsUFM nodes))) $ \node -> do
         let transfer :: SingleUse -> TransferFunction AnalResult
             transfer use = do
+              --use <- pprTrace "Rec:begin" (ppr ids) $ return use
               (ut_body, e') <- transfer_body use
               -- This is the actual fixed-point iteration: we depend on usage
               -- results from the previous iteration, defaulting to just the body.
               (ut_usage, Let (Rec old_bind) _) <- dependOnWithDefault (ut_body, Let bind e') (node, use)
-              (ut, bind') <- unleashLet Recursive old_bind transfer_rhs ut_usage ut_body
+              let transferred_binds = map transferred_bind old_bind
+              (ut, bind') <- unleashLet Recursive fam_envs transferred_binds ut_usage ut_body
+              --ut <- pprTrace "Rec:end" (ppr ids) $ return ut
               return (ut, Let (Rec bind') e')
 
         let change_detector :: ChangeDetector
             change_detector changed_refs (old, _) (new, _) =
               -- since we only care for arity and called once information of the
               -- previous iteration, we can efficiently test for changes.
-              pprTrace "change_detector" (ppr ids) $
+              --pprTrace "change_detector" (vcat[ppr ids, ppr node, ppr changed_refs]) $
               --pprTrace "change_detector" (vcat[ppr node, ppr changed_refs, ppr old, ppr new]) $
               map fst (Set.toList changed_refs) /= [node]
               || any (\id -> lookupUsage Recursive old id /= lookupUsage Recursive new id) ids
@@ -678,8 +684,8 @@ analyseCaseAlternative env case_bndr (dc, alt_bndrs, e)
     transfer transfer_alt use = do
       let fam_envs = ae_fam_envs env
       (ut_alt, e') <- transfer_alt use
-      let (ut_alt', alt_bndr_usages) = findBndrsUsages fam_envs ut_alt alt_bndrs
-      let (_, case_bndr_usage) = findBndrUsage fam_envs ut_alt case_bndr
+      let (ut_alt', alt_bndr_usages) = findBndrsUsages NonRecursive fam_envs ut_alt alt_bndrs
+      let (_, case_bndr_usage) = findBndrUsage NonRecursive fam_envs ut_alt case_bndr
       -- We have to combine usages of alts_bndrs with that of case_bndr.
       -- Usage info flows from case_bndr to alt_bndrs, but not the other way
       -- around! This means that we later on annotate case_bndr solely based
@@ -691,21 +697,21 @@ analyseCaseAlternative env case_bndr (dc, alt_bndrs, e)
       -- constructor. That's to be done when we finally match on dc.
       return (ut_alt', (dc, alt_bndrs', e'), product_use)
 
-findBndrUsage :: FamInstEnvs -> UsageType -> Id -> (UsageType, Usage)
-findBndrUsage fam_envs ut id
+findBndrUsage :: RecFlag -> FamInstEnvs -> UsageType -> Id -> (UsageType, Usage)
+findBndrUsage rec_flag fam_envs ut id
   = (delUsageType id ut, usage')
   where
-    usage = lookupUsage NonRecursive ut id
+    usage = lookupUsage rec_flag ut id
     -- See Note [Trimming a demand to a type] in Demand.hs
     shape = findTypeShape fam_envs (idType id)
     usage' = trimUsage shape usage
 
-findBndrsUsages :: FamInstEnvs -> UsageType -> [Var] -> (UsageType, [Usage])
-findBndrsUsages fam_envs ut = foldr step (ut, [])
+findBndrsUsages :: RecFlag -> FamInstEnvs -> UsageType -> [Var] -> (UsageType, [Usage])
+findBndrsUsages rec_flag fam_envs ut = foldr step (ut, [])
   where
     step b (ut, usages)
       | isId b
-      , (ut', usage) <- findBndrUsage fam_envs ut b
+      , (ut', usage) <- findBndrUsage rec_flag fam_envs ut b
       = (ut', usage:usages)
       | otherwise
       = (ut, usages)
@@ -742,7 +748,7 @@ propagateProductUse alts scrut_uses
   -- This is a good place to make sure we don't construct an infinitely depth
   -- use, which can happen when analysing e.g. lazy streams.
   -- Also see Note [Demand on scrutinee of a product case] in DmdAnal.hs.
-  = addDataConStrictness dc (boundDepth 3 scrut_use)
+  = addDataConStrictness dc (boundDepth 5 scrut_use)
 
   | otherwise
   -- We *could* lub the uses from the different branches, but there's not much
@@ -781,19 +787,23 @@ registerBindingGroup env = go env emptyVarEnv
             binds
           transfer <- callArityExpr env' rhs
           let transfer' use = do
-                pprTrace "RHS:begin" (ppr id <+> text "::" <+> ppr use) $ return ()
+                --use <- pprTrace "RHS:begin" (ppr id <+> text "::" <+> ppr use) $ return use
                 ret@(ut_rhs, e) <- transfer use
-                pprTrace "unleashCall:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut_rhs)]) $ return ()
+                --ret <- pprTrace "RHS:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut_rhs)]) $ return ret
                 return ret
-          let transfer_args use = dependOnWithDefault (botUsageType, rhs) (node, use)
-          let change_detector_args node (old, _) (new, _) =
+          let transfer_args use = do
+                --use <- pprTrace "args:begin" (ppr id <+> text "::" <+> ppr use) $ return use
+                ret@(ut, e) <- dependOnWithDefault (botUsageType, rhs) (node, use)
+                --ret <- pprTrace "args:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut)]) $ return ret
+                return ret
+          let change_detector_args nodes (old, _) (new, _) =
                 -- The only reason we split the transfer fuctions up is cheap
                 -- change detection for the arg usage case. This implies that
                 -- use sites of these sig nodes may only use the ut_args
                 -- component!
                 -- FIXME: Encode this in the FrameworkNode type somehow, but I
                 -- don't think it's worth the trouble.
-                pprTrace "change_detector_down" (vcat [ppr node, ppr id, ppr (ut_args old <= ut_args new), ppr (lubUsageSig (ut_args old) (ut_args new)), ppr (ut_args old), ppr (ut_args new), ppr (ut_args old /= ut_args new)]) $
+                --pprTrace "change_detector_down" (vcat [ppr node, ppr id, ppr (ut_args old <= ut_args new), ppr (lubUsageSig (ut_args old) (ut_args new)), ppr (ut_args old), ppr (ut_args new), ppr (ut_args old /= ut_args new)]) $
                 ASSERT2( ut_args old <= ut_args new, text "CallArity.change_detector_down: Not monotone" $$ ppr (ut_args old) $$ ppr (ut_args new) )
                 ut_args old /= ut_args new
                   where
@@ -805,66 +815,59 @@ registerBindingGroup env = go env emptyVarEnv
 
 unleashLet
   :: RecFlag
-  -> [(Id, CoreExpr)]
-  -> ((Id, CoreExpr) -> SingleUse -> TransferFunction AnalResult)
+  -> FamInstEnvs
+  -> [(Id, (CoreExpr, SingleUse -> TransferFunction AnalResult))]
   -> UsageType
   -> UsageType
   -> TransferFunction (UsageType, [(Id, CoreExpr)])
-unleashLet rec binds transfer_rhs ut_usage ut_body = do
-  (ut_rhss, binds') <- fmap unzip $ forM binds $ \bind ->
-    unleashCall rec ut_usage bind (transfer_rhs bind)
-  -- Note that information flows from @unleashCall@ to @callArityLetEnv@
-  -- via the annotated @binds'@!
-  let ids = map fst binds'
+unleashLet rec_flag fam_envs transferred_binds ut_usage ut_body = do
+  let (ids, transferred_rhss) = unzip transferred_binds
+  (ut_rhss, rhss') <- fmap unzip $ forM transferred_binds $ \(id, (rhs, transfer)) ->
+    unleashUsage rhs transfer (lookupUsage rec_flag ut_usage id)
   let ut_final = callArityLetEnv (zip ids ut_rhss) ut_body
-  -- @ut_final@ still tracks usages of @ids@. We still need them for identifying
-  -- the fixed-point!
-  return (ut_final, binds')
 
-unleashCall
-  :: RecFlag
-  -> UsageType
-  -> (Id, CoreExpr)
+  -- Now use that information to annotate binders.
+  let (_, usages) = findBndrsUsages rec_flag fam_envs ut_final ids
+  let ids' = setBndrsUsageInfo ids usages
+  ids'' <- forM (zip ids' transferred_rhss) $ \(id, (_, transfer)) ->
+    annotateExportedIdArgUsage id transfer
+
+  -- This intentionally still contains the @Id@s of the binding group, because
+  -- the recursive rule looks at their usages to determine stability.
+  return (ut_final, zip ids'' rhss')
+
+annotateExportedIdArgUsage
+  :: Id
   -> (SingleUse -> TransferFunction AnalResult)
-  -> TransferFunction (UsageType, (Id, CoreExpr))
-unleashCall rec ut_scope (id, rhs) transfer_rhs
-  | Absent <- usage_id
-  = return (emptyUsageType, (id `setIdCallArity` Absent, rhs)) -- No call to @id@ (yet)
-  | Used _ use <- usage_id
-  -- The work required to get the RHS of let-bindings to WHNF is shared among
-  -- all uses, so the multiplicity can be ignored *when analysing the RHS*.
-  -- We still annotate the binder with the multiplity, as @Once@ means
-  -- we don't have to memoize the result.
-  = analyse use
-  where
-    -- How @id@ was used in its scope.
-    -- See Note [Thunks in recursive groups]
-    -- @isRec rec@ implies more than one call (otherwise, why would it be
-    -- recursive?), although the co-call graph doesn't model it that way.
-    -- Self-edges in the co-call graph correspond to non-linear recursion.
-    -- Kind-of a leaky abstraction...
-    usage_id = lookupUsage rec ut_scope id
-
-    -- make_usage_sig is used for exported globals only. Note that in the case
-    -- where idArity id == 0, there is no interesting @UsageSig@ to be had.
+  -> TransferFunction Id
+annotateExportedIdArgUsage id transfer_rhs
+  | not (isExportedId id) = return id
+  | otherwise = do
+    -- We can't eta-expand beyond idArity anyway (exported!), so our best
+    -- bet is a single call with idArity.
+    -- Note that in the case where idArity id == 0, there is no interesting
+    -- @UsageSig@ to be had.
     -- In that case we *could* try to analyze with arity 1, just for the
     -- signature.
     -- TODO: Think harder about UsageSigs and how they should be handled with
     -- Used Many.
-    -- Also we can't eta-expand beyond idArity anyway (exported!), so our best
-    -- bet is a single call with idArity.
-    single_call = iterate (mkCallUse Once) topSingleUse !! idArity id
-    make_usage_sig use = ut_args . fst <$> transfer_rhs use
-    analyse use = do
-      (ut_rhs, rhs') <- transfer_rhs use
-      usage_sig <-
-        if isExportedId id
-          then make_usage_sig single_call
-          else return topUsageSig
-      let id' = id
-            `setIdCallArity` usage_id -- How the binder was used
-            `setIdArgUsage` usage_sig -- How a single call uses its args
-      return (ut_rhs, (id', rhs'))
+    let single_call = iterate (mkCallUse Once) topSingleUse !! idArity id
+    usage_sig <- ut_args . fst <$> transfer_rhs single_call
+    return (id `setIdArgUsage` usage_sig)
+
+unleashUsage
+  :: CoreExpr
+  -> (SingleUse -> TransferFunction AnalResult)
+  -> (Usage -> TransferFunction AnalResult)
+unleashUsage rhs transfer_rhs usage
+  | Absent <- usage
+  = return (emptyUsageType, rhs)
+  | Used _ use <- usage
+  -- The work required to get the RHS of let-bindings to WHNF is shared among
+  -- all use sites, so the multiplicity can be ignored *when analysing the RHS*.
+  -- We still annotate the binder with the multiplity later on, as @Once@ means
+  -- we don't have to memoize the result.
+  = transfer_rhs use
 
 -- Combining the results from body and rhs of a let binding
 -- See Note [Analysis II: The Co-Called analysis]
@@ -873,7 +876,7 @@ callArityLetEnv
   -> UsageType
   -> UsageType
 callArityLetEnv rhss ut_body
-    = pprTrace "callArityLetEnv" (vcat [ppr (map fst rhss), ppr (map snd rhss), ppr ut_body, ppr ut_new, ppr (map (lookupUsage Recursive ut_new . fst) rhss)]) $
+    = --pprTrace "callArityLetEnv" (vcat [ppr (map fst rhss), ppr (map snd rhss), ppr ut_body, ppr ut_new, ppr (map (lookupUsage Recursive ut_new . fst) rhss)]) $
       ut_new
   where
     (ids, ut_rhss) = unzip rhss
