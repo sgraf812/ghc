@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, TupleSections #-}
+{-# LANGUAGE CPP #-}
 --
 -- Copyright (c) 2014 Joachim Breitner
 --

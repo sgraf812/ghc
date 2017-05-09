@@ -41,7 +41,7 @@ import LiberateCase     ( liberateCase )
 import SAT              ( doStaticArgs )
 import Specialise       ( specProgram)
 import SpecConstr       ( specConstrProgram)
-import DmdAnal          ( dmdAnalProgram )
+import DmdAnalWrapper   ( combinedDmdAnalProgram )
 import CallArity        ( callArityAnalProgram )
 import WorkWrap         ( wwTopBinds )
 import Vectorise        ( vectorise )
@@ -474,7 +474,7 @@ doCorePass CoreDoCallArity           = {-# SCC "CallArity" #-}
                                        doPassDFM callArityAnalProgram
 
 doCorePass CoreDoStrictness          = {-# SCC "NewStranal" #-}
-                                       doPassDFM dmdAnalProgram
+                                       doPassDFM combinedDmdAnalProgram
 
 doCorePass CoreDoWorkerWrapper       = {-# SCC "WorkWrap" #-}
                                        doPassDFU wwTopBinds
