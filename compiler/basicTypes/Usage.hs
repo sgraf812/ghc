@@ -11,8 +11,9 @@ module Usage
   , manifyUsage, expandArity
   , UsageSig
   , botUsageSig, topUsageSig, lubUsageSig
-  , consUsageSig, unconsUsageSig, usageSigFromUsages, manifyUsageSig, usageSigFromStrictSig
+  , consUsageSig, unconsUsageSig, usageSigFromUsages, manifyUsageSig
   , trimSingleUse, trimUsage, trimUsageSig
+  , usageFromDemand, overwriteDemandWithUsage, usageSigFromStrictSig, overwriteStrictSigWithUsageSig
   ) where
 
 #include "HsVersions.h"
@@ -333,28 +334,6 @@ manifyUsageSig TopUsageSig = TopUsageSig
 manifyUsageSig BotUsageSig = BotUsageSig
 manifyUsageSig (ArgUsage u s) = consUsageSig (manifyUsage u) (manifyUsageSig s)
 
--- | For conveniently working with PrimOps. I've no nerve right now to go through
--- all entries in primops.txt.pp.
-usageSigFromStrictSig :: StrictSig -> UsageSig
-usageSigFromStrictSig sig
-  = usageSigFromUsages (map (usageFromArgUse . Demand.getUseDmd) dmds)
-  where
-    (dmds, _) = splitStrictSig sig
-
-multiplicityFromCount :: Demand.Count -> Multiplicity
-multiplicityFromCount Demand.One = Once
-multiplicityFromCount Demand.Many = Many
-
-singleUseFromUseDmd :: Demand.UseDmd -> SingleUse
-singleUseFromUseDmd Demand.UHead = topSingleUse
-singleUseFromUseDmd (Demand.UCall c u) = mkCallUse (multiplicityFromCount c) (singleUseFromUseDmd u)
-singleUseFromUseDmd (Demand.UProd comps) = mkProductUse (map usageFromArgUse comps)
-singleUseFromUseDmd Demand.Used = botSingleUse
-
-usageFromArgUse :: Demand.ArgUse -> Usage
-usageFromArgUse Demand.Abs = Absent
-usageFromArgUse (Demand.Use c u) = Used (multiplicityFromCount c) (singleUseFromUseDmd u)
-
 -- | Trims a `UsageSig` by looking at how the associated value is used.
 --
 -- The resulting `UsageSig` will only have as many arguments as the `SingleUse` has
@@ -439,3 +418,62 @@ instance Binary UsageSig where
       0 -> return BotUsageSig
       1 -> return TopUsageSig
       _ -> ArgUsage <$> get bh <*> get bh
+
+-- * Conversion to and from @Demand.hs@
+
+-- | For conveniently working with PrimOps. I've no nerve right now to go through
+-- all entries in primops.txt.pp.
+usageSigFromStrictSig :: StrictSig -> UsageSig
+usageSigFromStrictSig sig
+  = usageSigFromUsages (map (usageFromArgUse . Demand.getUseDmd) dmds)
+  where
+    (dmds, _) = splitStrictSig sig
+
+multiplicityFromCount :: Demand.Count -> Multiplicity
+multiplicityFromCount Demand.One = Once
+multiplicityFromCount Demand.Many = Many
+
+singleUseFromUseDmd :: Demand.UseDmd -> SingleUse
+singleUseFromUseDmd Demand.UHead = topSingleUse
+singleUseFromUseDmd (Demand.UCall c u) = mkCallUse (multiplicityFromCount c) (singleUseFromUseDmd u)
+singleUseFromUseDmd (Demand.UProd comps) = mkProductUse (map usageFromArgUse comps)
+singleUseFromUseDmd Demand.Used = botSingleUse
+
+usageFromArgUse :: Demand.ArgUse -> Usage
+usageFromArgUse Demand.Abs = Absent
+usageFromArgUse (Demand.Use c u) = Used (multiplicityFromCount c) (singleUseFromUseDmd u)
+
+usageFromDemand :: Demand.Demand -> Usage
+usageFromDemand = usageFromArgUse . Demand.getUseDmd
+
+-- | Overwrites the usage component of a `Demand.Demand` with the given `Usage`.
+overwriteDemandWithUsage :: Usage -> Demand.Demand -> Demand.Demand
+overwriteDemandWithUsage = Demand.setUseDmd . usageToArgUse
+
+usageToArgUse :: Usage -> Demand.ArgUse
+usageToArgUse Absent = Demand.Abs
+usageToArgUse (Used multi use)
+  = Demand.Use (multiplicityToCount multi) (singleUseToUseDmd use)
+
+multiplicityToCount :: Multiplicity -> Demand.Count
+multiplicityToCount Once = Demand.One
+multiplicityToCount Many = Demand.Many
+
+singleUseToUseDmd :: SingleUse -> Demand.UseDmd
+singleUseToUseDmd HeadUse = Demand.UHead
+singleUseToUseDmd UnknownUse = Demand.Used
+singleUseToUseDmd (Product comps) = Demand.UProd (map usageToArgUse comps)
+singleUseToUseDmd (Call multi use)
+  = Demand.UCall (multiplicityToCount multi) (singleUseToUseDmd use)
+
+-- | Overwrites the usage component of a `Demand.StrictSig` with the given
+-- `UsageSig`.
+overwriteStrictSigWithUsageSig :: UsageSig -> StrictSig -> StrictSig
+overwriteStrictSigWithUsageSig usage_sig strict_sig = strict_sig'
+  where
+    strict_sig' = Demand.mkClosedStrictSig (overwrite usage_sig dmds) dmd_result
+    (dmds, dmd_result) = Demand.splitStrictSig strict_sig
+    overwrite _ [] = []
+    overwrite sig (dmd:dmds)
+      | (usage, sig') <- unconsUsageSig sig
+      = overwriteDemandWithUsage usage dmd : overwrite sig' dmds
