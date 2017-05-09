@@ -415,6 +415,7 @@ Library
         CallArity.FrameworkBuilder
         CallArity.Analysis
         DmdAnal
+        DmdAnalWrapper
         WorkWrap
         WwLib
         FamInst

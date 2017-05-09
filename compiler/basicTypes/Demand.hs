@@ -10,7 +10,7 @@
 module Demand (
         StrDmd, UseDmd(..), Count(..), ArgUse, Use (..),
 
-        Demand, CleanDemand, getStrDmd, getUseDmd,
+        Demand, CleanDemand, getStrDmd, getUseDmd, setUseDmd,
         mkProdDmd, mkOnceUsedDmd, mkManyUsedDmd, mkHeadStrict, oneifyDmd,
         toCleanDmd,
         absDmd, topDmd, botDmd, seqDmd,
@@ -92,6 +92,9 @@ getStrDmd = sd
 
 getUseDmd :: JointDmd s u -> u
 getUseDmd = ud
+
+setUseDmd :: u -> JointDmd s u -> JointDmd s u
+setUseDmd u jd = jd { ud = u }
 
 -- Pretty-printing
 instance (Outputable s, Outputable u) => Outputable (JointDmd s u) where
