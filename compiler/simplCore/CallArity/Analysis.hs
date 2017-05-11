@@ -13,7 +13,7 @@ import CallArity.FrameworkBuilder
 import BasicTypes
 import CoreSyn
 import DataCon ( DataCon, dataConTyCon, dataConRepStrictness, isMarkedStrict )
-import DynFlags      ( DynFlags )
+import DynFlags      ( DynFlags, gopt, GeneralFlag(Opt_DmdTxDictSel) )
 import FamInstEnv
 import Id
 import Maybes ( expectJust, fromMaybe, isJust )
@@ -397,7 +397,12 @@ Call Arity considers everything that is not cheap (`exprIsCheap`) as a thunk.
 
 data AnalEnv
   = AE
-  { ae_sigs :: VarEnv FrameworkNode
+  { ae_dflags :: DynFlags
+  -- ^ Configuration flags. Of particular interest to this analysis:
+  --
+  --     - `Opt_DmdTxDictSel`: Control analysis of dictionary selectors.
+  --
+  , ae_sigs :: VarEnv FrameworkNode
   -- ^ 'FrameworkNode's of visible local let-bound identifiers. It is crucial
   -- that only the 'UsageSig' component is used, as the usage on free vars might
   -- be unstable and thus too optimistic.
@@ -405,10 +410,11 @@ data AnalEnv
   -- ^ Needed for 'findTypeShape' to resolve type/data families.
   }
 
-initialAnalEnv :: FamInstEnvs -> AnalEnv
-initialAnalEnv fam_envs
+initialAnalEnv :: DynFlags -> FamInstEnvs -> AnalEnv
+initialAnalEnv dflags fam_envs
   = AE
-  { ae_sigs = emptyVarEnv
+  { ae_dflags = dflags
+  , ae_sigs = emptyVarEnv
   , ae_fam_envs = fam_envs
   }
 
@@ -437,14 +443,14 @@ exprToModule _ = []
 
 -- Main entry point
 callArityAnalProgram :: DynFlags -> FamInstEnvs -> CoreProgram -> IO CoreProgram
-callArityAnalProgram _dflags fam_envs
-  = return . exprToModule . callArityRHS fam_envs . moduleToExpr
+callArityAnalProgram dflags fam_envs
+  = return . exprToModule . callArityRHS dflags fam_envs . moduleToExpr
 
-callArityRHS :: FamInstEnvs -> CoreExpr -> CoreExpr
-callArityRHS fam_envs e
+callArityRHS :: DynFlags -> FamInstEnvs -> CoreExpr -> CoreExpr
+callArityRHS dflags fam_envs e
   = ASSERT2( isEmptyUnVarSet (domType ut), text "Free vars in UsageType:" $$ ppr ut ) e'
   where
-    (ut, e') = buildAndRun (callArityExpr (initialAnalEnv fam_envs) e) topSingleUse
+    (ut, e') = buildAndRun (callArityExpr (initialAnalEnv dflags fam_envs) e) topSingleUse
 
 -- | The main analysis function. See Note [Analysis type signature]
 callArityExpr
@@ -498,6 +504,11 @@ callArityExpr env e@(Var id) = return transfer
       -- as a `UsageSig`.
       = return (emptyUsageType { ut_args = dataConUsageSig (idArity id) use }, e)
 
+      | gopt Opt_DmdTxDictSel (ae_dflags env)
+      , Just _ <- isClassOpId_maybe id
+      -- A dictionary component selector
+      = return (emptyUsageType { ut_args = dictSelUsageSig id use }, e)
+
       | isGlobalId id
       -- A global id from another module which has a usage signature.
       -- We don't need to track the id itself, though.
@@ -522,13 +533,17 @@ callArityExpr env (Lam id body)
         Absent -> return (emptyUsageType, Lam id body)
         Used multi body_use -> do
           (ut_body, body') <- transfer_body body_use
-          let id' | Once <- multi = id `setIdOneShotInfo` OneShotLam
-                  | otherwise = id
-          -- TODO: This *should* be OK: free vars are manified,
-          --       closed vars are not. Argument usages are manified,
-          --       which should be conservative enough.
-          let ut = multiplyUsages multi ut_body
-          return (makeIdArg id' ut, Lam id' body')
+          let (ut_body', usage_id) = findBndrUsage NonRecursive (ae_fam_envs env) ut_body id
+          let id' = applyWhen (multi == Once) (flip setIdOneShotInfo OneShotLam)
+                  . flip setIdCallArity usage_id
+                  $ id
+          -- Free vars are manified, closed vars are not. The usage of the current
+          -- argument `id` is *not* manified.
+          let ut = modifyArgs (consUsageSig usage_id)
+                 . multiplyUsages multi
+                 $ ut_body'
+          pprTrace "callArityExpr:Lam" (vcat [text "id:" <+> ppr id, text "usage:" <+> ppr usage_id, text "usage sig:" <+> ppr (ut_args ut)]) (return ())
+          return (ut, Lam id' body')
 
 callArityExpr env (App f (Type t)) = callArityExprMap env (flip App (Type t)) f
 
@@ -650,8 +665,27 @@ dataConUsageSig arity use = fromMaybe botUsageSig sig_maybe
       = Nothing
     sig_maybe = do
       product_use <- peelSingleShotCalls arity use
-      component_usages <- peelProductUse arity product_use
+      component_usages <- peelProductUse (Just arity) product_use
       return (usageSigFromUsages component_usages)
+
+dictSelUsageSig :: Id -> SingleUse -> UsageSig
+dictSelUsageSig id use
+  | Used m dict_single_call_use <- fst . unconsUsageSig . usageSigFromStrictSig . idStrictness $ id
+  , Just comps <- peelProductUse Nothing dict_single_call_use
+  = case peelCallUse use of -- The outer call is the selector. The inner use is on the actual method!
+      Just Absent -> botUsageSig
+      Just (Used Once method_use) -> specializeDictSig comps method_use
+      Just (Used Many method_use) -> manifyUsageSig (specializeDictSig comps method_use)
+  | otherwise
+  = topUsageSig
+
+specializeDictSig :: [Usage] -> SingleUse -> UsageSig
+specializeDictSig comps method_use = consUsageSig dict_usage topUsageSig
+  where
+    dict_usage = Used Once (mkProductUse (map replace_usage comps))
+    replace_usage old
+      | old == Absent = old
+      | otherwise = Used Once method_use -- This is the selector for the method we used!
 
 globalIdUsageSig :: Id -> SingleUse -> UsageSig
 globalIdUsageSig id use
@@ -719,7 +753,7 @@ findBndrsUsages rec_flag fam_envs ut = foldr step (ut, [])
 addCaseBndrUsage :: Usage -> [Usage] -> [Usage]
 addCaseBndrUsage Absent alt_bndr_usages = alt_bndr_usages
 addCaseBndrUsage (Used _ use) alt_bndr_usages
-  | Just case_comp_usages <- peelProductUse (length alt_bndr_usages) use
+  | Just case_comp_usages <- peelProductUse (Just (length alt_bndr_usages)) use
   = zipWith bothUsage case_comp_usages alt_bndr_usages
   | otherwise
   = topUsage <$ alt_bndr_usages
@@ -758,7 +792,7 @@ propagateProductUse alts scrut_uses
 addDataConStrictness :: DataCon -> SingleUse -> SingleUse
 -- See Note [Add demands for strict constructors] in DmdAnal.hs
 addDataConStrictness dc use
-  = maybe use (mkProductUse . add_component_strictness) (peelProductUse arity use)
+  = maybe use (mkProductUse . add_component_strictness) (peelProductUse (Just arity) use)
   where
     add_component_strictness :: [Usage] -> [Usage]
     add_component_strictness = zipWith add strs
@@ -801,8 +835,6 @@ registerBindingGroup env = go env emptyVarEnv
                 -- change detection for the arg usage case. This implies that
                 -- use sites of these sig nodes may only use the ut_args
                 -- component!
-                -- FIXME: Encode this in the FrameworkNode type somehow, but I
-                -- don't think it's worth the trouble.
                 --pprTrace "change_detector_down" (vcat [ppr node, ppr id, ppr (ut_args old <= ut_args new), ppr (lubUsageSig (ut_args old) (ut_args new)), ppr (ut_args old), ppr (ut_args new), ppr (ut_args old /= ut_args new)]) $
                 ASSERT2( ut_args old <= ut_args new, text "CallArity.change_detector_down: Not monotone" $$ ppr (ut_args old) $$ ppr (ut_args new) )
                 ut_args old /= ut_args new
@@ -849,8 +881,6 @@ annotateExportedIdArgUsage id transfer_rhs
     -- @UsageSig@ to be had.
     -- In that case we *could* try to analyze with arity 1, just for the
     -- signature.
-    -- TODO: Think harder about UsageSigs and how they should be handled with
-    -- Used Many.
     let single_call = iterate (mkCallUse Once) topSingleUse !! idArity id
     usage_sig <- ut_args . fst <$> transfer_rhs single_call
     return (id `setIdArgUsage` usage_sig)
