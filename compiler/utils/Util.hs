@@ -72,6 +72,9 @@ module Util (
         removeSpaces,
         (<&&>), (<||>),
 
+        -- * Functions
+        applyWhen,
+
         -- * Edit distance
         fuzzyMatch, fuzzyLookup,
 
@@ -791,6 +794,19 @@ infixr 3 <&&> -- same as (&&)
 (<||>) :: Applicative f => f Bool -> f Bool -> f Bool
 (<||>) = liftA2 (||)
 infixr 2 <||> -- same as (||)
+
+
+{-
+************************************************************************
+*                                                                      *
+\subsection[Utils-function]{Functions}
+*                                                                      *
+************************************************************************
+-}
+
+{-| `applyWhen b f x` applies `f` to `x` iff `b`. -}
+applyWhen :: Bool -> (a -> a) -> a -> a
+applyWhen b f = if b then f else id
 
 {-
 ************************************************************************

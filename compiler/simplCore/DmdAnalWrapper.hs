@@ -4,8 +4,6 @@ module DmdAnalWrapper (combinedDmdAnalProgram) where
 
 #include "HsVersions.h"
 
-import Control.Arrow ((***))
-
 import CallArity
 import CoreSyn
 import Demand
@@ -24,6 +22,7 @@ combinedDmdAnalProgram dflags fams prog = do
   -- from DA to CA. There isn't from CA to DA either, of course.
   prog' <- callArityAnalProgram dflags fams prog
   prog'' <- dmdAnalProgram dflags fams prog'
+  pprTrace "Program" (ppr prog'') $ pure ()
   return (mapBndrsProgram mergeInfo prog'')
 
 mergeInfo :: Var -> Var
@@ -31,7 +30,7 @@ mergeInfo id
   | isTyVar id
   = id
   | otherwise
-  = ASSERT2( ca_usage `leqUsage` old_usage, text "Usage should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usage <+> text "ca:" <+> ppr ca_usage <+> text "new:" <+> ppr new_demand )
+  = ASSERT2( isExportedId id || ca_usage `leqUsage` old_usage, text "Usage should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usage <+> text "ca:" <+> ppr ca_usage <+> text "new:" <+> ppr new_demand )
     ASSERT2( not (isExportedId id) || ca_usg_sig `leqUsageSig` old_usg_sig, text "UsageSig should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usg_sig <+> text "ca:" <+> ppr ca_usg_sig <+> text "new:" <+> ppr new_str_sig )
     id'
   where
@@ -51,15 +50,22 @@ mergeInfo id
 
     leqUsage l r = l `lubUsage` r == r
     leqUsageSig l r = l `lubUsageSig` r == r
-    id' = id `setIdDemandInfo` new_demand `setIdStrictness` (if isExportedId id then new_str_sig else old_str_sig)
+    id'
+      | isExportedId id = id `setIdStrictness` new_str_sig -- Only the sig matters
+      | otherwise = id `setIdDemandInfo` new_demand -- Only use sites matter
 
 
 mapBndrsProgram :: (Var -> Var) -> CoreProgram -> CoreProgram
 mapBndrsProgram f = map (mapBndrsBind f)
 
 mapBndrsBind :: (Var -> Var) -> CoreBind -> CoreBind
-mapBndrsBind f (NonRec id e) = NonRec (f id) (mapBndrsExpr f e)
-mapBndrsBind f (Rec bndrs) = Rec (map (f *** mapBndrsExpr f) bndrs)
+mapBndrsBind f (NonRec id e) = NonRec (f id) (mapBndrsExprIfNotAbsent id f e)
+mapBndrsBind f (Rec bndrs) = Rec (map (\(id, e) -> (f id, mapBndrsExprIfNotAbsent id f e)) bndrs)
+
+mapBndrsExprIfNotAbsent :: Var -> (Var -> Var) -> CoreExpr -> CoreExpr
+mapBndrsExprIfNotAbsent id f e
+  | Absent <- idCallArity id = e -- we won't have analysed e in this case.
+  | otherwise = mapBndrsExpr f e
 
 mapBndrsExpr :: (Var -> Var) -> CoreExpr -> CoreExpr
 mapBndrsExpr f e = case e of
