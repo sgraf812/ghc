@@ -200,11 +200,27 @@ peelCallUse (Call multi use) = Just (Used multi use)
 peelCallUse UnknownUse = Just topUsage
 peelCallUse _ = Nothing
 
--- | @peelProductUse (length comps) (mkProductUse comps) = Just comps@
-peelProductUse :: Arity -> SingleUse -> Maybe [Usage]
-peelProductUse n HeadUse = Just (replicate n botUsage)
-peelProductUse n UnknownUse = Just (replicate n topUsage)
-peelProductUse n (Product comps)
+-- | @peelProductUse len_hint use@ tries to treat @use@ as a product use and
+-- returns the list of usages on its components. It will adhere to the @len_hint@
+-- if supplied, meaning that the product_use is constrained to have that length.
+-- This is mostly so that `botSingleUse` and `topSingleUse`, oblivious to length
+-- information, can be translated (back) into a product use.
+--
+-- If @len_hint@ is not supplied, this function will only return `Just` in the
+-- case that @use@ actually models a proper product. Examples:
+--
+--    - @peelProductUse (Just (length comps)) (mkProductUse comps) == Just comps@
+--    - @peelProductUse Nothing (mkProductUse comps) == Just comps@
+--    - @peelProductUse (Just n) topSingleUse == Just (replicate n topUsage)@
+--    - @peelProductUse Nothing topSingleUse == Nothing@
+--    - @peelProductUse (Just n) (mkCallUse Once topSingleUse) == Nothing@
+--    - @forall n. peelProductUse (Just n) use == Nothing ==> peelProductUse Nothing use == Nothing@
+peelProductUse :: Maybe Arity -> SingleUse -> Maybe [Usage]
+peelProductUse Nothing (Product comps) = Just comps
+peelProductUse Nothing _ = Nothing
+peelProductUse (Just n) HeadUse = Just (replicate n botUsage)
+peelProductUse (Just n) UnknownUse = Just (replicate n topUsage)
+peelProductUse (Just n) (Product comps)
   = ASSERT2(comps `lengthIs` n, text "peelProductUse" $$ ppr n $$ ppr comps)
     Just comps
 peelProductUse _ (Call _ _) = Nothing -- might happen with unsafeCoerce (#9208)
@@ -434,10 +450,10 @@ multiplicityFromCount Demand.One = Once
 multiplicityFromCount Demand.Many = Many
 
 singleUseFromUseDmd :: Demand.UseDmd -> SingleUse
-singleUseFromUseDmd Demand.UHead = topSingleUse
+singleUseFromUseDmd Demand.UHead = botSingleUse
 singleUseFromUseDmd (Demand.UCall c u) = mkCallUse (multiplicityFromCount c) (singleUseFromUseDmd u)
 singleUseFromUseDmd (Demand.UProd comps) = mkProductUse (map usageFromArgUse comps)
-singleUseFromUseDmd Demand.Used = botSingleUse
+singleUseFromUseDmd Demand.Used = topSingleUse
 
 usageFromArgUse :: Demand.ArgUse -> Usage
 usageFromArgUse Demand.Abs = Absent
