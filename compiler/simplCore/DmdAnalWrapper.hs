@@ -22,7 +22,7 @@ combinedDmdAnalProgram dflags fams prog = do
   -- from DA to CA. There isn't from CA to DA either, of course.
   prog' <- callArityAnalProgram dflags fams prog
   prog'' <- dmdAnalProgram dflags fams prog'
-  pprTrace "Program" (ppr prog'') $ pure ()
+  --pprTrace "Program" (ppr prog'') $ pure ()
   return (mapBndrsProgram mergeInfo prog'')
 
 mergeInfo :: Var -> Var
@@ -32,6 +32,7 @@ mergeInfo id
   | otherwise
   = ASSERT2( isExportedId id || ca_usage `leqUsage` old_usage, text "Usage should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usage <+> text "ca:" <+> ppr ca_usage <+> text "new:" <+> ppr new_demand )
     ASSERT2( not (isExportedId id) || ca_usg_sig `leqUsageSig` old_usg_sig, text "UsageSig should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usg_sig <+> text "ca:" <+> ppr ca_usg_sig <+> text "new:" <+> ppr new_str_sig )
+    --(if idCallArity id == Absent then pprTrace "Absent" (ppr id) else \x -> x) $
     id'
   where
     -- We merge idDemandInfo with idCallArity and idStrictness with idArgUsage.
@@ -55,19 +56,19 @@ mergeInfo id
       | otherwise = id `setIdDemandInfo` new_demand -- Only use sites matter
 
 
-mapBndrsProgram :: (Var -> Var) -> CoreProgram -> CoreProgram
+mapBndrsProgram :: HasCallStack => (Var -> Var) -> CoreProgram -> CoreProgram
 mapBndrsProgram f = map (mapBndrsBind f)
 
-mapBndrsBind :: (Var -> Var) -> CoreBind -> CoreBind
+mapBndrsBind :: HasCallStack => (Var -> Var) -> CoreBind -> CoreBind
 mapBndrsBind f (NonRec id e) = NonRec (f id) (mapBndrsExprIfNotAbsent id f e)
 mapBndrsBind f (Rec bndrs) = Rec (map (\(id, e) -> (f id, mapBndrsExprIfNotAbsent id f e)) bndrs)
 
-mapBndrsExprIfNotAbsent :: Var -> (Var -> Var) -> CoreExpr -> CoreExpr
+mapBndrsExprIfNotAbsent :: HasCallStack => Var -> (Var -> Var) -> CoreExpr -> CoreExpr
 mapBndrsExprIfNotAbsent id f e
   | Absent <- idCallArity id = e -- we won't have analysed e in this case.
   | otherwise = mapBndrsExpr f e
 
-mapBndrsExpr :: (Var -> Var) -> CoreExpr -> CoreExpr
+mapBndrsExpr :: HasCallStack => (Var -> Var) -> CoreExpr -> CoreExpr
 mapBndrsExpr f e = case e of
   App func arg -> App (mapBndrsExpr f func) (mapBndrsExpr f arg)
   Lam id e -> Lam (f id) (mapBndrsExpr f e)
@@ -78,5 +79,5 @@ mapBndrsExpr f e = case e of
   Var _ -> e -- use sites carry no important annotations
   _ -> e
 
-mapBndrsAlt :: (Var -> Var) -> Alt CoreBndr -> Alt CoreBndr
+mapBndrsAlt :: HasCallStack => (Var -> Var) -> Alt CoreBndr -> Alt CoreBndr
 mapBndrsAlt f (con, bndrs, e) = (con, map f bndrs, mapBndrsExpr f e)
