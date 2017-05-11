@@ -198,7 +198,7 @@ main = do
                 Nothing -> return ()
             putMsg dflags (text n <> char ':')
             -- liftIO $ putMsg dflags (ppr e)
-            let e' = callArityRHS emptyFamInstEnvs e
+            let e' = callArityRHS dflags emptyFamInstEnvs e
             let bndrs = nonDetEltsUniqSet (allBoundIds e')
               -- It should be OK to use nonDetEltsUniqSet here, if it becomes a
               -- problem we should use DVarSet

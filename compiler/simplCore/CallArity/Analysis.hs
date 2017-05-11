@@ -11,6 +11,7 @@ import CallArity.Types
 import CallArity.FrameworkBuilder
 
 import BasicTypes
+import Coercion ( Coercion, coVarsOfCo )
 import CoreSyn
 import DataCon ( DataCon, dataConTyCon, dataConRepStrictness, isMarkedStrict )
 import DynFlags      ( DynFlags, gopt, GeneralFlag(Opt_DmdTxDictSel) )
@@ -476,16 +477,25 @@ callArityExprMap env f e
       (ut, e') <- transfer use
       return (ut, f e')
 
--- The trivial base cases
-callArityExpr _ e@(Lit _) = callArityExprTrivial e
-callArityExpr _ e@(Type _) = callArityExprTrivial e
-callArityExpr _ e@(Coercion _) = callArityExprTrivial e
+callArityExpr _ e@(Lit _)
+  = callArityExprTrivial e
+callArityExpr _ e@(Type _)
+  = callArityExprTrivial e
 
--- The transparent cases
-callArityExpr env (Tick t e) = callArityExprMap env (Tick t) e
-callArityExpr env (Cast e c) = callArityExprMap env (flip Cast c) e
+callArityExpr _ e@(Coercion co)
+  = return (\_ -> return (coercionUsageType co, e))
 
--- The interesting cases: Variables, Lambdas, Lets, Applications, Cases
+callArityExpr env (Tick t e)
+  = callArityExprMap env (Tick t) e
+
+callArityExpr env (Cast e co)
+  = transfer' <$> callArityExpr env e
+  where
+    transfer' transfer use = do
+      (ut, e') <- transfer use
+      -- like callArityExprMap, but we also have to combine with the UsageType
+      -- of the coercion.
+      return (ut `bothUsageType` coercionUsageType co, Cast e' co)
 
 callArityExpr env e@(Var id) = return transfer
   where
@@ -496,30 +506,34 @@ callArityExpr env e@(Var id) = return transfer
         (ut_callee, _) <- dependOnWithDefault (botUsageType, e) (node, use)
         -- It is crucial that we only use ut_args here, as every other field
         -- might be unstable and thus too optimistic.
-        --pprTrace "callArityExpr.Var" (vcat [ppr id, ppr use, ppr (ut_args ut_callee)]) (return ())
+        --pprTrace "callArityExpr:LocalId" (ppr id <+> ppr use <+> ppr (ut_args ut_callee)) (return ())
         return ((unitUsageType id use) { ut_args = ut_args ut_callee }, e)
 
       | isDataConWorkId id
       -- Some data constructor, on which we can try to unleash product use
       -- as a `UsageSig`.
-      = return (emptyUsageType { ut_args = dataConUsageSig (idArity id) use }, e)
+      = --pprTrace "callArityExpr:DataCon" (ppr id <+> ppr use <+> ppr (dataConUsageSig (idArity id) use)) $
+        return (emptyUsageType { ut_args = dataConUsageSig (idArity id) use }, e)
 
       | gopt Opt_DmdTxDictSel (ae_dflags env)
       , Just _ <- isClassOpId_maybe id
       -- A dictionary component selector
-      = return (emptyUsageType { ut_args = dictSelUsageSig id use }, e)
+      = --pprTrace "callArityExpr:DictSel" (ppr id <+> ppr use <+> ppr (dictSelUsageSig id use)) $
+        return (emptyUsageType { ut_args = dictSelUsageSig id use }, e)
 
       | isGlobalId id
       -- A global id from another module which has a usage signature.
       -- We don't need to track the id itself, though.
-      = return (emptyUsageType { ut_args = globalIdUsageSig id use }, e)
+      = --pprTrace "callArityExpr:GlobalId" (ppr id <+> ppr use <+> ppr (globalIdUsageSig id use)) $
+        return (emptyUsageType { ut_args = globalIdUsageSig id use }, e)
 
       | otherwise
       -- A LocalId not present in @nodes@, e.g. a lambda or case-bound variable.
       -- We are only second-order, so we don't model signatures for parameters!
       -- Their usage is interesting to note nonetheless for annotating lambda
       -- binders and scrutinees.
-      = return (unitUsageType id use, e)
+      = --pprTrace "callArityExpr:OtherId" (ppr id <+> ppr use) $
+        return (unitUsageType id use, e)
 
 callArityExpr env (Lam id body)
   | isTyVar id
@@ -542,7 +556,7 @@ callArityExpr env (Lam id body)
           let ut = modifyArgs (consUsageSig usage_id)
                  . multiplyUsages multi
                  $ ut_body'
-          pprTrace "callArityExpr:Lam" (vcat [text "id:" <+> ppr id, text "usage:" <+> ppr usage_id, text "usage sig:" <+> ppr (ut_args ut)]) (return ())
+          --pprTrace "callArityExpr:Lam" (vcat [text "id:" <+> ppr id, text "usage:" <+> ppr usage_id, text "usage sig:" <+> ppr (ut_args ut)]) (return ())
           return (ut, Lam id' body')
 
 callArityExpr env (App f (Type t)) = callArityExprMap env (flip App (Type t)) f
@@ -636,6 +650,11 @@ callArityExpr env (Let bind e) = do
         --pprTrace "Let" (ppr (ut, let')) $ return ()
         return (delUsageTypes (bindersOf bind) ut, let')
 
+coercionUsageType :: Coercion -> UsageType
+coercionUsageType co = multiplyUsages Many ut
+  where
+    ut = emptyUsageType { ut_uses = mapVarEnv (const topSingleUse) (coVarsOfCo co) }
+
 -- | Consider the expression
 --
 -- @
@@ -670,9 +689,10 @@ dataConUsageSig arity use = fromMaybe botUsageSig sig_maybe
 
 dictSelUsageSig :: Id -> SingleUse -> UsageSig
 dictSelUsageSig id use
-  | Used m dict_single_call_use <- fst . unconsUsageSig . usageSigFromStrictSig . idStrictness $ id
+  | Used _ dict_single_call_use <- fst . unconsUsageSig . usageSigFromStrictSig . idStrictness $ id
   , Just comps <- peelProductUse Nothing dict_single_call_use
   = case peelCallUse use of -- The outer call is the selector. The inner use is on the actual method!
+      Nothing -> topUsageSig -- weird
       Just Absent -> botUsageSig
       Just (Used Once method_use) -> specializeDictSig comps method_use
       Just (Used Many method_use) -> manifyUsageSig (specializeDictSig comps method_use)
@@ -765,7 +785,8 @@ setBndrsUsageInfo (b:bndrs) (usage:usages)
   = setIdCallArity b usage : setBndrsUsageInfo bndrs usages
 setBndrsUsageInfo (b:bndrs) usages
   = b : setBndrsUsageInfo bndrs usages
-setBndrsUsageInfo _ usages = pprPanic "No Ids, but a Usage left" (ppr usages)
+setBndrsUsageInfo _ usages
+  = pprPanic "No Ids, but a Usage left" (ppr usages)
 
 propagateProductUse
   :: [Alt CoreBndr]
@@ -782,7 +803,7 @@ propagateProductUse alts scrut_uses
   -- This is a good place to make sure we don't construct an infinitely depth
   -- use, which can happen when analysing e.g. lazy streams.
   -- Also see Note [Demand on scrutinee of a product case] in DmdAnal.hs.
-  = addDataConStrictness dc (boundDepth 5 scrut_use)
+  = addDataConStrictness dc (boundDepth 10 scrut_use)
 
   | otherwise
   -- We *could* lub the uses from the different branches, but there's not much
