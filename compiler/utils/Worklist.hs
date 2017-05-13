@@ -56,7 +56,6 @@ data WorklistState node lattice
   , unstable :: !(Map node (Set node)) -- unstable nodes and their changed references
   , callStack :: !(Set node)
   , referencedNodes :: !(Set node)
-  , loopBreakers :: !(Set node)
   }
 
 zoomGraph :: State (Graph node lattice) a -> State (WorklistState node lattice) a
@@ -74,17 +73,12 @@ zoomReferencedNodes modifier = state $ \st ->
   let (res, rn) = runState modifier (referencedNodes st)
   in  (res, st { referencedNodes = rn })
 
-zoomLoopBreakers :: State (Set node) a -> State (WorklistState node lattice) a
-zoomLoopBreakers modifier = state $ \st ->
-  let (res, lb) = runState modifier (loopBreakers st)
-  in  (res, st { loopBreakers = lb })
-
 initialWorklistState
   :: Map node (Set node)
   -> DataFlowFramework node lattice
   -> WorklistState node lattice
 initialWorklistState unstable fw =
-  WorklistState fw Map.empty unstable Set.empty Set.empty Set.empty
+  WorklistState fw Map.empty unstable Set.empty Set.empty
 
 dependOn :: Ord node => node -> TransferFunction node lattice (Maybe lattice)
 dependOn node = TFM $ do
@@ -94,17 +88,21 @@ dependOn node = TFM $ do
   zoomReferencedNodes (modify' (Set.insert node)) -- save that we depend on this value
   case maybeNodeInfo of
     Nothing | loopDetected -> do
-      -- We have to revisit these later
-      zoomLoopBreakers (modify' (Set.insert node))
-      --return (trace "Nothing, loop detected" Nothing)
+      -- Somewhere in an outer call stack we already compute this one.
+      -- We don't recurse again and just return Nothing.
+      -- The outer call will then recognize the instability and enqueue
+      -- itself as unstable after its first approximation is computed.
       return Nothing
+      --return (trace "Nothing, loop detected" Nothing)
     Nothing -> do
-      --fmap (\(val, _, _) -> Just val) (recompute (trace "Nothing, no loop" node))
-      fmap (\(val, _, _) -> Just val) (recompute node)
---    Just _ | isNotYetStable && not loopDetected -> do
---      fmap (\(val, _, _) -> Just val) (recompute (trace "Just, not stable" node))
+      Just <$> recompute node
+      --Just <$> recompute (trace "Nothing, no loop" node)
+    Just _ | isNotYetStable && not loopDetected -> do
+      Just <$> recompute node
+      --Just <$> recompute (trace "Just, not stable" node)
     Just info -> do
       return (value info)
+      --return (trace "Just, stable" (value info))
 
 data Diff a
   = Diff
@@ -143,55 +141,50 @@ updateGraphNode node val refs = zoomGraph $ do
 recompute
   :: Ord node
   => node
-  -> State (WorklistState node lattice) (lattice, NodeInfo node lattice, ChangeDetector node lattice)
+  -> State (WorklistState node lattice) lattice
 recompute node = do
   oldState <- get
   put $ oldState
     { referencedNodes = Set.empty
     , callStack = Set.insert node (callStack oldState)
     }
-  let (TFM transfer, changeDetector) = getTransfer (framework oldState) node
-  val <- transfer
+  let (TFM transfer, detectChange) = getTransfer (framework oldState) node
+  newVal <- transfer
   refs <- gets referencedNodes
   --pprTrace "recompute:refs" (ppr (length refs)) $ return ()
-  oldInfo <- updateGraphNode node val refs
+  oldInfo <- updateGraphNode node newVal refs
+  changedRefs <- fromMaybe Set.empty <$> deleteLookupUnstable node
+  case value oldInfo of
+    Just oldVal | not (detectChange changedRefs oldVal newVal) -> return ()
+    _ -> forM_ (referrers oldInfo) (\ref -> enqueueUnstable ref (Set.singleton node))
   modify' $ \st -> st
     { referencedNodes = referencedNodes oldState
     , callStack = callStack oldState
     }
-  return (val, oldInfo, changeDetector)
+  return newVal
 
 enqueueUnstable :: Ord node => node -> Set node -> State (WorklistState node lattice) ()
 enqueueUnstable reference referrers_ = zoomUnstable $ modify' $
   Map.alter (Just . maybe referrers_ (Set.union referrers_)) reference
 
-dequeueUnstable :: Ord node => State (WorklistState node lattice) (Maybe (node, Set node))
-dequeueUnstable = zoomUnstable $ state $ \m ->
-  maybe (Nothing, m) (first Just) (Map.maxViewWithKey m)
+deleteLookupUnstable :: Ord node => node -> State (WorklistState node lattice) (Maybe (Set node))
+deleteLookupUnstable node = zoomUnstable $ state $ Map.updateLookupWithKey (\_ _ -> Nothing) node
+
+highestPriorityUnstableNode :: Ord node => State (WorklistState node lattice) (Maybe node)
+highestPriorityUnstableNode = fmap (fst . fst) . Map.maxViewWithKey <$> gets unstable
 
 lookupReferrers :: Ord node => node -> Graph node lattice -> Set node
 lookupReferrers node = maybe Set.empty referrers . Map.lookup node
 
+whileJust_ :: Monad m => m (Maybe a) -> (a -> m b) -> m ()
+whileJust_ pred action = go
+  where
+    go = pred >>= \m -> case m of
+      Nothing -> return ()
+      Just a -> action a >> go
+
 work :: Ord node => State (WorklistState node lattice) ()
-work = do
-  m <- dequeueUnstable
-  case m of
-    Nothing -> return ()
-    Just (node, changedRefs) -> do
-      modify' $ \st -> st { loopBreakers = Set.empty, callStack = Set.empty, referencedNodes = Set.empty }
-      (newVal, oldInfo, detectChange) <- recompute node
-      -- We have to enqueue all referrers to loop breakers, e.g. nodes which we
-      -- returned `Nothing` from `dependOn` to break cyclic dependencies.
-      -- Their referrers probably aren't carrying safe values, so we have to
-      -- revisit them. This looks expensive, but loopBreakers should be pretty
-      -- rare later on.
-      g <- gets graph
-      lbs <- gets loopBreakers
-      forM_ lbs (\lb -> enqueueUnstable lb (lookupReferrers lb g))
-      case value oldInfo of
-        Just oldVal | not (detectChange changedRefs oldVal newVal) -> return ()
-        _ -> forM_ (referrers oldInfo) (\ref -> enqueueUnstable ref (Set.singleton node))
-      work
+work = whileJust_ highestPriorityUnstableNode recompute
 
 runFramework
   :: Ord node
