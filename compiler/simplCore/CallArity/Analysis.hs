@@ -630,8 +630,12 @@ callArityExpr env (Let bind e) = do
               (ut_usage, Let (Rec old_bind) _) <- dependOnWithDefault (ut_body, Let bind e') (node, use)
               let transferred_binds = map transferred_bind old_bind
               (ut, bind') <- unleashLet Recursive fam_envs transferred_binds ut_usage ut_body
-              --ut <- pprTrace "Rec:end" (ppr ids) $ return ut
-              return (ut, Let (Rec bind') e')
+              let lookup_old = lookupUsage Recursive ut_usage
+              let lookup_new = lookupUsage Recursive ut
+              let ut' | all (\id -> lookup_old id == lookup_new id) ids = markStable ut
+                      | otherwise = ut
+              --ut' <- pprTrace "Rec:end" (ppr ids) $ return ut'
+              return (ut', Let (Rec bind') e')
 
         let change_detector :: ChangeDetector
             change_detector changed_refs (old, _) (new, _) =
@@ -640,7 +644,8 @@ callArityExpr env (Let bind e) = do
               --pprTrace "change_detector" (vcat[ppr ids, ppr node, ppr changed_refs]) $
               --pprTrace "change_detector" (vcat[ppr node, ppr changed_refs, ppr old, ppr new]) $
               map fst (Set.toList changed_refs) /= [node]
-              || any (\id -> lookupUsage Recursive old id /= lookupUsage Recursive new id) ids
+              || not (ut_stable old) 
+              || not (ut_stable new) -- set in the transfer function through markStable
 
         return (node, (transfer, change_detector))
 

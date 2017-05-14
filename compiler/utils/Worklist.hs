@@ -4,7 +4,7 @@
 module Worklist where
 
 import Control.Arrow (first)
-import Control.Monad (forM_)
+import Control.Monad (forM_, when)
 import Control.Monad.Trans.State.Strict
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -153,10 +153,16 @@ recompute node = do
   refs <- gets referencedNodes
   --pprTrace "recompute:refs" (ppr (length refs)) $ return ()
   oldInfo <- updateGraphNode node newVal refs
+  --pprTrace "recompute:referrers" (ppr (length (referrers oldInfo))) $ return ()
   changedRefs <- fromMaybe Set.empty <$> deleteLookupUnstable node
   case value oldInfo of
     Just oldVal | not (detectChange changedRefs oldVal newVal) -> return ()
-    _ -> forM_ (referrers oldInfo) (\ref -> enqueueUnstable ref (Set.singleton node))
+    _ -> do
+      forM_ (referrers oldInfo) (\ref -> enqueueUnstable ref (Set.singleton node))
+      -- If the node depends itself the first time (e.g. when it gets its first value),
+      -- that will not be reflected in `oldInfo`. So we enqueue it manually
+      -- if that is the case.
+      when (Set.member node refs) (enqueueUnstable node (Set.singleton node))
   modify' $ \st -> st
     { referencedNodes = referencedNodes oldState
     , callStack = callStack oldState
@@ -168,13 +174,11 @@ enqueueUnstable reference referrers_ = zoomUnstable $ modify' $
   Map.alter (Just . maybe referrers_ (Set.union referrers_)) reference
 
 deleteLookupUnstable :: Ord node => node -> State (WorklistState node lattice) (Maybe (Set node))
-deleteLookupUnstable node = zoomUnstable $ state $ Map.updateLookupWithKey (\_ _ -> Nothing) node
+deleteLookupUnstable node = zoomUnstable $ state $ 
+  Map.updateLookupWithKey (\_ _ -> Nothing) node
 
 highestPriorityUnstableNode :: Ord node => State (WorklistState node lattice) (Maybe node)
 highestPriorityUnstableNode = fmap (fst . fst) . Map.maxViewWithKey <$> gets unstable
-
-lookupReferrers :: Ord node => node -> Graph node lattice -> Set node
-lookupReferrers node = maybe Set.empty referrers . Map.lookup node
 
 whileJust_ :: Monad m => m (Maybe a) -> (a -> m b) -> m ()
 whileJust_ pred action = go

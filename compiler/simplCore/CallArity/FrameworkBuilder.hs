@@ -75,10 +75,10 @@ registerTransferFunction prio f = FB $ do
   return result
 
 dependOnWithDefault :: AnalResult -> (FrameworkNode, SingleUse) -> TransferFunction AnalResult
-dependOnWithDefault def (node, use) = do
-  --use <- pprTrace "dependOnWithDefault:before" (text "node:" <+> ppr node <+> text "use:" <+> ppr use) $ return use
-  res <- fromMaybe def <$> Worklist.dependOn (node, use)
-  --res <- pprTrace "dependOnWithDefault:after" (vcat [text "node:" <+> ppr node, text "use:" <+> ppr use]) $ return res
+dependOnWithDefault def which = do
+  --which <- pprTrace "dependOnWithDefault:before" (ppr which) (return which)
+  res <- fromMaybe def <$> Worklist.dependOn which
+  --res <- pprTrace "dependOnWithDefault:after " (ppr which) (return res)
   return res
 
 buildAndRun :: FrameworkBuilder (SingleUse -> TransferFunction AnalResult) -> SingleUse -> AnalResult
