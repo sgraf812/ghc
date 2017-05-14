@@ -18,12 +18,14 @@ import VarEnv
 data UsageType
   = UT
   { ut_cocalled :: !UnVarGraph
-  -- ^ Models cardinality, e.g. at most {1, many} via the co-call relation for
-  -- _interesting_ variables
+  -- ^ Models cardinality, e.g. at most {1, many} via the co-call relation
   , ut_uses :: !(VarEnv SingleUse)
-  -- ^ Models per var usage and absence (card 0)
+  -- ^ Models how an Id was used, if at all
   , ut_args :: !UsageSig
   -- ^ Collects the signature for captured lambda binders
+  , ut_stable :: Bool
+  -- ^ Entirely irrelevant for Usage information, but needed for detecting
+  -- stabilization of fixed-point iteration.
   }
 
 modifyArgs :: (UsageSig -> UsageSig) -> UsageType -> UsageType
@@ -37,7 +39,7 @@ modifyCoCalls modifier ut = ut { ut_cocalled = modifier (ut_cocalled ut) }
 type AnalResult = (UsageType, CoreExpr)
 
 emptyUsageType :: UsageType
-emptyUsageType = UT emptyUnVarGraph emptyVarEnv topUsageSig
+emptyUsageType = UT emptyUnVarGraph emptyVarEnv topUsageSig False
 
 botUsageType :: UsageType
 botUsageType = unusedArgs emptyUsageType
@@ -52,7 +54,7 @@ delUsageTypes :: [Id] -> UsageType -> UsageType
 delUsageTypes ids ae = foldr delUsageType ae ids
 
 delUsageType :: Id -> UsageType -> UsageType
-delUsageType id (UT g ae args) = UT (g `delNode` id) (ae `delVarEnv` id) args
+delUsageType id (UT g ae args s) = UT (g `delNode` id) (ae `delVarEnv` id) args s
 
 domType :: UsageType -> UnVarSet
 domType ut = varEnvDom (ut_uses ut)
@@ -63,7 +65,7 @@ makeIdArg id ut = delUsageType id (modifyArgs (consUsageSig (lookupUsage NonRecu
 -- In the result, find out the minimum arity and whether the variable is called
 -- at most once.
 lookupUsage :: RecFlag -> UsageType -> Id -> Usage
-lookupUsage rec (UT g ae _) id = case lookupVarEnv ae id of
+lookupUsage rec (UT g ae _ _) id = case lookupVarEnv ae id of
   Just use
     | id `elemUnVarSet` neighbors g id -> Used Many use
     -- we assume recursive bindings to be called multiple times, what's the
@@ -80,31 +82,34 @@ calledWith ut id = neighbors (ut_cocalled ut) id
 -- Replaces the co-call graph by a complete graph (i.e. no information)
 multiplyUsages :: Multiplicity -> UsageType -> UsageType
 multiplyUsages Once ut = ut
-multiplyUsages Many ut@(UT _ u args)
+multiplyUsages Many ut@(UT _ u args _)
   = UT
   { ut_cocalled = completeGraph (domType ut)
   , ut_uses = mapVarEnv (\use -> bothSingleUse use use) u
   , ut_args = manifyUsageSig args
+  , ut_stable = False
   }
 
 -- | Corresponds to sequential composition of expressions.
 -- Used for application and cases.
 -- Note this returns the @UsageSig@ from the first argument.
 bothUsageType :: UsageType -> UsageType -> UsageType
-bothUsageType ut1@(UT g1 u1 args) ut2@(UT g2 u2 _)
+bothUsageType ut1@(UT g1 u1 args _) ut2@(UT g2 u2 _ _)
   = UT
   { ut_cocalled = unionUnVarGraphs [g1, g2, completeBipartiteGraph (domType ut1) (domType ut2)]
   , ut_uses = bothUseEnv u1 u2
   , ut_args = args
+  , ut_stable = False
   }
 
 -- | Used when combining results from alternative cases
 lubUsageType :: UsageType -> UsageType -> UsageType
-lubUsageType (UT g1 u1 args1) (UT g2 u2 args2)
+lubUsageType (UT g1 u1 args1 _) (UT g2 u2 args2 _)
   = UT
   { ut_cocalled = unionUnVarGraph g1 g2
   , ut_uses = lubUseEnv u1 u2
   , ut_args = lubUsageSig args1 args2
+  , ut_stable = False
   }
 
 lubUseEnv :: VarEnv SingleUse -> VarEnv SingleUse -> VarEnv SingleUse
@@ -123,10 +128,13 @@ peelArgUsage ut = (usg, ut { ut_args = args' })
   where
     (usg, args') = unconsUsageSig (ut_args ut)
 
+markStable :: UsageType -> UsageType
+markStable ut = ut { ut_stable = True }
+
 -- * Pretty-printing
 
 instance Outputable UsageType where
-  ppr (UT cocalled arities args) = vcat
+  ppr (UT cocalled arities args _) = vcat
     [ text "arg usages:" <+> ppr args
     , text "co-calls:" <+> ppr cocalled
     , text "uses:" <+> ppr arities
