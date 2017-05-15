@@ -8,7 +8,7 @@ module Usage
   , Usage (..)
   , multiplicity, botUsage, topUsage, lubUsage, bothUsage
   , seqUsage
-  , manifyUsage, expandArity
+  , manifyUsage, oneifyUsage, expandArity
   , UsageSig
   , botUsageSig, topUsageSig, lubUsageSig
   , consUsageSig, unconsUsageSig, usageSigFromUsages, manifyUsageSig
@@ -281,6 +281,10 @@ seqUsage = Used Once HeadUse
 -- `Usage` of the top-level expression (e.g. without applying any args).
 manifyUsage :: Usage -> Usage
 manifyUsage u = bothUsage u u
+
+oneifyUsage :: Usage -> Usage
+oneifyUsage Absent = Absent
+oneifyUsage (Used _ use) = Used Once use
 
 expandArity :: Usage -> Arity -> Arity
 expandArity Absent cheap_arity

@@ -4,7 +4,7 @@ Result size of Tidy Core = {terms: 59, types: 41, coercions: 0}
 
 -- RHS size: {terms: 39, types: 23, coercions: 0}
 pm [InlPrag=NOINLINE] :: Int -> Int -> (Int, Int)
-[GblId, Arity=2, Str=<L,U(U)><L,U(U)>m]
+[GblId, Arity=2, Str=<L,U><L,U>m]
 pm =
   \ (x_axr :: Int) (y_axs :: Int) ->
     let {
@@ -31,7 +31,7 @@ pm =
 m :: Int -> Int -> Int
 [GblId,
  Arity=2,
- Str=<L,U(U)><L,U(U)>,
+ Str=<L,U><L,U>,
  Unf=Unf{Src=InlineStable, TopLvl=True, Value=True, ConLike=True, WorkFree=True, Expandable=True,
          Guidance=ALWAYS_IF(arity=2,unsat_ok=True,boring_ok=False)
          Tmpl= \ (x_aCt [Occ=Once] :: Int) (y_aCu [Occ=Once] :: Int) ->

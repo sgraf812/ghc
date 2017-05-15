@@ -13,6 +13,7 @@ import CallArity.FrameworkBuilder
 import BasicTypes
 import Coercion ( Coercion, coVarsOfCo )
 import CoreSyn
+import CoreUtils ( exprIsTrivial )
 import DataCon ( DataCon, dataConTyCon, dataConRepStrictness, isMarkedStrict )
 import DynFlags      ( DynFlags, gopt, GeneralFlag(Opt_DmdTxDictSel) )
 import FamInstEnv
@@ -29,6 +30,7 @@ import Var ( isId, isTyVar )
 import VarEnv
 import WwLib ( findTypeShape )
 
+import Control.Arrow ( first )
 import Control.Monad ( forM )
 import qualified Data.Set as Set
 
@@ -569,16 +571,17 @@ callArityExpr env (App f a) = do
     --pprTrace "App:f'" (ppr f') $ return ()
     -- peel off one argument from the type
     let (arg_usage, ut_f') = peelArgUsage ut_f
-    case arg_usage of
+    case considerThunkSharing a arg_usage of
       Absent -> return (ut_f', App f' a)
-      Used _ arg_use -> do
-          -- We can ignore the multiplicity, as the work done before the first
-          -- lambda is uncovered will be shared (call-by-need!). This is the same
-          -- argument as for let-bound right hand sides.
-          -- Although we could use the multiplicity in the same way we do for
+      Used m arg_use -> do
+          -- `m` will be `Once` most of the time (see `considerThunkSharing`),
+          -- so that all work before the lambda is uncovered will be shared 
+          -- (call-by-need!). This is the same argument as for let-bound 
+          -- right hand sides.
+          -- We could also use the multiplicity in the same way we do for
           -- let-bindings: An argument only used once does not need to be
           -- memoized.
-          (ut_a, a') <- transfer_a arg_use
+          (ut_a, a') <- first (multiplyUsages m) <$> transfer_a arg_use
           --pprTrace "App:a'" (text "arg_use:" <+> ppr arg_use <+> ppr (ut_a, a')) $ return ()
           return (ut_f' `bothUsageType` ut_a, App f' a')
 
@@ -731,6 +734,15 @@ globalIdUsageSig id use
     mk_one_shot = mkCallUse Once
     no_call = iterate mk_one_shot botSingleUse !! max 0 (arity - 1)
     single_call = iterate mk_one_shot topSingleUse !! arity
+
+-- | Evaluation of a non-trivial RHS of a let-binding or argument 
+-- is shared (call-by-need!). GHC however doesn't allocate a new thunk
+-- if it finds the expression to bind to be trivial (`exprIsTrivial`).
+-- This makes sure we share usage only if this is not the case.
+considerThunkSharing :: CoreExpr -> Usage -> Usage
+considerThunkSharing e
+  | exprIsTrivial e = id
+  | otherwise = oneifyUsage
 
 analyseCaseAlternative
   :: AnalEnv
@@ -918,12 +930,14 @@ unleashUsage
 unleashUsage rhs transfer_rhs usage
   | Absent <- usage
   = return (emptyUsageType, rhs)
-  | Used _ use <- usage
-  -- The work required to get the RHS of let-bindings to WHNF is shared among
-  -- all use sites, so the multiplicity can be ignored *when analysing the RHS*.
-  -- We still annotate the binder with the multiplity later on, as @Once@ means
-  -- we don't have to memoize the result.
-  = transfer_rhs use
+  | Used m use <- considerThunkSharing rhs usage
+  -- As with arguments, `m` should be `Once` most of the time 
+  -- (e.g. if `rhs` is non-trivial, see `considerThunkSharing`).
+  -- Thus, the work required to get the RHS of let-bindings 
+  -- to WHNF is shared among all use sites.
+  -- We still annotate the binder with the multiplicity later on, 
+  -- as @Once@ means we don't have to memoize the result anyway.
+  = first (multiplyUsages m) <$> transfer_rhs use
 
 -- Combining the results from body and rhs of a let binding
 -- See Note [Analysis II: The Co-Called analysis]

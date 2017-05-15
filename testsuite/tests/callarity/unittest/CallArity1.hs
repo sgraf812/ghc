@@ -181,7 +181,7 @@ exprs =
     mkLet d (f `mkLApps` [0]) $
         mkLet n (mkLams [y] $ d `mkLApps` [1]) $
             elimPair (mkVarPair d n) (_1 `mkLApps` [0])
-  , ("calling the second tuple component twice (expect n 1*U and d w*U by transitivity)",) $
+  , ("calling the second tuple component twice (expect n w*U and d w*U by transitivity)",) $
     mkLet d (f `mkLApps` [0]) $
         mkLet n (mkLams [y] $ d `mkLApps` [1]) $
             elimPair (mkVarPair d n) (Var _2 `mkApps` [_2 `mkLApps` [0]])
