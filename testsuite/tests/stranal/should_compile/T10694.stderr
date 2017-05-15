@@ -4,7 +4,7 @@ Result size of Tidy Core = {terms: 70, types: 63, coercions: 0}
 
 -- RHS size: {terms: 39, types: 25, coercions: 0}
 T10694.$wpm [InlPrag=NOINLINE] :: Int -> Int -> (# Int, Int #)
-[GblId, Arity=2, Str=<L,U(U)><L,U(U)>]
+[GblId, Arity=2, Str=<L,U><L,U>m]
 T10694.$wpm =
   \ (w_sVU :: Int) (w1_sVV :: Int) ->
     let {
@@ -40,7 +40,7 @@ pm = \ (w_sVU :: Int) (w1_sVV :: Int) -> case T10694.$wpm w_sVU w1_sVV of { (# w
 m :: Int -> Int -> Int
 [GblId,
  Arity=2,
- Str=<L,U(U)><L,U(U)>,
+ Str=<L,U><L,U>,
  Unf=Unf{Src=InlineStable, TopLvl=True, Value=True, ConLike=True, WorkFree=True, Expandable=True,
          Guidance=ALWAYS_IF(arity=2,unsat_ok=True,boring_ok=False)
          Tmpl= \ (x_aCT [Occ=Once] :: Int) (y_aCU [Occ=Once] :: Int) ->
