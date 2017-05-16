@@ -680,7 +680,7 @@ coercionUsageType co = multiplyUsages Many ut
 -- to the constructors `idArity`, then peel off the product use to get at the
 -- usage on its components.
 dataConUsageSig :: Arity -> SingleUse -> UsageSig
-dataConUsageSig arity use = fromMaybe botUsageSig sig_maybe
+dataConUsageSig arity use = fromMaybe topUsageSig sig_maybe
   where
     peelSingleShotCalls 0 use = Just use
     peelSingleShotCalls n call
@@ -799,7 +799,8 @@ setBndrsUsageInfo :: [Var] -> [Usage] -> [Var]
 setBndrsUsageInfo [] [] = []
 setBndrsUsageInfo (b:bndrs) (usage:usages)
   | isId b
-  = setIdCallArity b usage : setBndrsUsageInfo bndrs usages
+  = --pprTrace "setBndrInfo" (ppr b <+> ppr usage) 
+    (setIdCallArity b usage) : setBndrsUsageInfo bndrs usages
 setBndrsUsageInfo (b:bndrs) usages
   = b : setBndrsUsageInfo bndrs usages
 setBndrsUsageInfo _ usages
