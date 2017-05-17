@@ -32,7 +32,7 @@ mergeInfo id
   | otherwise
   = ASSERT2( isExportedId id || ca_usage `leqUsage` old_usage, text "Usage should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usage <+> text "ca:" <+> ppr ca_usage <+> text "new:" <+> ppr new_demand )
     ASSERT2( not (isExportedId id) || ca_usg_sig `leqUsageSig` old_usg_sig, text "UsageSig should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usg_sig <+> text "ca:" <+> ppr ca_usg_sig <+> text "new:" <+> ppr new_str_sig )
-    --(if idCallArity id == Absent then pprTrace "Absent" (ppr id) else \x -> x) $
+    --pprTrace "mergeInfo" (ppr id <+> text "Demand:" <+> ppr old_demand <+> ppr ca_usage <+> ppr new_demand <+> text "Strictness" <+> ppr old_str_sig <+> ppr ca_usg_sig <+> ppr new_str_sig) $
     id'
   where
     -- We merge idDemandInfo with idCallArity and idStrictness with idArgUsage.

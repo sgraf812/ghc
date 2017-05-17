@@ -830,8 +830,9 @@ propagateProductUse alts scrut_uses
 
 addDataConStrictness :: DataCon -> SingleUse -> SingleUse
 -- See Note [Add demands for strict constructors] in DmdAnal.hs
-addDataConStrictness dc use
-  = maybe use (mkProductUse . add_component_strictness) (peelProductUse (Just arity) use)
+addDataConStrictness dc
+  = maybe topSingleUse (mkProductUse . add_component_strictness) 
+  . peelProductUse (Just arity) 
   where
     add_component_strictness :: [Usage] -> [Usage]
     add_component_strictness = zipWith add strs
