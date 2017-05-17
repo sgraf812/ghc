@@ -495,12 +495,15 @@ mkWWstr_one dflags fam_envs arg
                 -- during simplification, so for now I've just nuked this whole case
 
   | isStrictDmd dmd
-  , Just cs <- splitProdDmd_maybe dmd
-      -- See Note [Unpacking arguments with product and polymorphic demands]
   , Just (data_con, inst_tys, inst_con_arg_tys, co)
              <- deepSplitProductType_maybe fam_envs (idType arg)
+  , Just cs <- splitProdDmd (length inst_con_arg_tys) dmd
+      -- See Note [Unpacking arguments with product and polymorphic demands]
   , cs `equalLength` inst_con_arg_tys
       -- See Note [mkWWstr and unsafeCoerce]
+  , length (filter (not . isAbsDmd) cs) < 16 
+      -- The 16 is quite arbitrary, so that we don't run into the problem outlined in 
+      -- Note [Unpacking arguments with product and polymorphic demands]
   = do { (uniq1:uniqs) <- getUniquesM
         ; let   unpk_args = zipWith3 mk_ww_arg uniqs inst_con_arg_tys cs
                 unbox_fn  = mkUnpackCase (Var arg) co uniq1
