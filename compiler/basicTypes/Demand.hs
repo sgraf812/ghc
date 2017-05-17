@@ -48,7 +48,7 @@ module Demand (
         deferAfterIO,
         postProcessUnsat, postProcessDmdType,
 
-        splitProdDmd_maybe, peelCallDmd, mkCallDmd, mkWorkerDemand,
+        splitProdDmd_maybe, splitProdDmd, peelCallDmd, mkCallDmd, mkWorkerDemand,
         dmdTransformSig, dmdTransformDataConSig, dmdTransformDictSelSig,
         argOneShots, argsOneShots, saturatedByOneShots,
         trimToType, TypeShape(..),
@@ -930,6 +930,13 @@ splitProdDmd_maybe (JD { sd = s, ud = u })
                                   -> Just (mkJointDmds sx ux)
       (Lazy,    Use _ (UProd ux)) -> Just (mkJointDmds (replicate (length ux) Lazy) ux)
       _ -> Nothing
+
+splitProdDmd :: Int -> Demand -> Maybe [Demand]
+splitProdDmd n JD { sd = as, ud = au }
+  = do
+    let Str _ s = as
+    let Use _ u = au
+    mkJointDmds <$> splitStrProdDmd n s <*> splitUseProdDmd n u
 
 {-
 ************************************************************************

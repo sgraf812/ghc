@@ -81,7 +81,9 @@ mkCallUse m u = Call m u
 -- @Product [botUsage, botUsage..] === botSingleUse@.
 mkProductUse :: [Usage] -> SingleUse
 mkProductUse components
-  | all (== topUsage) components = topSingleUse
+  -- This contradicts Note [Don't optimise UProd(Used) to Used], but
+  -- I fixed the issue with WW that probably was the reason for the hack.
+  | all (== topUsage) components = topSingleUse 
   | all (== botUsage) components = botSingleUse
   | otherwise = Product components
 
