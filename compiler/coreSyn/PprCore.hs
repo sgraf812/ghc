@@ -432,17 +432,20 @@ pprIdBndrInfo info
     prag_info = inlinePragInfo info
     occ_info  = occInfo info
     dmd_info  = demandInfo info
+    usg_info  = callArityInfo info
     lbv_info  = oneShotInfo info
 
     has_prag  = not (isDefaultInlinePragma prag_info)
     has_occ   = not (isManyOccs occ_info)
     has_dmd   = not $ isTopDmd dmd_info
+    has_usg   = usg_info /= topUsage
     has_lbv   = not (hasNoOneShotInfo lbv_info)
 
     doc = showAttributes
           [ (has_prag, text "InlPrag=" <> pprInlineDebug prag_info)
           , (has_occ,  text "Occ=" <> ppr occ_info)
           , (has_dmd,  text "Dmd=" <> ppr dmd_info)
+          , (has_usg,  text "Usg=" <> ppr usg_info)
           , (has_lbv , text "OS=" <> ppr lbv_info)
           ]
 
@@ -459,10 +462,9 @@ ppIdInfo id info
     showAttributes
     [ (True, pp_scope <> ppr (idDetails id))
     , (has_arity,        text "Arity=" <> int arity)
-    , (has_arg_usage,    text "Usg=" <> ppr called_arity)
-    , (has_called_arity, text "CallArity=" <> ppr called_arity)
     , (has_caf_info,     text "Caf=" <> ppr caf_info)
     , (has_str_info,     text "Str=" <> pprStrictness str_info)
+    , (has_arg_usage,    text "ArgUsg=" <> ppr arg_usage)
     , (has_unf,          text "Unf=" <> ppr unf_info)
     , (not (null rules), text "RULES:" <+> vcat (map pprRule rules))
     ]   -- Inline pragma, occ, demand, one-shot info
