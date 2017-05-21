@@ -25,12 +25,16 @@ combinedDmdAnalProgram dflags fams prog = do
   --pprTrace "Program" (ppr prog'') $ pure ()
   return (mapBndrsProgram mergeInfo prog'')
 
-mergeInfo :: Var -> Var
-mergeInfo id
+mergeInfo :: Bool -> Var -> Var
+mergeInfo isLamBndr id
   | isTyVar id
   = id
-  | otherwise
-  = ASSERT2( isExportedId id || ca_usage `leqUsage` old_usage, text "Usage should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usage <+> text "ca:" <+> ppr ca_usage <+> text "new:" <+> ppr new_demand )
+  | otherwise 
+  -- Since LetDown analyzes the RHS stripped-off of lambdas only once with U 
+  -- instead of the whole expression, we get more conservative results in our
+  -- new analysis, where there might be multiplied uses on lambda binders if
+  -- it has more than one lambda. In that case we have to relax the assert.
+  = ASSERT2( isLamBndr || isExportedId id || ca_usage `leqUsage` old_usage, text "Usage should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usage <+> text "ca:" <+> ppr ca_usage <+> text "new:" <+> ppr new_demand )
     ASSERT2( not (isExportedId id) || ca_usg_sig `leqUsageSig` old_usg_sig, text "UsageSig should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usg_sig <+> text "ca:" <+> ppr ca_usg_sig <+> text "new:" <+> ppr new_str_sig )
     --pprTrace "mergeInfo" (ppr id <+> text "Demand:" <+> ppr old_demand <+> ppr ca_usage <+> ppr new_demand <+> text "Strictness" <+> ppr old_str_sig <+> ppr ca_usg_sig <+> ppr new_str_sig) $
     id'
@@ -56,28 +60,28 @@ mergeInfo id
       | otherwise = id `setIdDemandInfo` new_demand -- Only use sites matter
 
 
-mapBndrsProgram :: HasCallStack => (Var -> Var) -> CoreProgram -> CoreProgram
+mapBndrsProgram :: (Bool -> Var -> Var) -> CoreProgram -> CoreProgram
 mapBndrsProgram f = map (mapBndrsBind f)
 
-mapBndrsBind :: HasCallStack => (Var -> Var) -> CoreBind -> CoreBind
-mapBndrsBind f (NonRec id e) = NonRec (f id) (mapBndrsExprIfNotAbsent id f e)
-mapBndrsBind f (Rec bndrs) = Rec (map (\(id, e) -> (f id, mapBndrsExprIfNotAbsent id f e)) bndrs)
+mapBndrsBind :: (Bool -> Var -> Var) -> CoreBind -> CoreBind
+mapBndrsBind f (NonRec id e) = NonRec (f False id) (mapBndrsExprIfNotAbsent id f e)
+mapBndrsBind f (Rec bndrs) = Rec (map (\(id, e) -> (f False id, mapBndrsExprIfNotAbsent id f e)) bndrs)
 
-mapBndrsExprIfNotAbsent :: HasCallStack => Var -> (Var -> Var) -> CoreExpr -> CoreExpr
+mapBndrsExprIfNotAbsent :: Var -> (Bool -> Var -> Var) -> CoreExpr -> CoreExpr
 mapBndrsExprIfNotAbsent id f e
   | Absent <- idCallArity id = e -- we won't have analysed e in this case.
   | otherwise = mapBndrsExpr f e
 
-mapBndrsExpr :: HasCallStack => (Var -> Var) -> CoreExpr -> CoreExpr
+mapBndrsExpr :: (Bool -> Var -> Var) -> CoreExpr -> CoreExpr
 mapBndrsExpr f e = case e of
   App func arg -> App (mapBndrsExpr f func) (mapBndrsExpr f arg)
-  Lam id e -> Lam (f id) (mapBndrsExpr f e)
+  Lam id e -> Lam (f True id) (mapBndrsExpr f e)
   Let bind body -> Let (mapBndrsBind f bind) (mapBndrsExpr f body)
-  Case scrut id ty alts -> Case (mapBndrsExpr f scrut) (f id) ty (map (mapBndrsAlt f) alts)
+  Case scrut id ty alts -> Case (mapBndrsExpr f scrut) (f False id) ty (map (mapBndrsAlt f) alts)
   Cast e co -> Cast (mapBndrsExpr f e) co
   Tick t e -> Tick t (mapBndrsExpr f e)
   Var _ -> e -- use sites carry no important annotations
   _ -> e
 
-mapBndrsAlt :: HasCallStack => (Var -> Var) -> Alt CoreBndr -> Alt CoreBndr
-mapBndrsAlt f (con, bndrs, e) = (con, map f bndrs, mapBndrsExpr f e)
+mapBndrsAlt :: (Bool -> Var -> Var) -> Alt CoreBndr -> Alt CoreBndr
+mapBndrsAlt f (con, bndrs, e) = (con, map (f False) bndrs, mapBndrsExpr f e)

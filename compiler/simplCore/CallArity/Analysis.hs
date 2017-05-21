@@ -11,23 +11,25 @@ import CallArity.Types
 import CallArity.FrameworkBuilder
 
 import BasicTypes
+import Class
 import Coercion ( Coercion, coVarsOfCo )
 import CoreSyn
 import CoreUtils ( exprIsTrivial )
-import DataCon ( DataCon, dataConTyCon, dataConRepStrictness, isMarkedStrict )
+import DataCon
 import DynFlags      ( DynFlags, gopt, GeneralFlag(Opt_DmdTxDictSel) )
 import FamInstEnv
 import Id
 import Maybes ( expectJust, fromMaybe, isJust )
 import MkCore
 import Outputable
-import TyCon ( isDataProductTyCon_maybe )
+import TyCon ( isDataProductTyCon_maybe, tyConSingleDataCon_maybe )
 import UniqFM
 import UnVarGraph
 import Usage
 import Util
 import Var ( isId, isTyVar )
 import VarEnv
+import VarSet
 import WwLib ( findTypeShape )
 
 import Control.Arrow ( first )
@@ -429,14 +431,22 @@ extendAnalEnv env id node = env { ae_sigs = extendVarEnv (ae_sigs env) id node }
 -- nested lets, where the exports are returned in the inner-most let
 -- as a tuple. As a result, all exported identifiers are handled as called
 -- with each other, with `topUsage`.
+--
+-- FIXME: Currently, this doesn't play well with Unfoldings exposed by e.g.
+-- Worker wrapper, which effectively export non-exported bindings. So
+-- we simply regard every top-level binding as exported for now.
+-- Something more optimistic like looking at the unfolding and adding all
+-- `exprFreeIds` as used multiple times might work, too. This is not something
+-- I'd like to work on right now, though.
 moduleToExpr :: CoreProgram -> CoreExpr
-moduleToExpr = impl []
+moduleToExpr = impl emptyDVarSet
   where
-    impl exported []
+    impl exposed []
       -- @duplicate@, otherwise those Vars appear to be used once
-      = mkBigCoreVarTup (duplicate exported)
-    impl exported (bind:prog)
-      = Let bind (impl (filter isExportedId (bindersOf bind) ++ exported) prog)
+      = mkBigCoreVarTup (duplicate (dVarSetElems exposed))
+    impl exposed (bind:prog)
+      = Let bind (impl (exposed_ids bind `unionDVarSet` exposed) prog)
+    exposed_ids bind = mkDVarSet (bindersOf bind)
     duplicate = concatMap (replicate 2)
 
 -- | The left inverse to `moduleToExpr`: `exprToModule . moduleToExpr = id \@CoreProgram`
@@ -511,31 +521,32 @@ callArityExpr env e@(Var id) = return transfer
         --pprTrace "callArityExpr:LocalId" (ppr id <+> ppr use <+> ppr (ut_args ut_callee)) (return ())
         return ((unitUsageType id use) { ut_args = ut_args ut_callee }, e)
 
-      | isDataConWorkId id
-      -- Some data constructor, on which we can try to unleash product use
-      -- as a `UsageSig`.
-      = --pprTrace "callArityExpr:DataCon" (ppr id <+> ppr use <+> ppr (dataConUsageSig (idArity id) use)) $
-        return (emptyUsageType { ut_args = dataConUsageSig (idArity id) use }, e)
-
-      | gopt Opt_DmdTxDictSel (ae_dflags env)
-      , Just _ <- isClassOpId_maybe id
-      -- A dictionary component selector
-      = --pprTrace "callArityExpr:DictSel" (ppr id <+> ppr use <+> ppr (dictSelUsageSig id use)) $
-        return (emptyUsageType { ut_args = dictSelUsageSig id use }, e)
-
-      | isGlobalId id
-      -- A global id from another module which has a usage signature.
-      -- We don't need to track the id itself, though.
-      = --pprTrace "callArityExpr:GlobalId" (ppr id <+> ppr use <+> ppr (globalIdUsageSig id use)) $
-        return (emptyUsageType { ut_args = globalIdUsageSig id use }, e)
-
-      | otherwise
+      | isLocalId id
       -- A LocalId not present in @nodes@, e.g. a lambda or case-bound variable.
       -- We are only second-order, so we don't model signatures for parameters!
       -- Their usage is interesting to note nonetheless for annotating lambda
       -- binders and scrutinees.
       = --pprTrace "callArityExpr:OtherId" (ppr id <+> ppr use) $
         return (unitUsageType id use, e)
+
+      -- The other cases handle global ids
+      | Just dc <- ASSERT( isGlobalId id ) (isDataConWorkId_maybe id)
+      -- Some data constructor, on which we can try to unleash product use
+      -- as a `UsageSig`.
+      = --pprTrace "callArityExpr:DataCon" (ppr id <+> ppr use <+> ppr (dataConUsageSig dc use)) $
+        return (emptyUsageType { ut_args = dataConUsageSig dc use }, e)
+
+      | gopt Opt_DmdTxDictSel (ae_dflags env)
+      , Just clazz <- isClassOpId_maybe id
+      -- A dictionary component selector
+      = --pprTrace "callArityExpr:DictSel" (ppr id <+> ppr use <+> ppr (dictSelUsageSig id clazz use)) $
+        return (emptyUsageType { ut_args = dictSelUsageSig id clazz use }, e)
+
+      | otherwise
+      -- A global id from another module which has a usage signature.
+      -- We don't need to track the id itself, though.
+      = --pprTrace "callArityExpr:GlobalId" (ppr id <+> ppr (idArity id) <+> ppr use <+> ppr (globalIdUsageSig id use) <+> ppr (idDetails id)) $
+        return (emptyUsageType { ut_args = globalIdUsageSig id use }, e)
 
 callArityExpr env (Lam id body)
   | isTyVar id
@@ -547,7 +558,7 @@ callArityExpr env (Lam id body)
     return $ \use ->
       case fromMaybe topUsage (peelCallUse use) of -- Get at the relative @Usage@ of the body
         Absent -> return (emptyUsageType, Lam id body)
-        Used multi body_use -> do
+        u@(Used multi body_use) -> do
           (ut_body, body') <- transfer_body body_use
           let (ut_body', usage_id) = findBndrUsage NonRecursive (ae_fam_envs env) ut_body id
           let id' = applyWhen (multi == Once) (flip setIdOneShotInfo OneShotLam)
@@ -558,7 +569,7 @@ callArityExpr env (Lam id body)
           let ut = modifyArgs (consUsageSig usage_id)
                  . multiplyUsages multi
                  $ ut_body'
-          --pprTrace "callArityExpr:Lam" (vcat [text "id:" <+> ppr id, text "usage:" <+> ppr usage_id, text "usage sig:" <+> ppr (ut_args ut)]) (return ())
+          --pprTrace "callArityExpr:Lam" (vcat [text "id:" <+> ppr id, text "relative body usage:" <+> ppr u, text "id usage:" <+> ppr usage_id, text "usage sig:" <+> ppr (ut_args ut)]) (return ())
           return (ut, Lam id' body')
 
 callArityExpr env (App f (Type t)) = callArityExprMap env (flip App (Type t)) f
@@ -679,9 +690,10 @@ coercionUsageType co = multiplyUsages Many ut
 -- `dataConUsageSig` does exactly this: First peel off one-shot calls according
 -- to the constructors `idArity`, then peel off the product use to get at the
 -- usage on its components.
-dataConUsageSig :: Arity -> SingleUse -> UsageSig
-dataConUsageSig arity use = fromMaybe topUsageSig sig_maybe
+dataConUsageSig :: DataCon -> SingleUse -> UsageSig
+dataConUsageSig dc use = fromMaybe topUsageSig sig_maybe
   where
+    arity = dataConRepArity dc
     peelSingleShotCalls 0 use = Just use
     peelSingleShotCalls n call
       | Just Absent <- peelCallUse call
@@ -692,13 +704,18 @@ dataConUsageSig arity use = fromMaybe topUsageSig sig_maybe
       = Nothing
     sig_maybe = do
       product_use <- peelSingleShotCalls arity use
-      component_usages <- peelProductUse (Just arity) product_use
+      -- We need to consider strict constructors, where a head use will also
+      -- use its components (e.g. I#)
+      component_usages <- peelProductUse (Just arity) (addDataConStrictness dc product_use)
       return (usageSigFromUsages component_usages)
 
-dictSelUsageSig :: Id -> SingleUse -> UsageSig
-dictSelUsageSig id use
+dictSelUsageSig :: Id -> Class -> SingleUse -> UsageSig
+dictSelUsageSig id clazz use
+  -- using idArgUsage seems to loop endlessly on Data.Bits
   | Used _ dict_single_call_use <- fst . unconsUsageSig . usageSigFromStrictSig . idStrictness $ id
-  , Just comps <- peelProductUse Nothing dict_single_call_use
+  , Just dc <- tyConSingleDataCon_maybe (classTyCon clazz)
+  , let dict_length = idArity (dataConWorkId dc)
+  , Just comps <- peelProductUse (Just dict_length) dict_single_call_use
   = case peelCallUse use of -- The outer call is the selector. The inner use is on the actual method!
       Nothing -> topUsageSig -- weird
       Just Absent -> botUsageSig
@@ -725,15 +742,17 @@ globalIdUsageSig id use
   -- We would annotate them with something isomorphic anyway.
   = usageSigFromStrictSig (idStrictness id)
   | use <= single_call
-  = idArgUsage id
+  = arg_usage
   | otherwise
-  = topUsageSig
+  = --pprTrace "many" (ppr arg_usage <+> ppr (idStrictness id) <+> ppr (manifyUsageSig arg_usage)) $ 
+    manifyUsageSig arg_usage
   where
     (<=) = leqSingleUse
     arity = idArity id
     mk_one_shot = mkCallUse Once
     no_call = iterate mk_one_shot botSingleUse !! max 0 (arity - 1)
     single_call = iterate mk_one_shot topSingleUse !! arity
+    arg_usage = idArgUsage id
 
 -- | Evaluation of a non-trivial RHS of a let-binding or argument 
 -- is shared (call-by-need!). GHC however doesn't allocate a new thunk
@@ -818,7 +837,7 @@ propagateProductUse alts scrut_uses
   -- Don't include newtypes, as they aren't really constructors introducing
   -- indirections.
   , isJust (isDataProductTyCon_maybe tycon)
-  -- This is a good place to make sure we don't construct an infinitely depth
+  -- This is a good place to make sure we don't construct an infinitely deep
   -- use, which can happen when analysing e.g. lazy streams.
   -- Also see Note [Demand on scrutinee of a product case] in DmdAnal.hs.
   = addDataConStrictness dc (boundDepth 10 scrut_use)
@@ -862,12 +881,12 @@ registerBindingGroup env = go env emptyVarEnv
           transfer <- callArityExpr env' rhs
           let transfer' use = do
                 --use <- pprTrace "RHS:begin" (ppr id <+> text "::" <+> ppr use) $ return use
-                ret@(ut_rhs, e) <- transfer use
+                ret@(ut_rhs, _) <- transfer use
                 --ret <- pprTrace "RHS:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut_rhs)]) $ return ret
                 return ret
           let transfer_args use = do
                 --use <- pprTrace "args:begin" (ppr id <+> text "::" <+> ppr use) $ return use
-                ret@(ut, e) <- dependOnWithDefault (botUsageType, rhs) (node, use)
+                ret@(ut, _) <- dependOnWithDefault (botUsageType, rhs) (node, use)
                 --ret <- pprTrace "args:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut)]) $ return ret
                 return ret
           let change_detector_args nodes (old, _) (new, _) =
