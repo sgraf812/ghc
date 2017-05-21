@@ -81,10 +81,11 @@ mkCallUse m u = Call m u
 -- @Product [botUsage, botUsage..] === botSingleUse@.
 mkProductUse :: [Usage] -> SingleUse
 mkProductUse components
+  -- Order is important here: We want to regard U() as HU
+  | all (== botUsage) components = botSingleUse
   -- This contradicts Note [Don't optimise UProd(Used) to Used], but
   -- I fixed the issue with WW that probably was the reason for the hack.
   | all (== topUsage) components = topSingleUse 
-  | all (== botUsage) components = botSingleUse
   | otherwise = Product components
 
 -- | `CoreSym.Id`entifiers can be used multiple times and are the only means to

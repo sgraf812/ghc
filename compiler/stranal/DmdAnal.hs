@@ -1062,7 +1062,7 @@ data AnalEnv
        --   worker/wrapper related.
  }
 
-{-| Stores a @StrictSig@ per non-top-level @LocalId@.
+{-| Stores a @StrictSig@ per @LocalId@.
 
 If the the @StrictSig@ of a function is satisfied (e.g. if the function is given
 enough args), it gives
