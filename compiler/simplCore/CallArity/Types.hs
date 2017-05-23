@@ -8,6 +8,8 @@ import UnVarGraph
 import Usage
 import VarEnv
 
+import Data.List ( tails )
+
 ---------------------------------------
 -- Functions related to UsageType    --
 ---------------------------------------
@@ -59,6 +61,9 @@ delUsageType id (UT g ae args s) = UT (g `delNode` id) (ae `delVarEnv` id) args 
 domType :: UsageType -> UnVarSet
 domType ut = varEnvDom (ut_uses ut)
 
+domTypes :: [UsageType] -> UnVarSet
+domTypes = foldr unionUnVarSet emptyUnVarSet . map domType
+
 makeIdArg :: Id -> UsageType -> UsageType
 makeIdArg id ut = delUsageType id (modifyArgs (consUsageSig (lookupUsage NonRecursive ut id)) ut)
 
@@ -89,6 +94,18 @@ multiplyUsages Many ut@(UT _ u args _)
   , ut_args = manifyUsageSig args
   , ut_stable = False
   }
+
+bothUsageTypes :: [UsageType] -> UsageType
+bothUsageTypes uts 
+  = UT cocalled uses args False
+  where
+    cocalls = map ut_cocalled uts
+    uses = foldr bothUseEnv emptyVarEnv (map ut_uses uts)
+    args = foldr lubUsageSig botUsageSig (map ut_args uts)
+    pairings = drop 2 (reverse (tails uts)) -- beginning with a two element list
+    crossCalls = flip map pairings $ \(ut:others) -> 
+      completeBipartiteGraph (domType ut) (domTypes others)
+    cocalled = unionUnVarGraphs (cocalls ++ crossCalls)
 
 -- | Corresponds to sequential composition of expressions.
 -- Used for application and cases.
