@@ -431,22 +431,15 @@ extendAnalEnv env id node = env { ae_sigs = extendVarEnv (ae_sigs env) id node }
 -- nested lets, where the exports are returned in the inner-most let
 -- as a tuple. As a result, all exported identifiers are handled as called
 -- with each other, with `topUsage`.
---
--- FIXME: Currently, this doesn't play well with Unfoldings exposed by e.g.
--- Worker wrapper, which effectively export non-exported bindings. So
--- we simply regard every top-level binding as exported for now.
--- Something more optimistic like looking at the unfolding and adding all
--- `exprFreeIds` as used multiple times might work, too. This is not something
--- I'd like to work on right now, though.
 moduleToExpr :: CoreProgram -> CoreExpr
-moduleToExpr = impl emptyDVarSet
+moduleToExpr = impl []
   where
     impl exposed []
       -- @duplicate@, otherwise those Vars appear to be used once
-      = mkBigCoreVarTup (duplicate (dVarSetElems exposed))
+      = mkBigCoreVarTup (duplicate exposed)
     impl exposed (bind:prog)
-      = Let bind (impl (exposed_ids bind `unionDVarSet` exposed) prog)
-    exposed_ids bind = mkDVarSet (bindersOf bind)
+      = Let bind (impl (exposed_ids bind ++ exposed) prog)
+    exposed_ids bind = filter isExportedId (bindersOf bind)
     duplicate = concatMap (replicate 2)
 
 -- | The left inverse to `moduleToExpr`: `exprToModule . moduleToExpr = id \@CoreProgram`
@@ -572,29 +565,41 @@ callArityExpr env (Lam id body)
           --pprTrace "callArityExpr:Lam" (vcat [text "id:" <+> ppr id, text "relative body usage:" <+> ppr u, text "id usage:" <+> ppr usage_id, text "usage sig:" <+> ppr (ut_args ut)]) (return ())
           return (ut, Lam id' body')
 
-callArityExpr env (App f (Type t)) = callArityExprMap env (flip App (Type t)) f
-
-callArityExpr env (App f a) = do
-  transfer_f <- callArityExpr env f
-  transfer_a <- callArityExpr env a
-  return $ \result_use -> do
-    (ut_f, f') <- transfer_f (mkCallUse Once result_use)
-    --pprTrace "App:f'" (ppr f') $ return ()
-    -- peel off one argument from the type
-    let (arg_usage, ut_f') = peelArgUsage ut_f
-    case considerThunkSharing a arg_usage of
-      Absent -> return (ut_f', App f' a)
-      Used m arg_use -> do
-          -- `m` will be `Once` most of the time (see `considerThunkSharing`),
-          -- so that all work before the lambda is uncovered will be shared 
-          -- (call-by-need!). This is the same argument as for let-bound 
-          -- right hand sides.
-          -- We could also use the multiplicity in the same way we do for
-          -- let-bindings: An argument only used once does not need to be
-          -- memoized.
-          (ut_a, a') <- first (multiplyUsages m) <$> transfer_a arg_use
-          --pprTrace "App:a'" (text "arg_use:" <+> ppr arg_use <+> ppr (ut_a, a')) $ return ()
-          return (ut_f' `bothUsageType` ut_a, App f' a')
+callArityExpr env e@App{} 
+  | (f, args) <- collectArgs e
+  = do
+    let val_args = filter isValArg args 
+    let n = length val_args
+    transfer_f <- callArityExpr env f
+    transfer_val_args <- mapM (callArityExpr env) val_args
+    return $ \result_use -> do
+      (ut_f, f') <- transfer_f (iterate (mkCallUse Once) result_use !! n)
+      --pprTrace "App:f'" (ppr f') $ return ()
+      let blub ut_f [] [] = return (ut_f, [], [])
+          blub ut_f (transfer_arg:transfer_args) (arg:args) = do
+            -- peel off one argument from the type
+            let (arg_usage, ut_f') = peelArgUsage ut_f
+            -- handle the other args
+            (ut_f'', ut_args, args') <- blub ut_f' transfer_args args
+            case considerThunkSharing arg arg_usage of
+              Absent -> return (ut_f'', botUsageType:ut_args, arg:args')
+              Used m arg_use -> do
+                -- `m` will be `Once` most of the time (see `considerThunkSharing`),
+                -- so that all work before the lambda is uncovered will be shared 
+                -- (call-by-need!). This is the same argument as for let-bound 
+                -- right hand sides.
+                -- We could also use the multiplicity in the same way we do for
+                -- let-bindings: An argument only used once does not need to be
+                -- memoized.
+                (ut_arg, arg') <- first (multiplyUsages m) <$> transfer_arg arg_use
+                --pprTrace "App:arg'" (text "arg_use:" <+> ppr arg_use <+> ppr (ut_a, a')) $ return ()
+                return (ut_f'', ut_arg:ut_args, arg':args')
+      (ut_f', ut_args, val_args') <- blub ut_f transfer_val_args val_args
+      let merge_with_type_args (a:args) (va:val_args) 
+            | isValArg a = va:merge_with_type_args args val_args
+            | otherwise = a:merge_with_type_args args (va:val_args)
+          merge_with_type_args args [] = args
+      return (bothUsageTypes (ut_f':ut_args), mkApps f' (merge_with_type_args args val_args'))
 
 callArityExpr env (Case scrut case_bndr ty alts) = do
   transfer_scrut <- callArityExpr env scrut
