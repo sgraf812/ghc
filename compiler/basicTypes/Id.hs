@@ -877,7 +877,10 @@ transferPolyIdInfo old_id abstract_wrt new_id
     old_strictness  = strictnessInfo old_info
     new_strictness  = increaseStrictSigArity arity_increase old_strictness
 
+    old_arg_usage   = argUsageInfo old_info
+
     transfer new_info = new_info `setArityInfo` new_arity
                                  `setInlinePragInfo` old_inline_prag
                                  `setOccInfo` old_occ_info
                                  `setStrictnessInfo` new_strictness
+                                 `setArgUsageInfo` old_arg_usage

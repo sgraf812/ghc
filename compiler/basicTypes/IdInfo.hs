@@ -321,7 +321,7 @@ vanillaIdInfo
             occInfo             = NoOccInfo,
             strictnessInfo      = nopSig,
             demandInfo          = topDmd,
-            argUsageInfo           = topUsageSig,
+            argUsageInfo        = topUsageSig,
             callArityInfo       = topUsage
             --cardinalityInfo     = emptyCardinalityInfo
            }
