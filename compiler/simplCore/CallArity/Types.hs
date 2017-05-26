@@ -3,12 +3,14 @@ module CallArity.Types where
 import BasicTypes
 import CoreSyn
 import Id
+import Maybes
 import Outputable
 import UnVarGraph
 import Usage
 import VarEnv
 
-import Data.List ( tails )
+import Control.Monad ( guard )
+import Data.List ( tails, partition )
 
 ---------------------------------------
 -- Functions related to UsageType    --
@@ -72,12 +74,12 @@ makeIdArg id ut = delUsageType id (modifyArgs (consUsageSig (lookupUsage NonRecu
 lookupUsage :: RecFlag -> UsageType -> Id -> Usage
 lookupUsage rec (UT g ae _ _) id = case lookupVarEnv ae id of
   Just use
-    | id `elemUnVarSet` neighbors g id -> Used Many use
     -- we assume recursive bindings to be called multiple times, what's the
     -- point otherwise? It's a little sad we don't encode it in the co-call
     -- graph directly, though.
     -- See Note [Thunks in recursive groups]
     | isRec rec -> manifyUsage (Used Once use)
+    | id `elemUnVarSet` neighbors g id -> Used Many use
     | otherwise -> Used Once use
   Nothing -> botUsage
 
@@ -95,29 +97,47 @@ multiplyUsages Many ut@(UT _ u args _)
   , ut_stable = False
   }
 
+asCompleteGraph :: UsageType -> Maybe UnVarSet
+asCompleteGraph ut = do
+  s <- UnVarGraph.isCompleteGraph_maybe (ut_cocalled ut)
+  guard (sizeUnVarSet s == sizeUnVarSet (domType ut))
+  return s
+
 bothUsageTypes :: [UsageType] -> UsageType
 bothUsageTypes uts 
   = UT cocalled uses args False
   where
-    cocalls = map ut_cocalled uts
     uses = foldr bothUseEnv emptyVarEnv (map ut_uses uts)
-    args = foldr lubUsageSig botUsageSig (map ut_args uts)
-    pairings = drop 2 (reverse (tails uts)) -- beginning with a two element list
-    crossCalls = flip map pairings $ \(ut:others) -> 
-      completeBipartiteGraph (domType ut) (domTypes others)
-    cocalled = unionUnVarGraphs (cocalls ++ crossCalls)
+    args 
+      = ut_args 
+      . expectJust "bothUsageTypes: argument list empty" 
+      . listToMaybe
+      $ uts
+    -- Cross calls between complete graphs yield another complete graph.
+    -- This is an important optimization for large tuples, like occuring
+    -- when analysing top-level binds as let bindings
+    (completes, incompletes) 
+      -- = ([], uts)
+      = partition (isJust . asCompleteGraph) uts
+    completeDom
+      = unionUnVarSets 
+      . map (fromJust . asCompleteGraph) 
+      $ completes
+    completePart = completeGraph completeDom
+    graphs = completePart : map ut_cocalled incompletes
+    doms = completeDom : map domType incompletes
+    -- all tails, beginning with a two element list
+    pairings = drop 2 . reverse . tails $ doms
+    crossCalls = flip map pairings $ \(dom:others) -> 
+      -- There room for improvement by reusing the result of `unionUnVarSets`
+      completeBipartiteGraph dom (unionUnVarSets others) 
+    cocalled = unionUnVarGraphs (graphs ++ crossCalls)
 
 -- | Corresponds to sequential composition of expressions.
 -- Used for application and cases.
 -- Note this returns the @UsageSig@ from the first argument.
 bothUsageType :: UsageType -> UsageType -> UsageType
-bothUsageType ut1@(UT g1 u1 args _) ut2@(UT g2 u2 _ _)
-  = UT
-  { ut_cocalled = unionUnVarGraphs [g1, g2, completeBipartiteGraph (domType ut1) (domType ut2)]
-  , ut_uses = bothUseEnv u1 u2
-  , ut_args = args
-  , ut_stable = False
-  }
+bothUsageType ut1 ut2 = bothUsageTypes [ut1, ut2]
 
 -- | Used when combining results from alternative cases
 lubUsageType :: UsageType -> UsageType -> UsageType

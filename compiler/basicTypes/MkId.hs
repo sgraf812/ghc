@@ -62,6 +62,7 @@ import DataCon
 import Id
 import IdInfo
 import Demand
+import Usage
 import CoreSyn
 import Unique
 import UniqSupply
@@ -286,8 +287,9 @@ mkDictSelId name clas
              getNth arg_tys val_index
 
     base_info = noCafIdInfo
-                `setArityInfo`          1
-                `setStrictnessInfo`     strict_sig
+                `setArityInfo`         1
+                `setStrictnessInfo`    strict_sig
+                `setArgUsageInfo`      usage_sig
                 `setLevityInfoWithType` sel_ty
 
     info | new_tycon
@@ -321,6 +323,11 @@ mkDictSelId name clas
             | otherwise = mkManyUsedDmd $
                           mkProdDmd [ if name == sel_name then evalDmd else absDmd
                                     | sel_name <- sel_names ]
+    usage_sig = consUsageSig arg_usg topUsageSig
+    arg_usg | new_tycon = topUsage
+            | otherwise = Usage.Used Usage.Many $ 
+                            mkProductUse [ if name == sel_name then topUsage else botUsage
+                                         | sel_name <- sel_names ]
 
 mkDictSelRhs :: Class
              -> Int         -- 0-indexed selector among (superclasses ++ methods)
@@ -380,10 +387,11 @@ mkDataConWorkId wkr_name data_con
     alg_wkr_ty = dataConRepType data_con
     wkr_arity = dataConRepArity data_con
     wkr_info  = noCafIdInfo
-                `setArityInfo`          wkr_arity
-                `setStrictnessInfo`     wkr_sig
-                `setUnfoldingInfo`      evaldUnfolding  -- Record that it's evaluated,
-                                                        -- even if arity = 0
+                `setArityInfo`       wkr_arity
+                `setStrictnessInfo`  wkr_sig
+                `setArgUsageInfo`    topUsageSig
+                `setUnfoldingInfo`   evaldUnfolding  -- Record that it's evaluated,
+                                                     -- even if arity = 0
                 `setLevityInfoWithType` alg_wkr_ty
                   -- NB: unboxed tuples have workers, so we can't use
                   -- setNeverLevPoly
@@ -521,6 +529,7 @@ mkDataConRep dflags fam_envs wrap_name mb_bangs data_con
                          `setInlinePragInfo`    wrap_prag
                          `setUnfoldingInfo`     wrap_unf
                          `setStrictnessInfo`    wrap_sig
+                         `setArgUsageInfo`      topUsageSig
                              -- We need to get the CAF info right here because TidyPgm
                              -- does not tidy the IdInfo of implicit bindings (like the wrapper)
                              -- so it not make sure that the CAF info is sane
@@ -988,10 +997,12 @@ mkPrimOpId prim_op
     id   = mkGlobalId (PrimOpId prim_op) name ty info
 
     info = noCafIdInfo
-           `setRuleInfo`           mkRuleInfo (maybeToList $ primOpRules name prim_op)
-           `setArityInfo`          arity
-           `setStrictnessInfo`     strict_sig
-           `setInlinePragInfo`     neverInlinePragma
+           `setRuleInfo`          mkRuleInfo (maybeToList $ primOpRules name prim_op)
+           `setArityInfo`         arity
+           `setStrictnessInfo`    strict_sig
+           -- Reusing the usage declarations in primops.txt.pp for the time being...
+           `setArgUsageInfo`      usageSigFromStrictSig strict_sig
+           `setInlinePragInfo`    neverInlinePragma
            `setLevityInfoWithType` res_ty
                -- We give PrimOps a NOINLINE pragma so that we don't
                -- get silly warnings from Desugar.dsRule (the inline_shadows_rule
@@ -1021,10 +1032,11 @@ mkFCallId dflags uniq fcall ty
     name = mkFCallName uniq occ_str
 
     info = noCafIdInfo
-           `setArityInfo`          arity
-           `setStrictnessInfo`     strict_sig
+           `setArityInfo`         arity
+           `setStrictnessInfo`    strict_sig
+           `setArgUsageInfo`      topUsageSig
            `setLevityInfoWithType` ty
-
+           
     (bndrs, _) = tcSplitPiTys ty
     arity      = count isAnonTyBinder bndrs
     strict_sig = mkClosedStrictSig (replicate arity topDmd) topRes
@@ -1223,11 +1235,13 @@ runRWId = pcMiscPrelId runRWName ty info
   where
     info = noCafIdInfo `setInlinePragInfo` neverInlinePragma
                        `setStrictnessInfo` strict_sig
+                       `setArgUsageInfo`   usage_sig
                        `setArityInfo`      1
     strict_sig = mkClosedStrictSig [strictApply1Dmd] topRes
       -- Important to express its strictness,
       -- since it is not inlined until CorePrep
       -- Also see Note [runRW arg] in CorePrep
+    usage_sig = consUsageSig u'1C1U topUsageSig
 
     -- State# RealWorld
     stateRW = mkTyConApp statePrimTyCon [realWorldTy]
