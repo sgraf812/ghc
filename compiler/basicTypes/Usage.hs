@@ -7,12 +7,12 @@ module Usage
   , botSingleUse, topSingleUse, lubSingleUse, leqSingleUse, bothSingleUse, mkCallUse, peelCallUse, mkProductUse, peelProductUse, boundDepth
   , Usage (..)
   , multiplicity, botUsage, topUsage, lubUsage, bothUsage
-  , seqUsage
   , manifyUsage, oneifyUsage, expandArity
   , UsageSig
   , botUsageSig, topUsageSig, lubUsageSig
   , consUsageSig, unconsUsageSig, usageSigFromUsages, manifyUsageSig
   , trimSingleUse, trimUsage, trimUsageSig
+  , u'1HU, u'1C1U
   , usageFromDemand, overwriteDemandWithUsage, usageSigFromStrictSig, overwriteStrictSigWithUsageSig
   ) where
 
@@ -274,10 +274,6 @@ trimUsage :: TypeShape -> Usage -> Usage
 trimUsage shape (Used m use) = Used m (trimSingleUse shape use)
 trimUsage _ usg = usg
 
--- | `Usage` unleashed on `x` in @x `seq` ...@.
-seqUsage :: Usage
-seqUsage = Used Once HeadUse
-
 -- | @manifyUsage u = bothUsage u u@. For when an id is used more than once
 -- with the same `Usage`. This is different than just changing the top-level
 -- `Multiplicity` to `Many`, which would correspond to an additional `seq`
@@ -369,6 +365,16 @@ trimUsageSig (Call _ u) sig = consUsageSig head_usage (trimUsageSig u tail_usage
   where
     (head_usage, tail_usage) = unconsUsageSig sig
 trimUsageSig _ _ = TopUsageSig
+
+-- * Specific `Usage`s/`SingleUse`s
+
+-- | `Usage` unleashed on `x` in @x `seq` ...@.
+u'1HU:: Usage
+u'1HU = Used Once HeadUse
+
+-- | 'Called once with one argument' `Usage`: @1*C^1(U)@
+u'1C1U :: Usage
+u'1C1U = Used Once (mkCallUse Once topSingleUse)
 
 -- * Pretty-printing
 

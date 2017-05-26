@@ -1242,12 +1242,14 @@ tidyTopIdInfo dflags rhs_tidy_env name orig_rhs tidy_rhs idinfo show_unfold caf_
         `setCafInfo`        caf_info
         `setArityInfo`      arity
         `setStrictnessInfo` final_sig
+        `setArgUsageInfo`   arg_usage
 
   | otherwise           -- Externally-visible Ids get the whole lot
   = vanillaIdInfo
         `setCafInfo`           caf_info
         `setArityInfo`         arity
         `setStrictnessInfo`    final_sig
+        `setArgUsageInfo`      arg_usage
         `setOccInfo`           robust_occ_info
         `setInlinePragInfo`    (inlinePragInfo idinfo)
         `setUnfoldingInfo`     unfold_info
@@ -1303,6 +1305,7 @@ tidyTopIdInfo dflags rhs_tidy_env name orig_rhs tidy_rhs idinfo show_unfold caf_
     -- it to the top level. So it seems more robust just to
     -- fix it here.
     arity = exprArity orig_rhs
+    arg_usage = argUsageInfo idinfo
 
 {-
 ************************************************************************

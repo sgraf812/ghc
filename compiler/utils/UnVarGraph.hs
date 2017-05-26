@@ -16,13 +16,14 @@ equal to g, but twice as expensive and large.
 -}
 module UnVarGraph
     ( UnVarSet
-    , emptyUnVarSet, mkUnVarSet, varEnvDom, restrictVarEnv_UnVarSet
+    , emptyUnVarSet, sizeUnVarSet, mkUnVarSet, varEnvDom, restrictVarEnv_UnVarSet
     , unionUnVarSet, unionUnVarSets, delUnVarSet
     , elemUnVarSet, isEmptyUnVarSet
     , UnVarGraph
     , emptyUnVarGraph
     , unionUnVarGraph, unionUnVarGraphs
     , completeGraph, completeBipartiteGraph
+    , isCompleteGraph_maybe
     , neighbors
     , delNode
     ) where
@@ -51,6 +52,9 @@ k v = getKey (getUnique v)
 
 emptyUnVarSet :: UnVarSet
 emptyUnVarSet = UnVarSet S.empty
+
+sizeUnVarSet :: UnVarSet -> Int
+sizeUnVarSet (UnVarSet s) = S.size s
 
 elemUnVarSet :: Var -> UnVarSet -> Bool
 elemUnVarSet v (UnVarSet s) = k v `S.member` s
@@ -117,6 +121,15 @@ completeBipartiteGraph s1 s2 = prune $ UnVarGraph $ unitBag $ CBPG s1 s2
 
 completeGraph :: UnVarSet -> UnVarGraph
 completeGraph s = prune $ UnVarGraph $ unitBag $ CG s
+
+isCompleteGraph_maybe :: UnVarGraph -> Maybe UnVarSet
+isCompleteGraph_maybe (UnVarGraph g)
+  | [CG s] <- bagToList g
+  = Just s
+  | [] <- bagToList g
+  = Just emptyUnVarSet
+  | otherwise
+  = Nothing
 
 neighbors :: UnVarGraph -> Var -> UnVarSet
 neighbors (UnVarGraph g) v = unionUnVarSets $ concatMap go $ bagToList g
