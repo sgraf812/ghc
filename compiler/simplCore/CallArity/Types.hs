@@ -117,8 +117,8 @@ bothUsageTypes uts
     -- This is an important optimization for large tuples, like occuring
     -- when analysing top-level binds as let bindings
     (completes, incompletes) 
-      -- = ([], uts)
-      = partition (isJust . asCompleteGraph) uts
+      = ([], uts)
+      -- = partition (isJust . asCompleteGraph) uts
     completeDom
       = unionUnVarSets 
       . map (fromJust . asCompleteGraph) 

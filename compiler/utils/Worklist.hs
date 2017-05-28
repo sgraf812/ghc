@@ -1,10 +1,11 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
+{-# OPTIONS_GHC -fprof-auto #-}
 module Worklist where
 
 import Control.Arrow (first)
-import Control.Monad (forM_, when)
+import Control.Monad (forM_, when, (<=<))
 import Control.Monad.Trans.State.Strict
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -97,12 +98,16 @@ dependOn node = TFM $ do
     Nothing -> do
       Just <$> recompute node
       --Just <$> recompute (trace "Nothing, no loop" node)
-    Just _ | isNotYetStable && not loopDetected -> do
-      Just <$> recompute node
+    -- We aren't doing this because of monotonicity issues
+    --Just _ | isNotYetStable && not loopDetected -> do
+      --Just <$> recompute node
       --Just <$> recompute (trace "Just, not stable" node)
     Just info -> do
       return (value info)
       --return (trace "Just, stable" (value info))
+
+unsafePeekValue :: Ord node => node -> TransferFunction node lattice (Maybe lattice)
+unsafePeekValue node = TFM $ (value <=< Map.lookup node) <$> gets graph
 
 data Diff a
   = Diff

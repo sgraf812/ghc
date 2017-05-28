@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# OPTIONS_GHC -fprof-auto #-}
 --
 -- Copyright (c) 2014 Joachim Breitner
 --
@@ -441,12 +442,12 @@ extendAnalEnv env id node = env { ae_sigs = extendVarEnv (ae_sigs env) id node }
 -- as a tuple. As a result, all exported identifiers are handled as called
 -- with each other, with `topUsage`.
 moduleToExpr :: CoreProgram -> (VarSet, CoreExpr)
-moduleToExpr = impl []
+moduleToExpr = first (\it -> pprTrace "moduleToExpr" (ppr (sizeVarSet it)) it) . impl []
   where
     impl exposed []
       = (mkVarSet exposed, mkBigCoreVarTup exposed)
     impl exposed (bind:prog)
-      = second (Let bind) (impl (exposed_ids bind ++ exposed) prog)
+      = second (Let bind) (impl (exposed_ids' bind ++ exposed) prog)
     -- We are too conservative here, but we need *at least*  
     -- 
     --   * exported `Id`s (`isExportedId`)
@@ -456,6 +457,7 @@ moduleToExpr = impl []
     -- with any of the binders, so we just blindly assume all top-level
     -- `Id`s as exported (as does the demand analyzer).
     exposed_ids bind = bindersOf bind
+    exposed_ids' bind = filter isExportedId (bindersOf bind)
 
 -- | The left inverse to `moduleToExpr`: `exprToModule . snd . moduleToExpr = id \@CoreProgram`
 exprToModule :: CoreExpr -> CoreProgram
@@ -465,7 +467,7 @@ exprToModule _ = []
 -- Main entry point
 callArityAnalProgram :: DynFlags -> FamInstEnvs -> CoreProgram -> IO CoreProgram
 callArityAnalProgram dflags fam_envs
-  = return . exprToModule . uncurry (callArityRHS dflags fam_envs) . moduleToExpr
+  = return . (\it -> pprTrace "callArity:end" (ppr (length it)) it) . exprToModule . uncurry (callArityRHS dflags fam_envs) . moduleToExpr . (\it -> pprTrace "callArity:begin" (ppr (length it)) it)
   -- . (\prog -> pprTrace "CallArity:Program" (ppr prog) prog)
 
 callArityRHS :: DynFlags -> FamInstEnvs -> VarSet -> CoreExpr -> CoreExpr
@@ -580,44 +582,29 @@ callArityExpr env (Lam id body)
           --pprTrace "callArityExpr:Lam" (vcat [text "id:" <+> ppr id, text "relative body usage:" <+> ppr u, text "id usage:" <+> ppr usage_id, text "usage sig:" <+> ppr (ut_args ut)]) (return ())
           return (ut, Lam id' body')
 
-callArityExpr env e@App{} 
-  | (f, args) <- collectArgs e
-  = do
-    let val_args = filter isValArg args 
-    let n = length val_args
-    transfer_f <- callArityExpr env f
-    transfer_val_args <- mapM (callArityExpr env) val_args
-    return $ \result_use -> do
-      (ut_f, f') <- transfer_f (iterate (mkCallUse Once) result_use !! n)
-      --pprTrace "App:f'" (ppr f' <+> ppr (ut_args ut_f)) $ return ()
-      let blub ut [] [] = return (ut, [], [])
-          blub ut (transfer_arg:transfer_args) (arg:args) = do
-            -- peel off one argument from the type
-            let (arg_usage, ut') = peelArgUsage ut
-            -- handle the other args
-            (ut'', ut_args, args') <- blub ut' transfer_args args
-            case considerThunkSharing arg arg_usage of
-              Absent -> return (ut'', botUsageType:ut_args, arg:args')
-              Used m arg_use -> do
-                -- `m` will be `Once` most of the time (see `considerThunkSharing`),
-                -- so that all work before the lambda is uncovered will be shared 
-                -- (call-by-need!). This is the same argument as for let-bound 
-                -- right hand sides.
-                -- We could also use the multiplicity in the same way we do for
-                -- let-bindings: An argument only used once does not need to be
-                -- memoized.
-                (ut_arg, arg') <- first (multiplyUsages m) <$> transfer_arg arg_use
-                --pprTrace "App:arg'" (text "arg_use:" <+> ppr arg_use <+> ppr (ut_arg, arg')) $ return ()
-                return (ut'', ut_arg:ut_args, arg':args')
-      (ut_f', ut_args, val_args') <- blub ut_f transfer_val_args val_args
-      let merge_with_type_args (a:args) (va:val_args) 
-            | isValArg a = va:merge_with_type_args args val_args
-            | otherwise = a:merge_with_type_args args (va:val_args)
-          merge_with_type_args args [] = args
-      let ut = bothUsageTypes (ut_f':ut_args)
-      let e = mkApps f' (merge_with_type_args args val_args')
-      --pprTrace "App:combined" (ppr f <+> ppr val_args' <+> ppr ut) $ return ()
-      return (ut, e)
+callArityExpr env (App f (Type t)) = callArityExprMap env (flip App (Type t)) f
+
+callArityExpr env (App f a) = do
+  transfer_f <- callArityExpr env f
+  transfer_a <- callArityExpr env a
+  return $ \result_use -> do
+    (ut_f, f') <- transfer_f (mkCallUse Once result_use)
+    --pprTrace "App:f'" (ppr f') $ return ()
+    -- peel off one argument from the type
+    let (arg_usage, ut_f') = peelArgUsage ut_f
+    case considerThunkSharing a arg_usage of
+      Absent -> return (ut_f', App f' a)
+      Used m arg_use -> do
+          -- `m` will be `Once` most of the time (see `considerThunkSharing`),
+          -- so that all work before the lambda is uncovered will be shared 
+          -- (call-by-need!). This is the same argument as for let-bound 
+          -- right hand sides.
+          -- We could also use the multiplicity in the same way we do for
+          -- let-bindings: An argument only used once does not need to be
+          -- memoized.
+          (ut_a, a') <- first (multiplyUsages m) <$> transfer_a arg_use
+          --pprTrace "App:a'" (text "arg_use:" <+> ppr arg_use <+> ppr (ut_a, a')) $ return ()
+          return (ut_f' `bothUsageType` ut_a, App f' a')
 
 callArityExpr env (Case scrut case_bndr ty alts) = do
   transfer_scrut <- callArityExpr env scrut
@@ -666,12 +653,13 @@ callArityExpr env (Let bind e) = do
               (ut_usage, Let (Rec old_bind) _) <- dependOnWithDefault (ut_body, Let bind e') (node, use)
               let transferred_binds = map transferred_bind old_bind
               (ut, bind') <- unleashLet env Recursive transferred_binds ut_usage ut_body
+              let ut' = lubUsageType ut ut_usage
               let lookup_old = lookupUsage Recursive ut_usage
-              let lookup_new = lookupUsage Recursive ut
-              let ut' | all (\id -> lookup_old id == lookup_new id) ids = markStable ut
-                      | otherwise = ut
-              --ut' <- pprTrace "Rec:end" (ppr ids) $ return ut'
-              return (ut', Let (Rec bind') e')
+              let lookup_new = lookupUsage Recursive ut'
+              let ut'' | all (\id -> lookup_old id == lookup_new id) ids = markStable ut'
+                       | otherwise = ut'
+              --ut'' <- pprTrace "Rec:end" (ppr ids) $ return ut''
+              return (ut'', Let (Rec bind') e')
 
         let change_detector :: ChangeDetector
             change_detector changed_refs (old, _) (new, _) =
@@ -728,7 +716,7 @@ dataConUsageSig dc use = fromMaybe topUsageSig sig_maybe
       product_use <- peelSingleShotCalls arity use
       -- We need to consider strict constructors, where a head use will also
       -- use its components (e.g. I#)
-      component_usages <- peelProductUse (Just arity) (addDataConStrictness dc product_use)
+      component_usages <- peelProductUse arity (addDataConStrictness dc product_use)
       return (usageSigFromUsages component_usages)
 
 dictSelUsageSig :: Id -> Class -> SingleUse -> UsageSig
@@ -736,7 +724,7 @@ dictSelUsageSig id clazz use
   | Used _ dict_single_call_use <- fst . unconsUsageSig . idArgUsage $ id
   , Just dc <- tyConSingleDataCon_maybe (classTyCon clazz)
   , let dict_length = idArity (dataConWorkId dc)
-  , Just comps <- peelProductUse (Just dict_length) dict_single_call_use
+  , Just comps <- peelProductUse dict_length dict_single_call_use
   = case peelCallUse use of -- The outer call is the selector. The inner use is on the actual method!
       Nothing -> topUsageSig -- weird
       Just Absent -> botUsageSig
@@ -825,7 +813,7 @@ findBndrsUsages rec_flag fam_envs ut = foldr step (ut, [])
 addCaseBndrUsage :: Usage -> [Usage] -> [Usage]
 addCaseBndrUsage Absent alt_bndr_usages = alt_bndr_usages
 addCaseBndrUsage (Used _ use) alt_bndr_usages
-  | Just case_comp_usages <- peelProductUse (Just (length alt_bndr_usages)) use
+  | Just case_comp_usages <- peelProductUse (length alt_bndr_usages) use
   = zipWith bothUsage case_comp_usages alt_bndr_usages
   | otherwise
   = topUsage <$ alt_bndr_usages
@@ -856,7 +844,7 @@ propagateProductUse alts scrut_uses
   -- This is a good place to make sure we don't construct an infinitely deep
   -- use, which can happen when analysing e.g. lazy streams.
   -- Also see Note [Demand on scrutinee of a product case] in DmdAnal.hs.
-  = addDataConStrictness dc (boundDepth 10 scrut_use)
+  = addDataConStrictness dc (boundDepth 6 scrut_use)
 
   | otherwise
   -- We *could* lub the uses from the different branches, but there's not much
@@ -867,7 +855,7 @@ addDataConStrictness :: DataCon -> SingleUse -> SingleUse
 -- See Note [Add demands for strict constructors] in DmdAnal.hs
 addDataConStrictness dc
   = maybe topSingleUse (mkProductUse . add_component_strictness) 
-  . peelProductUse (Just arity) 
+  . peelProductUse arity
   where
     add_component_strictness :: [Usage] -> [Usage]
     add_component_strictness = zipWith add strs
@@ -897,7 +885,9 @@ registerBindingGroup env = go env emptyVarEnv
           transfer <- callArityExpr env' rhs
           let transfer' use = do
                 --use <- pprTrace "RHS:begin" (ppr id <+> text "::" <+> ppr use) $ return use
-                ret@(ut_rhs, _) <- transfer use
+                (prev_ut_rhs, _) <- fromMaybe (botUsageType, rhs) <$> unsafePeekValue (node, use)
+                (ut_rhs, rhs') <- transfer use 
+                let ret = (lubUsageType ut_rhs prev_ut_rhs, rhs')
                 --ret <- pprTrace "RHS:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut_rhs)]) $ return ret
                 return ret
           let transfer_args use = do
@@ -910,7 +900,7 @@ registerBindingGroup env = go env emptyVarEnv
                 -- change detection for the arg usage case. This implies that
                 -- use sites of these sig nodes may only use the ut_args
                 -- component!
-                --pprTrace "change_detector_down" (vcat [ppr node, ppr id, ppr (ut_args old <= ut_args new), ppr (lubUsageSig (ut_args old) (ut_args new)), ppr (ut_args old), ppr (ut_args new), ppr (ut_args old /= ut_args new)]) $
+                --pprTrace "change_detector_down" (vcat [ppr node, ppr id, ppr (ut_args old <= ut_args new), ppr (ut_args old), ppr (ut_args new), ppr (ut_args old /= ut_args new)]) $
                 ASSERT2( ut_args old <= ut_args new, text "CallArity.change_detector_down: Not monotone" $$ ppr id $$ ppr (ut_args old) $$ ppr (ut_args new) )
                 ut_args old /= ut_args new
                   where
@@ -1033,5 +1023,5 @@ callArityLetEnv rhss ut_body
         -- if the mutually recursive group becomes too large.
         -- Combining all rhs and the body with `bothUsageType` corresponds to
         -- cocalls in the complete graph.
-        | length ut_rhss > 25 = foldr bothUsageType botUsageType ut_all
+        | length ut_rhss > 25 = bothUsageTypes ut_all
         | otherwise           = lubUsageTypes (ut_all ++ map cross_calls rhss)

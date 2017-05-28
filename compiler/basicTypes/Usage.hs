@@ -204,29 +204,21 @@ peelCallUse UnknownUse = Just topUsage
 peelCallUse _ = Nothing
 
 -- | @peelProductUse len_hint use@ tries to treat @use@ as a product use and
--- returns the list of usages on its components. It will adhere to the @len_hint@
--- if supplied, meaning that the product_use is constrained to have that length.
+-- returns the list of usages on its components. It will adhere to the @len_hint@,
+-- meaning that the @product_use@ is constrained to have that length.
 -- This is mostly so that `botSingleUse` and `topSingleUse`, oblivious to length
 -- information, can be translated (back) into a product use.
 --
--- If @len_hint@ is not supplied, this function will only return `Just` in the
--- case that @use@ actually models a proper product. Examples:
+-- Examples:
 --
---    - @peelProductUse (Just (length comps)) (mkProductUse comps) == Just comps@
---    - @peelProductUse Nothing (mkProductUse comps) == Just comps@
---    - @peelProductUse (Just n) topSingleUse == Just (replicate n topUsage)@
---    - @peelProductUse Nothing topSingleUse == Nothing@
---    - @peelProductUse (Just n) (mkCallUse Once topSingleUse) == Nothing@
---    - @forall n. peelProductUse (Just n) use == Nothing ==> peelProductUse Nothing use == Nothing@
-peelProductUse :: Maybe Arity -> SingleUse -> Maybe [Usage]
-peelProductUse Nothing (Product comps) = Just comps
-peelProductUse Nothing _ = Nothing
-peelProductUse (Just n) HeadUse = Just (replicate n botUsage)
-peelProductUse (Just n) UnknownUse = Just (replicate n topUsage)
-peelProductUse (Just n) (Product comps)
-  = ASSERT2(comps `lengthIs` n, text "peelProductUse" $$ ppr n $$ ppr comps)
-    Just comps
-peelProductUse _ (Call _ _) = Nothing -- might happen with unsafeCoerce (#9208)
+--    - @peelProductUse (length comps) (mkProductUse comps) == Just comps@
+--    - @peelProductUse n topSingleUse == Just (replicate n topUsage)@
+--    - @peelProductUse n (mkCallUse Once topSingleUse) == Nothing@
+peelProductUse :: Arity -> SingleUse -> Maybe [Usage]
+peelProductUse n HeadUse = Just (replicate n botUsage)
+peelProductUse n UnknownUse = Just (replicate n topUsage)
+peelProductUse n (Product comps) | comps `lengthIs` n = Just comps
+peelProductUse _ _ = Nothing -- type error, might happen with GADTs and unsafeCoerce (#9208)
 
 -- | Since the lattice modeled by `SingleUse` has infinite height, we run might
 -- run into trouble regarding convergence. This happens in practice for product

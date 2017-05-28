@@ -10,6 +10,7 @@ module CallArity.FrameworkBuilder
   , RequestedPriority (..)
   , registerTransferFunction
   , dependOnWithDefault
+  , Worklist.unsafePeekValue
   , buildAndRun
   ) where
 
