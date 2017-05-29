@@ -66,6 +66,7 @@ foo [InlPrag=INLINE[0]] :: Int -> Int
  Arity=1,
  Caf=NoCafRefs,
  Str=<S(S),1*U>m,
+ ArgUsg=1*U,w*U,w*U..,
  Unf=Unf{Src=InlineStable, TopLvl=True, Value=True, ConLike=True,
          WorkFree=True, Expandable=True,
          Guidance=ALWAYS_IF(arity=1,unsat_ok=True,boring_ok=False)
