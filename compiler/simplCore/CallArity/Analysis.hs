@@ -567,7 +567,9 @@ callArityExpr env (Lam id body)
     transfer_body <- callArityExpr env body
     return $ \use ->
       case fromMaybe topUsage (peelCallUse use) of -- Get at the relative @Usage@ of the body
-        Absent -> return (emptyUsageType, Lam id body)
+        Absent -> do
+          let id' = id `setIdCallArity` Absent
+          return (emptyUsageType, Lam id' body)
         u@(Used multi body_use) -> do
           (ut_body, body') <- transfer_body body_use
           let (ut_body', usage_id) = findBndrUsage NonRecursive (ae_fam_envs env) ut_body id

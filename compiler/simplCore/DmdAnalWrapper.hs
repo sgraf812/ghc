@@ -26,8 +26,8 @@ combinedDmdAnalProgram dflags fams prog = do
   --pprTrace "Program" (ppr prog'') $ pure ()
   return (mapBndrsProgram mergeInfo prog'')
 
-mergeInfo :: TopLevelFlag -> Bool -> Var -> Var
-mergeInfo top_lvl is_lam_bndr id
+mergeInfo :: Bool -> Var -> Var
+mergeInfo is_lam_bndr id
   | isTyVar id
   = id
   | otherwise 
@@ -61,32 +61,32 @@ mergeInfo top_lvl is_lam_bndr id
     leqUsage l r = l `lubUsage` r == r
     leqUsageSig l r = l `lubUsageSig` r == r
     id'
-      | isTopLevel top_lvl = id `setIdStrictness` new_str_sig -- Only the sig matters
+      | isExportedId id = id `setIdStrictness` new_str_sig -- Only the sig matters
       | otherwise = id `setIdDemandInfo` new_demand -- Only use sites matter
 
 
-mapBndrsProgram :: (TopLevelFlag -> Bool -> Var -> Var) -> CoreProgram -> CoreProgram
-mapBndrsProgram f = map (mapBndrsBind TopLevel f)
+mapBndrsProgram :: (Bool -> Var -> Var) -> CoreProgram -> CoreProgram
+mapBndrsProgram f = map (mapBndrsBind f)
 
-mapBndrsBind :: TopLevelFlag -> (TopLevelFlag -> Bool -> Var -> Var) -> CoreBind -> CoreBind
-mapBndrsBind top_lvl f (NonRec id e) = NonRec (f top_lvl False id) (mapBndrsExprIfNotAbsent id f e)
-mapBndrsBind top_lvl f (Rec bndrs) = Rec (map (\(id, e) -> (f top_lvl False id, mapBndrsExprIfNotAbsent id f e)) bndrs)
+mapBndrsBind :: (Bool -> Var -> Var) -> CoreBind -> CoreBind
+mapBndrsBind f (NonRec id e) = NonRec (f False id) (mapBndrsExprIfNotAbsent id f e)
+mapBndrsBind f (Rec bndrs) = Rec (map (\(id, e) -> (f False id, mapBndrsExprIfNotAbsent id f e)) bndrs)
 
-mapBndrsExprIfNotAbsent :: Var -> (TopLevelFlag -> Bool -> Var -> Var) -> CoreExpr -> CoreExpr
+mapBndrsExprIfNotAbsent :: Var -> (Bool -> Var -> Var) -> CoreExpr -> CoreExpr
 mapBndrsExprIfNotAbsent id f e
   | Absent <- idCallArity id = e -- we won't have analysed e in this case.
   | otherwise = mapBndrsExpr f e
 
-mapBndrsExpr :: (TopLevelFlag -> Bool -> Var -> Var) -> CoreExpr -> CoreExpr
+mapBndrsExpr :: (Bool -> Var -> Var) -> CoreExpr -> CoreExpr
 mapBndrsExpr f e = case e of
   App func arg -> App (mapBndrsExpr f func) (mapBndrsExpr f arg)
-  Lam id e -> Lam (f NotTopLevel True id) (mapBndrsExpr f e)
-  Let bind body -> Let (mapBndrsBind NotTopLevel f bind) (mapBndrsExpr f body)
-  Case scrut id ty alts -> Case (mapBndrsExpr f scrut) (f NotTopLevel False id) ty (map (mapBndrsAlt f) alts)
+  Lam id e -> Lam (f True id) (mapBndrsExpr f e)
+  Let bind body -> Let (mapBndrsBind f bind) (mapBndrsExpr f body)
+  Case scrut id ty alts -> Case (mapBndrsExpr f scrut) (f False id) ty (map (mapBndrsAlt f) alts)
   Cast e co -> Cast (mapBndrsExpr f e) co
   Tick t e -> Tick t (mapBndrsExpr f e)
   Var _ -> e -- use sites carry no important annotations
   _ -> e
 
-mapBndrsAlt :: (TopLevelFlag -> Bool -> Var -> Var) -> Alt CoreBndr -> Alt CoreBndr
-mapBndrsAlt f (con, bndrs, e) = (con, map (f NotTopLevel False) bndrs, mapBndrsExpr f e)
+mapBndrsAlt :: (Bool -> Var -> Var) -> Alt CoreBndr -> Alt CoreBndr
+mapBndrsAlt f (con, bndrs, e) = (con, map (f False) bndrs, mapBndrsExpr f e)

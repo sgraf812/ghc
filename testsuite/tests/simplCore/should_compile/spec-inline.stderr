@@ -45,9 +45,9 @@ Roman.foo_$s$wgo [Occ=LoopBreaker]
   :: GHC.Prim.Int# -> GHC.Prim.Int# -> GHC.Prim.Int#
 [GblId, Arity=2, Caf=NoCafRefs, Str=<S,U><S,U>]
 Roman.foo_$s$wgo =
-  \ (sc :: GHC.Prim.Int#) (sc1 :: GHC.Prim.Int#) ->
+  \ (sc :: GHC.Prim.Int#) (sc1 [OS=OneShot] :: GHC.Prim.Int#) ->
     let {
-      m [Dmd=<L,A>] :: GHC.Prim.Int#
+      m [Dmd=<L,A>, Usg=A] :: GHC.Prim.Int#
       [LclId]
       m =
         GHC.Prim.+#
@@ -84,7 +84,7 @@ Roman.$wgo =
       Just x ->
         case x of { GHC.Types.I# ipv ->
         let {
-          m [Dmd=<L,A>] :: GHC.Prim.Int#
+          m :: GHC.Prim.Int#
           [LclId]
           m =
             GHC.Prim.+#
@@ -152,6 +152,7 @@ foo :: Int -> Int
  Arity=1,
  Caf=NoCafRefs,
  Str=<S(S),1*U>m,
+ ArgUsg=1*U,w*U,w*U..,
  Unf=Unf{Src=InlineStable, TopLvl=True, Value=True, ConLike=True,
          WorkFree=True, Expandable=True,
          Guidance=ALWAYS_IF(arity=1,unsat_ok=True,boring_ok=False)
