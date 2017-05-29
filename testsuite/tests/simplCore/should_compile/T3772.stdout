@@ -16,7 +16,11 @@ end Rec }
 
 -- RHS size: {terms: 14, types: 5, coercions: 0}
 foo [InlPrag=NOINLINE] :: Int -> ()
-[GblId, Arity=1, Caf=NoCafRefs, Str=<S(S),1*U>]
+[GblId,
+ Arity=1,
+ Caf=NoCafRefs,
+ Str=<S(S),1*U>,
+ ArgUsg=1*U,w*U,w*U..]
 foo =
   \ (n :: Int) ->
     case n of { GHC.Types.I# y ->
