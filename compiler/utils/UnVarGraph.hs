@@ -20,7 +20,7 @@ module UnVarGraph
     , emptyUnVarSet, sizeUnVarSet, mkUnVarSet, varEnvDom, restrictVarEnv_UnVarSet
     , unionUnVarSet, unionUnVarSets, delUnVarSet
     , elemUnVarSet, isEmptyUnVarSet
-    , UnVarGraph
+    , UnVarGraph, edgeCount
     , emptyUnVarGraph
     , unionUnVarGraph, unionUnVarGraphs
     , completeGraph, completeBipartiteGraph
@@ -47,8 +47,9 @@ import qualified Data.IntMap.Strict as IntMap
 -- Therefore, use a IntSet directly (which is likely also a bit more efficient).
 
 -- Set of uniques, i.e. for adjancet nodes
-newtype UnVarSet = UnVarSet IntSet
-    deriving Eq
+newtype UnVarSet 
+  = UnVarSet IntSet
+  deriving Eq
 
 k :: Var -> Int
 k v = getKey (getUnique v)
@@ -92,27 +93,40 @@ unionUnVarSets :: [UnVarSet] -> UnVarSet
 unionUnVarSets = foldr unionUnVarSet emptyUnVarSet
 
 instance Outputable UnVarSet where
-    ppr (UnVarSet s) = braces $
-        hcat $ punctuate comma [ ppr (getUnique i) | i <- IntSet.toList s]
+  ppr (UnVarSet s) = braces $
+    hcat $ punctuate comma [ ppr (getUnique i) | i <- IntSet.toList s]
 
 data OverlayResolution
-    = Additive
-    | Subtractive
-    deriving (Eq, Ord, Show)
+  = Additive
+  | Subtractive
+  deriving (Eq, Ord, Show)
 
 complementOverlayResolution :: OverlayResolution -> OverlayResolution
 complementOverlayResolution Additive = Subtractive
 complementOverlayResolution Subtractive = Additive
 
 data UnVarGraph 
-    = UnVarGraph
-    { edge_interpretation :: !OverlayResolution
-    , edge_count_estimate :: !(Int, Int)
-    , edges :: !(IntMap UnVarSet)
-    }
+  = UnVarGraph
+  { edge_interpretation :: !OverlayResolution
+  , edges :: !(IntMap UnVarSet)
+  , edge_count_estimate :: !(Int, Int)
+  , edge_count :: Int -- Intentionally lazy!
+  }
+
+edgeCount :: UnVarGraph -> Int
+edgeCount = edge_count
+
+mkUnVarGraph :: OverlayResolution -> IntMap UnVarSet -> (Int, Int) -> UnVarGraph
+mkUnVarGraph ei edges ec_estimate 
+  = UnVarGraph
+  { edge_interpretation = ei
+  , edges = edges
+  , edge_count_estimate = ec_estimate
+  , edge_count = foldr ((+) . sizeUnVarSet) 0 edges
+  }
 
 balance :: UnVarGraph -> UnVarGraph
-balance g@(UnVarGraph ei (_, ub) edges)
+balance g@(UnVarGraph ei edges (_, ub) ec)
   | ub_ratio < 0.6 = g
   | precise_ratio < 0.6 = precise_g
   | otherwise = complementUnVarGraph precise_g
@@ -121,18 +135,17 @@ balance g@(UnVarGraph ei (_, ub) edges)
     max_edges = nodes * nodes
     ub_ratio :: Double
     ub_ratio = fromIntegral ub / fromIntegral max_edges
-    edge_count = foldr ((+) . sizeUnVarSet) 0 edges
     precise_ratio :: Double
-    precise_ratio = fromIntegral edge_count / fromIntegral max_edges
-    precise_g = UnVarGraph ei (edge_count, edge_count) edges
+    precise_ratio = fromIntegral ec / fromIntegral max_edges
+    precise_g = UnVarGraph ei edges (ec, ec) ec
 
 complementUnVarGraph :: UnVarGraph -> UnVarGraph
-complementUnVarGraph (UnVarGraph res (lb, ub) edges) 
-  = UnVarGraph (complementOverlayResolution res) ec (complementEdges edges)
+complementUnVarGraph (UnVarGraph res edges (lb, ub) _) 
+  = mkUnVarGraph (complementOverlayResolution res) (complementEdges edges) ec_est
   where
     nodes = IntMap.size edges
     max_edges = nodes*nodes
-    ec = (max_edges - ub, max_edges - lb)
+    ec_est = (max_edges - ub, max_edges - lb)
 
 complementEdges :: IntMap UnVarSet -> IntMap UnVarSet
 complementEdges edges = edges'
@@ -147,15 +160,15 @@ complementEdges edges = edges'
       | otherwise = differenceUnVarSet dom neighbors
 
 emptyUnVarGraph :: UnVarGraph
-emptyUnVarGraph = UnVarGraph Subtractive (0, 0) IntMap.empty
+emptyUnVarGraph = mkUnVarGraph Subtractive IntMap.empty (0, 0)
 
 unionUnVarGraph :: UnVarGraph -> UnVarGraph -> UnVarGraph
-unionUnVarGraph u1@(UnVarGraph Subtractive _ _) u2
+unionUnVarGraph u1@(UnVarGraph Subtractive _ _ _) u2
   = unionUnVarGraph (complementUnVarGraph u1) u2
-unionUnVarGraph u1 u2@(UnVarGraph Subtractive _ _)
+unionUnVarGraph u1 u2@(UnVarGraph Subtractive _ _ _)
   = unionUnVarGraph u1 (complementUnVarGraph u2)
-unionUnVarGraph (UnVarGraph Additive (l1, u1) e1) (UnVarGraph Additive (l2, u2) e2)
-  = balance $ UnVarGraph Additive (max l1 l2, u1 + u2) e
+unionUnVarGraph (UnVarGraph Additive e1 (l1, u1) _) (UnVarGraph Additive e2 (l2, u2) _)
+  = balance $ mkUnVarGraph Additive e (max l1 l2, u1 + u2) 
   where
     e = IntMap.unionWith unionUnVarSet e1 e2
     
@@ -165,37 +178,40 @@ unionUnVarGraphs = foldr unionUnVarGraph emptyUnVarGraph
 -- completeBipartiteGraph A B = { {a,b} | a ∈ A, b ∈ B }
 completeBipartiteGraph :: UnVarSet -> UnVarSet -> UnVarGraph
 completeBipartiteGraph u1@(UnVarSet s1) u2@(UnVarSet s2) 
-    = balance (UnVarGraph Additive (2*a*b, 2*a*b) edges)
-    where
-      dom@(UnVarSet s) = unionUnVarSet u1 u2
-      (UnVarSet s3) = intersectionUnVarSet u1 u2 -- common elements
-      a = sizeUnVarSet u1
-      b = sizeUnVarSet u2
-      edges = IntMap.fromSet neighbors_of s
-      neighbors_of k
-        | k `IntSet.member` s3 = dom
-        | k `IntSet.member` s1 = u2
-        | k `IntSet.member` s2 = u1
+  = balance (UnVarGraph Additive edges (ec, ec) ec)
+  where
+    dom@(UnVarSet s) = unionUnVarSet u1 u2
+    (UnVarSet s3) = intersectionUnVarSet u1 u2 -- common elements
+    a = sizeUnVarSet u1
+    b = sizeUnVarSet u2
+    ec = 2*a*b
+    edges = IntMap.fromSet neighbors_of s
+    neighbors_of k
+      | k `IntSet.member` s3 = dom
+      | k `IntSet.member` s1 = u2
+      | k `IntSet.member` s2 = u1
         
 completeGraph :: UnVarSet -> UnVarGraph
-completeGraph (UnVarSet s) = UnVarGraph Subtractive (0, 0) (IntMap.fromSet (const emptyUnVarSet) s)
+completeGraph (UnVarSet s) 
+  = mkUnVarGraph Subtractive (IntMap.fromSet (const emptyUnVarSet) s) (0, 0)
 
 isCompleteGraph_maybe :: UnVarGraph -> Maybe UnVarSet
-isCompleteGraph_maybe (UnVarGraph Subtractive (0, 0) e) 
+isCompleteGraph_maybe (UnVarGraph Subtractive e (0, 0) _) 
   = Just (UnVarSet (IntMap.keysSet e))
 isCompleteGraph_maybe _ = Nothing
 
 neighbors :: UnVarGraph -> Var -> UnVarSet
-neighbors (UnVarGraph res _ edges) v 
+neighbors (UnVarGraph ie edges _ _) v 
   = fromMaybe emptyUnVarSet (interpret_edge <$> IntMap.lookup (k v) edges)
-  where dom = UnVarSet $ IntMap.keysSet edges
-        interpret_edge 
-          | res == Additive = id
-          | otherwise = differenceUnVarSet dom
+  where 
+    dom = UnVarSet $ IntMap.keysSet edges
+    interpret_edge 
+      | ie == Additive = id
+      | otherwise = differenceUnVarSet dom
 
 delNode :: UnVarGraph -> Var -> UnVarGraph
-delNode (UnVarGraph ei (lb, ub) g) v 
-  = UnVarGraph ei (lb', ub') g2 -- No rebalance here, since the graph gets smaller anyway
+delNode (UnVarGraph ei g (lb, ub) _) v 
+  = mkUnVarGraph ei g2 (lb', ub') -- No rebalance here, since the graph gets smaller anyway
   where 
     -- Note that we need to delete all mentioned edges, regardless of `ei`.
     (neighbors_maybe, g1) = IntMap.updateLookupWithKey (\_ _ -> Nothing) (k v) g
@@ -213,6 +229,6 @@ delNode (UnVarGraph ei (lb, ub) g) v
     ub' = ub - del_edge_count
 
 instance Outputable UnVarGraph where
-    ppr u@(UnVarGraph ei _ g) 
+    ppr u@(UnVarGraph ei g _ _) 
       | ei == Additive = ppr g
       | otherwise = ppr (complementUnVarGraph u)
