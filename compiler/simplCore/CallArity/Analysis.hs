@@ -669,9 +669,21 @@ callArityExpr env (Let bind e) = do
               -- previous iteration, we can efficiently test for changes.
               --pprTrace "change_detector" (vcat[ppr ids, ppr node, ppr changed_refs]) $
               --pprTrace "change_detector" (vcat[ppr node, ppr changed_refs, ppr old, ppr new]) $
-              map fst (Set.toList changed_refs) /= [node]
-              || not (ut_stable old) 
-              || not (ut_stable new) -- set in the transfer function through markStable
+              ASSERT2( old_sig `leqUsageSig` new_sig, text "CallArity.change_detector: usage sig not monotone")
+              old_sig == new_sig &&
+              ASSERT2( sizeUFM old_uses <= sizeUFM new_uses, text "CallArity.change_detector: uses not monotone")
+              sizeUFM old_uses == sizeUFM new_uses &&
+              old_uses == new_uses &&
+              ASSERT2( edgeCount old_cocalled <= edgeCount new_cocalled, text "CallArity.change_detector: edgeCount not monotone")
+              edgeCount old_cocalled == edgeCount new_cocalled
+              where
+                old_sig = ut_args old
+                new_sig = ut_args new
+                old_uses = ut_uses old
+                new_uses = ut_uses new
+                old_cocalled = ut_cocalled old
+                new_cocalled = ut_cocalled new
+                leqUsageSig a b = lubUsageSig a b == b
 
         return (node, (transfer, change_detector))
 
