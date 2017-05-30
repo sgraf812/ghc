@@ -8,9 +8,9 @@ module CallArity.FrameworkBuilder
   , DataFlowFramework
   , FrameworkBuilder
   , RequestedPriority (..)
+  , monotonize
   , registerTransferFunction
   , dependOnWithDefault
-  , Worklist.unsafePeekValue
   , buildAndRun
   ) where
 
@@ -49,6 +49,12 @@ buildFramework (FB state) = (res, Worklist.DFF dff)
     dff (FrameworkNode node, use) = case IntMap.lookup node env of
       Nothing -> pprPanic "CallArity.FrameworkBuilder.buildFramework" (ppr node)
       Just (transfer, detectChange) -> (transfer use, detectChange)
+
+monotonize :: FrameworkNode -> (SingleUse -> TransferFunction AnalResult) -> SingleUse -> TransferFunction AnalResult
+monotonize node transfer use = do
+  (old_ut, _) <- fromMaybe (botUsageType, error "not needed") <$> Worklist.unsafePeekValue (node, use)
+  (new_ut, new_e) <- transfer use
+  return (lubUsageType new_ut old_ut, new_e) -- Just pray new_e is OK
 
 data RequestedPriority
   = LowerThan !FrameworkNode
