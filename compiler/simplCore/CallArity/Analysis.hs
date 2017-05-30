@@ -483,10 +483,11 @@ callArityExpr
   -> FrameworkBuilder (SingleUse -> TransferFunction AnalResult)
 
 callArityExprTrivial
-  :: CoreExpr
+  :: UsageType
+  -> CoreExpr
   -> FrameworkBuilder (SingleUse -> TransferFunction AnalResult)
-callArityExprTrivial e
-  = return (\_ -> return (emptyUsageType, e))
+callArityExprTrivial ut e
+  = return (const (return (ut, e)))
 
 callArityExprMap
   :: AnalEnv
@@ -501,12 +502,12 @@ callArityExprMap env f e
       return (ut, f e')
 
 callArityExpr _ e@(Lit _)
-  = callArityExprTrivial e
+  = callArityExprTrivial emptyUsageType e 
 callArityExpr _ e@(Type _)
-  = callArityExprTrivial e
+  = callArityExprTrivial emptyUsageType e
 
 callArityExpr _ e@(Coercion co)
-  = return (\_ -> return (coercionUsageType co, e))
+  = callArityExprTrivial (coercionUsageType co) e
 
 callArityExpr env (Tick t e)
   = callArityExprMap env (Tick t) e
@@ -622,76 +623,47 @@ callArityExpr env (Case scrut case_bndr ty alts) = do
     --pprTrace "Case" (vcat [text "ut_scrut:" <+> ppr ut_scrut, text "ut_alts:" <+> ppr ut_alts, text "ut:" <+> ppr ut]) (return ())
     return (ut, Case scrut' case_bndr' ty alts')
 
-callArityExpr env (Let bind e) = do
-  let initial_binds = flattenBinds [bind]
-  let ids = map fst initial_binds
-  (env', nodes) <- registerBindingGroup env initial_binds
-  let lookup_node id =
-        expectJust ": the RHS of id wasn't registered" (lookupVarEnv nodes id)
-  let transfer_rhs (id, rhs) use =
-        dependOnWithDefault (botUsageType, rhs) (lookup_node id, use)
-  let transferred_bind b@(id, rhs) = (id, (rhs, transfer_rhs b))
-  transfer_body <- callArityExpr env' e
-
-  case bind of
-    NonRec _ _ ->
-      -- We don't need to dependOn ourselves here, because only the let body can't
-      -- call id. Thus we also can spare to allocate a new @FrameworkNode@.
-      return $ \use -> do
-        (ut_body, e') <- transfer_body use
-        let transferred_binds = map transferred_bind initial_binds
-        (ut, [(id', rhs')]) <- unleashLet env NonRecursive transferred_binds ut_body ut_body
-        return (delUsageTypes (bindersOf bind) ut, Let (NonRec id' rhs') e')
-    Rec _ -> do -- The binding group stored in the @Rec@ constructor is always the initial one!
-      -- This is a little more complicated, as we'll introduce a new FrameworkNode
-      -- which we'll depend on ourselves.
-      node <- registerTransferFunction (LowerThan (minimum (eltsUFM nodes))) $ \node -> do
-        let transfer :: SingleUse -> TransferFunction AnalResult
-            transfer use = do
-              --use <- pprTrace "Rec:begin" (ppr ids) $ return use
-              (ut_body, e') <- transfer_body use
-              -- This is the actual fixed-point iteration: we depend on usage
-              -- results from the previous iteration, defaulting to just the body.
-              (ut_usage, Let (Rec old_bind) _) <- dependOnWithDefault (ut_body, Let bind e') (node, use)
-              let transferred_binds = map transferred_bind old_bind
-              (ut, bind') <- unleashLet env Recursive transferred_binds ut_usage ut_body
-              let ut' = lubUsageType ut ut_usage
-              let lookup_old = lookupUsage Recursive ut_usage
-              let lookup_new = lookupUsage Recursive ut'
-              let ut'' | all (\id -> lookup_old id == lookup_new id) ids = markStable ut'
-                       | otherwise = ut'
-              --ut'' <- pprTrace "Rec:end" (ppr ids) $ return ut''
-              return (ut'', Let (Rec bind') e')
-
-        let change_detector :: ChangeDetector
-            change_detector changed_refs (old, _) (new, _) =
-              -- since we only care for arity and called once information of the
-              -- previous iteration, we can efficiently test for changes.
-              --pprTrace "change_detector" (vcat[ppr ids, ppr node, ppr changed_refs]) $
-              --pprTrace "change_detector" (vcat[ppr node, ppr changed_refs, ppr old, ppr new]) $
-              ASSERT2( old_sig `leqUsageSig` new_sig, text "CallArity.change_detector: usage sig not monotone")
-              old_sig == new_sig &&
-              ASSERT2( sizeUFM old_uses <= sizeUFM new_uses, text "CallArity.change_detector: uses not monotone")
-              sizeUFM old_uses == sizeUFM new_uses &&
-              old_uses == new_uses &&
-              ASSERT2( edgeCount old_cocalled <= edgeCount new_cocalled, text "CallArity.change_detector: edgeCount not monotone")
-              edgeCount old_cocalled == edgeCount new_cocalled
-              where
-                old_sig = ut_args old
-                new_sig = ut_args new
-                old_uses = ut_uses old
-                new_uses = ut_uses new
-                old_cocalled = ut_cocalled old
-                new_cocalled = ut_cocalled new
-                leqUsageSig a b = lubUsageSig a b == b
-
-        return (node, (transfer, change_detector))
-
-      -- Now for the actual TransferFunction of this expr...
-      return $ \use -> do
-        (ut, let') <- dependOnWithDefault (botUsageType, Let bind e) (node, use)
-        --pprTrace "Let" (ppr (ut, let')) $ return ()
-        return (delUsageTypes (bindersOf bind) ut, let')
+callArityExpr env (Let bind e) 
+  = registerTransferFunction HighestAvailable register >>= reference
+  where
+    reference node = return $ \use -> do
+      (ut, let') <- dependOnWithDefault (botUsageType, Let bind e) (node, use)
+      --pprTrace "Let" (ppr (ut, let')) $ return ()
+      return (delUsageTypes (bindersOf bind) ut, let')
+    register node = do
+      let initial_binds = flattenBinds [bind]
+      let ids = map fst initial_binds
+      env' <- registerBindingGroup env initial_binds
+      let lookup_node id =
+            expectJust ": the RHS of id wasn't registered" (lookupVarEnv (ae_sigs env') id)
+      let transfer_rhs (id, rhs) use =
+            dependOnWithDefault (botUsageType, rhs) (lookup_node id, use)
+      let transferred_bind b@(id, rhs) = (id, (rhs, transfer_rhs b))
+      transfer_body <- callArityExpr env' e
+      let rec_flag = recFlagOf bind
+      let transfer :: SingleUse -> TransferFunction AnalResult
+          transfer = monotonize node $ \use -> do
+            --use <- pprTrace "Rec:begin" (ppr ids) $ return use
+            (ut_body, e') <- transfer_body use
+            (ut_usage, old_binds) <- case rec_flag of
+              NonRecursive -> 
+                -- We don't need to dependOn ourselves here, because only the let body can't
+                -- call id.
+                return (ut_body, initial_binds)
+              Recursive -> do
+                -- This is the actual fixed-point iteration: we depend on usage
+                -- results from the previous iteration, defaulting to just the body.
+                (ut_usage, Let (Rec old_binds) _) <- dependOnWithDefault (ut_body, Let bind e) (node, use)
+                return (ut_usage, old_binds)
+            let transferred_binds = map transferred_bind old_binds
+            (ut, binds') <- unleashLet env rec_flag transferred_binds ut_usage ut_body
+            --ut <- pprTrace "Rec:end" (ppr ids) $ return ut
+            case rec_flag of
+              NonRecursive 
+                | [(id', rhs')] <- binds'
+                -> return (ut, Let (NonRec id' rhs') e')
+              _ -> return (ut, Let (Rec binds') e')
+      return (node, (transfer, changeDetector))
 
 coercionUsageType :: Coercion -> UsageType
 coercionUsageType co = multiplyUsages Many ut
@@ -882,47 +854,43 @@ addDataConStrictness dc
       | isMarkedStrict str = usage `bothUsage` u'1HU -- head usage imposed by `seq`
       | otherwise = usage
 
+recFlagOf :: CoreBind -> RecFlag
+recFlagOf Rec{} = Recursive
+recFlagOf NonRec{} = NonRecursive
+
 registerBindingGroup
   :: AnalEnv
   -> [(Id, CoreExpr)]
-  -> FrameworkBuilder (AnalEnv, VarEnv FrameworkNode)
-registerBindingGroup env = go env emptyVarEnv
+  -> FrameworkBuilder AnalEnv
+registerBindingGroup env [] = return env
+registerBindingGroup env ((id, rhs):binds) =
+  registerTransferFunction HighestAvailable $ \node -> do
+    env' <- registerBindingGroup (extendAnalEnv env id node) binds
+    transfer <- callArityExpr env' rhs
+    let transfer' = monotonize node $ \use -> do
+          --use <- pprTrace "RHS:begin" (ppr id <+> text "::" <+> ppr use) $ return use
+          ret@(ut_rhs, rhs') <- transfer use 
+          --ret <- pprTrace "RHS:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut_rhs)]) $ return ret
+          return ret
+    return (env', (transfer', changeDetector)) -- registerTransferFunction  will peel `snd`s away for registration
+
+changeDetector :: ChangeDetector
+changeDetector _ (old, e) (new, e') =
+  ASSERT2( old_sig `leqUsageSig` new_sig, text "CallArity.changeDetector: usage sig not monotone")
+  pprTrace "usage sig" empty (old_sig /= new_sig) ||
+  ASSERT2( sizeUFM old_uses <= sizeUFM new_uses, text "CallArity.changeDetector: uses not monotone")
+  pprTrace "uses count" empty (sizeUFM old_uses /= sizeUFM new_uses) ||
+  pprTrace "uses" empty (old_uses /= new_uses) ||
+  ASSERT2( edgeCount old_cocalled <= edgeCount new_cocalled, text "CallArity.changeDetector: edgeCount not monotone")
+  pprTrace "edgeCount" (ppr (edgeCount old_cocalled) <+> ppr (edgeCount new_cocalled)) (edgeCount old_cocalled /= edgeCount new_cocalled)
   where
-    go env nodes [] = return (env, nodes)
-    go env nodes ((id, rhs):binds) =
-      registerTransferFunction HighestAvailable $ \node ->
-        registerTransferFunction HighestAvailable $ \args_node -> do
-          (env', nodes') <- go
-            (extendAnalEnv env id args_node)
-            (extendVarEnv nodes id node)
-            binds
-          transfer <- callArityExpr env' rhs
-          let transfer' use = do
-                --use <- pprTrace "RHS:begin" (ppr id <+> text "::" <+> ppr use) $ return use
-                (prev_ut_rhs, _) <- fromMaybe (botUsageType, rhs) <$> unsafePeekValue (node, use)
-                (ut_rhs, rhs') <- transfer use 
-                let ret = (lubUsageType ut_rhs prev_ut_rhs, rhs')
-                --ret <- pprTrace "RHS:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut_rhs)]) $ return ret
-                return ret
-          let transfer_args use = do
-                --use <- pprTrace "args:begin" (ppr id <+> text "::" <+> ppr use) $ return use
-                ret@(ut, _) <- dependOnWithDefault (botUsageType, rhs) (node, use)
-                --ret <- pprTrace "args:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut)]) $ return ret
-                return ret
-          let change_detector_args nodes (old, _) (new, _) =
-                -- The only reason we split the transfer fuctions up is cheap
-                -- change detection for the arg usage case. This implies that
-                -- use sites of these sig nodes may only use the ut_args
-                -- component!
-                --pprTrace "change_detector_down" (vcat [ppr node, ppr id, ppr (ut_args old <= ut_args new), ppr (ut_args old), ppr (ut_args new), ppr (ut_args old /= ut_args new)]) $
-                ASSERT2( ut_args old <= ut_args new, text "CallArity.change_detector_down: Not monotone" $$ ppr id $$ ppr (ut_args old) $$ ppr (ut_args new) )
-                ut_args old /= ut_args new
-                  where
-                    a <= b = lubUsageSig a b == b
-          let ret = (env', nodes') -- What we return from 'registerBindingGroup'
-          let full = (transfer', alwaysChangeDetector) -- What we register for @node@
-          let args = (transfer_args, change_detector_args) -- What we register for @arg_node@
-          return ((ret, full), args) -- registerTransferFunction  will peel `snd`s away for registration
+    old_sig = ut_args old
+    new_sig = ut_args new
+    old_uses = ut_uses old
+    new_uses = ut_uses new
+    old_cocalled = ut_cocalled old
+    new_cocalled = ut_cocalled new
+    leqUsageSig a b = lubUsageSig a b == b
 
 unleashLet
   :: AnalEnv 
