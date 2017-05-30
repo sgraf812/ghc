@@ -568,73 +568,98 @@ callArityExpr env (Lam id body)
   | isTyVar id
   = mapAnalFuns env (Lam id) body
   | otherwise
-  = registerTransferFunction HighestAvailable $ \node -> do
-      (transfer_body, annotate_body) <- callArity env body
-      return (transfer transfer_body, annotate node annotate_body)
+  = transfer &&& annotate <$> registerTransferFunction -- This will memoize the
+      (error "Cycle in Lam rule")                      -- transfer function of 
+      (callArity env body)                             -- the body
   where
     rel_body_usage use 
       -- The usage of the body, relative to the given call use
       = fromMaybe topUsage (peelCallUse use)
-    annotate annotate_body use = case rel_body_usage use of
+    annotate (transfer_body, annotate_body) use = case rel_body_usage use of
       Absent -> return (Lam (id `setIdCallArity` Absent) body)
       Used multi body_use -> do
-      body' <- annotate_body use
-      let id' = id `setIdCallArity` rel_body_usage use
-      return (Lam id', body')
-    transfer transfer_body use = 
-    (transfer_body, annotate_body) <- callArityExpr env body
-    return $ \use ->
-      case fromMaybe topUsage (peelCallUse use) of -- Get at the relative @Usage@ of the body
-        Absent -> do
-          let id' = id `setIdCallArity` Absent
-          return (emptyUsageType, Lam id' body)
-        Used multi body_use -> do
-          (ut_body, body') <- transfer_body body_use
-          let (ut_body', usage_id) = findBndrUsage NonRecursive (ae_fam_envs env) ut_body id
-          let id' = applyWhen (multi == Once) (flip setIdOneShotInfo OneShotLam)
-                  . flip setIdCallArity usage_id
-                  $ id
-          -- Free vars are manified, closed vars are not. The usage of the current
-          -- argument `id` is *not* manified.
-          let ut = modifyArgs (consUsageSig usage_id)
-                 . multiplyUsages multi
-                 $ ut_body'
-          --pprTrace "callArityExpr:Lam" (vcat [text "id:" <+> ppr id, text "relative body usage:" <+> ppr u, text "id usage:" <+> ppr usage_id, text "usage sig:" <+> ppr (ut_args ut)]) (return ())
-          return (ut, Lam id' body')
+        body' <- annotate_body body_use
+        ut_body <- transfer_body use
+        let (_, id_usage) = findBndrUsage NonRecursive (ae_fam_envs env) ut_body id
+        let id' = applyWhen (multi == Once) (`setIdOneShotInfo` OneShotLam)
+                . (`setIdCallArity` usage_id)
+                $ id
+        return (Lam id', body')
+    transfer (transfer_body, _) use = case rel_body_usage use of
+      Absent -> return emptyUsageType
+      Used multi body_use -> do
+        ut_body <- transfer_body use
+        let (ut_body', usage_id) = findBndrUsage NonRecursive (ae_fam_envs env) ut_body id
+        -- Free vars are manified, closed vars are not. The usage of the current
+        -- argument `id` is *not* manified.
+        let ut = modifyArgs (consUsageSig usage_id)
+                . multiplyUsages multi
+                $ ut_body'
+        --pprTrace "callArityExpr:Lam" (vcat [text "id:" <+> ppr id, text "relative body usage:" <+> ppr u, text "id usage:" <+> ppr usage_id, text "usage sig:" <+> ppr (ut_args ut)]) (return ())
+        return (ut, Lam id' body')
 
 callArityExpr env (App f (Type t)) = mapAnalFuns env (flip App (Type t)) f
 
 callArityExpr env (App f a) = do
-  transfer_f <- callArityExpr env f
-  transfer_a <- callArityExpr env a
-  return $ \result_use -> do
-    (ut_f, f') <- transfer_f (mkCallUse Once result_use)
-    --pprTrace "App:f'" (ppr f') $ return ()
-    -- peel off one argument from the type
-    let (arg_usage, ut_f') = peelArgUsage ut_f
-    case considerThunkSharing a arg_usage of
-      Absent -> return (ut_f', App f' a)
-      Used m arg_use -> do
-          -- `m` will be `Once` most of the time (see `considerThunkSharing`),
-          -- so that all work before the lambda is uncovered will be shared 
-          -- (call-by-need!). This is the same argument as for let-bound 
-          -- right hand sides.
-          -- We could also use the multiplicity in the same way we do for
-          -- let-bindings: An argument only used once does not need to be
-          -- memoized.
-          (ut_a, a') <- first (multiplyUsages m) <$> transfer_a arg_use
-          --pprTrace "App:a'" (text "arg_use:" <+> ppr arg_use <+> ppr (ut_a, a')) $ return ()
-          return (ut_f' `bothUsageType` ut_a, App f' a')
+  (transfer_f, annotate_f) <- callArityExpr env f -- Maybe also register a transfer function?
+  (transfer_a, annotate_a) <- callArityExpr env a
+  return (transfer transfer_f transfer_a, annotate annotate_f transfer_f annotate_a)
+  where
+    peel_arg_usage' transfer_f result_use = do
+      --pprTrace "App:f'" (ppr f') $ return ()
+      -- peel off one argument from the type
+      ut_f <- transfer_f (mkCallUse Once result_use)
+      let (arg_usage, ut_f') = peelArgUsage ut_f
+      return (considerThunkSharing a arg_usage, ut_f')
+    annotate annotate_f transfer_f annotate_a result_use = do
+      f' <- annotate_f result_use
+      (arg_usage, ut_f') <- peel_arg_usage' transfer_f result_use
+      case arg_usage of
+        Absent -> return (App f' a)
+        Used _ arg_use -> App f' <$> annotate_a arg_use
+    transfer transfer_f transfer_a result_use = do
+      (arg_usage, ut_f') <- peel_arg_usage' transfer_f result_use
+      case arg_usage of
+        Absent -> return ut_f'
+        Used m arg_use -> do
+            -- `m` will be `Once` most of the time (see `considerThunkSharing`),
+            -- so that all work before the lambda is uncovered will be shared 
+            -- (call-by-need!). This is the same argument as for let-bound 
+            -- right hand sides.
+            -- We could also use the multiplicity in the same way we do for
+            -- let-bindings: An argument only used once does not need to be
+            -- memoized.
+            ut_a <- multiplyUsages m <$> transfer_a arg_use
+            --pprTrace "App:a'" (text "arg_use:" <+> ppr arg_use <+> ppr (ut_a, a')) $ return ()
+            return (ut_f' `bothUsageType` ut_a)
 
 callArityExpr env (Case scrut case_bndr ty alts) = do
-  transfer_scrut <- callArityExpr env scrut
-  transfer_alts <- mapM (analyseCaseAlternative env case_bndr) alts
+  (transfer_scrut, annotate_scrut) <- callArityExpr env scrut
+  (transfer_alts, annotate_alts) <- unzip <$> mapM (analyseCaseAlternative env case_bndr) alts
+  where
+    transfer transfer_scrut transfer_alts use = do
+      (ut_alts, scrut_uses) <- unzip <$> mapM ($ use) transfer_alts
+      let scrut_use = propagateProductUse alts scrut_uses
+      ut_scrut <- transfer_scrut scrut_use
+      let ut_alt = lubUsageTypes ut_alts
+      let ut_alt' = delUsageType ut_alt case_bndr
+      return (ut_alt' `bothUsageType` ut_scrut)
+    annotate transfer_alts annotate_scrut annotate_alts use = do
+      alts' <- mapM ($ use) annotate_alts
+      (ut_alts, scrut_uses) <- unzip <$> mapM ($ use) transfer_alts
+      let ut_alt = lubUsageTypes ut_alts
+      let (ut_alt', case_bndr_usage) = findBndrUsage NonRecursive (ae_fam_envs env) ut_alt case_bndr
+      let case_bndr' = case_bndr `setIdCallArity` case_bndr_usage
+      let scrut_use = propagateProductUse alts scrut_uses
+      scrut' <- annotate_scrut scrut_use
+      
+      
   return $ \use -> do
     (ut_alts, alts', scrut_uses) <- unzip3 <$> mapM ($ use) transfer_alts
     let ut_alt = lubUsageTypes ut_alts
-    let case_bndr' = setIdCallArity case_bndr (lookupUsage NonRecursive ut_alt case_bndr)
-    let ut_alt' = delUsageType case_bndr ut_alt
-    let scrut_use = propagateProductUse alts' scrut_uses
+    let (ut_alt', case_bndr_usage) = findBndrUsage NonRecursive (ae_fam_envs env) ut_alt case_bndr
+    let case_bndr' = case_bndr `setIdCallArity` case_bndr_usage
+    let scrut_use = propagateProductUse alts scrut_uses
     (ut_scrut, scrut') <- transfer_scrut scrut_use
     let ut = ut_alt' `bothUsageType` ut_scrut
     --pprTrace "Case" (vcat [text "ut_scrut:" <+> ppr ut_scrut, text "ut_alts:" <+> ppr ut_alts, text "ut:" <+> ppr ut]) (return ())
@@ -911,25 +936,6 @@ sameAnnotations a b = and (zipWith ((==) `on` idCallArity) as bs)
   where
     as = foldMapExpr singleton a
     bs = foldMapExpr singleton b
-
-changeDetector :: ChangeDetector
-changeDetector _ (old, e) (new, e') =
-  ASSERT2( old_sig `leqUsageSig` new_sig, text "CallArity.changeDetector: usage sig not monotone")
-  pprTrace "usage sig" empty (old_sig /= new_sig) ||
-  ASSERT2( sizeUFM old_uses <= sizeUFM new_uses, text "CallArity.changeDetector: uses not monotone")
-  pprTrace "uses count" empty (sizeUFM old_uses /= sizeUFM new_uses) ||
-  pprTrace "uses" empty (old_uses /= new_uses) ||
-  ASSERT2( edgeCount old_cocalled <= edgeCount new_cocalled, text "CallArity.changeDetector: edgeCount not monotone")
-  pprTrace "edgeCount" (ppr (edgeCount old_cocalled) <+> ppr (edgeCount new_cocalled)) (edgeCount old_cocalled /= edgeCount new_cocalled) ||
-  not (sameAnnotations e e')
-  where
-    old_sig = ut_args old
-    new_sig = ut_args new
-    old_uses = ut_uses old
-    new_uses = ut_uses new
-    old_cocalled = ut_cocalled old
-    new_cocalled = ut_cocalled new
-    leqUsageSig a b = lubUsageSig a b == b
 
 unleashLet
   :: AnalEnv 
