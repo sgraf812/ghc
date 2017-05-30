@@ -114,7 +114,11 @@ data UnVarGraph
   }
 
 edgeCount :: UnVarGraph -> Int
-edgeCount = edge_count
+edgeCount g 
+  | Additive <- edge_interpretation g = edge_count g
+  | otherwise = nodes*nodes - edge_count g
+  where
+    nodes = IntMap.size (edges g)
 
 mkUnVarGraph :: OverlayResolution -> IntMap UnVarSet -> (Int, Int) -> UnVarGraph
 mkUnVarGraph ei edges ec_estimate 
