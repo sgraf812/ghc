@@ -45,6 +45,12 @@ import qualified Data.Set as Set
 %*                                                                      *
 %************************************************************************
 
+Note [Notes are out of date]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+While the general concept of the Co-Call Analysis still holds, much has
+changed at isn't yet on par with the implementation.
+
 Note [Call Arity: The goal]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -408,8 +414,8 @@ data AnalEnv
   --
   --     - `Opt_DmdTxDictSel`: Control analysis of dictionary selectors.
   --
-  , ae_sigs :: VarEnv FrameworkNode
-  -- ^ 'FrameworkNode's of visible local let-bound identifiers. It is crucial
+  , ae_sigs :: VarEnv (SingleUse -> TransferFunction UsageType)
+  -- ^ 'TransferFunction's of visible local let-bound identifiers. It is crucial
   -- that only the 'UsageSig' component is used, as the usage on free vars might
   -- be unstable and thus too optimistic.
   , ae_fam_envs :: FamInstEnvs
@@ -429,8 +435,13 @@ initialAnalEnv dflags fam_envs need_sigs
   , ae_need_sig_annotation = need_sigs
   }
 
-extendAnalEnv :: AnalEnv -> Id -> FrameworkNode -> AnalEnv
-extendAnalEnv env id node = env { ae_sigs = extendVarEnv (ae_sigs env) id node }
+extendAnalEnv 
+  :: AnalEnv 
+  -> Id 
+  -> (SingleUse -> TransferFunction UsageType) 
+  -> AnalEnv
+extendAnalEnv env id node 
+  = env { ae_sigs = extendVarEnv (ae_sigs env) id node }
 
 -- | See Note [Analysing top-level-binds]
 -- `moduleToExpr` returns a pair of externally visible top-level `Id`s
@@ -524,10 +535,10 @@ callArityExpr env (Cast e co)
 callArityExpr env e@(Var id) = return transfer
   where
     transfer use
-      | Just node <- lookupVarEnv (ae_sigs env) id
+      | Just transfer_callee <- lookupVarEnv (ae_sigs env) id
       -- A local let-binding, e.g. a binding from this module.
       = do
-        (ut_callee, _) <- dependOnWithDefault (botUsageType, e) (node, use)
+        ut_callee <- transfer_callee use
         -- It is crucial that we only use ut_args here, as every other field
         -- might be unstable and thus too optimistic.
         --pprTrace "callArityExpr:LocalId" (ppr id <+> ppr use <+> ppr (ut_args ut_callee)) (return ())
@@ -624,21 +635,22 @@ callArityExpr env (Case scrut case_bndr ty alts) = do
     return (ut, Case scrut' case_bndr' ty alts')
 
 callArityExpr env (Let bind e) 
-  = registerTransferFunction HighestAvailable register >>= reference
+  = registerTransferFunction register >>= deref_node
   where
-    reference node = return $ \use -> do
+    deref_node node = return $ \use -> do
       (ut, let') <- dependOnWithDefault (botUsageType, Let bind e) (node, use)
       --pprTrace "Let" (ppr (ut, let')) $ return ()
       return (delUsageTypes (bindersOf bind) ut, let')
     register node = do
       let initial_binds = flattenBinds [bind]
       let ids = map fst initial_binds
-      env' <- registerBindingGroup env initial_binds
+      (env', rhs_env) <- registerBindingGroup env initial_binds
       let lookup_node id =
-            expectJust ": the RHS of id wasn't registered" (lookupVarEnv (ae_sigs env') id)
-      let transfer_rhs (id, rhs) use =
-            dependOnWithDefault (botUsageType, rhs) (lookup_node id, use)
-      let transferred_bind b@(id, rhs) = (id, (rhs, transfer_rhs b))
+            expectJust ": the RHS of id wasn't registered" (lookupVarEnv rhs_env id)
+      let transferred_bind b@(id, rhs) = (id, (rhs, lookup_node id))
+      -- Ideally we'd want the body to have a lower priority than the RHSs,
+      -- but we need to access env' with the new sigs in the body, so we
+      -- can't register it earlier.
       transfer_body <- callArityExpr env' e
       let rec_flag = recFlagOf bind
       let transfer :: SingleUse -> TransferFunction AnalResult
@@ -663,7 +675,7 @@ callArityExpr env (Let bind e)
                 | [(id', rhs')] <- binds'
                 -> return (ut, Let (NonRec id' rhs') e')
               _ -> return (ut, Let (Rec binds') e')
-      return (node, (transfer, changeDetector))
+      return (node, (transfer, changeDetectorAnalResult node))
 
 coercionUsageType :: Coercion -> UsageType
 coercionUsageType co = multiplyUsages Many ut
@@ -861,21 +873,38 @@ recFlagOf NonRec{} = NonRecursive
 registerBindingGroup
   :: AnalEnv
   -> [(Id, CoreExpr)]
-  -> FrameworkBuilder AnalEnv
-registerBindingGroup env [] = return env
-registerBindingGroup env ((id, rhs):binds) =
-  registerTransferFunction HighestAvailable $ \node -> do
-    env' <- registerBindingGroup (extendAnalEnv env id node) binds
-    transfer <- callArityExpr env' rhs
-    let transfer' = monotonize node $ \use -> do
-          --use <- pprTrace "RHS:begin" (ppr id <+> text "::" <+> ppr use) $ return use
-          ret@(ut_rhs, rhs') <- transfer use 
-          --ret <- pprTrace "RHS:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut_rhs)]) $ return ret
-          return ret
-    return (env', (transfer', changeDetector)) -- registerTransferFunction  will peel `snd`s away for registration
+  -> FrameworkBuilder (AnalEnv, VarEnv (SingleUse -> TransferFunction AnalResult))
+registerBindingGroup env = go env emptyVarEnv
+  where
+    go env nodes [] = return (env, nodes)
+    go env nodes ((id, rhs):binds) =
+      registerTransferFunction $ \node ->
+        registerTransferFunction $ \args_node -> do
+          let deref_node node def_e use = dependOnWithDefault (botUsageType, def_e) (node, use)
+          let expr_forced_error = error "Expression component may not be used"
+          (env', nodes') <- go
+            (extendAnalEnv env id (fmap fst . deref_node args_node expr_forced_error))
+            (extendVarEnv nodes id (deref_node node rhs))
+            binds
+          transfer <- callArityExpr env' rhs
+          let transfer' = monotonize node $ \use -> do
+                --use <- pprTrace "RHS:begin" (ppr id <+> text "::" <+> ppr use) $ return use
+                ret@(ut, rhs') <- transfer use 
+                --ret <- pprTrace "RHS:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut_rhs)]) $ return ret
+                return ret
+          let transfer_args use = do
+                --use <- pprTrace "args:begin" (ppr id <+> text "::" <+> ppr use) $ return use
+                (ut, _) <- dependOnWithDefault (botUsageType, undefined) (node, use)
+                --ut <- pprTrace "args:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut)]) $ return ut
+                return (ut, expr_forced_error)
+          let ret = (env', nodes') -- What we return from 'registerBindingGroup'
+          let full = (transfer', changeDetectorAnalResult node) -- What we register for @node@
+          let args = (transfer_args, changeDetectorUsageType) -- What we register for @arg_node@
+          return ((ret, full), args) -- registerTransferFunction  will peel `snd`s away for registration
 
-changeDetector :: ChangeDetector
-changeDetector _ (old, e) (new, e') =
+changeDetectorUsageType :: ChangeDetector
+changeDetectorUsageType changed_refs (old, _) (new, _) =
+  -- It's crucial that we don't have to check the annotated expressions.
   ASSERT2( old_sig `leqUsageSig` new_sig, text "CallArity.changeDetector: usage sig not monotone")
   pprTrace "usage sig" empty (old_sig /= new_sig) ||
   ASSERT2( sizeUFM old_uses <= sizeUFM new_uses, text "CallArity.changeDetector: uses not monotone")
@@ -891,6 +920,12 @@ changeDetector _ (old, e) (new, e') =
     old_cocalled = ut_cocalled old
     new_cocalled = ut_cocalled new
     leqUsageSig a b = lubUsageSig a b == b
+
+changeDetectorAnalResult :: FrameworkNode -> ChangeDetector
+changeDetectorAnalResult self_node changed_refs (old, e) (new, e') =
+  pprTrace "changeDetector" (ppr $ Set.map fst changed_refs) $
+  not (Set.map fst changed_refs `Set.isSubsetOf` Set.singleton self_node) || 
+  changeDetectorUsageType changed_refs (old, e) (new, e')
 
 unleashLet
   :: AnalEnv 

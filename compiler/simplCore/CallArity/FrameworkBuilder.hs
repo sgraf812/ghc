@@ -7,7 +7,6 @@ module CallArity.FrameworkBuilder
   , Worklist.alwaysChangeDetector
   , DataFlowFramework
   , FrameworkBuilder
-  , RequestedPriority (..)
   , registerTransferFunction
   , monotonize
   , dependOnWithDefault
@@ -50,23 +49,12 @@ buildFramework (FB state) = (res, Worklist.DFF dff)
       Nothing -> pprPanic "CallArity.FrameworkBuilder.buildFramework" (ppr node)
       Just (transfer, detectChange) -> (transfer use, detectChange)
 
-data RequestedPriority
-  = LowerThan !FrameworkNode
-  | HighestAvailable
-
 registerTransferFunction
-  :: RequestedPriority
-  -> (FrameworkNode -> FrameworkBuilder (a, (SingleUse -> TransferFunction AnalResult, ChangeDetector)))
+  :: (FrameworkNode -> FrameworkBuilder (a, (SingleUse -> TransferFunction AnalResult, ChangeDetector)))
   -> FrameworkBuilder a
-registerTransferFunction prio f = FB $ do
+registerTransferFunction f = FB $ do
   nodes <- get
-  let node = case prio of
-        HighestAvailable -> 2 * IntMap.size nodes
-        LowerThan (FrameworkNode node)
-          | not (IntMap.member (node - 1) nodes) -> node - 1
-          | otherwise -> pprPanic
-            "CallArity.FrameworkBuilder.registerTransferFunction"
-            (text "There was already a node registered with priority" <+> ppr (node - 1))
+  let node = IntMap.size nodes
   (result, _) <- mfix $ \ ~(_, entry) -> do
     -- Using mfix so that we can spare an unnecessary Int counter in the state.
     -- Also because @f@ needs to see its own node in order to define its
@@ -94,10 +82,9 @@ dependOnWithDefault def which = do
 buildAndRun :: FrameworkBuilder (SingleUse -> TransferFunction AnalResult) -> SingleUse -> AnalResult
 buildAndRun buildTransfer use = lookup_result (Worklist.runFramework fw (Set.singleton (node, use)))
   where
-    (node, fw) = buildFramework $
-      registerTransferFunction (LowerThan (FrameworkNode 0)) $ \node -> do
-        transfer <- buildTransfer
-        return (node, (transfer, Worklist.alwaysChangeDetector))
+    (node, fw) = buildFramework $ registerTransferFunction $ \node -> do
+      transfer <- buildTransfer
+      return (node, (transfer, Worklist.alwaysChangeDetector))
 
     lookup_result :: Map (FrameworkNode, SingleUse) AnalResult -> AnalResult
     lookup_result result_map = case Map.lookup (node, use) result_map of
