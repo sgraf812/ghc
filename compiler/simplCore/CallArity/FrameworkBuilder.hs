@@ -9,8 +9,8 @@ module CallArity.FrameworkBuilder
   , FrameworkBuilder
   , RequestedPriority (..)
   , registerTransferFunction
+  , monotonize
   , dependOnWithDefault
-  , Worklist.unsafePeekValue
   , buildAndRun
   ) where
 
@@ -74,6 +74,15 @@ registerTransferFunction prio f = FB $ do
     modify' (IntMap.insert node entry)
     unFB (f (FrameworkNode node))
   return result
+
+monotonize
+  :: FrameworkNode
+  -> (SingleUse -> TransferFunction AnalResult)
+  -> SingleUse -> TransferFunction AnalResult
+monotonize node transfer use = do
+  (ut_new, e') <- transfer use 
+  (ut_old, _) <- fromMaybe (botUsageType, undefined) <$> Worklist.unsafePeekValue (node, use)
+  return (lubUsageType ut_new ut_old, e')
 
 dependOnWithDefault :: AnalResult -> (FrameworkNode, SingleUse) -> TransferFunction AnalResult
 dependOnWithDefault def which = do
