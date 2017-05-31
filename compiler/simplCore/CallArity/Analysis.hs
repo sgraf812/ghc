@@ -444,7 +444,7 @@ extendAnalEnv env id node
   = env { ae_sigs = extendVarEnv (ae_sigs env) id node }
 
 -- | See Note [Analysing top-level-binds]
--- `moduleToExpr` returns a pair of externally visible top-level `Id`s
+-- `programToExpr` returns a pair of externally visible top-level `Id`s
 -- (including at least exports and mentions in RULEs) and a nested
 -- `let` expression to be analysed by `callArityRHS`.
 --
@@ -452,13 +452,15 @@ extendAnalEnv env id node
 -- nested lets, where the external visible ids are returned in the inner-most let
 -- as a tuple. As a result, all exported identifiers are handled as called
 -- with each other, with `topUsage`.
-moduleToExpr :: CoreProgram -> (VarSet, CoreExpr)
-moduleToExpr = first (\it -> pprTrace "moduleToExpr" (ppr (sizeVarSet it)) it) . impl []
+programToExpr 
+  :: CoreProgram 
+  -> (VarSet, CoreExpr)
+programToExpr = first (\it -> pprTrace "programToExpr" (ppr (sizeVarSet it)) it) . impl []
   where
     impl exposed []
       = (mkVarSet exposed, mkBigCoreVarTup exposed)
     impl exposed (bind:prog)
-      = second (Let bind) (impl (exposed_ids' bind ++ exposed) prog)
+      = second (Let bind) (impl (exposed_ids bind ++ exposed) prog)
     -- We are too conservative here, but we need *at least*  
     -- 
     --   * exported `Id`s (`isExportedId`)
@@ -468,17 +470,25 @@ moduleToExpr = first (\it -> pprTrace "moduleToExpr" (ppr (sizeVarSet it)) it) .
     -- with any of the binders, so we just blindly assume all top-level
     -- `Id`s as exported (as does the demand analyzer).
     exposed_ids bind = bindersOf bind
-    exposed_ids' bind = filter isExportedId (bindersOf bind)
 
--- | The left inverse to `moduleToExpr`: `exprToModule . snd . moduleToExpr = id \@CoreProgram`
-exprToModule :: CoreExpr -> CoreProgram
-exprToModule (Let bind e) = bind : exprToModule e
-exprToModule _ = []
+-- | The left inverse to `programToExpr`: `exprToProgram . snd . programToExpr = id \@CoreProgram`
+exprToProgram :: CoreExpr -> CoreProgram
+exprToProgram (Let bind e) = bind : exprToProgram e
+exprToProgram _ = []
 
 -- Main entry point
-callArityAnalProgram :: DynFlags -> FamInstEnvs -> CoreProgram -> IO CoreProgram
+callArityAnalProgram 
+  :: DynFlags 
+  -> FamInstEnvs 
+  -> CoreProgram 
+  -> IO CoreProgram
 callArityAnalProgram dflags fam_envs
-  = return . (\it -> pprTrace "callArity:end" (ppr (length it)) it) . exprToModule . uncurry (callArityRHS dflags fam_envs) . moduleToExpr . (\it -> pprTrace "callArity:begin" (ppr (length it)) it)
+  = return 
+  . (\it -> pprTrace "callArity:end" (ppr (length it)) it) 
+  . exprToProgram 
+  . uncurry (callArityRHS dflags fam_envs) 
+  . programToExpr 
+  . (\it -> pprTrace "callArity:begin" (ppr (length it)) it)
   -- . (\prog -> pprTrace "CallArity:Program" (ppr prog) prog)
 
 callArityRHS :: DynFlags -> FamInstEnvs -> VarSet -> CoreExpr -> CoreExpr
@@ -635,7 +645,7 @@ callArityExpr env (Case scrut case_bndr ty alts) = do
     return (ut, Case scrut' case_bndr' ty alts')
 
 callArityExpr env (Let bind e) 
-  = registerTransferFunction register >>= deref_node
+  = registerTransferFunction LowestPriority register >>= deref_node
   where
     deref_node node = return $ \use -> do
       (ut, let') <- dependOnWithDefault (botUsageType, Let bind e) (node, use)
@@ -878,8 +888,8 @@ registerBindingGroup env = go env emptyVarEnv
   where
     go env nodes [] = return (env, nodes)
     go env nodes ((id, rhs):binds) =
-      registerTransferFunction $ \node ->
-        registerTransferFunction $ \args_node -> do
+      registerTransferFunction HighestPriority $ \node ->
+        registerTransferFunction HighestPriority $ \args_node -> do
           let deref_node node def_e use = dependOnWithDefault (botUsageType, def_e) (node, use)
           let expr_forced_error = error "Expression component may not be used"
           (env', nodes') <- go
