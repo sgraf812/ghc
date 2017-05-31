@@ -7,6 +7,7 @@ module CallArity.FrameworkBuilder
   , Worklist.alwaysChangeDetector
   , DataFlowFramework
   , FrameworkBuilder
+  , RequestedPriority (..)
   , registerTransferFunction
   , monotonize
   , dependOnWithDefault
@@ -37,29 +38,55 @@ type DataFlowFramework = Worklist.DataFlowFramework (FrameworkNode, SingleUse) A
 -- | Maps @FrameworkNode@ to incoming usage dependent @TransferFunction@s
 type NodeTransferEnv = IntMap (SingleUse -> TransferFunction AnalResult, ChangeDetector)
 
+data BuilderState
+  = BS 
+  { bs_env :: !NodeTransferEnv
+  , bs_lowest :: !Int 
+  , bs_highest :: !Int
+  }
+
+initialBuilderState :: BuilderState
+initialBuilderState = BS IntMap.empty 0 maxBound
+
+modifyNodes :: (NodeTransferEnv -> NodeTransferEnv) -> BuilderState -> BuilderState
+modifyNodes f bs = bs { bs_env = f (bs_env bs) }
+
 newtype FrameworkBuilder a
-  = FB { unFB :: State NodeTransferEnv a }
+  = FB { unFB :: State BuilderState a }
   deriving (Functor, Applicative, Monad)
 
 buildFramework :: FrameworkBuilder a -> (a, DataFlowFramework)
 buildFramework (FB state) = (res, Worklist.DFF dff)
   where
-    (res, env) = runState state IntMap.empty -- NodeTransferEnv
-    dff (FrameworkNode node, use) = case IntMap.lookup node env of
+    (res, bs) = runState state initialBuilderState
+    dff (FrameworkNode node, use) = case IntMap.lookup node (bs_env bs) of
       Nothing -> pprPanic "CallArity.FrameworkBuilder.buildFramework" (ppr node)
       Just (transfer, detectChange) -> (transfer use, detectChange)
 
+data RequestedPriority
+  = HighestPriority
+  | LowestPriority
+
+popNodeWithRequestedPriority :: RequestedPriority -> State BuilderState Int
+popNodeWithRequestedPriority prio = state impl
+  where
+    impl bs 
+      | HighestPriority <- prio
+      = (bs_highest bs, bs { bs_highest = bs_highest bs - 1 })
+      | otherwise
+      = (bs_lowest bs, bs { bs_lowest = bs_lowest bs + 1 }) 
+
 registerTransferFunction
-  :: (FrameworkNode -> FrameworkBuilder (a, (SingleUse -> TransferFunction AnalResult, ChangeDetector)))
+  :: RequestedPriority
+  -> (FrameworkNode -> FrameworkBuilder (a, (SingleUse -> TransferFunction AnalResult, ChangeDetector)))
   -> FrameworkBuilder a
-registerTransferFunction f = FB $ do
-  nodes <- get
-  let node = IntMap.size nodes
+registerTransferFunction prio f = FB $ do
+  node <- popNodeWithRequestedPriority prio
   (result, _) <- mfix $ \ ~(_, entry) -> do
     -- Using mfix so that we can spare an unnecessary Int counter in the state.
     -- Also because @f@ needs to see its own node in order to define its
     -- transfer function in case of letrec.
-    modify' (IntMap.insert node entry)
+    modify' (modifyNodes (IntMap.insert node entry))
     unFB (f (FrameworkNode node))
   return result
 
@@ -82,7 +109,7 @@ dependOnWithDefault def which = do
 buildAndRun :: FrameworkBuilder (SingleUse -> TransferFunction AnalResult) -> SingleUse -> AnalResult
 buildAndRun buildTransfer use = lookup_result (Worklist.runFramework fw (Set.singleton (node, use)))
   where
-    (node, fw) = buildFramework $ registerTransferFunction $ \node -> do
+    (node, fw) = buildFramework $ registerTransferFunction LowestPriority $ \node -> do
       transfer <- buildTransfer
       return (node, (transfer, Worklist.alwaysChangeDetector))
 
