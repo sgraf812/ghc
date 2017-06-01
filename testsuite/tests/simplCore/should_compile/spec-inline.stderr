@@ -84,7 +84,7 @@ Roman.$wgo =
       Just x ->
         case x of { GHC.Types.I# ipv ->
         let {
-          m :: GHC.Prim.Int#
+          m [Dmd=<L,A>, Usg=A] :: GHC.Prim.Int#
           [LclId]
           m =
             GHC.Prim.+#
