@@ -36,6 +36,7 @@ import WwLib ( findTypeShape )
 import Control.Arrow ( first, second )
 import Control.Monad ( forM )
 import qualified Data.Set as Set
+import Data.Tree
 
 
 {-
@@ -424,16 +425,30 @@ data AnalEnv
   -- ^ `Id`s which need to be annotated with a signature, e.g. because
   -- they are visible beyond this module. These are probably top-level
   -- ids only, including exports and mentions in RULEs.
+  , ae_predicted_nodes :: Tree Int
+  -- ^ A prediction of how many `FrameworkNode`s need to be allocated for
+  -- the expression to be analyzed. We need these for allocating
+  -- `FrameworkNode`s in a particular order that guarantees fast
+  -- stabilization.
   }
 
-initialAnalEnv :: DynFlags -> FamInstEnvs -> VarSet -> AnalEnv
-initialAnalEnv dflags fam_envs need_sigs
+initialAnalEnv :: DynFlags -> FamInstEnvs -> VarSet -> Tree Int -> AnalEnv
+initialAnalEnv dflags fam_envs need_sigs predicted_nodes
   = AE
   { ae_dflags = dflags
   , ae_sigs = emptyVarEnv
   , ae_fam_envs = fam_envs
   , ae_need_sig_annotation = need_sigs
+  , ae_predicted_nodes = predicted_nodes
   }
+
+descend :: Int -> AnalEnv -> AnalEnv
+descend n env 
+  = env { ae_predicted_nodes = subForest (ae_predicted_nodes env) !! n }
+
+predictSizeOfLetBody :: AnalEnv -> Int
+-- The body is always the first child
+predictSizeOfLetBody = rootLabel . ae_predicted_nodes . descend 0 
 
 extendAnalEnv 
   :: AnalEnv 
@@ -495,7 +510,8 @@ callArityRHS :: DynFlags -> FamInstEnvs -> VarSet -> CoreExpr -> CoreExpr
 callArityRHS dflags fam_envs need_sigs e
   = ASSERT2( isEmptyUnVarSet (domType ut), text "Free vars in UsageType:" $$ ppr ut ) e'
   where
-    (ut, e') = buildAndRun (callArityExpr (initialAnalEnv dflags fam_envs need_sigs) e) topSingleUse
+    env = initialAnalEnv dflags fam_envs need_sigs (predictAllocatedNodes e)
+    (ut, e') = buildAndRun (callArityExpr env e) topSingleUse
 
 -- | The main analysis function. See Note [Analysis type signature]
 callArityExpr
@@ -606,11 +622,11 @@ callArityExpr env (Lam id body)
           --pprTrace "callArityExpr:Lam" (vcat [text "id:" <+> ppr id, text "relative body usage:" <+> ppr u, text "id usage:" <+> ppr usage_id, text "usage sig:" <+> ppr (ut_args ut)]) (return ())
           return (ut, Lam id' body')
 
-callArityExpr env (App f (Type t)) = callArityExprMap env (flip App (Type t)) f
-
+callArityExpr env (App f (Type t)) 
+  = callArityExprMap (descend 0 env) (flip App (Type t)) f
 callArityExpr env (App f a) = do
-  transfer_f <- callArityExpr env f
-  transfer_a <- callArityExpr env a
+  transfer_f <- callArityExpr (descend 0 env) f
+  transfer_a <- callArityExpr (descend 1 env) a
   return $ \result_use -> do
     (ut_f, f') <- transfer_f (mkCallUse Once result_use)
     --pprTrace "App:f'" (ppr f') $ return ()
@@ -631,8 +647,10 @@ callArityExpr env (App f a) = do
           return (ut_f' `bothUsageType` ut_a, App f' a')
 
 callArityExpr env (Case scrut case_bndr ty alts) = do
-  transfer_scrut <- callArityExpr env scrut
-  transfer_alts <- mapM (analyseCaseAlternative env case_bndr) alts
+  transfer_scrut <- callArityExpr (descend 0 env) scrut
+  -- We zip the index of the child in the ae_predicted_nodes tree
+  transfer_alts <- forM (zip [1..] alts) $ \(n, alt) -> 
+    analyseCaseAlternative (descend n env) case_bndr alt
   return $ \use -> do
     (ut_alts, alts', scrut_uses) <- unzip3 <$> mapM ($ use) transfer_alts
     let ut_alt = lubUsageTypes ut_alts
@@ -645,7 +663,7 @@ callArityExpr env (Case scrut case_bndr ty alts) = do
     return (ut, Case scrut' case_bndr' ty alts')
 
 callArityExpr env (Let bind e) 
-  = registerTransferFunction LowestPriority register >>= deref_node
+  = registerTransferFunction register >>= deref_node
   where
     deref_node node = return $ \use -> do
       (ut, let') <- dependOnWithDefault (botUsageType, Let bind e) (node, use)
@@ -654,14 +672,18 @@ callArityExpr env (Let bind e)
     register node = do
       let initial_binds = flattenBinds [bind]
       let ids = map fst initial_binds
+      -- We retain nodes we need for the body, so that they have lower
+      -- priority than the bindings.
+      retained <- retainNodes (predictSizeOfLetBody env)
       (env', rhs_env) <- registerBindingGroup env initial_binds
+      freeRetainedNodes retained
       let lookup_node id =
             expectJust ": the RHS of id wasn't registered" (lookupVarEnv rhs_env id)
       let transferred_bind b@(id, rhs) = (id, (rhs, lookup_node id))
       -- Ideally we'd want the body to have a lower priority than the RHSs,
       -- but we need to access env' with the new sigs in the body, so we
       -- can't register it earlier.
-      transfer_body <- callArityExpr env' e
+      transfer_body <- callArityExpr (descend 0 env') e
       let rec_flag = recFlagOf bind
       let transfer :: SingleUse -> TransferFunction AnalResult
           transfer = monotonize node $ \use -> do
@@ -884,19 +906,19 @@ registerBindingGroup
   :: AnalEnv
   -> [(Id, CoreExpr)]
   -> FrameworkBuilder (AnalEnv, VarEnv (SingleUse -> TransferFunction AnalResult))
-registerBindingGroup env = go env emptyVarEnv
+registerBindingGroup env = go env emptyVarEnv . zip [1..] -- `zip` for `descend`ing
   where
     go env nodes [] = return (env, nodes)
-    go env nodes ((id, rhs):binds) =
-      registerTransferFunction HighestPriority $ \node ->
-        registerTransferFunction HighestPriority $ \args_node -> do
+    go env nodes ((n, (id, rhs)):binds) =
+      registerTransferFunction $ \node ->
+        registerTransferFunction $ \args_node -> do
           let deref_node node def_e use = dependOnWithDefault (botUsageType, def_e) (node, use)
           let expr_forced_error = error "Expression component may not be used"
           (env', nodes') <- go
             (extendAnalEnv env id (fmap fst . deref_node args_node expr_forced_error))
             (extendVarEnv nodes id (deref_node node rhs))
             binds
-          transfer <- callArityExpr env' rhs
+          transfer <- callArityExpr (descend n env') rhs
           let transfer' = monotonize node $ \use -> do
                 --use <- pprTrace "RHS:begin" (ppr id <+> text "::" <+> ppr use) $ return use
                 ret@(ut, rhs') <- transfer use 
@@ -918,7 +940,7 @@ changeDetectorUsageType changed_refs (old, _) (new, _) =
   ASSERT2( old_sig `leqUsageSig` new_sig, text "CallArity.changeDetector: usage sig not monotone")
   pprTrace "usage sig" empty (old_sig /= new_sig) ||
   ASSERT2( sizeUFM old_uses <= sizeUFM new_uses, text "CallArity.changeDetector: uses not monotone")
-  pprTrace "uses count" empty (sizeUFM old_uses /= sizeUFM new_uses) ||
+  pprTrace "uses count" (ppr (sizeUFM old_uses) <+> ppr (sizeUFM new_uses)) (sizeUFM old_uses /= sizeUFM new_uses) ||
   pprTrace "uses" empty (old_uses /= new_uses) ||
   ASSERT2( edgeCount old_cocalled <= edgeCount new_cocalled, text "CallArity.changeDetector: edgeCount not monotone")
   pprTrace "edgeCount" (ppr (edgeCount old_cocalled) <+> ppr (edgeCount new_cocalled)) (edgeCount old_cocalled /= edgeCount new_cocalled)
