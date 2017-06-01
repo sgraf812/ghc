@@ -470,7 +470,7 @@ extendAnalEnv env id node
 programToExpr 
   :: CoreProgram 
   -> (VarSet, CoreExpr)
-programToExpr = first (\it -> pprTrace "programToExpr" (ppr (sizeVarSet it)) it) . impl []
+programToExpr = impl []
   where
     impl exposed []
       = (mkVarSet exposed, mkBigCoreVarTup exposed)
@@ -499,11 +499,11 @@ callArityAnalProgram
   -> IO CoreProgram
 callArityAnalProgram dflags fam_envs
   = return 
-  . (\it -> pprTrace "callArity:end" (ppr (length it)) it) 
+  -- . (\it -> pprTrace "callArity:end" (ppr (length it)) it) 
   . exprToProgram 
   . uncurry (callArityRHS dflags fam_envs) 
   . programToExpr 
-  . (\it -> pprTrace "callArity:begin" (ppr (length it)) it)
+  -- . (\it -> pprTrace "callArity:begin" (ppr (length it)) it)
   -- . (\prog -> pprTrace "CallArity:Program" (ppr prog) prog)
 
 callArityRHS :: DynFlags -> FamInstEnvs -> VarSet -> CoreExpr -> CoreExpr
@@ -938,12 +938,12 @@ changeDetectorUsageType :: ChangeDetector
 changeDetectorUsageType changed_refs (old, _) (new, _) =
   -- It's crucial that we don't have to check the annotated expressions.
   ASSERT2( old_sig `leqUsageSig` new_sig, text "CallArity.changeDetector: usage sig not monotone")
-  pprTrace "usage sig" empty (old_sig /= new_sig) ||
+  old_sig /= new_sig ||
   ASSERT2( sizeUFM old_uses <= sizeUFM new_uses, text "CallArity.changeDetector: uses not monotone")
-  pprTrace "uses count" (ppr (sizeUFM old_uses) <+> ppr (sizeUFM new_uses)) (sizeUFM old_uses /= sizeUFM new_uses) ||
-  pprTrace "uses" empty (old_uses /= new_uses) ||
+  sizeUFM old_uses /= sizeUFM new_uses ||
+  old_uses /= new_uses ||
   ASSERT2( edgeCount old_cocalled <= edgeCount new_cocalled, text "CallArity.changeDetector: edgeCount not monotone")
-  pprTrace "edgeCount" (ppr (edgeCount old_cocalled) <+> ppr (edgeCount new_cocalled)) (edgeCount old_cocalled /= edgeCount new_cocalled)
+  edgeCount old_cocalled /= edgeCount new_cocalled
   where
     old_sig = ut_args old
     new_sig = ut_args new
@@ -955,7 +955,7 @@ changeDetectorUsageType changed_refs (old, _) (new, _) =
 
 changeDetectorAnalResult :: FrameworkNode -> ChangeDetector
 changeDetectorAnalResult self_node changed_refs (old, e) (new, e') =
-  pprTrace "changeDetector" (ppr $ Set.map fst changed_refs) $
+  --pprTrace "changeDetector" (ppr $ Set.map fst changed_refs) $
   not (Set.map fst changed_refs `Set.isSubsetOf` Set.singleton self_node) || 
   changeDetectorUsageType changed_refs (old, e) (new, e')
 
