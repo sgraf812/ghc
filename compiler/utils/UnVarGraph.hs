@@ -131,7 +131,6 @@ mkUnVarGraph ei edges ec_estimate
 
 balance :: UnVarGraph -> UnVarGraph
 balance g@(UnVarGraph ei edges (_, ub) ec)
-  | ub_ratio < 0.6 = g
   | precise_ratio < 0.6 = precise_g
   | otherwise = complementUnVarGraph precise_g
   where
@@ -152,10 +151,10 @@ complementUnVarGraph (UnVarGraph res edges (lb, ub) _)
     ec_est = (max_edges - ub, max_edges - lb)
 
 complementEdges :: IntMap UnVarSet -> IntMap UnVarSet
-complementEdges edges = edges'
+complementEdges !edges = edges'
   where
     dom = UnVarSet (IntMap.keysSet edges)
-    edges' = fmap complement_neighbors edges
+    !edges' = fmap complement_neighbors edges
     complement_neighbors neighbors
       -- Very common cases are an empty neighbor set and the full neighbor set,
       -- in which case we want to be pretty cheap.
@@ -167,14 +166,33 @@ emptyUnVarGraph :: UnVarGraph
 emptyUnVarGraph = mkUnVarGraph Subtractive IntMap.empty (0, 0)
 
 unionUnVarGraph :: UnVarGraph -> UnVarGraph -> UnVarGraph
-unionUnVarGraph u1@(UnVarGraph Subtractive _ _ _) u2
-  = unionUnVarGraph (complementUnVarGraph u1) u2
-unionUnVarGraph u1 u2@(UnVarGraph Subtractive _ _ _)
-  = unionUnVarGraph u1 (complementUnVarGraph u2)
 unionUnVarGraph (UnVarGraph Additive e1 (l1, u1) _) (UnVarGraph Additive e2 (l2, u2) _)
   = balance $ mkUnVarGraph Additive e (max l1 l2, u1 + u2) 
   where
     e = IntMap.unionWith unionUnVarSet e1 e2
+unionUnVarGraph (UnVarGraph Subtractive e1 (l1, u1) _) (UnVarGraph Subtractive e2 (l2, u2) _)
+  = balance $ mkUnVarGraph Subtractive e (l, u)
+  where
+    diff1 = IntMap.keysSet e2 `IntSet.difference` IntMap.keysSet e1
+    diff2 = IntMap.keysSet e1 `IntSet.difference` IntMap.keysSet e2
+    e = IntMap.unionWithKey merger e1 e2
+    nodes = IntMap.size e
+    d1 = IntSet.size diff1
+    d2 = IntSet.size diff2
+    l = min l1 l2 + 2*d1*d2 -- assumes missing edges repeal themselves
+    u = u1 + u2 + 2*d1*d2 -- assumes missing edges in the non-shared component
+    merger n s1 s2
+      | n `IntSet.member` diff1 = s1 `unionUnVarSet` UnVarSet diff2
+      | n `IntSet.member` diff2 = s2 `unionUnVarSet` UnVarSet diff1
+      | otherwise = intersectionUnVarSet s1 s2 
+unionUnVarGraph u1 u2
+  = unionUnVarGraph u1' u2' -- we could be smarter here
+  where
+    nodes1 = IntMap.size (edges u1)
+    nodes2 = IntMap.size (edges u2)
+    (u1', u2')
+      | nodes1 < nodes2 = (complementUnVarGraph u1, u2)
+      | otherwise = (u1, complementUnVarGraph u2)
     
 unionUnVarGraphs :: [UnVarGraph] -> UnVarGraph
 unionUnVarGraphs = foldr unionUnVarGraph emptyUnVarGraph
