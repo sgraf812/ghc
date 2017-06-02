@@ -56,11 +56,10 @@ T4908.$wf [InlPrag=[0]] :: Int# -> (Int, Int) -> Bool
  Arity=2,
  Caf=NoCafRefs,
  Str=<S,1*U><L,1*U(A,1*U(1*U))>,
- ArgUsg=1*U,1*U(A,1*U(1*U)),w*U,w*U..,
  Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
          WorkFree=True, Expandable=True, Guidance=IF_ARGS [30 20] 101 20}]
 T4908.$wf =
-  \ (ww :: Int#) (w :: (Int, Int)) ->
+  \ (ww :: Int#) (w [OS=OneShot] :: (Int, Int)) ->
     case ww of ds {
       __DEFAULT ->
         case w of { (a, b) ->
