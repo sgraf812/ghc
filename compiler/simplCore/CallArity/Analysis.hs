@@ -630,8 +630,8 @@ callArityExpr env (Lam id body)
         u@(Used multi body_use) -> do
           (ut_body, body') <- transfer_body body_use
           let (ut_body', usage_id) = findBndrUsage NonRecursive (ae_fam_envs env) ut_body id
-          let id' = applyWhen (multi == Once) (flip setIdOneShotInfo OneShotLam)
-                  . flip setIdCallArity usage_id
+          let id' = applyWhen (multi == Once) (`setIdOneShotInfo` OneShotLam)
+                  . (`setIdCallArity` usage_id)
                   $ id
           -- Free vars are manified, closed vars are not. The usage of the current
           -- argument `id` is *not* manified.
@@ -654,16 +654,16 @@ callArityExpr env (App f a) = do
     case considerThunkSharing a arg_usage of
       Absent -> return (ut_f', App f' a)
       Used m arg_use -> do
-          -- `m` will be `Once` most of the time (see `considerThunkSharing`),
-          -- so that all work before the lambda is uncovered will be shared 
-          -- (call-by-need!). This is the same argument as for let-bound 
-          -- right hand sides.
-          -- We could also use the multiplicity in the same way we do for
-          -- let-bindings: An argument only used once does not need to be
-          -- memoized.
-          (ut_a, a') <- first (multiplyUsages m) <$> transfer_a arg_use
-          --pprTrace "App:a'" (text "arg_use:" <+> ppr arg_use <+> ppr (ut_a, a')) $ return ()
-          return (ut_f' `bothUsageType` ut_a, App f' a')
+        -- `m` will be `Once` most of the time (see `considerThunkSharing`),
+        -- so that all work before the lambda is uncovered will be shared 
+        -- (call-by-need!). This is the same argument as for let-bound 
+        -- right hand sides.
+        -- We could also use the multiplicity in the same way we do for
+        -- let-bindings: An argument only used once does not need to be
+        -- memoized.
+        (ut_a, a') <- first (multiplyUsages m) <$> transfer_a arg_use
+        --pprTrace "App:a'" (text "arg_use:" <+> ppr arg_use <+> ppr (ut_a, a')) $ return ()
+        return (ut_f' `bothUsageType` ut_a, App f' a')
 
 callArityExpr env (Case scrut case_bndr ty alts) = do
   transfer_scrut <- callArityExpr (descend 0 env) scrut
@@ -719,7 +719,7 @@ callArityExpr env (Let bind e)
                 (ut_usage, Let (Rec old_binds) _) <- dependOnWithDefault (ut_body, Let bind e) (node, use)
                 return (ut_usage, old_binds)
             let transferred_binds = map transferred_bind old_binds
-            (ut, binds') <- unleashLet env rec_flag transferred_binds ut_usage ut_body
+            (ut, binds') <- unleashLet env' rec_flag transferred_binds ut_usage ut_body
             --ut <- pprTrace "Rec:end" (ppr ids) $ return ut
             case rec_flag of
               NonRecursive 
@@ -727,9 +727,6 @@ callArityExpr env (Let bind e)
                 -> return (ut, Let (NonRec id' rhs') e')
               _ -> return (ut, Let (Rec binds') e')
       return (node, (transfer, changeDetectorAnalResult node))
-
-useLetUp :: Id -> Bool
-useLetUp id = idArity id == 0
 
 coercionUsageType :: Coercion -> UsageType
 coercionUsageType co = multiplyUsages Many ut
@@ -927,6 +924,9 @@ recFlagOf NonRec{} = NonRecursive
 exprForcedError :: CoreExpr
 exprForcedError = error "Expression component may not be used"
 
+useLetUp :: Id -> Bool
+useLetUp id = idArity id == 0
+
 transferUp :: Id -> CoreExpr -> FrameworkNode -> SingleUse -> TransferFunction AnalResult
 transferUp id rhs node use = do
   (ut, rhs') <- dependOnWithDefault (botUsageType, rhs) (node, use)
@@ -958,11 +958,11 @@ registerBindingGroup env = go env emptyVarEnv . zip [1..] -- `zip` for `descend`
           -- Now that the whole binding group is in scope in `env'`,
           -- we actually have to attend to our duty and register the
           -- transfer functions associated with `up_node` and `down_node`
-          transfer <- callArityExpr (descend n env') rhs
+          transfer_rhs <- callArityExpr (descend n env') rhs
           let transfer_annotate = monotonize up_node $ \use -> do
                 --use <- pprTrace "RHS:begin" (ppr id <+> text "::" <+> ppr use) $ return use
                 ret@(ut, rhs') <- transfer_rhs use 
-                --ret <- pprTrace "RHS:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut_rhs)]) $ return ret
+                --ret <- pprTrace "RHS:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr ut]) $ return ret
                 return ret
           let transfer_args_only use = do
                 -- This makes sure to forget the annotated expression from the up_node, 
@@ -970,7 +970,7 @@ registerBindingGroup env = go env emptyVarEnv . zip [1..] -- `zip` for `descend`
                 -- termination of the analysis.
                 --use <- pprTrace "args:begin" (ppr id <+> text "::" <+> ppr use) $ return use
                 (ut, _) <- dependOnWithDefault (botUsageType, exprForcedError) (up_node, use)
-                --ut_callee <- pprTrace "args:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut_callee)]) $ return ut_calle
+                --ut <- pprTrace "args:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr ut]) $ return ut
                 return (ut, exprForcedError)
           let annotate = (transfer_annotate, changeDetectorAnalResult up_node) -- What we register for `up_node`
           let args_only = (transfer_args_only, changeDetectorUsageType)        -- What we register for `down_node`
@@ -1010,7 +1010,6 @@ unleashLet
   -> TransferFunction (UsageType, [(Id, CoreExpr)])
 unleashLet env rec_flag transferred_binds ut_usage ut_body = do
   let fam_envs = ae_fam_envs env
-  let need_sigs = ae_need_sig_annotation env
   let (ids, transferred_rhss) = unzip transferred_binds
   (ut_rhss, rhss') <- fmap unzip $ forM transferred_binds $ \(id, (rhs, transfer)) ->
     unleashUsage rhs transfer (lookupUsage rec_flag ut_usage id)
@@ -1020,21 +1019,20 @@ unleashLet env rec_flag transferred_binds ut_usage ut_body = do
   -- Now use that information to annotate binders.
   let (_, usages) = findBndrsUsages rec_flag fam_envs ut_final ids
   let ids' = setBndrsUsageInfo ids usages
-  ids'' <- forM (zip ids' transferred_rhss) $ \(id, (_, transfer)) ->
-    annotateIdArgUsage need_sigs id transfer
+  ids'' <- forM ids' (annotateIdArgUsage env) 
 
   -- This intentionally still contains the @Id@s of the binding group, because
   -- the recursive rule looks at their usages to determine stability.
   return (ut_final, zip ids'' rhss')
 
 annotateIdArgUsage
-  :: VarSet
+  :: AnalEnv
   -> Id
-  -> (SingleUse -> TransferFunction AnalResult)
   -> TransferFunction Id
-annotateIdArgUsage need_sigs id transfer_rhs
-  | not (id `elemVarSet` need_sigs) = return id
-  | otherwise = do
+annotateIdArgUsage env id
+  | id `elemVarSet` (ae_need_sig_annotation env)
+  , Just transfer_callee <- lookupVarEnv (ae_sigs env) id
+  = do
     -- We can't eta-expand beyond idArity anyway (exported!), so our best
     -- bet is a single call with idArity.
     -- Note that in the case where idArity id == 0, there is no interesting
@@ -1042,8 +1040,10 @@ annotateIdArgUsage need_sigs id transfer_rhs
     -- In that case we *could* try to analyze with arity 1, just for the
     -- signature.
     let single_call = iterate (mkCallUse Once) topSingleUse !! idArity id
-    usage_sig <- ut_args . fst <$> transfer_rhs single_call
+    usage_sig <- ut_args <$> transfer_callee single_call
     return (id `setIdArgUsage` usage_sig)
+  | otherwise
+  = return id
 
 unleashUsage
   :: CoreExpr

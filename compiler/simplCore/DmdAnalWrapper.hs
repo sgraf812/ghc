@@ -13,6 +13,7 @@ import FamInstEnv
 import Id
 import Outputable
 import Usage
+import Util
 import Var
 
 combinedDmdAnalProgram :: DynFlags -> FamInstEnvs -> (Activation -> Bool) -> [CoreRule] -> CoreProgram -> IO CoreProgram
@@ -33,8 +34,8 @@ mergeInfo is_lam_bndr id
   -- instead of the whole expression, we get more conservative results in our
   -- new analysis, where there might be multiplied uses on lambda binders if
   -- it has more than one lambda. In that case we have to relax the assert.
-  = WARN( not (is_lam_bndr || isExportedId id || ca_usage `leqUsage` old_usage), text "Usage should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usage <+> text "ca:" <+> ppr ca_usage <+> text "new:" <+> ppr new_demand )
-    WARN( not (not (isExportedId id) || ca_usg_sig `leqUsageSig` old_usg_sig), text "UsageSig should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usg_sig <+> text "ca:" <+> ppr ca_usg_sig <+> text "new:" <+> ppr new_str_sig )
+  = ASSERT2( (is_lam_bndr || isExportedId id || ca_usage `leqUsage` old_usage), text "Usage should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usage <+> text "ca:" <+> ppr ca_usage <+> text "new:" <+> ppr new_demand )
+    ASSERT2( (not (isExportedId id) || ca_usg_sig `leqUsageSig` old_usg_sig), text "UsageSig should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usg_sig <+> text "ca:" <+> ppr ca_usg_sig <+> text "new:" <+> ppr new_str_sig )
     --pprTrace "mergeInfo" (ppr id <+> text "Demand:" <+> ppr old_demand <+> ppr ca_usage <+> ppr new_demand <+> text "Strictness" <+> ppr old_str_sig <+> ppr ca_usg_sig <+> ppr new_str_sig) $
     id'
   where
