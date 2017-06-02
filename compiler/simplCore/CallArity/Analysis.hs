@@ -14,7 +14,7 @@ import CallArity.FrameworkBuilder
 import BasicTypes
 import Class
 import Coercion ( Coercion, coVarsOfCo )
-import CoreFVs ( idRuleRhsVars, rulesFreeVars )
+import CoreFVs ( rulesFreeVars, idRuleRhsVars )
 import CoreSyn
 import CoreUtils ( exprIsTrivial )
 import DataCon
@@ -460,29 +460,27 @@ extendAnalEnv env id node
   = env { ae_sigs = extendVarEnv (ae_sigs env) id node }
 
 -- | See Note [Analysing top-level-binds]
--- `programToExpr` returns a pair of externally visible top-level `Id`s
--- (including at least exports and mentions in RULEs) and a nested
--- `let` expression to be analysed by `callArityRHS`.
+-- `programToExpr` returns a pair of all top-level `Id`s
+-- and a nested `let` expression that uses everything externally visible.
+-- This `let` expression is then to be analysed by `callArityRHS`.
 --
 -- Represents the fact that a `CoreProgram` is like a sequence of
 -- nested lets, where the external visible ids are returned in the inner-most let
--- as a tuple. As a result, all exported identifiers are handled as called
+-- as a tuple. As a result, all visible identifiers are handled as called
 -- with each other, with `topUsage`.
 programToExpr 
-  :: (Activation -> Bool)
-  -> [CoreRule]
+  :: [CoreRule]
   -> CoreProgram 
   -> (VarSet, CoreExpr)
-programToExpr is_active_rule orphan_rules = impl (rulesFreeVars orphan_rules)
+programToExpr orphan_rules = impl [] (rulesFreeVars orphan_rules)
   where
-    impl :: VarSet -> CoreProgram -> (VarSet, CoreExpr)
-    impl exposed []
-      = (exposed, mkBigCoreVarTup (nonDetEltsUFM exposed))
+    impl top_level_ids exposed []
+      = (mkVarSet top_level_ids, mkBigCoreVarTup (nonDetEltsUFM exposed))
         -- nonDetEltsUFM is OK, because all product components will
         -- used in the same way anyway.
-    impl exposed (bind:prog)
-      = second (Let bind) (impl (exposed_ids bind `unionVarSet` exposed) prog)
-    -- We need *at least*  
+    impl top_level_ids exposed (bind:prog)
+      = second (Let bind) (impl (bindersOf bind ++ top_level_ids) (exposed_ids bind `unionVarSet` exposed) prog)
+    -- We need to use *at least*  
     -- 
     --   * exported `Id`s (`isExportedId`)
     --   * `Id`s mentioned in any RULE's RHS of this module
@@ -501,6 +499,7 @@ programToExpr is_active_rule orphan_rules = impl (rulesFreeVars orphan_rules)
       where
         bs = bindersOf bind
         exported = mkVarSet (filter isExportedId bs)
+        is_active_rule _ = True -- Conservative, but we should be fine
         rules = map (idRuleRhsVars is_active_rule) bs
 
 -- | The left inverse to `programToExpr`: `exprToProgram . snd . programToExpr = id \@CoreProgram`
@@ -512,16 +511,15 @@ exprToProgram _ = []
 callArityAnalProgram 
   :: DynFlags 
   -> FamInstEnvs 
-  -> (Activation -> Bool)
   -> [CoreRule]
   -> CoreProgram 
   -> IO CoreProgram
-callArityAnalProgram dflags fam_envs is_active_rule orphan_rules
+callArityAnalProgram dflags fam_envs orphan_rules
   = return 
   -- . (\it -> pprTrace "callArity:end" (ppr (length it)) it) 
   . exprToProgram 
   . uncurry (callArityRHS dflags fam_envs) 
-  . programToExpr is_active_rule orphan_rules
+  . programToExpr orphan_rules
   -- . (\it -> pprTrace "callArity:begin" (ppr (length it)) it)
   -- . (\prog -> pprTrace "CallArity:Program" (ppr prog) prog)
 
@@ -627,7 +625,7 @@ callArityExpr env (Lam id body)
         Absent -> do
           let id' = id `setIdCallArity` Absent
           return (emptyUsageType, Lam id' body)
-        u@(Used multi body_use) -> do
+        Used multi body_use -> do
           (ut_body, body') <- transfer_body body_use
           let (ut_body', usage_id) = findBndrUsage NonRecursive (ae_fam_envs env) ut_body id
           let id' = applyWhen (multi == Once) (`setIdOneShotInfo` OneShotLam)
@@ -690,7 +688,6 @@ callArityExpr env (Let bind e)
       return (delUsageTypes (bindersOf bind) ut, let')
     register node = do
       let initial_binds = flattenBinds [bind]
-      let ids = map fst initial_binds
       -- We retain nodes we need for the body, so that they have lower
       -- priority than the bindings.
       retained <- retainNodes (predictSizeOfLetBody env)
@@ -698,7 +695,7 @@ callArityExpr env (Let bind e)
       freeRetainedNodes retained
       let lookup_node id =
             expectJust ": the RHS of id wasn't registered" (lookupVarEnv rhs_env id)
-      let transferred_bind b@(id, rhs) = (id, (rhs, lookup_node id))
+      let transferred_bind (id, rhs) = (id, (rhs, lookup_node id))
       -- Ideally we'd want the body to have a lower priority than the RHSs,
       -- but we need to access env' with the new sigs in the body, so we
       -- can't register it earlier.
@@ -795,17 +792,18 @@ globalIdUsageSig id use
   | use <= no_call -- @f x `seq` ...@ for a GlobalId `f` with arity > 1
   = botUsageSig
   | use <= single_call
-  = arg_usage
+  = ASSERT2( usg_sig `leqUsageSig` str_sig, text "usg_sig:" <+> ppr usg_sig <+> text "str_sig:" <+> ppr str_sig ) usg_sig
   | otherwise
   = --pprTrace "many" (ppr arg_usage <+> ppr (idStrictness id) <+> ppr (manifyUsageSig arg_usage)) $ 
-    manifyUsageSig arg_usage
+    manifyUsageSig usg_sig
   where
     (<=) = leqSingleUse
     arity = idArity id
     mk_one_shot = mkCallUse Once
     no_call = iterate mk_one_shot botSingleUse !! max 0 (arity - 1)
     single_call = iterate mk_one_shot topSingleUse !! arity
-    arg_usage = idArgUsage id
+    usg_sig = idArgUsage id
+    str_sig = usageSigFromStrictSig (idStrictness id)
 
 -- | Evaluation of a non-trivial RHS of a let-binding or argument 
 -- is shared (call-by-need!). GHC however doesn't allocate a new thunk
@@ -993,7 +991,6 @@ changeDetectorUsageType _ (old, _) (new, _) =
     new_uses = ut_uses new
     old_cocalled = ut_cocalled old
     new_cocalled = ut_cocalled new
-    leqUsageSig a b = lubUsageSig a b == b
 
 changeDetectorAnalResult :: FrameworkNode -> ChangeDetector
 changeDetectorAnalResult self_node changed_refs (old, e) (new, e') =
@@ -1010,7 +1007,7 @@ unleashLet
   -> TransferFunction (UsageType, [(Id, CoreExpr)])
 unleashLet env rec_flag transferred_binds ut_usage ut_body = do
   let fam_envs = ae_fam_envs env
-  let (ids, transferred_rhss) = unzip transferred_binds
+  let ids = fst . unzip $ transferred_binds
   (ut_rhss, rhss') <- fmap unzip $ forM transferred_binds $ \(id, (rhs, transfer)) ->
     unleashUsage rhs transfer (lookupUsage rec_flag ut_usage id)
   let ut_final = callArityLetEnv (zip ids ut_rhss) ut_body
@@ -1041,6 +1038,7 @@ annotateIdArgUsage env id
     -- signature.
     let single_call = iterate (mkCallUse Once) topSingleUse !! idArity id
     usage_sig <- ut_args <$> transfer_callee single_call
+    --pprTrace "annotating" (ppr id <+> ppr usage_sig) $ return ()
     return (id `setIdArgUsage` usage_sig)
   | otherwise
   = return id

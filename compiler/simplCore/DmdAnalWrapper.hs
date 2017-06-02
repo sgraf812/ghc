@@ -4,7 +4,6 @@ module DmdAnalWrapper (combinedDmdAnalProgram) where
 
 #include "HsVersions.h"
 
-import BasicTypes
 import CallArity
 import CoreSyn
 import DmdAnal
@@ -16,11 +15,11 @@ import Usage
 import Util
 import Var
 
-combinedDmdAnalProgram :: DynFlags -> FamInstEnvs -> (Activation -> Bool) -> [CoreRule] -> CoreProgram -> IO CoreProgram
-combinedDmdAnalProgram dflags fams is_active_rule orphan_rules prog = do
+combinedDmdAnalProgram :: DynFlags -> FamInstEnvs -> [CoreRule] -> CoreProgram -> IO CoreProgram
+combinedDmdAnalProgram dflags fams orphan_rules prog = do
   -- Call Arity first, suggesting the fact that there's no information flow
   -- from DA to CA. There isn't from CA to DA either, of course.
-  prog' <- callArityAnalProgram dflags fams is_active_rule orphan_rules prog
+  prog' <- callArityAnalProgram dflags fams orphan_rules prog
   prog'' <- dmdAnalProgram dflags fams prog'
   --pprTrace "Program" (ppr prog'') $ pure ()
   return (mapBndrsProgram mergeInfo prog'')
