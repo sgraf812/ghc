@@ -50,7 +50,7 @@ import Data.Tree
 Note [Notes are out of date]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-While the general concept of the Co-Call Analysis still holds, much has
+While the general concept of the Co-Call Analysis still applies, much has
 changed at isn't yet on par with the implementation.
 
 Note [Call Arity: The goal]
@@ -582,12 +582,12 @@ callArityExpr env e@(Var id) = return transfer
     transfer use
       | Just transfer_callee <- lookupVarEnv (ae_sigs env) id
       -- A local let-binding, e.g. a binding from this module.
+      -- We apply either the LetUp or LetDown rule, which is handled
+      -- transparently in `registerBindingGroups`.
       = do
         ut_callee <- transfer_callee use
-        -- It is crucial that we only use ut_args here, as every other field
-        -- might be unstable and thus too optimistic.
         --pprTrace "callArityExpr:LocalId" (ppr id <+> ppr use <+> ppr (ut_args ut_callee)) (return ())
-        return ((unitUsageType id use) { ut_args = ut_args ut_callee }, e)
+        return (ut_callee `bothUsageType` unitUsageType id use, e)
 
       | isLocalId id
       -- A LocalId not present in @nodes@, e.g. a lambda or case-bound variable.
@@ -727,6 +727,9 @@ callArityExpr env (Let bind e)
                 -> return (ut, Let (NonRec id' rhs') e')
               _ -> return (ut, Let (Rec binds') e')
       return (node, (transfer, changeDetectorAnalResult node))
+
+useLetUp :: Id -> Bool
+useLetUp id = idArity id == 0
 
 coercionUsageType :: Coercion -> UsageType
 coercionUsageType co = multiplyUsages Many ut
@@ -921,41 +924,61 @@ recFlagOf :: CoreBind -> RecFlag
 recFlagOf Rec{} = Recursive
 recFlagOf NonRec{} = NonRecursive
 
+exprForcedError :: CoreExpr
+exprForcedError = error "Expression component may not be used"
+
+transferUp :: Id -> CoreExpr -> FrameworkNode -> SingleUse -> TransferFunction AnalResult
+transferUp id rhs node use = do
+  (ut, rhs') <- dependOnWithDefault (botUsageType, rhs) (node, use)
+  if useLetUp id
+    then return (ut, rhs')
+    else return (botUsageType, rhs')
+
+transferDown :: Id -> FrameworkNode -> SingleUse -> TransferFunction UsageType
+transferDown id node use = do
+  (ut, _) <- dependOnWithDefault (botUsageType, exprForcedError) (node, use)
+  if useLetUp id
+    then return (forgetFreeVarUsages ut)
+    else return ut
+
 registerBindingGroup
   :: AnalEnv
   -> [(Id, CoreExpr)]
   -> FrameworkBuilder (AnalEnv, VarEnv (SingleUse -> TransferFunction AnalResult))
 registerBindingGroup env = go env emptyVarEnv . zip [1..] -- `zip` for `descend`ing
   where
-    go env nodes [] = return (env, nodes)
-    go env nodes ((n, (id, rhs)):binds) =
-      registerTransferFunction $ \node ->
-        registerTransferFunction $ \args_node -> do
-          let deref_node node def_e use = dependOnWithDefault (botUsageType, def_e) (node, use)
-          let expr_forced_error = error "Expression component may not be used"
-          (env', nodes') <- go
-            (extendAnalEnv env id (fmap fst . deref_node args_node expr_forced_error))
-            (extendVarEnv nodes id (deref_node node rhs))
+    go env transfer_ups [] = return (env, transfer_ups)
+    go env transfer_ups ((n, (id, rhs)):binds) =
+      registerTransferFunction $ \up_node ->
+        registerTransferFunction $ \down_node -> do
+          ret@(env', _) <- go
+            (extendAnalEnv env id (transferDown id down_node))
+            (extendVarEnv transfer_ups id (transferUp id rhs up_node))
             binds
+          -- Now that the whole binding group is in scope in `env'`,
+          -- we actually have to attend to our duty and register the
+          -- transfer functions associated with `up_node` and `down_node`
           transfer <- callArityExpr (descend n env') rhs
-          let transfer' = monotonize node $ \use -> do
+          let transfer_annotate = monotonize up_node $ \use -> do
                 --use <- pprTrace "RHS:begin" (ppr id <+> text "::" <+> ppr use) $ return use
-                ret@(ut, rhs') <- transfer use 
+                ret@(ut, rhs') <- transfer_rhs use 
                 --ret <- pprTrace "RHS:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut_rhs)]) $ return ret
                 return ret
-          let transfer_args use = do
+          let transfer_args_only use = do
+                -- This makes sure to forget the annotated expression from the up_node, 
+                -- in order to have a more forgiving change detector. That's essential for 
+                -- termination of the analysis.
                 --use <- pprTrace "args:begin" (ppr id <+> text "::" <+> ppr use) $ return use
-                (ut, _) <- dependOnWithDefault (botUsageType, undefined) (node, use)
-                --ut <- pprTrace "args:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut)]) $ return ut
-                return (ut, expr_forced_error)
-          let ret = (env', nodes') -- What we return from 'registerBindingGroup'
-          let full = (transfer', changeDetectorAnalResult node) -- What we register for @node@
-          let args = (transfer_args, changeDetectorUsageType) -- What we register for @arg_node@
-          return ((ret, full), args) -- registerTransferFunction  will peel `snd`s away for registration
+                (ut, _) <- dependOnWithDefault (botUsageType, exprForcedError) (up_node, use)
+                --ut_callee <- pprTrace "args:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr (ut_args ut_callee)]) $ return ut_calle
+                return (ut, exprForcedError)
+          let annotate = (transfer_annotate, changeDetectorAnalResult up_node) -- What we register for `up_node`
+          let args_only = (transfer_args_only, changeDetectorUsageType)        -- What we register for `down_node`
+          return ((ret, annotate), args_only) -- `registerTransferFunction`  will peel `snd`s away for registration
 
 changeDetectorUsageType :: ChangeDetector
 changeDetectorUsageType _ (old, _) (new, _) =
-  -- It's crucial that we don't have to check the annotated expressions.
+  -- It's crucial for termination that we don't have to check the annotated expressions.
   ASSERT2( old_sig `leqUsageSig` new_sig, text "CallArity.changeDetector: usage sig not monotone")
   old_sig /= new_sig ||
   ASSERT2( sizeUFM old_uses <= sizeUFM new_uses, text "CallArity.changeDetector: uses not monotone")
