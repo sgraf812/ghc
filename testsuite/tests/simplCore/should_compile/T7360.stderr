@@ -24,6 +24,7 @@ fun1 [InlPrag=NOINLINE] :: Foo -> ()
  Arity=1,
  Caf=NoCafRefs,
  Str=<S,1*U>,
+ ArgUsg=1*U,w*U,w*U..,
  Unf=Unf{Src=InlineStable, TopLvl=True, Value=True, ConLike=True,
          WorkFree=True, Expandable=True,
          Guidance=ALWAYS_IF(arity=1,unsat_ok=True,boring_ok=False)
@@ -52,6 +53,7 @@ fun2 :: forall a. [a] -> ((), Int)
 [GblId,
  Arity=1,
  Str=<L,1*U>m,
+ ArgUsg=1*U,w*U,w*U..,
  Unf=Unf{Src=InlineStable, TopLvl=True, Value=True, ConLike=True,
          WorkFree=True, Expandable=True,
          Guidance=ALWAYS_IF(arity=1,unsat_ok=True,boring_ok=False)
