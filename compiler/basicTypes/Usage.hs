@@ -260,6 +260,7 @@ trimSingleUse (TsFun shape) (Call m body)
 trimSingleUse (TsProd shapes) (Product comps)
   | equalLength shapes comps
   = mkProductUse (zipWith trimUsage shapes comps)
+trimSingleUse (TsProd []) UnknownUse = HeadUse
 trimSingleUse _ _ = topSingleUse
 
 trimUsage :: TypeShape -> Usage -> Usage
