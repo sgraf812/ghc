@@ -9,7 +9,7 @@ module Usage
   , multiplicity, botUsage, topUsage, lubUsage, bothUsage
   , manifyUsage, oneifyUsage, expandArity
   , UsageSig
-  , botUsageSig, topUsageSig, lubUsageSig
+  , botUsageSig, topUsageSig, lubUsageSig, leqUsageSig
   , consUsageSig, unconsUsageSig, usageSigFromUsages, manifyUsageSig
   , trimSingleUse, trimUsage, trimUsageSig
   , u'1HU, u'1C1U
@@ -191,6 +191,9 @@ lubUsageSig s BotUsageSig = s
 lubUsageSig TopUsageSig _ = TopUsageSig
 lubUsageSig _ TopUsageSig = TopUsageSig
 lubUsageSig (ArgUsage u1 s1) (ArgUsage u2 s2) = consUsageSig (lubUsage u1 u2) (lubUsageSig s1 s2)
+
+leqUsageSig :: UsageSig -> UsageSig -> Bool
+leqUsageSig u1 u2 = lubUsageSig u1 u2 == u2
 
 -- * Working with `SingleUse`, `Usage` and `UsageSig`
 

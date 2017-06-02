@@ -69,8 +69,9 @@ import Coercion         ( isCoVar )
 import TysPrim
 import DataCon          ( DataCon, dataConWorkId )
 import IdInfo           ( vanillaIdInfo, setStrictnessInfo,
-                          setArityInfo )
+                          setArgUsageInfo, setArityInfo )
 import Demand
+import Usage
 import Name      hiding ( varName )
 import Outputable
 import FastString
@@ -741,6 +742,7 @@ mkRuntimeErrorId name
  = mkVanillaGlobalWithInfo name runtime_err_ty bottoming_info
  where
     bottoming_info = vanillaIdInfo `setStrictnessInfo`    strict_sig
+                                   `setArgUsageInfo`      topUsageSig
                                    `setArityInfo`         1
                         -- Make arity and strictness agree
 

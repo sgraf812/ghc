@@ -252,49 +252,10 @@ data IdInfo
         strictnessInfo  :: !StrictSig,
         demandInfo      :: !Demand,
         argUsageInfo    :: !UsageSig,
-        callArityInfo   :: !Usage
+        callArityInfo   :: !Usage,
 
-        levityInfo      :: LevityInfo    -- ^ when applied, will this Id ever have a levity-polymorphic type?
-        --cardinalityInfo :: CardinalityInfo      -- ^ Evaluation cardinality of the binder and its arguments
+        levityInfo      :: LevityInfo           -- ^ when applied, will this Id ever have a levity-polymorphic type?
     }
-
--- | Cardinality information about a binder.
---
--- The cardinality of a binder represents how often it is evaluated/called.
--- Interesting cardinalities are {0, 1, $\omega$}, where $\omega$ means
--- multiple times.
---
--- Strictness and usage analysis compute approximations to the
--- actual runtime cardinality: Strictness analysis will compute a *lower* bound
--- for the cadinality (e.g. 'is this evaluated at least once?'), whereas
--- usage analysis computes upper bounds for cardinality (e.g. 'not used at all',
--- 'used at most once'). The results are saved in @ci_demanded@ and @ci_used@.
---
--- For second-order strictness and usage analysis, we also store signatures of
--- how the binder evaluates *its arguments* on evaluation. These signatures are
--- stored in @ci_argStrictness@ and @ci_argUsage@ and persisted in interface
--- files for analysis information flow across module boundaries.
-data CardinalityInfo
-  = CardinalityInfo {
-        ci_argStrictness :: !StrictSig,
-        -- ^ What strictness is unleashed upon *arguments* if this @Id@ is called
-        ci_argUsage      :: !UsageSig,
-        -- ^ What usage is unleashed upon *arguments* if this @Id@ is called
-        ci_demanded      :: !Demand,
-        -- ^ Is this binding used *at least* once (e.g. strict)?
-        ci_used          :: !Usage
-        -- ^ Is this binding used *at most* never, once or multiple times?
-        -- What is the minimum number of arguments it was called with?
-  }
-
-emptyCardinalityInfo :: CardinalityInfo
-emptyCardinalityInfo
-  = CardinalityInfo {
-        ci_argStrictness = nopSig,
-        ci_argUsage      = topUsageSig,
-        ci_demanded      = topDmd,
-        ci_used          = topUsage
-  }
 
 -- Setters
 
