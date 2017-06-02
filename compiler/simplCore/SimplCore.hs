@@ -34,7 +34,7 @@ import FloatOut         ( floatOutwards )
 import FamInstEnv
 import Id
 import ErrUtils         ( withTiming )
-import BasicTypes       ( CompilerPhase(..), isDefaultInlinePragma )
+import BasicTypes       ( Activation, CompilerPhase(..), isDefaultInlinePragma )
 import VarSet
 import VarEnv
 import LiberateCase     ( liberateCase )
@@ -471,10 +471,10 @@ doCorePass CoreDoStaticArgs          = {-# SCC "StaticArgs" #-}
                                        doPassU doStaticArgs
 
 doCorePass CoreDoCallArity           = {-# SCC "CallArity" #-}
-                                       doPassDFM callArityAnalProgram
+                                       doPassDFRM callArityAnalProgram
 
 doCorePass CoreDoStrictness          = {-# SCC "NewStranal" #-}
-                                       doPassDFM combinedDmdAnalProgram
+                                       doPassDFRM combinedDmdAnalProgram
 
 doCorePass CoreDoWorkerWrapper       = {-# SCC "WorkWrap" #-}
                                        doPassDFU wwTopBinds
@@ -543,12 +543,17 @@ doPassDU do_pass = doPassDUM (\dflags us -> return . do_pass dflags us)
 doPassU :: (UniqSupply -> CoreProgram -> CoreProgram) -> ModGuts -> CoreM ModGuts
 doPassU do_pass = doPassDU (const do_pass)
 
-doPassDFM :: (DynFlags -> FamInstEnvs -> CoreProgram -> IO CoreProgram) -> ModGuts -> CoreM ModGuts
-doPassDFM do_pass guts = do
+doPassDFRM :: (DynFlags -> FamInstEnvs -> (Activation -> Bool) -> [CoreRule] -> CoreProgram -> IO CoreProgram) -> ModGuts -> CoreM ModGuts
+doPassDFRM do_pass guts = do
     dflags <- getDynFlags
     p_fam_env <- getPackageFamInstEnv
     let fam_envs = (p_fam_env, mg_fam_inst_env guts)
-    doPassM (liftIO . do_pass dflags fam_envs) guts
+    -- No idea how to get at the SimplifierMode mode here,
+    -- or what else to choose as is_active_rule predicate.
+    -- let is_active_rule = activeRule (mkSimplEnv mode)
+    let is_active_rule = const True 
+    let orphan_rules = mg_rules guts
+    doPassM (liftIO . do_pass dflags fam_envs is_active_rule orphan_rules) guts
 
 doPassDFU :: (DynFlags -> FamInstEnvs -> UniqSupply -> CoreProgram -> CoreProgram) -> ModGuts -> CoreM ModGuts
 doPassDFU do_pass guts = do

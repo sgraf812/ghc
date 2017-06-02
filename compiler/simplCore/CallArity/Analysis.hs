@@ -14,6 +14,7 @@ import CallArity.FrameworkBuilder
 import BasicTypes
 import Class
 import Coercion ( Coercion, coVarsOfCo )
+import CoreFVs ( idRuleRhsVars, rulesFreeVars )
 import CoreSyn
 import CoreUtils ( exprIsTrivial )
 import DataCon
@@ -468,23 +469,39 @@ extendAnalEnv env id node
 -- as a tuple. As a result, all exported identifiers are handled as called
 -- with each other, with `topUsage`.
 programToExpr 
-  :: CoreProgram 
+  :: (Activation -> Bool)
+  -> [CoreRule]
+  -> CoreProgram 
   -> (VarSet, CoreExpr)
-programToExpr = impl []
+programToExpr is_active_rule orphan_rules = impl (rulesFreeVars orphan_rules)
   where
+    impl :: VarSet -> CoreProgram -> (VarSet, CoreExpr)
     impl exposed []
-      = (mkVarSet exposed, mkBigCoreVarTup exposed)
+      = (exposed, mkBigCoreVarTup (nonDetEltsUFM exposed))
+        -- nonDetEltsUFM is OK, because all product components will
+        -- used in the same way anyway.
     impl exposed (bind:prog)
-      = second (Let bind) (impl (exposed_ids bind ++ exposed) prog)
-    -- We are too conservative here, but we need *at least*  
+      = second (Let bind) (impl (exposed_ids bind `unionVarSet` exposed) prog)
+    -- We need *at least*  
     -- 
     --   * exported `Id`s (`isExportedId`)
-    --   * `Id`s mentioned in RULEs of this module
+    --   * `Id`s mentioned in any RULE's RHS of this module
+    --   * Manually (through a VECTORISE pragma) vectorized `Id`s.
+    --     No need for RHSs of VECTORISE pragmas since we run after
+    --     the initial phase of the simplifier.
+    --     (See Note [Vectorisation declarations and occurrences] in SimplCore.hs)
+    --     TODO: We ignore these altogether for now, since collecting 
+    --           the needed info is really tedious.
     --
-    -- I'm not sure it's enough to just look into RULEs associated
-    -- with any of the binders, so we just blindly assume all top-level
-    -- `Id`s as exported (as does the demand analyzer).
-    exposed_ids bind = bindersOf bind
+    -- This essentially does the same as the Occurence Analyser,
+    -- but we are more conservative in that we don't try to follow
+    -- transitive RULE mentions and just take into account all free vars
+    -- of any binder instead of starting to trace from exported ones.
+    exposed_ids bind = unionVarSets (exported:rules)
+      where
+        bs = bindersOf bind
+        exported = mkVarSet (filter isExportedId bs)
+        rules = map (idRuleRhsVars is_active_rule) bs
 
 -- | The left inverse to `programToExpr`: `exprToProgram . snd . programToExpr = id \@CoreProgram`
 exprToProgram :: CoreExpr -> CoreProgram
@@ -495,14 +512,16 @@ exprToProgram _ = []
 callArityAnalProgram 
   :: DynFlags 
   -> FamInstEnvs 
+  -> (Activation -> Bool)
+  -> [CoreRule]
   -> CoreProgram 
   -> IO CoreProgram
-callArityAnalProgram dflags fam_envs
+callArityAnalProgram dflags fam_envs is_active_rule orphan_rules
   = return 
   -- . (\it -> pprTrace "callArity:end" (ppr (length it)) it) 
   . exprToProgram 
   . uncurry (callArityRHS dflags fam_envs) 
-  . programToExpr 
+  . programToExpr is_active_rule orphan_rules
   -- . (\it -> pprTrace "callArity:begin" (ppr (length it)) it)
   -- . (\prog -> pprTrace "CallArity:Program" (ppr prog) prog)
 
@@ -935,7 +954,7 @@ registerBindingGroup env = go env emptyVarEnv . zip [1..] -- `zip` for `descend`
           return ((ret, full), args) -- registerTransferFunction  will peel `snd`s away for registration
 
 changeDetectorUsageType :: ChangeDetector
-changeDetectorUsageType changed_refs (old, _) (new, _) =
+changeDetectorUsageType _ (old, _) (new, _) =
   -- It's crucial that we don't have to check the annotated expressions.
   ASSERT2( old_sig `leqUsageSig` new_sig, text "CallArity.changeDetector: usage sig not monotone")
   old_sig /= new_sig ||
