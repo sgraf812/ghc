@@ -427,7 +427,6 @@ ppIdInfo id info
     , (has_arity,        text "Arity=" <> int arity)
     , (has_caf_info,     text "Caf=" <> ppr caf_info)
     , (has_str_info,     text "Str=" <> pprStrictness str_info)
-    , (has_usg,          text "Usg=" <> ppr usg_info)
     , (has_arg_usage,    text "ArgUsg=" <> ppr arg_usage)
     , (has_unf,          text "Unf=" <> ppr unf_info)
     , (not (null rules), text "RULES:" <+> vcat (map pprRule rules))
@@ -441,9 +440,6 @@ ppIdInfo id info
 
     arity = arityInfo info
     has_arity = arity /= 0
-
-    usg_info = callArityInfo info
-    has_usg = usg_info /= topUsage
 
     arg_usage = argUsageInfo info
     has_arg_usage = arg_usage /= topUsageSig

@@ -43,9 +43,9 @@ Rec {
 -- RHS size: {terms: 55, types: 9, coercions: 0}
 Roman.foo_$s$wgo [Occ=LoopBreaker]
   :: GHC.Prim.Int# -> GHC.Prim.Int# -> GHC.Prim.Int#
-[GblId, Arity=2, Caf=NoCafRefs, Str=<S,U><S,U>]
+[GblId, Arity=2, Caf=NoCafRefs, Str=<S,U><S,U>, ArgUsg=A,w*U,w*U..]
 Roman.foo_$s$wgo =
-  \ (sc :: GHC.Prim.Int#) (sc1 [OS=OneShot] :: GHC.Prim.Int#) ->
+  \ (sc :: GHC.Prim.Int#) (sc1 :: GHC.Prim.Int#) ->
     let {
       m [Dmd=<L,A>, Usg=A] :: GHC.Prim.Int#
       [LclId]
@@ -75,6 +75,7 @@ Roman.$wgo [InlPrag=[0]] :: Maybe Int -> Maybe Int -> GHC.Prim.Int#
 [GblId,
  Arity=2,
  Str=<S,1*U><S,1*U>,
+ ArgUsg=1*U,1*U,w*U,w*U..,
  Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
          WorkFree=True, Expandable=True, Guidance=IF_ARGS [60 30] 256 0}]
 Roman.$wgo =
@@ -119,6 +120,7 @@ Roman.foo_go [InlPrag=INLINE[0]] :: Maybe Int -> Maybe Int -> Int
 [GblId,
  Arity=2,
  Str=<S,1*U><S,1*U>m,
+ ArgUsg=1*U,1*U,w*U,w*U..,
  Unf=Unf{Src=InlineStable, TopLvl=True, Value=True, ConLike=True,
          WorkFree=True, Expandable=True,
          Guidance=ALWAYS_IF(arity=2,unsat_ok=True,boring_ok=False)
