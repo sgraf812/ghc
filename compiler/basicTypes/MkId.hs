@@ -322,7 +322,7 @@ mkDictSelId name clas
             | otherwise = mkManyUsedDmd $
                           mkProdDmd [ if name == sel_name then evalDmd else absDmd
                                     | sel_name <- sel_names ]
-    usage_sig = consUsageSig arg_usg topUsageSig
+    usage_sig = usageSigFromUsages [arg_usg]
     arg_usg | new_tycon = topUsage
             | otherwise = Usage.Used Usage.Many $ 
                             mkProductUse [ if name == sel_name then topUsage else botUsage
@@ -1235,7 +1235,7 @@ runRWId = pcMiscPrelId runRWName ty info
       -- Important to express its strictness,
       -- since it is not inlined until CorePrep
       -- Also see Note [runRW arg] in CorePrep
-    usage_sig = consUsageSig u'1C1U topUsageSig
+    usage_sig = usageSigFromUsages [u'1C1U]
 
     -- State# RealWorld
     stateRW = mkTyConApp statePrimTyCon [realWorldTy]
