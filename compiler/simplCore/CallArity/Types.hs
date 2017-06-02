@@ -22,9 +22,9 @@ data UsageType
   = UT
   { ut_cocalled :: !UnVarGraph
   -- ^ Models cardinality, e.g. at most {1, many} via the co-call relation
-  , ut_uses :: !(VarEnv SingleUse)
-  -- ^ Models how an Id was used, if at all
-  , ut_args :: !UsageSig
+  , ut_uses     :: !(VarEnv SingleUse)
+  -- ^ Models how an `Id` was used, if at all
+  , ut_args     :: !UsageSig
   -- ^ Collects the signature for captured lambda binders
   }
 
@@ -49,6 +49,9 @@ unitUsageType id use = emptyUsageType { ut_uses = unitVarEnv id use }
 
 unusedArgs :: UsageType -> UsageType
 unusedArgs ut = ut { ut_args = botUsageSig }
+
+forgetFreeVarUsages :: UsageType -> UsageType
+forgetFreeVarUsages ut = botUsageType { ut_args = ut_args ut }
 
 delUsageTypes :: [Id] -> UsageType -> UsageType
 delUsageTypes ids ae = foldr delUsageType ae ids
