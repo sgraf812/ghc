@@ -454,10 +454,9 @@ usageSigFromStrictSig sig
   . map (usageFromArgUse . Demand.getUseDmd) 
   $ dmds
   where
-    (dmds, res) = splitStrictSig sig
+    (dmds, _) = splitStrictSig sig
     tail_sig
-      |  res == Demand.exnRes 
-      || res == Demand.botRes 
+      | Demand.isBottomingSig sig
       = botUsageSig -- Diverging or throwing: all other args are unused
       | otherwise 
       = topUsageSig 

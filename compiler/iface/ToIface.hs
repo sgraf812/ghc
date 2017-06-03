@@ -350,7 +350,7 @@ toIfaceIdInfo id_info
                     usage_hsinfo, inline_hsinfo,  unfold_hsinfo] of
        []    -> NoInfo
        infos -> HasInfo infos
-               -- NB: strictness and arity must appear in the list before unfolding
+               -- NB: strictness, usage and arity must appear in the list before unfolding
                -- See TcIface.tcUnfolding
   where
     ------------  Arity  --------------
