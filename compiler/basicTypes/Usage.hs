@@ -450,9 +450,17 @@ instance Binary UsageSig where
 -- all entries in primops.txt.pp.
 usageSigFromStrictSig :: StrictSig -> UsageSig
 usageSigFromStrictSig sig
-  = usageSigFromUsages (map (usageFromArgUse . Demand.getUseDmd) dmds)
+  = foldr consUsageSig tail_sig
+  . map (usageFromArgUse . Demand.getUseDmd) 
+  $ dmds
   where
-    (dmds, _) = splitStrictSig sig
+    (dmds, res) = splitStrictSig sig
+    tail_sig
+      |  res == Demand.exnRes 
+      || res == Demand.botRes 
+      = botUsageSig -- Diverging or throwing: all other args are unused
+      | otherwise 
+      = topUsageSig 
 
 multiplicityFromCount :: Demand.Count -> Multiplicity
 multiplicityFromCount Demand.One = Once
