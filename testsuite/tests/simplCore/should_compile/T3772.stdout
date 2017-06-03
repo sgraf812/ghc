@@ -5,7 +5,7 @@ Result size of Tidy Core = {terms: 36, types: 14, coercions: 0}
 Rec {
 -- RHS size: {terms: 10, types: 2, coercions: 0}
 $wxs :: GHC.Prim.Int# -> ()
-[GblId, Arity=1, Caf=NoCafRefs, Str=<S,1*U>]
+[GblId, Arity=1, Caf=NoCafRefs, Str=<S,1*U>, ArgUsg=1*U,w*U,w*U..]
 $wxs =
   \ (ww :: GHC.Prim.Int#) ->
     case ww of ds1 {
