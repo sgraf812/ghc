@@ -159,7 +159,8 @@ recompute node = do
   --pprTrace "recompute:refs" (ppr (length refs)) $ return ()
   oldInfo <- updateGraphNode node newVal refs
   --pprTrace "recompute:referrers" (ppr (length (referrers oldInfo))) $ return ()
-  changedRefs <- fromMaybe Set.empty <$> deleteLookupUnstable node
+  let add_new_refs = Set.union (Set.difference refs (references oldInfo)) -- new refs are changes, too!
+  changedRefs <- add_new_refs . fromMaybe Set.empty <$> deleteLookupUnstable node
   case value oldInfo of
     Just oldVal | not (detectChange changedRefs oldVal newVal) -> return ()
     _ -> do
