@@ -232,5 +232,7 @@ delNode (UnVarGraph ei g _) v
 
 instance Outputable UnVarGraph where
     ppr u@(UnVarGraph ei g _) 
-      | ei == Additive = ppr g
+      | ei == Additive 
+      = brackets . hcat . punctuate comma 
+      $ [ ppr (getUnique k) <+> text ":->" <+> ppr v | (k, v) <- IntMap.toList g ]
       | otherwise = ppr (complementUnVarGraph u)
