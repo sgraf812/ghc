@@ -34,7 +34,7 @@ import VarEnv
 import VarSet
 import WwLib ( findTypeShape )
 
-import Control.Arrow ( first, second )
+import Control.Arrow ( first, second, (***) )
 import Control.Monad ( forM )
 import qualified Data.Set as Set
 import Data.Tree
@@ -650,7 +650,7 @@ callArityExpr env (App f a) = do
     -- peel off one argument from the type
     let (arg_usage, ut_f') = peelArgUsage ut_f
     case considerThunkSharing a arg_usage of
-      Absent -> return (ut_f', App f' a)
+      Absent -> return (ut_f', App f' (markAbsent a))
       Used m arg_use -> do
         -- `m` will be `Once` most of the time (see `considerThunkSharing`),
         -- so that all work before the lambda is uncovered will be shared 
@@ -1049,7 +1049,7 @@ unleashUsage
   -> (Usage -> TransferFunction AnalResult)
 unleashUsage rhs transfer_rhs usage
   | Absent <- usage
-  = return (emptyUsageType, rhs)
+  = return (emptyUsageType, markAbsent rhs)
   | Used m use <- considerThunkSharing rhs usage
   -- As with arguments, `m` should be `Once` most of the time 
   -- (e.g. if `rhs` is non-trivial, see `considerThunkSharing`).
@@ -1114,3 +1114,21 @@ callArityLetEnv rhss ut_body
         -- cocalls in the complete graph.
         | length ut_rhss > 25 = bothUsageTypes ut_all
         | otherwise           = lubUsageTypes (ut_all ++ map cross_calls rhss)
+
+markAbsent :: CoreExpr -> CoreExpr
+markAbsent = expr
+  where 
+    abs id = id `setIdCallArity` Absent
+    expr e = case e of
+      App f a -> App (expr f) (expr a)
+      -- I better leave the binder untouched for now... Don't want to break 
+      -- stuff that expects absent closures to be compilable
+      Lam id body -> Lam id (expr body) 
+      Let binds body -> Let (bind binds) (expr body)
+      Case scrut bndr ty alts -> Case (expr scrut) (abs bndr) ty (map alt alts)
+      Cast e co -> Cast (expr e) co
+      Tick t e -> Tick t (expr e)
+      _ -> e
+    bind (NonRec id rhs) = NonRec (abs id) (expr rhs)
+    bind (Rec binds) = Rec (map (abs *** expr) binds)
+    alt (dc, bndrs, body) = (dc, map abs bndrs, expr body)
