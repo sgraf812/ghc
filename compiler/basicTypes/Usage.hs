@@ -349,18 +349,15 @@ manifyUsageSig TopUsageSig = TopUsageSig
 manifyUsageSig BotUsageSig = BotUsageSig
 manifyUsageSig (ArgUsage u s) = consUsageSig (manifyUsage u) (manifyUsageSig s)
 
--- | Trims a `UsageSig` by looking at how the associated value is used.
+-- | Trims a `UsageSig` by arity, so that any arguments beyond that arity get `topUsage`.
 --
--- The resulting `UsageSig` will only have as many arguments as the `SingleUse` has
--- call nestings.
-trimUsageSig :: SingleUse -> UsageSig -> UsageSig
-trimUsageSig _ BotUsageSig = BotUsageSig
-trimUsageSig HeadUse _ = BotUsageSig -- Since the result isn't forced beyond WHNF, no further argument will
+-- It holds that @forall n. trimUsage n sig `leqUsageSig` sig@.
+trimUsageSig :: Arity -> UsageSig -> UsageSig
+trimUsageSig 0 _ = TopUsageSig
 trimUsageSig _ TopUsageSig = TopUsageSig
-trimUsageSig (Call _ u) sig = consUsageSig head_usage (trimUsageSig u tail_usage)
+trimUsageSig n sig = consUsageSig head_usage (trimUsageSig (n-1) tail_usage)
   where
     (head_usage, tail_usage) = unconsUsageSig sig
-trimUsageSig _ _ = TopUsageSig
 
 -- * Specific `Usage`s/`SingleUse`s
 
