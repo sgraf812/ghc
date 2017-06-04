@@ -2,11 +2,13 @@ module CallArity.Types where
 
 import BasicTypes
 import CoreSyn
+import FamInstEnv
 import Id
 import Outputable
 import UnVarGraph
 import Usage
 import VarEnv
+import WwLib ( findTypeShape )
 
 import Control.Monad ( guard )
 import Data.List ( foldl1' )
@@ -30,9 +32,6 @@ data UsageType
 
 modifyArgs :: (UsageSig -> UsageSig) -> UsageType -> UsageType
 modifyArgs modifier ut = ut { ut_args = modifier (ut_args ut) }
-
-modifyCoCalls :: (UnVarGraph -> UnVarGraph) -> UsageType -> UsageType
-modifyCoCalls modifier ut = ut { ut_cocalled = modifier (ut_cocalled ut) }
 
 -- | How an expression uses its interesting variables
 -- and the elaborated expression with annotated Ids
@@ -62,25 +61,25 @@ delUsageType id (UT g ae args) = UT (g `delNode` id) (ae `delVarEnv` id) args
 domType :: UsageType -> UnVarSet
 domType ut = varEnvDom (ut_uses ut)
 
-domTypes :: [UsageType] -> UnVarSet
-domTypes = foldr unionUnVarSet emptyUnVarSet . map domType
-
-makeIdArg :: Id -> UsageType -> UsageType
-makeIdArg id ut = delUsageType id (modifyArgs (consUsageSig (lookupUsage NonRecursive ut id)) ut)
+-- | See Note [Trimming a demand to a type] in Demand.hs.
+trimUsageToTypeShape :: FamInstEnvs -> Id -> Usage -> Usage
+trimUsageToTypeShape fam_envs id = trimUsage (findTypeShape fam_envs (idType id))
 
 -- In the result, find out the minimum arity and whether the variable is called
 -- at most once.
-lookupUsage :: RecFlag -> UsageType -> Id -> Usage
-lookupUsage rec (UT g ae _) id = case lookupVarEnv ae id of
-  Just use
-    -- we assume recursive bindings to be called multiple times, what's the
-    -- point otherwise? It's a little sad we don't encode it in the co-call
-    -- graph directly, though.
-    -- See Note [Thunks in recursive groups]
-    | isRec rec -> manifyUsage (Used Once use)
-    | id `elemUnVarSet` neighbors g id -> Used Many use
-    | otherwise -> Used Once use
-  Nothing -> botUsage
+lookupUsage :: RecFlag -> FamInstEnvs -> UsageType -> Id -> Usage
+lookupUsage rec fam_envs (UT g ae _) id = trimUsageToTypeShape fam_envs id usage 
+  where
+    usage = case lookupVarEnv ae id of
+      Just use
+        -- we assume recursive bindings to be called multiple times, what's the
+        -- point otherwise? It's a little sad we don't encode it in the co-call
+        -- graph directly, though.
+        -- See Note [Thunks in recursive groups]
+        | isRec rec -> manifyUsage (Used Once use)
+        | id `elemUnVarSet` neighbors g id -> Used Many use
+        | otherwise -> Used Once use
+      Nothing -> botUsage
 
 calledWith :: UsageType -> Id -> UnVarSet
 calledWith ut id = neighbors (ut_cocalled ut) id

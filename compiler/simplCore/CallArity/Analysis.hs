@@ -627,9 +627,10 @@ callArityExpr env (Lam id body)
           return (emptyUsageType, Lam id' body)
         Used multi body_use -> do
           (ut_body, body') <- transfer_body body_use
-          let (ut_body', usage_id) = findBndrUsage NonRecursive (ae_fam_envs env) ut_body id
+          let fam_envs = ae_fam_envs env
+          let (ut_body', usage_id) = findBndrUsage NonRecursive fam_envs ut_body id
           let id' = applyWhen (multi == Once) (`setIdOneShotInfo` OneShotLam)
-                  . (`setIdCallArity` usage_id)
+                  . (\id -> setBndrUsageInfo fam_envs id usage_id)
                   $ id
           -- Free vars are manified, closed vars are not. The usage of the current
           -- argument `id` is *not* manified.
@@ -671,7 +672,9 @@ callArityExpr env (Case scrut case_bndr ty alts) = do
   return $ \use -> do
     (ut_alts, alts', scrut_uses) <- unzip3 <$> mapM ($ use) transfer_alts
     let ut_alt = lubUsageTypes ut_alts
-    let case_bndr' = setIdCallArity case_bndr (lookupUsage NonRecursive ut_alt case_bndr)
+    let fam_envs = ae_fam_envs env
+    let case_bndr_usage = lookupUsage NonRecursive fam_envs ut_alt case_bndr
+    let case_bndr' = setBndrUsageInfo fam_envs case_bndr case_bndr_usage
     let ut_alt' = delUsageType case_bndr ut_alt
     let scrut_use = propagateProductUse alts' scrut_uses
     (ut_scrut, scrut') <- transfer_scrut scrut_use
@@ -832,7 +835,7 @@ analyseCaseAlternative env case_bndr (dc, alt_bndrs, e)
       -- around! This means that we later on annotate case_bndr solely based
       -- on how its @Id@ was used, not on how the components were used.
       let alt_bndr_usages' = addCaseBndrUsage case_bndr_usage alt_bndr_usages
-      let alt_bndrs' = setBndrsUsageInfo alt_bndrs alt_bndr_usages
+      let alt_bndrs' = setBndrsUsageInfo fam_envs alt_bndrs alt_bndr_usages
       let product_use = mkProductUse alt_bndr_usages'
       -- product_use doesn't yet take into account strictness annotations of the
       -- constructor. That's to be done when we finally match on dc.
@@ -840,12 +843,7 @@ analyseCaseAlternative env case_bndr (dc, alt_bndrs, e)
 
 findBndrUsage :: RecFlag -> FamInstEnvs -> UsageType -> Id -> (UsageType, Usage)
 findBndrUsage rec_flag fam_envs ut id
-  = (delUsageType id ut, usage')
-  where
-    usage = lookupUsage rec_flag ut id
-    -- See Note [Trimming a demand to a type] in Demand.hs
-    shape = findTypeShape fam_envs (idType id)
-    usage' = trimUsage shape usage
+  = (delUsageType id ut, lookupUsage rec_flag fam_envs ut id)
 
 findBndrsUsages :: RecFlag -> FamInstEnvs -> UsageType -> [Var] -> (UsageType, [Usage])
 findBndrsUsages rec_flag fam_envs ut = foldr step (ut, [])
@@ -865,15 +863,26 @@ addCaseBndrUsage (Used _ use) alt_bndr_usages
   | otherwise
   = topUsage <$ alt_bndr_usages
 
-setBndrsUsageInfo :: [Var] -> [Usage] -> [Var]
-setBndrsUsageInfo [] [] = []
-setBndrsUsageInfo (b:bndrs) (usage:usages)
+-- | We should try avoiding to call `setIdCallArity` directly but rather go
+-- through this function. This makes sure to trim the `Usage`
+-- according to the binder's type before annotating.
+setBndrUsageInfo :: FamInstEnvs -> Var -> Usage -> Var
+setBndrUsageInfo fam_envs id usage
+  | isTyVar id
+  = id 
+  | otherwise
+    -- See Note [Trimming a demand to a type] in Demand.hs
+  = --pprTrace "setBndrUsageInfo" (ppr id <+> ppr usage') 
+    id `setIdCallArity` trimUsageToTypeShape fam_envs id usage
+
+setBndrsUsageInfo :: FamInstEnvs -> [Var] -> [Usage] -> [Var]
+setBndrsUsageInfo _ [] [] = []
+setBndrsUsageInfo fam_envs (b:bndrs) (usage:usages)
   | isId b
-  = --pprTrace "setBndrInfo" (ppr b <+> ppr usage) 
-    (setIdCallArity b usage) : setBndrsUsageInfo bndrs usages
-setBndrsUsageInfo (b:bndrs) usages
-  = b : setBndrsUsageInfo bndrs usages
-setBndrsUsageInfo _ usages
+  = setBndrUsageInfo fam_envs b usage : setBndrsUsageInfo fam_envs bndrs usages
+setBndrsUsageInfo fam_envs (b:bndrs) usages
+  = b : setBndrsUsageInfo fam_envs bndrs usages
+setBndrsUsageInfo _ _ usages
   = pprPanic "No Ids, but a Usage left" (ppr usages)
 
 propagateProductUse
@@ -1009,13 +1018,13 @@ unleashLet env rec_flag transferred_binds ut_usage ut_body = do
   let fam_envs = ae_fam_envs env
   let ids = fst . unzip $ transferred_binds
   (ut_rhss, rhss') <- fmap unzip $ forM transferred_binds $ \(id, (rhs, transfer)) ->
-    unleashUsage rhs transfer (lookupUsage rec_flag ut_usage id)
+    unleashUsage rhs transfer (lookupUsage rec_flag fam_envs ut_usage id)
   let ut_final = callArityLetEnv (zip ids ut_rhss) ut_body
 
   --pprTrace "unleashLet" (ppr ids $$ text "ut_body" <+> ppr ut_body $$ text "ut_final" <+> ppr ut_final) $ return ()
   -- Now use that information to annotate binders.
   let (_, usages) = findBndrsUsages rec_flag fam_envs ut_final ids
-  let ids' = setBndrsUsageInfo ids usages
+  let ids' = setBndrsUsageInfo fam_envs ids usages
   ids'' <- forM ids' (annotateIdArgUsage env) 
 
   -- This intentionally still contains the @Id@s of the binding group, because
