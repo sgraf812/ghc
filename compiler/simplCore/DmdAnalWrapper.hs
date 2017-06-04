@@ -8,6 +8,7 @@ import BasicTypes
 import CallArity
 import CoreArity
 import CoreSyn
+import Demand
 import DmdAnal
 import DynFlags
 import FamInstEnv
@@ -48,6 +49,7 @@ mergeInfo top_lvl is_lam_bndr id
     -- we first convert everything to the representation of Usage.hs.
     old_demand = idDemandInfo id
     old_str_sig = idStrictness id
+    (old_arg_dmds, _) = splitStrictSig old_str_sig
     ca_usage = idCallArity id
     ca_usg_sig = idArgUsage id
 
@@ -61,7 +63,15 @@ mergeInfo top_lvl is_lam_bndr id
       | ca_usage `leqUsage` old_usage = overwriteDemandWithUsage ca_usage old_demand
       | otherwise = old_demand
     new_str_sig 
-      | ca_usg_sig `leqUsageSig` old_usg_sig = overwriteStrictSigWithUsageSig ca_usg_sig old_str_sig
+      | ca_usg_sig `leqUsageSig` old_usg_sig 
+      , idArity id <= length old_arg_dmds
+      -- This is only safe if DmdAnal used the same arity as CallArity.
+      -- Otherwise we get into nasty situations where arity /= #top-level binders,
+      -- like with IO's RealWorld tokens. In that situation we have
+      -- a more precise usage signature, but at the cost of a higher arity.
+      -- Which is OK, since arity analysis determined that there didn't
+      -- happen anything before.
+      = overwriteStrictSigWithUsageSig ca_usg_sig old_str_sig
       | otherwise = old_str_sig
 
     leqUsage l r = l `lubUsage` r == r
