@@ -5,6 +5,7 @@ module DmdAnalWrapper (combinedDmdAnalProgram) where
 #include "HsVersions.h"
 
 import CallArity
+import CoreArity
 import CoreSyn
 import DmdAnal
 import DynFlags
@@ -33,11 +34,12 @@ mergeInfo is_lam_bndr id
   -- instead of the whole expression, we get more conservative results in our
   -- new analysis, where there might be multiplied uses on lambda binders if
   -- it has more than one lambda. In that case we have to relax the assert.
-  = ASSERT2( (is_lam_bndr || isExportedId id || ca_usage `leqUsage` old_usage), text "Usage should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usage <+> text "ca:" <+> ppr ca_usage <+> text "new:" <+> ppr new_demand )
-    ASSERT2( (not (isExportedId id) || ca_usg_sig `leqUsageSig` old_usg_sig), text "UsageSig should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usg_sig <+> text "ca:" <+> ppr ca_usg_sig <+> text "new:" <+> ppr new_str_sig )
+  = ASSERT2( (is_lam_bndr || not has_usage || ca_usage `leqUsage` old_usage), text "Usage should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usage <+> text "ca:" <+> ppr ca_usage <+> text "new:" <+> ppr new_demand )
+    ASSERT2( (not has_usg_sig || ca_usg_sig `leqUsageSig` old_usg_sig), text "UsageSig should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usg_sig <+> text "ca:" <+> ppr ca_usg_sig <+> text "new:" <+> ppr new_str_sig )
     --pprTrace "mergeInfo" (ppr id <+> text "Demand:" <+> ppr old_demand <+> ppr ca_usage <+> ppr new_demand <+> text "Strictness" <+> ppr old_str_sig <+> ppr ca_usg_sig <+> ppr new_str_sig) $
     id'
   where
+    max_arity = length (typeArity (idType id))
     -- We merge idDemandInfo with idCallArity and idStrictness with idArgUsage.
     -- Since Demand.hs doesn't seem to enforce the equivalences from the paper,
     -- we first convert everything to the representation of Usage.hs.
@@ -47,7 +49,10 @@ mergeInfo is_lam_bndr id
     ca_usg_sig = idArgUsage id
 
     old_usage = usageFromDemand old_demand
-    old_usg_sig = usageSigFromStrictSig old_str_sig
+    -- trimming the sig so that we don't care for arguments which aren't there
+    -- as dictated by the types (e.g. when a sig bottoms out after 2 arguments 
+    -- and the id's type only has two arrows).
+    old_usg_sig = trimUsageSig max_arity (usageSigFromStrictSig old_str_sig) 
 
     new_demand 
       | ca_usage `leqUsage` old_usage = overwriteDemandWithUsage ca_usage old_demand
@@ -58,9 +63,11 @@ mergeInfo is_lam_bndr id
 
     leqUsage l r = l `lubUsage` r == r
     leqUsageSig l r = l `lubUsageSig` r == r
-    id'
-      | isExportedId id = id `setIdStrictness` new_str_sig -- Only the sig matters
-      | otherwise = id `setIdDemandInfo` new_demand -- Only use sites matter
+    has_usage = idCallArity id /= topUsage || old_usage /= topUsage
+    has_usg_sig = idArgUsage id /= topUsageSig || old_usg_sig /= topUsageSig
+    id' = id 
+      `setIdDemandInfo` new_demand
+      `setIdStrictness` new_str_sig
 
 
 mapBndrsProgram :: (Bool -> Var -> Var) -> CoreProgram -> CoreProgram
