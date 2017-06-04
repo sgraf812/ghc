@@ -62,7 +62,7 @@ Rec {
 -- RHS size: {terms: 55, types: 9, coercions: 0, joins: 0/1}
 Roman.foo_$s$wgo [Occ=LoopBreaker]
   :: GHC.Prim.Int# -> GHC.Prim.Int# -> GHC.Prim.Int#
-[GblId, Arity=2, Caf=NoCafRefs, Str=<S,U><S,U>, ArgUsg=A,w*U,w*U..]
+[GblId, Arity=2, Caf=NoCafRefs, Str=<S,A><S,U>, ArgUsg=A,w*U,w*U..]
 Roman.foo_$s$wgo =
   \ (sc :: GHC.Prim.Int#) (sc1 :: GHC.Prim.Int#) ->
     let {
@@ -104,7 +104,7 @@ Roman.$wgo =
       Just x ->
         case x of { GHC.Types.I# ipv ->
         let {
-          m [Usg=A] :: GHC.Prim.Int#
+          m [Dmd=<L,A>, Usg=A] :: GHC.Prim.Int#
           [LclId]
           m =
             GHC.Prim.+#

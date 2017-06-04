@@ -900,7 +900,7 @@ propagateProductUse alts scrut_uses
   -- This is a good place to make sure we don't construct an infinitely deep
   -- use, which can happen when analysing e.g. lazy streams.
   -- Also see Note [Demand on scrutinee of a product case] in DmdAnal.hs.
-  = addDataConStrictness dc (boundDepth 9 scrut_use) -- 9 seems to be just enough to match DmdAnal
+  = addDataConStrictness dc (boundDepth 10 scrut_use) -- 10 seems to be just enough to match DmdAnal
 
   | otherwise
   -- We *could* lub the uses from the different branches, but there's not much
