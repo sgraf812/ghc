@@ -39,7 +39,7 @@ mergeInfo top_lvl is_lam_bndr id
   -- new analysis, where there might be multiplied uses on lambda binders if
   -- it has more than one lambda. In that case we have to relax the assert.
   = ASSERT2( (is_lam_bndr || not has_usage || ca_usage `leqUsage` old_usage), text "Usage should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usage <+> text "ca:" <+> ppr ca_usage <+> text "new:" <+> ppr new_demand )
-    ASSERT2( (not has_usg_sig || ca_usg_sig `leqUsageSig` old_usg_sig), text "UsageSig should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usg_sig <+> text "ca:" <+> ppr ca_usg_sig <+> text "new:" <+> ppr new_str_sig )
+    ASSERT2( (not has_usg_sig || not str_sig_comparable_to_usg_sig || ca_usg_sig `leqUsageSig` old_usg_sig), text "UsageSig should never be less precise:" <+> ppr id <+> text "old:" <+> ppr old_usg_sig <+> text "ca:" <+> ppr ca_usg_sig <+> text "new:" <+> ppr new_str_sig )
     --pprTrace "mergeInfo" (ppr id <+> text "Demand:" <+> ppr old_demand <+> ppr ca_usage <+> ppr new_demand <+> text "Strictness" <+> ppr old_str_sig <+> ppr ca_usg_sig <+> ppr new_str_sig) $
     id'
   where
@@ -50,6 +50,7 @@ mergeInfo top_lvl is_lam_bndr id
     old_demand = idDemandInfo id
     old_str_sig = idStrictness id
     (old_arg_dmds, _) = splitStrictSig old_str_sig
+    str_sig_comparable_to_usg_sig = idArity id == length old_arg_dmds -- See further below at `new_str_sig`
     ca_usage = idCallArity id
     ca_usg_sig = idArgUsage id
 
@@ -71,6 +72,10 @@ mergeInfo top_lvl is_lam_bndr id
       -- a more precise usage signature, but at the cost of a higher arity.
       -- Which is OK, since arity analysis determined that there didn't
       -- happen anything before.
+      -- The reverse direction can happen, too: if arity is less than what
+      -- DmdAnal sees (something like unsafeCoerce obscures things, DmdAnal will
+      -- just take the str_sig verbatim from the thing being coerced), DmdAnal
+      -- might be more precise. Happens in HpcParser.hs, happyReduction_2
       = overwriteStrictSigWithUsageSig ca_usg_sig old_str_sig
       | otherwise = old_str_sig
 
