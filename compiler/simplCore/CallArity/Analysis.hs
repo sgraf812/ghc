@@ -891,7 +891,7 @@ propagateProductUse alts scrut_uses
   -- This is a good place to make sure we don't construct an infinitely deep
   -- use, which can happen when analysing e.g. lazy streams.
   -- Also see Note [Demand on scrutinee of a product case] in DmdAnal.hs.
-  = addDataConStrictness dc (boundDepth 6 scrut_use)
+  = addDataConStrictness dc (boundDepth 9 scrut_use) -- 9 seems to be just enough to match DmdAnal
 
   | otherwise
   -- We *could* lub the uses from the different branches, but there's not much
@@ -1118,7 +1118,9 @@ callArityLetEnv rhss ut_body
 markAbsent :: CoreExpr -> CoreExpr
 markAbsent = expr
   where 
-    abs id = id `setIdCallArity` Absent
+    abs id 
+      | isTyVar id = id
+      | otherwise = id `setIdCallArity` Absent
     expr e = case e of
       App f a -> App (expr f) (expr a)
       -- I better leave the binder untouched for now... Don't want to break 
