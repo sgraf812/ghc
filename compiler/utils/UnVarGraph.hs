@@ -160,14 +160,14 @@ unionUnVarGraph :: UnVarGraph -> UnVarGraph -> UnVarGraph
 unionUnVarGraph (UnVarGraph Additive e1 _) (UnVarGraph Additive e2 _)
   = balance $ mkUnVarGraph Additive $ IntMap.unionWith unionUnVarSet e1 e2
 unionUnVarGraph (UnVarGraph Subtractive e1 _) (UnVarGraph Subtractive e2 _)
-  = balance $ mkUnVarGraph Subtractive $ IntMap.unionWithKey merger e1 e2
+  = balance $ mkUnVarGraph Subtractive $ IntMap.unionWith intersectionUnVarSet e1' e2'
   where
-    diff1 = IntMap.keysSet e2 `IntSet.difference` IntMap.keysSet e1
-    diff2 = IntMap.keysSet e1 `IntSet.difference` IntMap.keysSet e2
-    merger n s1 s2
-      | n `IntSet.member` diff1 = s1 `unionUnVarSet` UnVarSet diff2
-      | n `IntSet.member` diff2 = s2 `unionUnVarSet` UnVarSet diff1
-      | otherwise = intersectionUnVarSet s1 s2 
+    -- diffn = nodes of the union *not* mentioned in graph n
+    diff1 = UnVarSet $ IntMap.keysSet e2 `IntSet.difference` IntMap.keysSet e1 -- 4
+    diff2 = UnVarSet $ IntMap.keysSet e1 `IntSet.difference` IntMap.keysSet e2 -- 0
+    e1' = unionUnVarSet diff1 <$> e1
+    e2' = unionUnVarSet diff2 <$> e2
+
 unionUnVarGraph u1 u2
   = unionUnVarGraph u1' u2' -- we could be smarter here
   where
@@ -231,8 +231,14 @@ delNode (UnVarGraph ei g _) v
       | otherwise = delUnVarSet s v
 
 instance Outputable UnVarGraph where
-    ppr u@(UnVarGraph ei g _) 
-      | ei == Additive 
-      = brackets . hcat . punctuate comma 
-      $ [ ppr (getUnique k) <+> text ":->" <+> ppr v | (k, v) <- IntMap.toList g ]
-      | otherwise = ppr (complementUnVarGraph u)
+    ppr (UnVarGraph Additive g _) = pprEdges "+" g
+    ppr (UnVarGraph _ g _) = pprEdges "-" (complementEdges g)
+
+pprEdges :: String -> IntMap UnVarSet -> SDoc
+pprEdges sign
+  = (text "UnVarGraph" <> text sign <+>) 
+  . brackets 
+  . hcat 
+  . punctuate comma 
+  . map (\(k, v) -> ppr (getUnique k) <+> text ":->" <+> ppr v)
+  . IntMap.toList
