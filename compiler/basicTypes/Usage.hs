@@ -258,12 +258,12 @@ boundDepth max_height use = snd (boundUse 0 use)
 
 trimSingleUse :: TypeShape -> SingleUse -> SingleUse
 trimSingleUse _ HeadUse = HeadUse
-trimSingleUse (TsFun shape) (Call m body)
+trimSingleUse (TsFun shape) u
+  | Just (Used m body) <- peelCallUse u
   = mkCallUse m (trimSingleUse shape body)
-trimSingleUse (TsProd shapes) (Product comps)
-  | equalLength shapes comps
+trimSingleUse (TsProd shapes) u
+  | Just comps <- peelProductUse (length shapes) u
   = mkProductUse (zipWith trimUsage shapes comps)
-trimSingleUse (TsProd []) UnknownUse = HeadUse
 trimSingleUse _ _ = topSingleUse
 
 trimUsage :: TypeShape -> Usage -> Usage
