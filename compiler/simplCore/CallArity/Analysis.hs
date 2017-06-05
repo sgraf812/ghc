@@ -22,9 +22,10 @@ import DynFlags      ( DynFlags, gopt, GeneralFlag(Opt_DmdTxDictSel) )
 import FamInstEnv
 import Id
 import Maybes ( expectJust, fromMaybe, isJust )
-import MkCore
+import MkCore 
 import Outputable
 import TyCon ( isDataProductTyCon_maybe, tyConSingleDataCon_maybe )
+import TysWiredIn ( trueDataConId )
 import UniqFM
 import UnVarGraph
 import Usage
@@ -32,7 +33,6 @@ import Util
 import Var ( isId, isTyVar )
 import VarEnv
 import VarSet
-import WwLib ( findTypeShape )
 
 import Control.Arrow ( first, second, (***) )
 import Control.Monad ( forM )
@@ -459,6 +459,50 @@ extendAnalEnv
 extendAnalEnv env id node 
   = env { ae_sigs = extendVarEnv (ae_sigs env) id node }
 
+mapBinds :: (CoreBind -> CoreBind) -> CoreExpr -> CoreExpr
+mapBinds f = expr 
+  where
+    expr e = case e of
+      App fun arg -> App (expr fun) (expr arg)
+      Lam id body -> Lam id (expr body)
+      Let binds body -> Let (bind binds) (expr body)
+      Case scrut bndr ty alts -> Case (expr scrut) bndr ty (map alt alts)
+      Cast e co -> Cast (expr e) co
+      Tick t e -> Tick t (expr e)
+      _ -> e
+    bind (NonRec id rhs) = f (NonRec id (expr rhs))
+    bind (Rec binds) = f (Rec (map (second expr) binds))
+    alt (dc, bndrs, rhs) = (dc, bndrs, expr rhs)
+
+-- | Adds to the RHSs of a binding group an additional `Case` statement
+-- for potential Unfolding templates, so that they are analyzed, too.
+addUnfoldings :: CoreBind -> CoreBind
+addUnfoldings b = case b of
+  NonRec id rhs -> uncurry NonRec (impl (id, rhs))
+  Rec binds -> Rec (map impl binds)
+  where
+    impl (id, rhs)
+      = (,) id
+      . maybe rhs (mkIfThenElse (Var trueDataConId) rhs)
+      . maybeUnfoldingTemplate 
+      . idUnfolding 
+      $ id
+
+-- | Strips away the additional `Case` for a potential Unfolding from the
+-- RHS of a binding group. Left inverse to `addUnfoldings`.
+stripUnfoldings :: CoreBind -> CoreBind
+stripUnfoldings b = case b of
+  NonRec id rhs -> uncurry NonRec (impl (id, rhs))
+  Rec binds -> Rec (map impl binds)
+  where
+    impl (id, rhs)
+      | Just _ <- maybeUnfoldingTemplate (idUnfolding id)
+      , Case (Var true_id) _ _ [(_, _, orig_rhs), _unf_alt] <- rhs
+      , true_id == trueDataConId
+      = (id, orig_rhs)
+      | otherwise -- There should be no Unfolding template!
+      = (id, rhs)
+
 -- | See Note [Analysing top-level-binds]
 -- `programToExpr` returns a pair of all top-level `Id`s
 -- and a nested `let` expression that uses everything externally visible.
@@ -479,7 +523,10 @@ programToExpr orphan_rules = impl [] (rulesFreeVars orphan_rules)
         -- nonDetEltsUFM is OK, because all product components will
         -- used in the same way anyway.
     impl top_level_ids exposed (bind:prog)
-      = second (Let bind) (impl (bindersOf bind ++ top_level_ids) (exposed_ids bind `unionVarSet` exposed) prog)
+      = second (Let bind) (impl top_level_ids' exposed' prog)
+      where
+        top_level_ids' = bindersOf bind ++ top_level_ids
+        exposed' = exposed_ids bind `unionVarSet` exposed
     -- We need to use *at least*  
     -- 
     --   * exported `Id`s (`isExportedId`)
@@ -493,13 +540,14 @@ programToExpr orphan_rules = impl [] (rulesFreeVars orphan_rules)
     --
     -- This essentially does the same as the Occurence Analyser,
     -- but we are more conservative in that we don't try to follow
-    -- transitive RULE mentions and just take into account all free vars
-    -- of any binder instead of starting to trace from exported ones.
+    -- transitive RULE mentions and just take into account 
+    -- all free vars in RULEs Unfoldings of any binder instead of 
+    -- starting to trace from exported ones.
     exposed_ids bind = unionVarSets (exported:rules)
       where
         bs = bindersOf bind
         exported = mkVarSet (filter isExportedId bs)
-        is_active_rule _ = True -- Conservative, but we should be fine
+        is_active_rule _ = True -- Conservative, but negligible
         rules = map (idRuleRhsVars is_active_rule) bs
 
 -- | The left inverse to `programToExpr`: `exprToProgram . snd . programToExpr = id \@CoreProgram`
@@ -518,14 +566,18 @@ callArityAnalProgram dflags fam_envs orphan_rules
   = return 
   -- . (\it -> pprTrace "callArity:end" (ppr (length it)) it) 
   . exprToProgram 
+  . mapBinds stripUnfoldings
   . uncurry (callArityRHS dflags fam_envs) 
+  . second (mapBinds addUnfoldings)
   . programToExpr orphan_rules
   -- . (\it -> pprTrace "callArity:begin" (ppr (length it)) it)
   -- . (\prog -> pprTrace "CallArity:Program" (ppr prog) prog)
 
 callArityRHS :: DynFlags -> FamInstEnvs -> VarSet -> CoreExpr -> CoreExpr
 callArityRHS dflags fam_envs need_sigs e
-  = ASSERT2( isEmptyUnVarSet (domType ut), text "Free vars in UsageType:" $$ ppr ut ) e'
+  -- There might be free vars because of added Unfolding RHSs which mention 
+  -- bogus ids. Unfoldings are crazy.
+  = WARN( not (isEmptyUnVarSet (domType ut)), text "Free vars in UsageType:" $$ ppr ut ) e'
   where
     env = initialAnalEnv dflags fam_envs need_sigs (predictAllocatedNodes e)
     (ut, e') = buildAndRun (callArityExpr env e) topSingleUse
