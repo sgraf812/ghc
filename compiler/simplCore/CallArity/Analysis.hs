@@ -21,11 +21,11 @@ import DataCon
 import DynFlags      ( DynFlags, gopt, GeneralFlag(Opt_DmdTxDictSel) )
 import FamInstEnv
 import Id
-import Maybes ( expectJust, fromMaybe, isJust )
+import Maybes ( expectJust, fromMaybe, isJust, listToMaybe )
 import MkCore 
 import Outputable
 import TyCon ( isDataProductTyCon_maybe, tyConSingleDataCon_maybe )
-import TysWiredIn ( trueDataConId )
+import TysWiredIn ( trueDataCon, trueDataConId )
 import UniqFM
 import UnVarGraph
 import Usage
@@ -497,10 +497,13 @@ stripUnfoldings b = case b of
   where
     impl (id, rhs)
       | Just _ <- maybeUnfoldingTemplate (idUnfolding id)
-      , Case (Var true_id) _ _ [(_, _, orig_rhs), _unf_alt] <- rhs
-      , true_id == trueDataConId
-      = (id, orig_rhs)
-      | otherwise -- There should be no Unfolding template!
+      = case rhs of
+          Case (Var true_id) _ _ alts
+            | true_id == trueDataConId
+            , Just orig_rhs <- listToMaybe [ rhs | (DataAlt dc, _, rhs) <- alts, dc == trueDataCon ]
+            -> (id, orig_rhs)
+          _ -> pprPanic "Expected Case for Unfolding" empty
+      | otherwise
       = (id, rhs)
 
 -- | See Note [Analysing top-level-binds]
@@ -567,11 +570,12 @@ callArityAnalProgram dflags fam_envs orphan_rules
   -- . (\it -> pprTrace "callArity:end" (ppr (length it)) it) 
   . exprToProgram 
   . mapBinds stripUnfoldings
+  -- . pprTraceIt "CallArity:Program"
   . uncurry (callArityRHS dflags fam_envs) 
   . second (mapBinds addUnfoldings)
   . programToExpr orphan_rules
   -- . (\it -> pprTrace "callArity:begin" (ppr (length it)) it)
-  -- . (\prog -> pprTrace "CallArity:Program" (ppr prog) prog)
+  -- . pprTraceIt "CallArity:Program"
 
 callArityRHS :: DynFlags -> FamInstEnvs -> VarSet -> CoreExpr -> CoreExpr
 callArityRHS dflags fam_envs need_sigs e
@@ -1099,7 +1103,7 @@ annotateIdArgUsage env id
     -- signature.
     let single_call = iterate (mkCallUse Once) topSingleUse !! idArity id
     usage_sig <- ut_args <$> transfer_callee single_call
-    --pprTrace "annotating" (ppr id <+> ppr usage_sig) $ return ()
+    pprTrace "annotating" (ppr id <+> ppr usage_sig) $ return ()
     return (id `setIdArgUsage` usage_sig)
   | otherwise
   = return id

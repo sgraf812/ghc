@@ -4,7 +4,6 @@
 {-# OPTIONS_GHC -fprof-auto #-}
 module Worklist where
 
-import Control.Arrow (first)
 import Control.Monad (forM_, when, (<=<))
 import Control.Monad.Trans.State.Strict
 import Data.Map (Map)
