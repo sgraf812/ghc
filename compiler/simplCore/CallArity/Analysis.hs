@@ -1124,6 +1124,11 @@ callArityLetEnv rhss ut_body
         | length ut_rhss > 25 = bothUsageTypes ut_all
         | otherwise           = lubUsageTypes (ut_all ++ map cross_calls rhss)
 
+-- | Marks every binder it reaches as absent, but does *not* descend into absent
+-- RHSs. These are implicitly assumed as absent. This is so that we don't trigger
+-- CoreLint warnings on stuff the Occurence Anaylzer deems reachable but we do not.
+-- Examples are bindings only reachable through unoptimized Unfolding templates,
+-- which are just too much trouble to deal with ATM. FIXME!
 markAbsent :: CoreExpr -> CoreExpr
 markAbsent = expr
   where 
