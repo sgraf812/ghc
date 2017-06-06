@@ -92,8 +92,13 @@ mapBndrsProgram :: InfoMerger -> CoreProgram -> CoreProgram
 mapBndrsProgram f = map (mapBndrsBind TopLevel f)
 
 mapBndrsBind :: TopLevelFlag -> InfoMerger -> CoreBind -> CoreBind
-mapBndrsBind top_lvl f (NonRec id e) = NonRec (f top_lvl False id) (mapBndrsExpr f e)
-mapBndrsBind top_lvl f (Rec bndrs) = Rec (map (\(id, e) -> (f top_lvl False id, mapBndrsExpr f e)) bndrs)
+mapBndrsBind top_lvl f (NonRec id e) = NonRec (f top_lvl False id) (mapBndrsExprIfNotAbsent id f e)
+mapBndrsBind top_lvl f (Rec bndrs) = Rec (map (\(id, e) -> (f top_lvl False id, mapBndrsExprIfNotAbsent id f e)) bndrs)
+
+mapBndrsExprIfNotAbsent :: Var -> InfoMerger -> CoreExpr -> CoreExpr
+mapBndrsExprIfNotAbsent id f e
+  | Absent <- idCallArity id = e -- we won't have annotated e in this case.
+  | otherwise = mapBndrsExpr f e
 
 mapBndrsExpr :: InfoMerger -> CoreExpr -> CoreExpr
 mapBndrsExpr f e = case e of
