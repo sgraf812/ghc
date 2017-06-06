@@ -256,19 +256,28 @@ boundDepth max_height use = snd (boundUse 0 use)
         impl height (Call m u) = second (mkCallUse m) (boundUse height u)
         impl _ u = (False, u)
 
-trimSingleUse :: TypeShape -> SingleUse -> SingleUse
-trimSingleUse _ HeadUse = HeadUse
-trimSingleUse (TsFun shape) u
+trimSingleUseBounded :: Int -> TypeShape -> SingleUse -> SingleUse
+trimSingleUseBounded _ _ HeadUse = HeadUse
+trimSingleUseBounded d (TsFun shape) u
+  -- Infinite arity is prohibited by the type system, so we don't have to modify d here
   | Just (Used m body) <- peelCallUse u
-  = mkCallUse m (trimSingleUse shape body)
-trimSingleUse (TsProd shapes) u
-  | Just comps <- peelProductUse (length shapes) u
-  = mkProductUse (zipWith trimUsage shapes comps)
-trimSingleUse _ _ = topSingleUse
+  = mkCallUse m (trimSingleUseBounded d shape body)
+trimSingleUseBounded d (TsProd shapes) u
+  -- TsProd may be infinitely deep, so we have to cut off at some point
+  | d < 10
+  , Just comps <- peelProductUse (length shapes) u
+  = mkProductUse (zipWith (trimUsageBounded (d+1)) shapes comps)
+trimSingleUseBounded _ _ _ = topSingleUse 
+    
+trimUsageBounded :: Int -> TypeShape -> Usage -> Usage
+trimUsageBounded d shape (Used m use) = Used m (trimSingleUseBounded d shape use)
+trimUsageBounded _ _ usg = usg
+
+trimSingleUse :: TypeShape -> SingleUse -> SingleUse
+trimSingleUse = trimSingleUseBounded 0 
 
 trimUsage :: TypeShape -> Usage -> Usage
-trimUsage shape (Used m use) = Used m (trimSingleUse shape use)
-trimUsage _ usg = usg
+trimUsage = trimUsageBounded 0
 
 -- | @manifyUsage u = bothUsage u u@. For when an id is used more than once
 -- with the same `Usage`. This is different than just changing the top-level
