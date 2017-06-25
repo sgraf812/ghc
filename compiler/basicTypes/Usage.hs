@@ -315,12 +315,6 @@ expandArity (Used _ u) cheap_arity
       -- Although for the cheap_arity = 0 case, we *should* not expand at all,
       -- because that would yield surprising behavior.
       = cheap_arity
-    impl UnknownUse cheap_arity
-      -- No chance we can expand anything
-      = cheap_arity
-    impl (Product _) cheap_arity
-      -- This doesn't really make sense anyway.
-      = cheap_arity
     impl (Call Many _) 0
       -- the application expression we accumulated does non-trivial work,
       -- which we aren't allowed to push into a non-one-shot lambda. So
@@ -332,6 +326,9 @@ expandArity (Used _ u) cheap_arity
       -- It's OK to push work into a one-shot lambda, or to expand as long
       -- as the accumulated application expression is cheap.
       = 1 + impl u (max 0 (cheap_arity - 1))
+    impl _ cheap_arity
+      -- No chance we can expand anything
+      = cheap_arity
 
 consUsageSig :: Usage -> UsageSig -> UsageSig
 consUsageSig u s
