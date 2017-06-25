@@ -163,11 +163,10 @@ unionUnVarGraph (UnVarGraph Subtractive e1 _) (UnVarGraph Subtractive e2 _)
   = balance $ mkUnVarGraph Subtractive $ IntMap.unionWith intersectionUnVarSet e1' e2'
   where
     -- diffn = nodes of the union *not* mentioned in graph n
-    diff1 = UnVarSet $ IntMap.keysSet e2 `IntSet.difference` IntMap.keysSet e1 -- 4
-    diff2 = UnVarSet $ IntMap.keysSet e1 `IntSet.difference` IntMap.keysSet e2 -- 0
+    diff1 = UnVarSet $ IntMap.keysSet e2 `IntSet.difference` IntMap.keysSet e1
+    diff2 = UnVarSet $ IntMap.keysSet e1 `IntSet.difference` IntMap.keysSet e2
     e1' = unionUnVarSet diff1 <$> e1
     e2' = unionUnVarSet diff2 <$> e2
-
 unionUnVarGraph u1 u2
   = unionUnVarGraph u1' u2' -- we could be smarter here
   where
