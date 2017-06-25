@@ -32,7 +32,6 @@ import Util
 import Var ( isId, isTyVar )
 import VarEnv
 import VarSet
-import WwLib ( findTypeShape )
 
 import Control.Arrow ( first, second, (***) )
 import Control.Monad ( forM )
@@ -584,7 +583,7 @@ callArityExpr env e@(Var id) = return transfer
       -- transparently in `registerBindingGroups`.
       = do
         ut_callee <- transfer_callee use
-        --pprTrace "callArityExpr:LocalId" (ppr id <+> ppr use <+> ppr (ut_args ut_callee)) (return ())
+        pprTrace "callArityExpr:LocalId" (ppr id <+> ppr use <+> ppr (ut_args ut_callee)) (return ())
         return (ut_callee `bothUsageType` unitUsageType id use, e)
 
       | isLocalId id
@@ -872,8 +871,10 @@ setBndrUsageInfo fam_envs id usage
   = id 
   | otherwise
     -- See Note [Trimming a demand to a type] in Demand.hs
-  = --pprTrace "setBndrUsageInfo" (ppr id <+> ppr usage') 
-    id `setIdCallArity` trimUsageToTypeShape fam_envs id usage
+  = pprTrace "setBndrUsageInfo" (ppr id <+> ppr usage') $
+    id `setIdCallArity` usage'
+    where
+      usage' = trimUsageToTypeShape fam_envs id usage
 
 setBndrsUsageInfo :: FamInstEnvs -> [Var] -> [Usage] -> [Var]
 setBndrsUsageInfo _ [] [] = []
@@ -1016,7 +1017,7 @@ unleashLet
   -> TransferFunction (UsageType, [(Id, CoreExpr)])
 unleashLet env rec_flag transferred_binds ut_usage ut_body = do
   let fam_envs = ae_fam_envs env
-  let ids = fst . unzip $ transferred_binds
+  let ids = map fst transferred_binds
   (ut_rhss, rhss') <- fmap unzip $ forM transferred_binds $ \(id, (rhs, transfer)) ->
     unleashUsage rhs transfer (lookupUsage rec_flag fam_envs ut_usage id)
   let ut_final = callArityLetEnv (zip ids ut_rhss) ut_body

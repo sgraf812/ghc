@@ -310,8 +310,10 @@ expandArity (Used Many _) 0
 expandArity (Used _ u) cheap_arity
   = impl u cheap_arity
   where
-    impl HeadUse cheap_arity -- the application expression we accumulated does non-trivial work, so
-      -- Same reason as for the above @Absent@ case
+    impl HeadUse cheap_arity
+      -- Same reason as for the above @Absent@ case, we can expand arbitrarily. 
+      -- Although for the cheap_arity = 0 case, we *should* not expand at all,
+      -- because that would yield surprising behavior.
       = cheap_arity
     impl UnknownUse cheap_arity
       -- No chance we can expand anything
