@@ -8,35 +8,38 @@ module CallArity.Analysis where
 
 #include "HsVersions.h"
 
-import CallArity.Types
-import CallArity.FrameworkBuilder
+import           CallArity.FrameworkBuilder
+import           CallArity.Types
 
-import BasicTypes
-import Class
-import Coercion ( Coercion, coVarsOfCo )
-import CoreFVs ( rulesFreeVars, idRuleRhsVars )
-import CoreSyn
-import CoreUtils ( exprIsTrivial )
-import DataCon
-import DynFlags      ( DynFlags, gopt, GeneralFlag(Opt_DmdTxDictSel) )
-import FamInstEnv
-import Id
-import Maybes ( expectJust, fromMaybe, isJust )
-import MkCore
-import Outputable
-import TyCon ( isDataProductTyCon_maybe, tyConSingleDataCon_maybe )
-import UniqFM
-import UnVarGraph
-import Usage
-import Util
-import Var ( isId, isTyVar )
-import VarEnv
-import VarSet
+import           BasicTypes
+import           Class
+import           Coercion                   (Coercion, coVarsOfCo)
+import           CoreFVs                    (idRuleRhsVars, rulesFreeVars)
+import           CoreSyn
+import           CoreUtils                  (exprIsTrivial)
+import           DataCon
+import           DynFlags                   (DynFlags,
+                                             GeneralFlag (Opt_DmdTxDictSel),
+                                             gopt)
+import           FamInstEnv
+import           Id
+import           Maybes                     (expectJust, fromMaybe, isJust)
+import           MkCore
+import           Outputable
+import           TyCon                      (isDataProductTyCon_maybe,
+                                             tyConSingleDataCon_maybe)
+import           UniqFM
+import           UnVarGraph
+import           Usage
+import           Util
+import           Var                        (isId, isTyVar)
+import           VarEnv
+import           VarSet
 
-import Control.Arrow ( first, second, (***) )
-import Control.Monad ( forM )
-import qualified Data.Set as Set
-import Data.Tree
+import           Control.Arrow              (first, second, (***))
+import           Control.Monad              (forM)
+import qualified Data.Set                   as Set
+import           Data.Tree
 
 
 {-
@@ -410,22 +413,22 @@ Call Arity considers everything that is not cheap (`exprIsCheap`) as a thunk.
 
 data AnalEnv
   = AE
-  { ae_dflags :: DynFlags
+  { ae_dflags              :: DynFlags
   -- ^ Configuration flags. Of particular interest to this analysis:
   --
   --     - `Opt_DmdTxDictSel`: Control analysis of dictionary selectors.
   --
-  , ae_sigs :: VarEnv (SingleUse -> TransferFunction UsageType)
+  , ae_sigs                :: VarEnv (SingleUse -> TransferFunction UsageType)
   -- ^ 'TransferFunction's of visible local let-bound identifiers. It is crucial
   -- that only the 'UsageSig' component is used, as the usage on free vars might
   -- be unstable and thus too optimistic.
-  , ae_fam_envs :: FamInstEnvs
+  , ae_fam_envs            :: FamInstEnvs
   -- ^ Needed for 'findTypeShape' to resolve type/data families.
   , ae_need_sig_annotation :: VarSet
   -- ^ `Id`s which need to be annotated with a signature, e.g. because
   -- they are visible beyond this module. These are probably top-level
   -- ids only, including exports and mentions in RULEs.
-  , ae_predicted_nodes :: Tree Int
+  , ae_predicted_nodes     :: Tree Int
   -- ^ A prediction of how many `FrameworkNode`s need to be allocated for
   -- the expression to be analyzed. We need these for allocating
   -- `FrameworkNode`s in a particular order that guarantees fast
@@ -443,19 +446,19 @@ initialAnalEnv dflags fam_envs need_sigs predicted_nodes
   }
 
 descend :: Int -> AnalEnv -> AnalEnv
-descend n env 
+descend n env
   = env { ae_predicted_nodes = subForest (ae_predicted_nodes env) !! n }
 
 predictSizeOfLetBody :: AnalEnv -> Int
 -- The body is always the first child
-predictSizeOfLetBody = rootLabel . ae_predicted_nodes . descend 0 
+predictSizeOfLetBody = rootLabel . ae_predicted_nodes . descend 0
 
-extendAnalEnv 
-  :: AnalEnv 
-  -> Id 
-  -> (SingleUse -> TransferFunction UsageType) 
+extendAnalEnv
+  :: AnalEnv
+  -> Id
+  -> (SingleUse -> TransferFunction UsageType)
   -> AnalEnv
-extendAnalEnv env id node 
+extendAnalEnv env id node
   = env { ae_sigs = extendVarEnv (ae_sigs env) id node }
 
 -- | See Note [Analysing top-level-binds]
@@ -467,9 +470,9 @@ extendAnalEnv env id node
 -- nested lets, where the external visible ids are returned in the inner-most let
 -- as a tuple. As a result, all visible identifiers are handled as called
 -- with each other, with `topUsage`.
-programToExpr 
+programToExpr
   :: [CoreRule]
-  -> CoreProgram 
+  -> CoreProgram
   -> (VarSet, CoreExpr)
 programToExpr orphan_rules = impl [] (rulesFreeVars orphan_rules)
   where
@@ -479,15 +482,15 @@ programToExpr orphan_rules = impl [] (rulesFreeVars orphan_rules)
         -- used in the same way anyway.
     impl top_level_ids exposed (bind:prog)
       = second (Let bind) (impl (bindersOf bind ++ top_level_ids) (exposed_ids bind `unionVarSet` exposed) prog)
-    -- We need to use *at least*  
-    -- 
+    -- We need to use *at least*
+    --
     --   * exported `Id`s (`isExportedId`)
     --   * `Id`s mentioned in any RULE's RHS of this module
     --   * Manually (through a VECTORISE pragma) vectorized `Id`s.
     --     No need for RHSs of VECTORISE pragmas since we run after
     --     the initial phase of the simplifier.
     --     (See Note [Vectorisation declarations and occurrences] in SimplCore.hs)
-    --     TODO: We ignore these altogether for now, since collecting 
+    --     TODO: We ignore these altogether for now, since collecting
     --           the needed info is really tedious.
     --
     -- This essentially does the same as the Occurence Analyser,
@@ -504,20 +507,20 @@ programToExpr orphan_rules = impl [] (rulesFreeVars orphan_rules)
 -- | The left inverse to `programToExpr`: `exprToProgram . snd . programToExpr = id \@CoreProgram`
 exprToProgram :: CoreExpr -> CoreProgram
 exprToProgram (Let bind e) = bind : exprToProgram e
-exprToProgram _ = []
+exprToProgram _            = []
 
 -- Main entry point
-callArityAnalProgram 
-  :: DynFlags 
-  -> FamInstEnvs 
+callArityAnalProgram
+  :: DynFlags
+  -> FamInstEnvs
   -> [CoreRule]
-  -> CoreProgram 
+  -> CoreProgram
   -> IO CoreProgram
 callArityAnalProgram dflags fam_envs orphan_rules
-  = return 
-  -- . (\it -> pprTrace "callArity:end" (ppr (length it)) it) 
-  . exprToProgram 
-  . uncurry (callArityRHS dflags fam_envs) 
+  = return
+  -- . (\it -> pprTrace "callArity:end" (ppr (length it)) it)
+  . exprToProgram
+  . uncurry (callArityRHS dflags fam_envs)
   . programToExpr orphan_rules
   -- . (\it -> pprTrace "callArity:begin" (ppr (length it)) it)
   -- . (\prog -> pprTrace "CallArity:Program" (ppr prog) prog)
@@ -555,7 +558,7 @@ callArityExprMap env f e
       return (ut, f e')
 
 callArityExpr _ e@(Lit _)
-  = callArityExprTrivial emptyUsageType e 
+  = callArityExprTrivial emptyUsageType e
 callArityExpr _ e@(Type _)
   = callArityExprTrivial emptyUsageType e
 
@@ -583,7 +586,7 @@ callArityExpr env e@(Var id) = return transfer
       -- transparently in `registerBindingGroups`.
       = do
         ut_callee <- transfer_callee use
-        pprTrace "callArityExpr:LocalId" (ppr id <+> ppr use <+> ppr (ut_args ut_callee)) (return ())
+        --pprTrace "callArityExpr:LocalId" (ppr id <+> ppr use <+> ppr (ut_args ut_callee)) (return ())
         return (ut_callee `bothUsageType` unitUsageType id use, e)
 
       | isLocalId id
@@ -639,7 +642,7 @@ callArityExpr env (Lam id body)
           --pprTrace "callArityExpr:Lam" (vcat [text "id:" <+> ppr id, text "relative body usage:" <+> ppr u, text "id usage:" <+> ppr usage_id, text "usage sig:" <+> ppr (ut_args ut)]) (return ())
           return (ut, Lam id' body')
 
-callArityExpr env (App f (Type t)) 
+callArityExpr env (App f (Type t))
   = callArityExprMap (descend 0 env) (flip App (Type t)) f
 callArityExpr env (App f a) = do
   transfer_f <- callArityExpr (descend 0 env) f
@@ -653,8 +656,8 @@ callArityExpr env (App f a) = do
       Absent -> return (ut_f', App f' (markAbsent a))
       Used m arg_use -> do
         -- `m` will be `Once` most of the time (see `considerThunkSharing`),
-        -- so that all work before the lambda is uncovered will be shared 
-        -- (call-by-need!). This is the same argument as for let-bound 
+        -- so that all work before the lambda is uncovered will be shared
+        -- (call-by-need!). This is the same argument as for let-bound
         -- right hand sides.
         -- We could also use the multiplicity in the same way we do for
         -- let-bindings: An argument only used once does not need to be
@@ -666,7 +669,7 @@ callArityExpr env (App f a) = do
 callArityExpr env (Case scrut case_bndr ty alts) = do
   transfer_scrut <- callArityExpr (descend 0 env) scrut
   -- We zip the index of the child in the ae_predicted_nodes tree
-  transfer_alts <- forM (zip [1..] alts) $ \(n, alt) -> 
+  transfer_alts <- forM (zip [1..] alts) $ \(n, alt) ->
     analyseCaseAlternative (descend n env) case_bndr alt
   return $ \use -> do
     (ut_alts, alts', scrut_uses) <- unzip3 <$> mapM ($ use) transfer_alts
@@ -681,7 +684,7 @@ callArityExpr env (Case scrut case_bndr ty alts) = do
     --pprTrace "Case" (vcat [text "ut_scrut:" <+> ppr ut_scrut, text "ut_alts:" <+> ppr ut_alts, text "ut:" <+> ppr ut]) (return ())
     return (ut, Case scrut' case_bndr' ty alts')
 
-callArityExpr env (Let bind e) 
+callArityExpr env (Let bind e)
   = registerTransferFunction register >>= deref_node
   where
     deref_node node = return $ \use -> do
@@ -708,7 +711,7 @@ callArityExpr env (Let bind e)
             --use <- pprTrace "Rec:begin" (ppr ids) $ return use
             (ut_body, e') <- transfer_body use
             (ut_usage, old_binds) <- case rec_flag of
-              NonRecursive -> 
+              NonRecursive ->
                 -- We don't need to dependOn ourselves here, because only the let body can't
                 -- call id.
                 return (ut_body, initial_binds)
@@ -721,7 +724,7 @@ callArityExpr env (Let bind e)
             (ut, binds') <- unleashLet env' rec_flag transferred_binds ut_usage ut_body
             --ut <- pprTrace "Rec:end" (ppr ids) $ return ut
             case rec_flag of
-              NonRecursive 
+              NonRecursive
                 | [(id', rhs')] <- binds'
                 -> return (ut, Let (NonRec id' rhs') e')
               _ -> return (ut, Let (Rec binds') e')
@@ -796,7 +799,7 @@ globalIdUsageSig id use
   | use <= single_call
   = ASSERT2( usg_sig `leqUsageSig` str_sig, text "usg_sig:" <+> ppr usg_sig <+> text "str_sig:" <+> ppr str_sig ) usg_sig
   | otherwise
-  = --pprTrace "many" (ppr arg_usage <+> ppr (idStrictness id) <+> ppr (manifyUsageSig arg_usage)) $ 
+  = --pprTrace "many" (ppr arg_usage <+> ppr (idStrictness id) <+> ppr (manifyUsageSig arg_usage)) $
     manifyUsageSig usg_sig
   where
     (<=) = leqSingleUse
@@ -807,7 +810,7 @@ globalIdUsageSig id use
     usg_sig = idArgUsage id
     str_sig = usageSigFromStrictSig (idStrictness id)
 
--- | Evaluation of a non-trivial RHS of a let-binding or argument 
+-- | Evaluation of a non-trivial RHS of a let-binding or argument
 -- is shared (call-by-need!). GHC however doesn't allocate a new thunk
 -- if it finds the expression to bind to be trivial (`exprIsTrivial`).
 -- This makes sure we share usage only if this is not the case.
@@ -868,10 +871,10 @@ addCaseBndrUsage (Used _ use) alt_bndr_usages
 setBndrUsageInfo :: FamInstEnvs -> Var -> Usage -> Var
 setBndrUsageInfo fam_envs id usage
   | isTyVar id
-  = id 
+  = id
   | otherwise
     -- See Note [Trimming a demand to a type] in Demand.hs
-  = pprTrace "setBndrUsageInfo" (ppr id <+> ppr usage') $
+  = --pprTrace "setBndrUsageInfo" (ppr id <+> ppr usage') $
     id `setIdCallArity` usage'
     where
       usage' = trimUsageToTypeShape fam_envs id usage
@@ -911,7 +914,7 @@ propagateProductUse alts scrut_uses
 addDataConStrictness :: DataCon -> SingleUse -> SingleUse
 -- See Note [Add demands for strict constructors] in DmdAnal.hs
 addDataConStrictness dc
-  = maybe topSingleUse (mkProductUse . add_component_strictness) 
+  = maybe topSingleUse (mkProductUse . add_component_strictness)
   . peelProductUse arity
   where
     add_component_strictness :: [Usage] -> [Usage]
@@ -926,7 +929,7 @@ addDataConStrictness dc
       | otherwise = usage
 
 recFlagOf :: CoreBind -> RecFlag
-recFlagOf Rec{} = Recursive
+recFlagOf Rec{}    = Recursive
 recFlagOf NonRec{} = NonRecursive
 
 exprForcedError :: CoreExpr
@@ -969,12 +972,12 @@ registerBindingGroup env = go env emptyVarEnv . zip [1..] -- `zip` for `descend`
           transfer_rhs <- callArityExpr (descend n env') rhs
           let transfer_annotate = monotonize up_node $ \use -> do
                 --use <- pprTrace "RHS:begin" (ppr id <+> text "::" <+> ppr use) $ return use
-                ret@(ut, rhs') <- transfer_rhs use 
+                ret@(ut, rhs') <- transfer_rhs use
                 --ret <- pprTrace "RHS:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr ut]) $ return ret
                 return ret
           let transfer_args_only use = do
-                -- This makes sure to forget the annotated expression from the up_node, 
-                -- in order to have a more forgiving change detector. That's essential for 
+                -- This makes sure to forget the annotated expression from the up_node,
+                -- in order to have a more forgiving change detector. That's essential for
                 -- termination of the analysis.
                 --use <- pprTrace "args:begin" (ppr id <+> text "::" <+> ppr use) $ return use
                 (ut, _) <- dependOnWithDefault (botUsageType, exprForcedError) (up_node, use)
@@ -1005,11 +1008,11 @@ changeDetectorUsageType _ (old, _) (new, _) =
 changeDetectorAnalResult :: FrameworkNode -> ChangeDetector
 changeDetectorAnalResult self_node changed_refs (old, e) (new, e') =
   --pprTrace "changeDetector" (ppr $ Set.map fst changed_refs) $
-  not (Set.map fst changed_refs `Set.isSubsetOf` Set.singleton self_node) || 
+  not (Set.map fst changed_refs `Set.isSubsetOf` Set.singleton self_node) ||
   changeDetectorUsageType changed_refs (old, e) (new, e')
 
 unleashLet
-  :: AnalEnv 
+  :: AnalEnv
   -> RecFlag
   -> [(Id, (CoreExpr, SingleUse -> TransferFunction AnalResult))]
   -> UsageType
@@ -1026,7 +1029,7 @@ unleashLet env rec_flag transferred_binds ut_usage ut_body = do
   -- Now use that information to annotate binders.
   let (_, usages) = findBndrsUsages rec_flag fam_envs ut_final ids
   let ids' = setBndrsUsageInfo fam_envs ids usages
-  ids'' <- forM ids' (annotateIdArgUsage env) 
+  ids'' <- forM ids' (annotateIdArgUsage env)
 
   -- This intentionally still contains the @Id@s of the binding group, because
   -- the recursive rule looks at their usages to determine stability.
@@ -1061,11 +1064,11 @@ unleashUsage rhs transfer_rhs usage
   | Absent <- usage
   = return (emptyUsageType, markAbsent rhs)
   | Used m use <- considerThunkSharing rhs usage
-  -- As with arguments, `m` should be `Once` most of the time 
+  -- As with arguments, `m` should be `Once` most of the time
   -- (e.g. if `rhs` is non-trivial, see `considerThunkSharing`).
-  -- Thus, the work required to get the RHS of let-bindings 
+  -- Thus, the work required to get the RHS of let-bindings
   -- to WHNF is shared among all use sites.
-  -- We still annotate the binder with the multiplicity later on, 
+  -- We still annotate the binder with the multiplicity later on,
   -- as @Once@ means we don't have to memoize the result anyway.
   = first (multiplyUsages m) <$> transfer_rhs use
 
@@ -1132,20 +1135,20 @@ callArityLetEnv rhss ut_body
 -- which are just too much trouble to deal with ATM. FIXME!
 markAbsent :: CoreExpr -> CoreExpr
 markAbsent = expr
-  where 
-    abs id 
+  where
+    abs id
       | isTyVar id = id
       | otherwise = id `setIdCallArity` Absent
     expr e = case e of
       App f a -> App (expr f) (expr a)
-      -- I better leave the binder untouched for now... Don't want to break 
+      -- I better leave the binder untouched for now... Don't want to break
       -- stuff that expects absent closures to be compilable
-      Lam id body -> Lam id (expr body) 
+      Lam id body -> Lam id (expr body)
       Let binds body -> Let (bind binds) (expr body)
       Case scrut bndr ty alts -> Case (expr scrut) (abs bndr) ty (map alt alts)
       Cast e co -> Cast (expr e) co
       Tick t e -> Tick t (expr e)
       _ -> e
     bind (NonRec id rhs) = NonRec (abs id) (expr rhs)
-    bind (Rec binds) = Rec (map (abs *** expr) binds)
+    bind (Rec binds)     = Rec (map (abs *** expr) binds)
     alt (dc, bndrs, body) = (dc, map abs bndrs, expr body)
