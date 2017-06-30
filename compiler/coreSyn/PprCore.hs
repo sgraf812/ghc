@@ -432,7 +432,7 @@ pprIdBndrInfo info
     prag_info = inlinePragInfo info
     occ_info  = occInfo info
     dmd_info  = demandInfo info
-    usg_info  = callArityInfo info
+    usg_info  = usageInfo info
     lbv_info  = oneShotInfo info
 
     has_prag  = not (isDefaultInlinePragma prag_info)

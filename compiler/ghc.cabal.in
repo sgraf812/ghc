@@ -412,10 +412,10 @@ Library
         CoreToStg
         StgLint
         StgSyn
-        CallArity
-        CallArity.Types
-        CallArity.FrameworkBuilder
-        CallArity.Analysis
+        UsageAnal
+        UsageAnal.Types
+        UsageAnal.FrameworkBuilder
+        UsageAnal.Analysis
         DmdAnal
         DmdAnalWrapper
         WorkWrap

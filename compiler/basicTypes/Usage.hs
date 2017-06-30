@@ -3,15 +3,15 @@
 module Usage
   ( Multiplicity (..)
   , botMultiplicity, topMultiplicity, lubMultiplicity
-  , SingleUse
-  , botSingleUse, topSingleUse, lubSingleUse, leqSingleUse, bothSingleUse, mkCallUse, peelCallUse, mkProductUse, peelProductUse, boundDepth
+  , Use
+  , botUse, topUse, lubUse, leqUse, bothUse, mkCallUse, peelCallUse, mkProductUse, peelProductUse, boundDepth
   , Usage (..)
   , multiplicity, botUsage, topUsage, lubUsage, bothUsage
   , manifyUsage, oneifyUsage, expandArity
   , UsageSig
   , botUsageSig, topUsageSig, lubUsageSig, leqUsageSig
   , consUsageSig, unconsUsageSig, usageSigFromUsages, manifyUsageSig
-  , trimSingleUse, trimUsage, trimUsageSig
+  , trimUse, trimUsage, trimUsageSig
   , u'1HU, u'1C1U
   , usageFromDemand, overwriteDemandWithUsage, usageSigFromStrictSig, overwriteStrictSigWithUsageSig
   ) where
@@ -34,7 +34,7 @@ data Multiplicity
   | Many
   deriving (Eq, Ord, Show)
 
--- | A `SingleUse` describes how an expression is used, after it hit WHNF.
+-- | A `Use` describes how an expression is used, after it hit WHNF.
 -- Some examples:
 --
 --    * A single use of @seq a b@ unleashes nothing beyond the WHNF use on @a@,
@@ -44,12 +44,12 @@ data Multiplicity
 --
 -- The `Ord` instance is incompatible with the lattice and only used when
 -- acting as a key type in a map.
-data SingleUse
+data Use
   = HeadUse
-  -- ^ A `SingleUse` which just evaluates the expression to WHNF. No resulting
+  -- ^ A `Use` which just evaluates the expression to WHNF. No resulting
   -- lambdas are called and usage of all product components is absent.
-  | Call !Multiplicity !SingleUse
-  -- ^ @Call m u@ denotes a `SingleUse` where, after hitting WHNF, the lambda
+  | Call !Multiplicity !Use
+  -- ^ @Call m u@ denotes a `Use` where, after hitting WHNF, the lambda
   -- body is used according to @u@ with multiplicity @m@. @Call Many u@ would
   -- mean the expression was called potentially many times, after being brought
   -- to WHNF.
@@ -57,13 +57,13 @@ data SingleUse
   -- Use `mkCallUse` to introduce this constructor and `peelCallUse` to
   -- eliminate `Call`s.
   | Product ![Usage]
-  -- ^ A `SingleUse` which, after evaluating a product constructor, will use the
+  -- ^ A `Use` which, after evaluating a product constructor, will use the
   -- product's components according to the `Usage`s given.
   --
   -- Use `mkProductUse` to introduce this constructor and `peelProductUse` to
   -- eliminate `Product`s.
   | UnknownUse
-  -- ^ A `SingleUse` where, after hitting WHNF of the expression,
+  -- ^ A `Use` where, after hitting WHNF of the expression,
   -- we don't know any further details of how
   --
   --     * a resulting nested lambda body is used
@@ -72,32 +72,32 @@ data SingleUse
 
 -- | A smart constructor for `Call` which normalizes according to the equivalence
 -- @Call Many UnknownUse = UnknownUse@.
-mkCallUse :: Multiplicity -> SingleUse -> SingleUse
+mkCallUse :: Multiplicity -> Use -> Use
 mkCallUse Many UnknownUse = UnknownUse
 mkCallUse m u = Call m u
 
 -- | A smart constructor for `Product` which normalizes according to the equivalences
--- @Product [topUsage, topUsage..] === topSingleUse@ and
--- @Product [botUsage, botUsage..] === botSingleUse@.
-mkProductUse :: [Usage] -> SingleUse
+-- @Product [topUsage, topUsage..] === topUse@ and
+-- @Product [botUsage, botUsage..] === botUse@.
+mkProductUse :: [Usage] -> Use
 mkProductUse components
   -- Order is important here: We want to regard U() as HU
-  | all (== botUsage) components = botSingleUse
+  | all (== botUsage) components = botUse
   -- This contradicts Note [Don't optimise UProd(Used) to Used], but
   -- I fixed the issue with WW that probably was the reason for the hack.
-  | all (== topUsage) components = topSingleUse 
+  | all (== topUsage) components = topUse 
   | otherwise = Product components
 
 -- | `CoreSym.Id`entifiers can be used multiple times and are the only means to
 -- introduce sharing of work, evaluating expressions into WHNF, that is.
 -- `Usage` can track how often an identifier was used and how each of the
--- `SingleUse`s looked like.
+-- `Use`s looked like.
 --
 -- The `Ord` instance is incompatible with the lattice and only used when
 -- acting as a key type in a map.
 data Usage
   = Absent
-  | Used !Multiplicity !SingleUse
+  | Used !Multiplicity !Use
   deriving (Eq, Ord, Show)
 
 multiplicity :: Usage -> Maybe Multiplicity
@@ -125,59 +125,59 @@ lubMultiplicity Once m = m
 lubMultiplicity m Once = m
 lubMultiplicity _ _    = Many
 
-botSingleUse :: SingleUse
-botSingleUse = HeadUse
+botUse :: Use
+botUse = HeadUse
 
-topSingleUse :: SingleUse
-topSingleUse = UnknownUse
+topUse :: Use
+topUse = UnknownUse
 
-lubSingleUse :: SingleUse -> SingleUse -> SingleUse
-lubSingleUse UnknownUse _ = UnknownUse
-lubSingleUse _ UnknownUse = UnknownUse
-lubSingleUse HeadUse u = u
-lubSingleUse u HeadUse = u
-lubSingleUse (Product c1) (Product c2)
+lubUse :: Use -> Use -> Use
+lubUse UnknownUse _ = UnknownUse
+lubUse _ UnknownUse = UnknownUse
+lubUse HeadUse u = u
+lubUse u HeadUse = u
+lubUse (Product c1) (Product c2)
   | equalLength c1 c2
   -- If this is not true, we probably have uses from different case branches.
-  -- In that case, returning topSingleUse is the right thing to do.
+  -- In that case, returning topUse is the right thing to do.
   = mkProductUse (zipWith lubUsage c1 c2)
-lubSingleUse (Call m1 u1) (Call m2 u2)
-  = mkCallUse (lubMultiplicity m1 m2) (lubSingleUse u1 u2)
-lubSingleUse _ _ = topSingleUse
+lubUse (Call m1 u1) (Call m2 u2)
+  = mkCallUse (lubMultiplicity m1 m2) (lubUse u1 u2)
+lubUse _ _ = topUse
 
-leqSingleUse :: SingleUse -> SingleUse -> Bool
-leqSingleUse a b = lubSingleUse a b == b
+leqUse :: Use -> Use -> Bool
+leqUse a b = lubUse a b == b
 
--- | Think \'plus\' on `SingleUse`s, for sequential composition.
-bothSingleUse :: SingleUse -> SingleUse -> SingleUse
-bothSingleUse UnknownUse _ = UnknownUse
-bothSingleUse _ UnknownUse = UnknownUse
-bothSingleUse HeadUse u = u
-bothSingleUse u HeadUse = u
-bothSingleUse (Product c1) (Product c2)
+-- | Think \'plus\' on `Use`s, for sequential composition.
+bothUse :: Use -> Use -> Use
+bothUse UnknownUse _ = UnknownUse
+bothUse _ UnknownUse = UnknownUse
+bothUse HeadUse u = u
+bothUse u HeadUse = u
+bothUse (Product c1) (Product c2)
   | equalLength c1 c2
   = mkProductUse (zipWith bothUsage c1 c2)
-bothSingleUse (Call _ u1) (Call _ u2)
-  = mkCallUse Many (lubSingleUse u1 u2)
-bothSingleUse _ _ = topSingleUse
+bothUse (Call _ u1) (Call _ u2)
+  = mkCallUse Many (lubUse u1 u2)
+bothUse _ _ = topUse
 
 botUsage :: Usage
 botUsage = Absent
 
 topUsage :: Usage
-topUsage = Used topMultiplicity topSingleUse
+topUsage = Used topMultiplicity topUse
 
 lubUsage :: Usage -> Usage -> Usage
 lubUsage Absent u = u
 lubUsage u Absent = u
-lubUsage (Used m1 u1) (Used m2 u2) = Used (lubMultiplicity m1 m2) (lubSingleUse u1 u2)
+lubUsage (Used m1 u1) (Used m2 u2) = Used (lubMultiplicity m1 m2) (lubUse u1 u2)
 
 -- | Think \'plus\' on `Usage`s, for sequential composition.
 -- E.g. if `Usage`s from scrutinee and case branches should be combined.
 bothUsage :: Usage -> Usage -> Usage
 bothUsage Absent u = u
 bothUsage u Absent = u
-bothUsage (Used _ u1) (Used _ u2) = Used Many (bothSingleUse u1 u2)
+bothUsage (Used _ u1) (Used _ u2) = Used Many (bothUse u1 u2)
 
 botUsageSig :: UsageSig
 botUsageSig = BotUsageSig
@@ -195,12 +195,12 @@ lubUsageSig (ArgUsage u1 s1) (ArgUsage u2 s2) = consUsageSig (lubUsage u1 u2) (l
 leqUsageSig :: UsageSig -> UsageSig -> Bool
 leqUsageSig u1 u2 = lubUsageSig u1 u2 == u2
 
--- * Working with `SingleUse`, `Usage` and `UsageSig`
+-- * Working with `Use`, `Usage` and `UsageSig`
 
 -- | Eliminates a `Call`. This will return the `Usage` of the lambda body,
--- relative to the given `SingleUse` of the outer expression. Useful in the
+-- relative to the given `Use` of the outer expression. Useful in the
 -- `CoreSyn.Lam`bda rule.
-peelCallUse :: SingleUse -> Maybe Usage
+peelCallUse :: Use -> Maybe Usage
 peelCallUse HeadUse = Just Absent -- The lambda will be reduced to WHNF, but the body will stay untouched.
 peelCallUse (Call multi use) = Just (Used multi use)
 peelCallUse UnknownUse = Just topUsage
@@ -209,21 +209,21 @@ peelCallUse _ = Nothing
 -- | @peelProductUse len_hint use@ tries to treat @use@ as a product use and
 -- returns the list of usages on its components. It will adhere to the @len_hint@,
 -- meaning that the @product_use@ is constrained to have that length.
--- This is mostly so that `botSingleUse` and `topSingleUse`, oblivious to length
+-- This is mostly so that `botUse` and `topUse`, oblivious to length
 -- information, can be translated (back) into a product use.
 --
 -- Examples:
 --
 --    - @peelProductUse (length comps) (mkProductUse comps) == Just comps@
---    - @peelProductUse n topSingleUse == Just (replicate n topUsage)@
---    - @peelProductUse n (mkCallUse Once topSingleUse) == Nothing@
-peelProductUse :: Arity -> SingleUse -> Maybe [Usage]
+--    - @peelProductUse n topUse == Just (replicate n topUsage)@
+--    - @peelProductUse n (mkCallUse Once topUse) == Nothing@
+peelProductUse :: Arity -> Use -> Maybe [Usage]
 peelProductUse n HeadUse = Just (replicate n botUsage)
 peelProductUse n UnknownUse = Just (replicate n topUsage)
 peelProductUse n (Product comps) | comps `lengthIs` n = Just comps
 peelProductUse _ _ = Nothing -- type error, might happen with GADTs and unsafeCoerce (#9208)
 
--- | Since the lattice modeled by `SingleUse` has infinite height, we run might
+-- | Since the lattice modeled by `Use` has infinite height, we run might
 -- run into trouble regarding convergence. This happens in practice for product
 -- usages on lazy infinite stream functions such as `filter`, where the recursion
 -- propagates strictly increasing product use chains for the argument.
@@ -233,7 +233,7 @@ peelProductUse _ _ = Nothing -- type error, might happen with GADTs and unsafeCo
 -- Although there also may be infinitely many nested Calls, we don't need to
 -- worry about them, since there should be no program for which the analysis
 -- constructs an infinite chain of Calls.
-boundDepth :: Int -> SingleUse -> SingleUse
+boundDepth :: Int -> Use -> Use
 boundDepth max_height use = snd (boundUse 0 use)
   where
     wrap impl height u -- simple caching wrapper around the actual impl
@@ -252,29 +252,29 @@ boundDepth max_height use = snd (boundUse 0 use)
           , (changed, comps') <- mapAndUnzip (boundUsage (height + 1)) comps
           = (or changed, mkProductUse comps')
           | otherwise
-          = (True, topSingleUse)
+          = (True, topUse)
         impl height (Call m u) = second (mkCallUse m) (boundUse height u)
         impl _ u = (False, u)
 
-trimSingleUseBounded :: Int -> TypeShape -> SingleUse -> SingleUse
-trimSingleUseBounded _ _ HeadUse = HeadUse
-trimSingleUseBounded d (TsFun shape) u
+trimUseBounded :: Int -> TypeShape -> Use -> Use
+trimUseBounded _ _ HeadUse = HeadUse
+trimUseBounded d (TsFun shape) u
   -- Infinite arity is prohibited by the type system, so we don't have to modify d here
   | Just (Used m body) <- peelCallUse u
-  = mkCallUse m (trimSingleUseBounded d shape body)
-trimSingleUseBounded d (TsProd shapes) u
+  = mkCallUse m (trimUseBounded d shape body)
+trimUseBounded d (TsProd shapes) u
   -- TsProd may be infinitely deep, so we have to cut off at some point
   | d < 10
   , Just comps <- peelProductUse (length shapes) u
   = mkProductUse (zipWith (trimUsageBounded (d+1)) shapes comps)
-trimSingleUseBounded _ _ _ = topSingleUse 
+trimUseBounded _ _ _ = topUse 
     
 trimUsageBounded :: Int -> TypeShape -> Usage -> Usage
-trimUsageBounded d shape (Used m use) = Used m (trimSingleUseBounded d shape use)
+trimUsageBounded d shape (Used m use) = Used m (trimUseBounded d shape use)
 trimUsageBounded _ _ usg = usg
 
-trimSingleUse :: TypeShape -> SingleUse -> SingleUse
-trimSingleUse = trimSingleUseBounded 0 
+trimUse :: TypeShape -> Use -> Use
+trimUse = trimUseBounded 0 
 
 trimUsage :: TypeShape -> Usage -> Usage
 trimUsage = trimUsageBounded 0
@@ -367,7 +367,7 @@ trimUsageSig n sig = consUsageSig head_usage (trimUsageSig (n-1) tail_usage)
   where
     (head_usage, tail_usage) = unconsUsageSig sig
 
--- * Specific `Usage`s/`SingleUse`s
+-- * Specific `Usage`s/`Use`s
 
 -- | `Usage` unleashed on `x` in @x `seq` ...@.
 u'1HU:: Usage
@@ -375,7 +375,7 @@ u'1HU = Used Once HeadUse
 
 -- | 'Called once with one argument' `Usage`: @1*C^1(U)@
 u'1C1U :: Usage
-u'1C1U = Used Once (mkCallUse Once topSingleUse)
+u'1C1U = Used Once (mkCallUse Once topUse)
 
 -- * Pretty-printing
 
@@ -383,7 +383,7 @@ instance Outputable Multiplicity where
   ppr Once = text "1"
   ppr Many = text "w"
 
-instance Outputable SingleUse where
+instance Outputable Use where
   ppr HeadUse = text "HU"
   ppr UnknownUse = text "U"
   ppr (Product components) = text "U" <> parens (hcat (punctuate (char ',') (map ppr components)))
@@ -414,7 +414,7 @@ instance Binary Multiplicity where
       _ -> return Many
 
 -- | Mostly important for serializing `UsageSig` in interface files.
-instance Binary SingleUse where
+instance Binary Use where
   put_ bh HeadUse = putByte bh 0
   put_ bh UnknownUse = putByte bh 1
   put_ bh (Product components) = putByte bh 2 >> put_ bh components
@@ -470,11 +470,11 @@ multiplicityFromCount :: Demand.Count -> Multiplicity
 multiplicityFromCount Demand.One = Once
 multiplicityFromCount Demand.Many = Many
 
-singleUseFromUseDmd :: Demand.UseDmd -> SingleUse
-singleUseFromUseDmd Demand.UHead = botSingleUse
+singleUseFromUseDmd :: Demand.UseDmd -> Use
+singleUseFromUseDmd Demand.UHead = botUse
 singleUseFromUseDmd (Demand.UCall c u) = mkCallUse (multiplicityFromCount c) (singleUseFromUseDmd u)
 singleUseFromUseDmd (Demand.UProd comps) = mkProductUse (map usageFromArgUse comps)
-singleUseFromUseDmd Demand.Used = topSingleUse
+singleUseFromUseDmd Demand.Used = topUse
 
 usageFromArgUse :: Demand.ArgUse -> Usage
 usageFromArgUse Demand.Abs = Absent
@@ -496,7 +496,7 @@ multiplicityToCount :: Multiplicity -> Demand.Count
 multiplicityToCount Once = Demand.One
 multiplicityToCount Many = Demand.Many
 
-singleUseToUseDmd :: SingleUse -> Demand.UseDmd
+singleUseToUseDmd :: Use -> Demand.UseDmd
 singleUseToUseDmd HeadUse = Demand.UHead
 singleUseToUseDmd UnknownUse = Demand.Used
 singleUseToUseDmd (Product comps) = Demand.UProd (map usageToArgUse comps)

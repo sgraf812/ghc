@@ -1431,7 +1431,7 @@ tryEtaExpandRhs env is_rec bndr rhs
       , let cheap_arity = findRhsArity dflags bndr rhs old_arity
             -- The following four lines can go away if CoreArity was aware
             -- of Usage information
-            usage = idCallArity bndr
+            usage = idUsage bndr
             expanded_arity = expandArity usage cheap_arity
             -- See Note [Trimming arity]
             new_arity = min expanded_arity (maxArity bndr)

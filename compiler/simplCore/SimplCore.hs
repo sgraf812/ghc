@@ -42,7 +42,7 @@ import SAT              ( doStaticArgs )
 import Specialise       ( specProgram)
 import SpecConstr       ( specConstrProgram)
 import DmdAnalWrapper   ( combinedDmdAnalProgram )
-import CallArity        ( callArityAnalProgram )
+import UsageAnal        ( usageAnalProgram )
 import WorkWrap         ( wwTopBinds )
 import Vectorise        ( vectorise )
 import SrcLoc
@@ -119,7 +119,7 @@ getCoreToDo dflags
     phases        = simplPhases        dflags
     max_iter      = maxSimplIterations dflags
     rule_check    = ruleCheck          dflags
-    call_arity    = gopt Opt_CallArity                    dflags
+    usage_anal    = gopt Opt_UsageAnal                    dflags
     strictness    = gopt Opt_Strictness                   dflags
     full_laziness = gopt Opt_FullLaziness                 dflags
     do_specialise = gopt Opt_Specialise                   dflags
@@ -298,9 +298,9 @@ getCoreToDo dflags
             -- up after the inlining from simplification.  Example in fulsom,
             -- Csg.calc, where an arg of timesDouble thereby becomes strict.
 
-        runWhen call_arity $ CoreDoPasses
-            [ CoreDoCallArity
-            , simpl_phase 0 ["post-call-arity"] max_iter
+        runWhen usage_anal $ CoreDoPasses
+            [ CoreDoUsageAnal
+            , simpl_phase 0 ["post-usage-anal"] max_iter
             ],
 
         runWhen strictness demand_analyser,
@@ -470,8 +470,8 @@ doCorePass (CoreDoFloatOutwards f)   = {-# SCC "FloatOutwards" #-}
 doCorePass CoreDoStaticArgs          = {-# SCC "StaticArgs" #-}
                                        doPassU doStaticArgs
 
-doCorePass CoreDoCallArity           = {-# SCC "CallArity" #-}
-                                       doPassDFRM callArityAnalProgram
+doCorePass CoreDoUsageAnal           = {-# SCC "UsageAnal" #-}
+                                       doPassDFRM usageAnalProgram
 
 doCorePass CoreDoStrictness          = {-# SCC "NewStranal" #-}
                                        doPassDFRM combinedDmdAnalProgram

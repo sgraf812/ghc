@@ -1,4 +1,4 @@
-module CallArity.Types where
+module UsageAnal.Types where
 
 import BasicTypes
 import CoreSyn
@@ -24,7 +24,7 @@ data UsageType
   = UT
   { ut_cocalled :: !UnVarGraph
   -- ^ Models cardinality, e.g. at most {1, many} via the co-call relation
-  , ut_uses     :: !(VarEnv SingleUse)
+  , ut_uses     :: !(VarEnv Use)
   -- ^ Models how an `Id` was used, if at all
   , ut_args     :: !UsageSig
   -- ^ Collects the signature for captured lambda binders
@@ -43,7 +43,7 @@ emptyUsageType = UT emptyUnVarGraph emptyVarEnv topUsageSig
 botUsageType :: UsageType
 botUsageType = unusedArgs emptyUsageType
 
-unitUsageType :: Id -> SingleUse -> UsageType
+unitUsageType :: Id -> Use -> UsageType
 unitUsageType id use = emptyUsageType { ut_uses = unitVarEnv id use }
 
 unusedArgs :: UsageType -> UsageType
@@ -90,7 +90,7 @@ multiplyUsages Once ut = ut
 multiplyUsages Many ut@(UT _ u args)
   = UT
   { ut_cocalled = completeGraph (domType ut)
-  , ut_uses = mapVarEnv (\use -> bothSingleUse use use) u
+  , ut_uses = mapVarEnv (\use -> bothUse use use) u
   , ut_args = manifyUsageSig args
   }
 
@@ -126,11 +126,11 @@ lubUsageType (UT g1 u1 args1) (UT g2 u2 args2)
   , ut_args = lubUsageSig args1 args2
   }
 
-lubUseEnv :: VarEnv SingleUse -> VarEnv SingleUse -> VarEnv SingleUse
-lubUseEnv = plusVarEnv_C lubSingleUse
+lubUseEnv :: VarEnv Use -> VarEnv Use -> VarEnv Use
+lubUseEnv = plusVarEnv_C lubUse
 
-bothUseEnv :: VarEnv SingleUse -> VarEnv SingleUse -> VarEnv SingleUse
-bothUseEnv = plusVarEnv_C bothSingleUse
+bothUseEnv :: VarEnv Use -> VarEnv Use -> VarEnv Use
+bothUseEnv = plusVarEnv_C bothUse
 
 lubUsageTypes :: [UsageType] -> UsageType
 lubUsageTypes = foldl lubUsageType botUsageType

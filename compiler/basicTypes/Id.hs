@@ -96,7 +96,7 @@ module Id (
         idOneShotInfo, idStateHackOneShotInfo,
         idOccInfo,
         isNeverLevPolyId,
-        idCallArity,
+        idUsage,
         idArgUsage,
         idDemandInfo,
         idStrictness,
@@ -109,7 +109,7 @@ module Id (
         setIdCafInfo,
         setIdOccInfo, zapIdOccInfo,
 
-        setIdCallArity,
+        setIdUsage,
         setIdArgUsage,
         setIdDemandInfo,
         setIdStrictness,
@@ -168,7 +168,7 @@ infixl  1 `setIdUnfolding`,
           `asJoinId`,
           `asJoinId_maybe`,
 
-          `setIdCallArity`,
+          `setIdUsage`,
           `setIdArgUsage`
 
 {-
@@ -623,11 +623,11 @@ idArity id = arityInfo (idInfo id)
 setIdArity :: Id -> Arity -> Id
 setIdArity id arity = modifyIdInfo (`setArityInfo` arity) id
 
-idCallArity :: Id -> Usage
-idCallArity id = callArityInfo (idInfo id)
+idUsage :: Id -> Usage
+idUsage id = usageInfo (idInfo id)
 
-setIdCallArity :: Id -> Usage -> Id
-setIdCallArity id used = modifyIdInfo (`setCallArityInfo` used) id
+setIdUsage :: Id -> Usage -> Id
+setIdUsage id used = modifyIdInfo (`setUsageInfo` used) id
 
 idArgUsage :: Id -> UsageSig
 idArgUsage id = argUsageInfo (idInfo id)

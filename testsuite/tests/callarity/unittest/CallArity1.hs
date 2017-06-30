@@ -5,7 +5,7 @@ import CoreUtils
 import Id
 import Type
 import MkCore
-import CallArity.Analysis ( callArityRHS )
+import UsageAnal.Analysis ( usageAnalRHS )
 import MkId
 import SysTools
 import DynFlags
@@ -203,7 +203,7 @@ main = do
               -- It should be OK to use nonDetEltsUniqSet here, if it becomes a
               -- problem we should use DVarSet
             -- liftIO $ putMsg dflags (ppr e')
-            forM_ bndrs $ \v -> putMsg dflags $ nest 4 $ ppr v <+> ppr (idCallArity v)
+            forM_ bndrs $ \v -> putMsg dflags $ nest 4 $ ppr v <+> ppr (idUsage v)
 
 -- Utilities
 mkLApps :: Id -> [Integer] -> CoreExpr

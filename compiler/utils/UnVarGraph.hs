@@ -7,12 +7,9 @@ A data structure for undirected graphs of variables
 (or in plain terms: Sets of unordered pairs of numbers)
 
 
-This is very specifically tailored for the use in CallArity. In particular it
-stores the graph as a union of complete and complete bipartite graph, which
-would be very expensive to store as sets of edges or as adjanceny lists.
-
-It does not normalize the graphs. This means that g `unionUnVarGraph` g is
-equal to g, but twice as expensive and large.
+This is very specifically tailored for the use in UsageAnal. In particular it
+is optimized for the nearly complete and sparse cases, which are quite common
+for co-call graphs.
 
 -}
 module UnVarGraph
