@@ -422,7 +422,7 @@ data GeneralFlag
    | Opt_PrintTypecheckerElaboration
 
    -- optimisation opts
-   | Opt_CallArity
+   | Opt_UsageAnal
    | Opt_Strictness
    | Opt_LateDmdAnal
    | Opt_KillAbsence
@@ -3662,7 +3662,7 @@ fFlagsDeps = [
   flagGhciSpec "break-on-error"               Opt_BreakOnError,
   flagGhciSpec "break-on-exception"           Opt_BreakOnException,
   flagSpec "building-cabal-package"           Opt_BuildingCabalPackage,
-  flagSpec "call-arity"                       Opt_CallArity,
+  flagSpec "usage-anal"                       Opt_UsageAnal,
   flagSpec "case-merge"                       Opt_CaseMerge,
   flagSpec "case-folding"                     Opt_CaseFolding,
   flagSpec "cmm-elim-common-blocks"           Opt_CmmElimCommonBlocks,
@@ -4115,7 +4115,7 @@ optLevelFlags -- see Note [Documenting optimisation flags]
     , ([0],     Opt_IgnoreInterfacePragmas)
     , ([0],     Opt_OmitInterfacePragmas)
 
-    , ([1,2],   Opt_CallArity)
+    , ([1,2],   Opt_UsageAnal)
     , ([1,2],   Opt_CaseMerge)
     , ([1,2],   Opt_CaseFolding)
     , ([1,2],   Opt_CmmElimCommonBlocks)

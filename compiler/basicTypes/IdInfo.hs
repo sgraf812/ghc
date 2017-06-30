@@ -38,7 +38,7 @@ module IdInfo (
 
         -- ** Usage info
         argUsageInfo, setArgUsageInfo,
-        callArityInfo, setCallArityInfo,
+        usageInfo, setUsageInfo,
 
         -- ** Demand and strictness Info
         strictnessInfo, setStrictnessInfo,
@@ -112,9 +112,13 @@ infixl  1 `setRuleInfo`,
           `setCafInfo`,
           `setStrictnessInfo`,
           `setDemandInfo`,
+<<<<<<< HEAD
           `setNeverLevPoly`,
           `setLevityInfoWithType`
           `setCallArityInfo`,
+=======
+          `setUsageInfo`,
+>>>>>>> Renamed CallArity to UsageAnal, also SingleUse -> Use
           `setArgUsageInfo`
 
 {-
@@ -233,7 +237,7 @@ pprIdDetails other     = brackets (pp other)
 --
 -- Most of the 'IdInfo' gives information about the value, or definition, of
 -- the 'Id', independent of its usage. Exceptions to this
--- are 'demandInfo', 'occInfo', 'oneShotInfo' and 'callArityInfo'.
+-- are 'demandInfo', 'occInfo', 'oneShotInfo' and 'usageInfo'.
 --
 -- Performance note: when we update 'IdInfo', we have to reallocate this
 -- entire record, so it is a good idea not to let this data structure get
@@ -252,7 +256,7 @@ data IdInfo
         strictnessInfo  :: !StrictSig,
         demandInfo      :: !Demand,
         argUsageInfo    :: !UsageSig,
-        callArityInfo   :: !Usage,
+        usageInfo       :: !Usage,
 
         levityInfo      :: LevityInfo           -- ^ when applied, will this Id ever have a levity-polymorphic type?
     }
@@ -293,8 +297,8 @@ setStrictnessInfo info dd = info { strictnessInfo = dd }
 setArgUsageInfo :: IdInfo -> UsageSig -> IdInfo
 setArgUsageInfo info sig = info { argUsageInfo = sig }
 
-setCallArityInfo :: IdInfo -> Usage -> IdInfo
-setCallArityInfo info used = info { callArityInfo = used }
+setUsageInfo :: IdInfo -> Usage -> IdInfo
+setUsageInfo info used = info { usageInfo = used }
 
 -- | Basic 'IdInfo' that carries no useful information whatsoever
 vanillaIdInfo :: IdInfo
@@ -310,8 +314,12 @@ vanillaIdInfo
             strictnessInfo      = nopSig,
             demandInfo          = topDmd,
             argUsageInfo        = topUsageSig,
+<<<<<<< HEAD
             callArityInfo       = topUsage
             levityInfo          = NoLevityInfo
+=======
+            usageInfo       = topUsage
+>>>>>>> Renamed CallArity to UsageAnal, also SingleUse -> Use
             --cardinalityInfo     = emptyCardinalityInfo
            }
 

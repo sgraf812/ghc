@@ -1,15 +1,14 @@
 {-# LANGUAGE CPP #-}
-{-# OPTIONS_GHC -fprof-auto #-}
 --
 -- Copyright (c) 2014 Joachim Breitner
 --
 
-module CallArity.Analysis where
+module UsageAnal.Analysis where
 
 #include "HsVersions.h"
 
-import CallArity.Types
-import CallArity.FrameworkBuilder
+import UsageAnal.Types
+import UsageAnal.FrameworkBuilder
 
 import BasicTypes
 import Class
@@ -73,7 +72,7 @@ Furthermore, an analysis that only looks at the RHS of go cannot be sufficient
 to eta-expand go: If `go` is ever called with one argument (and the result used
 multiple times), we would be doing the work in `...` multiple times.
 
-So `callArityAnalProgram` looks at the whole let expression to figure out if
+So `usageAnalProgram` looks at the whole let expression to figure out if
 all calls are nice, i.e. have a high enough arity. It then stores the result in
 the `calledArity` field of the `IdInfo` of `go`, which the next simplifier
 phase will eta-expand.
@@ -296,11 +295,11 @@ together with what other functions.
 Note [Analysis type signature]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The work-hourse of the analysis is the function `callArityAnal`, with the
+The work-hourse of the analysis is the function `usageAnal`, with the
 following type:
 
     type UsageType = (UnVarGraph, VarEnv Arity)
-    callArityAnal ::
+    usageAnal ::
         Arity ->  -- The arity this expression is called with
         VarSet -> -- The set of interesting variables
         CoreExpr ->  -- The expression to analyse
@@ -415,7 +414,7 @@ data AnalEnv
   --
   --     - `Opt_DmdTxDictSel`: Control analysis of dictionary selectors.
   --
-  , ae_sigs :: VarEnv (SingleUse -> TransferFunction UsageType)
+  , ae_sigs :: VarEnv (Use -> TransferFunction UsageType)
   -- ^ 'TransferFunction's of visible local let-bound identifiers. It is crucial
   -- that only the 'UsageSig' component is used, as the usage on free vars might
   -- be unstable and thus too optimistic.
@@ -453,7 +452,7 @@ predictSizeOfLetBody = rootLabel . ae_predicted_nodes . descend 0
 extendAnalEnv 
   :: AnalEnv 
   -> Id 
-  -> (SingleUse -> TransferFunction UsageType) 
+  -> (Use -> TransferFunction UsageType) 
   -> AnalEnv
 extendAnalEnv env id node 
   = env { ae_sigs = extendVarEnv (ae_sigs env) id node }
@@ -461,7 +460,7 @@ extendAnalEnv env id node
 -- | See Note [Analysing top-level-binds]
 -- `programToExpr` returns a pair of all top-level `Id`s
 -- and a nested `let` expression that uses everything externally visible.
--- This `let` expression is then to be analysed by `callArityRHS`.
+-- This `let` expression is then to be analysed by `usageAnalRHS`.
 --
 -- Represents the fact that a `CoreProgram` is like a sequence of
 -- nested lets, where the external visible ids are returned in the inner-most let
@@ -507,74 +506,73 @@ exprToProgram (Let bind e) = bind : exprToProgram e
 exprToProgram _ = []
 
 -- Main entry point
-callArityAnalProgram 
+usageAnalProgram 
   :: DynFlags 
   -> FamInstEnvs 
   -> [CoreRule]
   -> CoreProgram 
   -> IO CoreProgram
-callArityAnalProgram dflags fam_envs orphan_rules
+usageAnalProgram dflags fam_envs orphan_rules
   = return 
-  -- . (\it -> pprTrace "callArity:end" (ppr (length it)) it) 
+  -- . (\it -> pprTrace "usageAnal:end" (ppr (length it)) it) 
   . exprToProgram 
-  . uncurry (callArityRHS dflags fam_envs) 
+  . uncurry (usageAnalRHS dflags fam_envs) 
   . programToExpr orphan_rules
-  -- . (\it -> pprTrace "callArity:begin" (ppr (length it)) it)
-  -- . (\prog -> pprTrace "CallArity:Program" (ppr prog) prog)
+  -- . (\it -> pprTrace "usageAnal:begin" (ppr (length it)) it)
+  -- . (\prog -> pprTrace "usageAnal:Program" (ppr prog) prog)
 
-callArityRHS :: DynFlags -> FamInstEnvs -> VarSet -> CoreExpr -> CoreExpr
-callArityRHS dflags fam_envs need_sigs e
+usageAnalRHS :: DynFlags -> FamInstEnvs -> VarSet -> CoreExpr -> CoreExpr
+usageAnalRHS dflags fam_envs need_sigs e
   = ASSERT2( isEmptyUnVarSet (domType ut), text "Free vars in UsageType:" $$ ppr ut ) e'
   where
     env = initialAnalEnv dflags fam_envs need_sigs (predictAllocatedNodes e)
-    (ut, e') = buildAndRun (callArityExpr env e) topSingleUse
+    (ut, e') = buildAndRun (usageAnalExpr env e) topUse
 
--- | The main analysis function. See Note [Analysis type signature]
-callArityExpr
+usageAnalExpr
   :: AnalEnv
   -> CoreExpr
-  -> FrameworkBuilder (SingleUse -> TransferFunction AnalResult)
+  -> FrameworkBuilder (Use -> TransferFunction AnalResult)
 
-callArityExprTrivial
+usageAnalExprTrivial
   :: UsageType
   -> CoreExpr
-  -> FrameworkBuilder (SingleUse -> TransferFunction AnalResult)
-callArityExprTrivial ut e
+  -> FrameworkBuilder (Use -> TransferFunction AnalResult)
+usageAnalExprTrivial ut e
   = return (const (return (ut, e)))
 
-callArityExprMap
+usageAnalExprMap
   :: AnalEnv
   -> (CoreExpr -> a)
   -> CoreExpr
-  -> FrameworkBuilder (SingleUse -> TransferFunction (UsageType, a)) -- @a@ instead of @CoreExpr@
-callArityExprMap env f e
-  = transfer' <$> callArityExpr env e
+  -> FrameworkBuilder (Use -> TransferFunction (UsageType, a)) -- @a@ instead of @CoreExpr@
+usageAnalExprMap env f e
+  = transfer' <$> usageAnalExpr env e
   where
     transfer' transfer use = do
       (ut, e') <- transfer use
       return (ut, f e')
 
-callArityExpr _ e@(Lit _)
-  = callArityExprTrivial emptyUsageType e 
-callArityExpr _ e@(Type _)
-  = callArityExprTrivial emptyUsageType e
+usageAnalExpr _ e@(Lit _)
+  = usageAnalExprTrivial emptyUsageType e 
+usageAnalExpr _ e@(Type _)
+  = usageAnalExprTrivial emptyUsageType e
 
-callArityExpr _ e@(Coercion co)
-  = callArityExprTrivial (coercionUsageType co) e
+usageAnalExpr _ e@(Coercion co)
+  = usageAnalExprTrivial (coercionUsageType co) e
 
-callArityExpr env (Tick t e)
-  = callArityExprMap env (Tick t) e
+usageAnalExpr env (Tick t e)
+  = usageAnalExprMap env (Tick t) e
 
-callArityExpr env (Cast e co)
-  = transfer' <$> callArityExpr env e
+usageAnalExpr env (Cast e co)
+  = transfer' <$> usageAnalExpr env e
   where
     transfer' transfer use = do
       (ut, e') <- transfer use
-      -- like callArityExprMap, but we also have to combine with the UsageType
+      -- like usageAnalExprMap, but we also have to combine with the UsageType
       -- of the coercion.
       return (ut `bothUsageType` coercionUsageType co, Cast e' co)
 
-callArityExpr env e@(Var id) = return transfer
+usageAnalExpr env e@(Var id) = return transfer
   where
     transfer use
       | Just transfer_callee <- lookupVarEnv (ae_sigs env) id
@@ -583,7 +581,7 @@ callArityExpr env e@(Var id) = return transfer
       -- transparently in `registerBindingGroups`.
       = do
         ut_callee <- transfer_callee use
-        pprTrace "callArityExpr:LocalId" (ppr id <+> ppr use <+> ppr (ut_args ut_callee)) (return ())
+        --pprTrace "usageAnalExpr:LocalId" (ppr id <+> ppr use <+> ppr (ut_args ut_callee)) (return ())
         return (ut_callee `bothUsageType` unitUsageType id use, e)
 
       | isLocalId id
@@ -591,38 +589,38 @@ callArityExpr env e@(Var id) = return transfer
       -- We are only second-order, so we don't model signatures for parameters!
       -- Their usage is interesting to note nonetheless for annotating lambda
       -- binders and scrutinees.
-      = --pprTrace "callArityExpr:OtherId" (ppr id <+> ppr use) $
+      = --pprTrace "usageAnalExpr:OtherId" (ppr id <+> ppr use) $
         return (unitUsageType id use, e)
 
       -- The other cases handle global ids
       | Just dc <- ASSERT( isGlobalId id ) (isDataConWorkId_maybe id)
       -- Some data constructor, on which we can try to unleash product use
       -- as a `UsageSig`.
-      = --pprTrace "callArityExpr:DataCon" (ppr id <+> ppr use <+> ppr (dataConUsageSig dc use)) $
+      = --pprTrace "usageAnalExpr:DataCon" (ppr id <+> ppr use <+> ppr (dataConUsageSig dc use)) $
         return (emptyUsageType { ut_args = dataConUsageSig dc use }, e)
 
       | gopt Opt_DmdTxDictSel (ae_dflags env)
       , Just clazz <- isClassOpId_maybe id
       -- A dictionary component selector
-      = --pprTrace "callArityExpr:DictSel" (ppr id <+> ppr use <+> ppr (dictSelUsageSig id clazz use)) $
+      = --pprTrace "usageAnalExpr:DictSel" (ppr id <+> ppr use <+> ppr (dictSelUsageSig id clazz use)) $
         return (emptyUsageType { ut_args = dictSelUsageSig id clazz use }, e)
 
       | otherwise
       -- A global id from another module which has a usage signature.
       -- We don't need to track the id itself, though.
-      = --pprTrace "callArityExpr:GlobalId" (ppr id <+> ppr (idArity id) <+> ppr use <+> ppr (globalIdUsageSig id use) <+> ppr (idStrictness id) <+> ppr (idDetails id)) $
+      = --pprTrace "usageAnalExpr:GlobalId" (ppr id <+> ppr (idArity id) <+> ppr use <+> ppr (globalIdUsageSig id use) <+> ppr (idStrictness id) <+> ppr (idDetails id)) $
         return (emptyUsageType { ut_args = globalIdUsageSig id use }, e)
 
-callArityExpr env (Lam id body)
+usageAnalExpr env (Lam id body)
   | isTyVar id
-  = callArityExprMap env (Lam id) body
+  = usageAnalExprMap env (Lam id) body
   | otherwise
   = do
-    transfer_body <- callArityExpr env body
+    transfer_body <- usageAnalExpr env body
     return $ \use ->
       case fromMaybe topUsage (peelCallUse use) of -- Get at the relative @Usage@ of the body
         Absent -> do
-          let id' = id `setIdCallArity` Absent
+          let id' = id `setIdUsage` Absent
           return (emptyUsageType, Lam id' body)
         Used multi body_use -> do
           (ut_body, body') <- transfer_body body_use
@@ -636,14 +634,14 @@ callArityExpr env (Lam id body)
           let ut = modifyArgs (consUsageSig usage_id)
                  . multiplyUsages multi
                  $ ut_body'
-          --pprTrace "callArityExpr:Lam" (vcat [text "id:" <+> ppr id, text "relative body usage:" <+> ppr u, text "id usage:" <+> ppr usage_id, text "usage sig:" <+> ppr (ut_args ut)]) (return ())
+          --pprTrace "usageAnalExpr:Lam" (vcat [text "id:" <+> ppr id, text "relative body usage:" <+> ppr u, text "id usage:" <+> ppr usage_id, text "usage sig:" <+> ppr (ut_args ut)]) (return ())
           return (ut, Lam id' body')
 
-callArityExpr env (App f (Type t)) 
-  = callArityExprMap (descend 0 env) (flip App (Type t)) f
-callArityExpr env (App f a) = do
-  transfer_f <- callArityExpr (descend 0 env) f
-  transfer_a <- callArityExpr (descend 1 env) a
+usageAnalExpr env (App f (Type t)) 
+  = usageAnalExprMap (descend 0 env) (flip App (Type t)) f
+usageAnalExpr env (App f a) = do
+  transfer_f <- usageAnalExpr (descend 0 env) f
+  transfer_a <- usageAnalExpr (descend 1 env) a
   return $ \result_use -> do
     (ut_f, f') <- transfer_f (mkCallUse Once result_use)
     --pprTrace "App:f'" (ppr f') $ return ()
@@ -663,8 +661,8 @@ callArityExpr env (App f a) = do
         --pprTrace "App:a'" (text "arg_use:" <+> ppr arg_use <+> ppr (ut_a, a')) $ return ()
         return (ut_f' `bothUsageType` ut_a, App f' a')
 
-callArityExpr env (Case scrut case_bndr ty alts) = do
-  transfer_scrut <- callArityExpr (descend 0 env) scrut
+usageAnalExpr env (Case scrut case_bndr ty alts) = do
+  transfer_scrut <- usageAnalExpr (descend 0 env) scrut
   -- We zip the index of the child in the ae_predicted_nodes tree
   transfer_alts <- forM (zip [1..] alts) $ \(n, alt) -> 
     analyseCaseAlternative (descend n env) case_bndr alt
@@ -681,7 +679,7 @@ callArityExpr env (Case scrut case_bndr ty alts) = do
     --pprTrace "Case" (vcat [text "ut_scrut:" <+> ppr ut_scrut, text "ut_alts:" <+> ppr ut_alts, text "ut:" <+> ppr ut]) (return ())
     return (ut, Case scrut' case_bndr' ty alts')
 
-callArityExpr env (Let bind e) 
+usageAnalExpr env (Let bind e) 
   = registerTransferFunction register >>= deref_node
   where
     deref_node node = return $ \use -> do
@@ -701,9 +699,9 @@ callArityExpr env (Let bind e)
       -- Ideally we'd want the body to have a lower priority than the RHSs,
       -- but we need to access env' with the new sigs in the body, so we
       -- can't register it earlier.
-      transfer_body <- callArityExpr (descend 0 env') e
+      transfer_body <- usageAnalExpr (descend 0 env') e
       let rec_flag = recFlagOf bind
-      let transfer :: SingleUse -> TransferFunction AnalResult
+      let transfer :: Use -> TransferFunction AnalResult
           transfer = monotonize node $ \use -> do
             --use <- pprTrace "Rec:begin" (ppr ids) $ return use
             (ut_body, e') <- transfer_body use
@@ -721,7 +719,7 @@ callArityExpr env (Let bind e)
             (ut, binds') <- unleashLet env' rec_flag transferred_binds ut_usage ut_body
             --ut <- pprTrace "Rec:end" (ppr ids) $ return ut
             case rec_flag of
-              NonRecursive 
+              NonRecursive
                 | [(id', rhs')] <- binds'
                 -> return (ut, Let (NonRec id' rhs') e')
               _ -> return (ut, Let (Rec binds') e')
@@ -730,7 +728,7 @@ callArityExpr env (Let bind e)
 coercionUsageType :: Coercion -> UsageType
 coercionUsageType co = multiplyUsages Many ut
   where
-    ut = emptyUsageType { ut_uses = mapVarEnv (const topSingleUse) (coVarsOfCo co) }
+    ut = emptyUsageType { ut_uses = mapVarEnv (const topUse) (coVarsOfCo co) }
 
 -- | Consider the expression
 --
@@ -748,14 +746,14 @@ coercionUsageType co = multiplyUsages Many ut
 -- `dataConUsageSig` does exactly this: First peel off one-shot calls according
 -- to the constructors `idArity`, then peel off the product use to get at the
 -- usage on its components.
-dataConUsageSig :: DataCon -> SingleUse -> UsageSig
+dataConUsageSig :: DataCon -> Use -> UsageSig
 dataConUsageSig dc use = fromMaybe topUsageSig sig_maybe
   where
     arity = dataConRepArity dc
     peelSingleShotCalls 0 use = Just use
     peelSingleShotCalls n call
       | Just Absent <- peelCallUse call
-      = Just botSingleUse -- (,) x `seq` ...: Nothing unleashed in this case
+      = Just botUse -- (,) x `seq` ...: Nothing unleashed in this case
       | Just (Used Once use) <- peelCallUse call
       = peelSingleShotCalls (n - 1) use
       | otherwise
@@ -767,7 +765,7 @@ dataConUsageSig dc use = fromMaybe topUsageSig sig_maybe
       component_usages <- peelProductUse arity (addDataConStrictness dc product_use)
       return (usageSigFromUsages component_usages)
 
-dictSelUsageSig :: Id -> Class -> SingleUse -> UsageSig
+dictSelUsageSig :: Id -> Class -> Use -> UsageSig
 dictSelUsageSig id clazz use
   | Used _ dict_single_call_use <- fst . unconsUsageSig . idArgUsage $ id
   , Just dc <- tyConSingleDataCon_maybe (classTyCon clazz)
@@ -781,7 +779,7 @@ dictSelUsageSig id clazz use
   | otherwise
   = topUsageSig
 
-specializeDictSig :: [Usage] -> SingleUse -> UsageSig
+specializeDictSig :: [Usage] -> Use -> UsageSig
 specializeDictSig comps method_use = consUsageSig dict_usage topUsageSig
   where
     dict_usage = Used Once (mkProductUse (map replace_usage comps))
@@ -789,7 +787,7 @@ specializeDictSig comps method_use = consUsageSig dict_usage topUsageSig
       | old == Absent = old
       | otherwise = Used Once method_use -- This is the selector for the method we used!
 
-globalIdUsageSig :: Id -> SingleUse -> UsageSig
+globalIdUsageSig :: Id -> Use -> UsageSig
 globalIdUsageSig id use
   | use <= no_call -- @f x `seq` ...@ for a GlobalId `f` with arity > 1
   = botUsageSig
@@ -799,11 +797,11 @@ globalIdUsageSig id use
   = --pprTrace "many" (ppr arg_usage <+> ppr (idStrictness id) <+> ppr (manifyUsageSig arg_usage)) $ 
     manifyUsageSig usg_sig
   where
-    (<=) = leqSingleUse
+    (<=) = leqUse
     arity = idArity id
     mk_one_shot = mkCallUse Once
-    no_call = iterate mk_one_shot botSingleUse !! max 0 (arity - 1)
-    single_call = iterate mk_one_shot topSingleUse !! arity
+    no_call = iterate mk_one_shot botUse !! max 0 (arity - 1)
+    single_call = iterate mk_one_shot topUse !! arity
     usg_sig = idArgUsage id
     str_sig = usageSigFromStrictSig (idStrictness id)
 
@@ -820,9 +818,9 @@ analyseCaseAlternative
   :: AnalEnv
   -> Id
   -> Alt CoreBndr
-  -> FrameworkBuilder (SingleUse -> TransferFunction (UsageType, Alt CoreBndr, SingleUse))
+  -> FrameworkBuilder (Use -> TransferFunction (UsageType, Alt CoreBndr, Use))
 analyseCaseAlternative env case_bndr (dc, alt_bndrs, e)
-  = transfer <$> callArityExpr env e
+  = transfer <$> usageAnalExpr env e
   where
     transfer transfer_alt use = do
       let fam_envs = ae_fam_envs env
@@ -862,7 +860,7 @@ addCaseBndrUsage (Used _ use) alt_bndr_usages
   | otherwise
   = topUsage <$ alt_bndr_usages
 
--- | We should try avoiding to call `setIdCallArity` directly but rather go
+-- | We should try avoiding to call `setIdUsage` directly but rather go
 -- through this function. This makes sure to trim the `Usage`
 -- according to the binder's type before annotating.
 setBndrUsageInfo :: FamInstEnvs -> Var -> Usage -> Var
@@ -871,10 +869,8 @@ setBndrUsageInfo fam_envs id usage
   = id 
   | otherwise
     -- See Note [Trimming a demand to a type] in Demand.hs
-  = pprTrace "setBndrUsageInfo" (ppr id <+> ppr usage') $
-    id `setIdCallArity` usage'
-    where
-      usage' = trimUsageToTypeShape fam_envs id usage
+  = --pprTrace "setBndrUsageInfo" (ppr id <+> ppr usage') 
+    id `setIdUsage` trimUsageToTypeShape fam_envs id usage
 
 setBndrsUsageInfo :: FamInstEnvs -> [Var] -> [Usage] -> [Var]
 setBndrsUsageInfo _ [] [] = []
@@ -888,8 +884,8 @@ setBndrsUsageInfo _ _ usages
 
 propagateProductUse
   :: [Alt CoreBndr]
-  -> [SingleUse]
-  -> SingleUse
+  -> [Use]
+  -> Use
 propagateProductUse alts scrut_uses
   -- Only one alternative with a product constructor
   | [(DataAlt dc, _, _)] <- alts
@@ -906,12 +902,12 @@ propagateProductUse alts scrut_uses
   | otherwise
   -- We *could* lub the uses from the different branches, but there's not much
   -- to be won there, except for maybe head strictness.
-  = topSingleUse
+  = topUse
 
-addDataConStrictness :: DataCon -> SingleUse -> SingleUse
+addDataConStrictness :: DataCon -> Use -> Use
 -- See Note [Add demands for strict constructors] in DmdAnal.hs
 addDataConStrictness dc
-  = maybe topSingleUse (mkProductUse . add_component_strictness) 
+  = maybe topUse (mkProductUse . add_component_strictness) 
   . peelProductUse arity
   where
     add_component_strictness :: [Usage] -> [Usage]
@@ -935,14 +931,14 @@ exprForcedError = error "Expression component may not be used"
 useLetUp :: Id -> Bool
 useLetUp id = idArity id == 0
 
-transferUp :: Id -> CoreExpr -> FrameworkNode -> SingleUse -> TransferFunction AnalResult
+transferUp :: Id -> CoreExpr -> FrameworkNode -> Use -> TransferFunction AnalResult
 transferUp id rhs node use = do
   (ut, rhs') <- dependOnWithDefault (botUsageType, rhs) (node, use)
   if useLetUp id
     then return (ut, rhs')
     else return (botUsageType, rhs')
 
-transferDown :: Id -> FrameworkNode -> SingleUse -> TransferFunction UsageType
+transferDown :: Id -> FrameworkNode -> Use -> TransferFunction UsageType
 transferDown id node use = do
   (ut, _) <- dependOnWithDefault (botUsageType, exprForcedError) (node, use)
   if useLetUp id
@@ -952,7 +948,7 @@ transferDown id node use = do
 registerBindingGroup
   :: AnalEnv
   -> [(Id, CoreExpr)]
-  -> FrameworkBuilder (AnalEnv, VarEnv (SingleUse -> TransferFunction AnalResult))
+  -> FrameworkBuilder (AnalEnv, VarEnv (Use -> TransferFunction AnalResult))
 registerBindingGroup env = go env emptyVarEnv . zip [1..] -- `zip` for `descend`ing
   where
     go env transfer_ups [] = return (env, transfer_ups)
@@ -966,7 +962,7 @@ registerBindingGroup env = go env emptyVarEnv . zip [1..] -- `zip` for `descend`
           -- Now that the whole binding group is in scope in `env'`,
           -- we actually have to attend to our duty and register the
           -- transfer functions associated with `up_node` and `down_node`
-          transfer_rhs <- callArityExpr (descend n env') rhs
+          transfer_rhs <- usageAnalExpr (descend n env') rhs
           let transfer_annotate = monotonize up_node $ \use -> do
                 --use <- pprTrace "RHS:begin" (ppr id <+> text "::" <+> ppr use) $ return use
                 ret@(ut, rhs') <- transfer_rhs use 
@@ -987,12 +983,12 @@ registerBindingGroup env = go env emptyVarEnv . zip [1..] -- `zip` for `descend`
 changeDetectorUsageType :: ChangeDetector
 changeDetectorUsageType _ (old, _) (new, _) =
   -- It's crucial for termination that we don't have to check the annotated expressions.
-  ASSERT2( old_sig `leqUsageSig` new_sig, text "CallArity.changeDetector: usage sig not monotone")
+  ASSERT2( old_sig `leqUsageSig` new_sig, text "UsageAnal.changeDetector: usage sig not monotone")
   old_sig /= new_sig ||
-  ASSERT2( sizeUFM old_uses <= sizeUFM new_uses, text "CallArity.changeDetector: uses not monotone")
+  ASSERT2( sizeUFM old_uses <= sizeUFM new_uses, text "UsageAnal.changeDetector: uses not monotone")
   sizeUFM old_uses /= sizeUFM new_uses ||
   old_uses /= new_uses ||
-  ASSERT2( edgeCount old_cocalled <= edgeCount new_cocalled, text "CallArity.changeDetector: edgeCount not monotone")
+  ASSERT2( edgeCount old_cocalled <= edgeCount new_cocalled, text "UsageAnal.changeDetector: edgeCount not monotone")
   edgeCount old_cocalled /= edgeCount new_cocalled
   where
     old_sig = ut_args old
@@ -1011,7 +1007,7 @@ changeDetectorAnalResult self_node changed_refs (old, e) (new, e') =
 unleashLet
   :: AnalEnv 
   -> RecFlag
-  -> [(Id, (CoreExpr, SingleUse -> TransferFunction AnalResult))]
+  -> [(Id, (CoreExpr, Use -> TransferFunction AnalResult))]
   -> UsageType
   -> UsageType
   -> TransferFunction (UsageType, [(Id, CoreExpr)])
@@ -1020,7 +1016,7 @@ unleashLet env rec_flag transferred_binds ut_usage ut_body = do
   let ids = map fst transferred_binds
   (ut_rhss, rhss') <- fmap unzip $ forM transferred_binds $ \(id, (rhs, transfer)) ->
     unleashUsage rhs transfer (lookupUsage rec_flag fam_envs ut_usage id)
-  let ut_final = callArityLetEnv (zip ids ut_rhss) ut_body
+  let ut_final = usageAnalLetEnv (zip ids ut_rhss) ut_body
 
   --pprTrace "unleashLet" (ppr ids $$ text "ut_body" <+> ppr ut_body $$ text "ut_final" <+> ppr ut_final) $ return ()
   -- Now use that information to annotate binders.
@@ -1046,16 +1042,20 @@ annotateIdArgUsage env id
     -- @UsageSig@ to be had.
     -- In that case we *could* try to analyze with arity 1, just for the
     -- signature.
-    let single_call = iterate (mkCallUse Once) topSingleUse !! idArity id
+    let single_call = iterate (mkCallUse Once) topUse !! idArity id
     usage_sig <- ut_args <$> transfer_callee single_call
     --pprTrace "annotating" (ppr id <+> ppr usage_sig) $ return ()
     return (id `setIdArgUsage` usage_sig)
   | otherwise
   = return id
 
+-- | Lifts the domain of a transfer function of an expression to @Usage@.
+-- Non-trivial expressions (as per `exprIsTrivial`) are considered shared,
+-- while the transferred result for trivial expressions is multiplied
+-- according to usage multiplicity.
 unleashUsage
   :: CoreExpr
-  -> (SingleUse -> TransferFunction AnalResult)
+  -> (Use -> TransferFunction AnalResult)
   -> (Usage -> TransferFunction AnalResult)
 unleashUsage rhs transfer_rhs usage
   | Absent <- usage
@@ -1071,12 +1071,12 @@ unleashUsage rhs transfer_rhs usage
 
 -- Combining the results from body and rhs of a let binding
 -- See Note [Analysis II: The Co-Called analysis]
-callArityLetEnv
+usageAnalLetEnv
   :: [(Id, UsageType)]
   -> UsageType
   -> UsageType
-callArityLetEnv rhss ut_body
-    = --pprTrace "callArityLetEnv" (vcat [ppr (map fst rhss), ppr (map snd rhss), ppr ut_body, ppr ut_new, ppr (map (lookupUsage Recursive ut_new . fst) rhss)]) $
+usageAnalLetEnv rhss ut_body
+    = --pprTrace "usageAnalLetEnv" (vcat [ppr (map fst rhss), ppr (map snd rhss), ppr ut_body, ppr ut_new, ppr (map (lookupUsage Recursive ut_new . fst) rhss)]) $
       ut_new
   where
     (ids, ut_rhss) = unzip rhss
@@ -1135,7 +1135,7 @@ markAbsent = expr
   where 
     abs id 
       | isTyVar id = id
-      | otherwise = id `setIdCallArity` Absent
+      | otherwise = id `setIdUsage` Absent
     expr e = case e of
       App f a -> App (expr f) (expr a)
       -- I better leave the binder untouched for now... Don't want to break 

@@ -1,6 +1,6 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
-module CallArity.FrameworkBuilder
+module UsageAnal.FrameworkBuilder
   ( predictAllocatedNodes
   , FrameworkNode
   , TransferFunction
@@ -17,7 +17,7 @@ module CallArity.FrameworkBuilder
   , buildAndRun
   ) where
 
-import CallArity.Types
+import UsageAnal.Types
 import CoreSyn
 import Outputable
 import Usage
@@ -54,11 +54,11 @@ newtype FrameworkNode
   = FrameworkNode Int
   deriving (Show, Eq, Ord, Outputable)
 
-type TransferFunction a = Worklist.TransferFunction (FrameworkNode, SingleUse) AnalResult a
-type ChangeDetector = Worklist.ChangeDetector (FrameworkNode, SingleUse) AnalResult
-type DataFlowFramework = Worklist.DataFlowFramework (FrameworkNode, SingleUse) AnalResult
+type TransferFunction a = Worklist.TransferFunction (FrameworkNode, Use) AnalResult a
+type ChangeDetector = Worklist.ChangeDetector (FrameworkNode, Use) AnalResult
+type DataFlowFramework = Worklist.DataFlowFramework (FrameworkNode, Use) AnalResult
 -- | Maps @FrameworkNode@ to incoming usage dependent @TransferFunction@s
-type NodeTransferEnv = IntMap (SingleUse -> TransferFunction AnalResult, ChangeDetector)
+type NodeTransferEnv = IntMap (Use -> TransferFunction AnalResult, ChangeDetector)
 
 data BuilderState
   = BS 
@@ -92,7 +92,7 @@ buildFramework (FB state) = (res, Worklist.DFF dff)
   where
     (res, bs) = runState state initialBuilderState
     dff (FrameworkNode node, use) = case IntMap.lookup node (bs_env bs) of
-      Nothing -> pprPanic "CallArity.FrameworkBuilder.buildFramework" (ppr node)
+      Nothing -> pprPanic "UsageAnal.FrameworkBuilder.buildFramework" (ppr node)
       Just (transfer, detectChange) -> (transfer use, detectChange)
 
 viewAt :: Int -> IntMap a -> Maybe (a, IntMap a)
@@ -141,7 +141,7 @@ popNextFreeNode :: State BuilderState Int
 popNextFreeNode = rc_start <$> unFB (retainNodes 1)
 
 registerTransferFunction
-  :: (FrameworkNode -> FrameworkBuilder (a, (SingleUse -> TransferFunction AnalResult, ChangeDetector)))
+  :: (FrameworkNode -> FrameworkBuilder (a, (Use -> TransferFunction AnalResult, ChangeDetector)))
   -> FrameworkBuilder a
 registerTransferFunction f = FB $ do
   node <- popNextFreeNode
@@ -155,28 +155,28 @@ registerTransferFunction f = FB $ do
 
 monotonize
   :: FrameworkNode
-  -> (SingleUse -> TransferFunction AnalResult)
-  -> SingleUse -> TransferFunction AnalResult
+  -> (Use -> TransferFunction AnalResult)
+  -> Use -> TransferFunction AnalResult
 monotonize node transfer use = do
   (ut_new, e') <- transfer use 
   (ut_old, _) <- fromMaybe (botUsageType, undefined) <$> Worklist.unsafePeekValue (node, use)
   return (lubUsageType ut_new ut_old, e')
 
-dependOnWithDefault :: AnalResult -> (FrameworkNode, SingleUse) -> TransferFunction AnalResult
+dependOnWithDefault :: AnalResult -> (FrameworkNode, Use) -> TransferFunction AnalResult
 dependOnWithDefault def which = do
   --which <- pprTrace "dependOnWithDefault:before" (ppr which) (return which)
   res <- fromMaybe def <$> Worklist.dependOn which
   --res <- pprTrace "dependOnWithDefault:after " (ppr which) (return res)
   return res
 
-buildAndRun :: FrameworkBuilder (SingleUse -> TransferFunction AnalResult) -> SingleUse -> AnalResult
+buildAndRun :: FrameworkBuilder (Use -> TransferFunction AnalResult) -> Use -> AnalResult
 buildAndRun buildTransfer use = lookup_result (Worklist.runFramework fw (Set.singleton (node, use)))
   where
     (node, fw) = buildFramework $ registerTransferFunction $ \node -> do
       transfer <- buildTransfer
       return (node, (transfer, Worklist.alwaysChangeDetector))
 
-    lookup_result :: Map (FrameworkNode, SingleUse) AnalResult -> AnalResult
+    lookup_result :: Map (FrameworkNode, Use) AnalResult -> AnalResult
     lookup_result result_map = case Map.lookup (node, use) result_map of
-      Nothing -> pprPanic "CallArity.FrameworkBuilder.buildAndRun" empty
+      Nothing -> pprPanic "UsageAnal.FrameworkBuilder.buildAndRun" empty
       Just res -> res

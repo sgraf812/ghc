@@ -5,7 +5,7 @@ module DmdAnalWrapper (combinedDmdAnalProgram) where
 #include "HsVersions.h"
 
 import BasicTypes
-import CallArity
+import UsageAnal
 import CoreArity
 import CoreSyn
 import Demand
@@ -22,7 +22,7 @@ combinedDmdAnalProgram :: DynFlags -> FamInstEnvs -> [CoreRule] -> CoreProgram -
 combinedDmdAnalProgram dflags fams orphan_rules prog = do
   -- Call Arity first, suggesting the fact that there's no information flow
   -- from DA to CA. There isn't from CA to DA either, of course.
-  prog' <- callArityAnalProgram dflags fams orphan_rules prog
+  prog' <- usageAnalProgram dflags fams orphan_rules prog
   prog'' <- dmdAnalProgram dflags fams prog'
   --pprTrace "Program" (ppr prog'') $ pure ()
   return (mapBndrsProgram mergeInfo prog'')
@@ -44,14 +44,14 @@ mergeInfo top_lvl is_lam_bndr id
     id'
   where
     max_arity = length (typeArity (idType id))
-    -- We merge idDemandInfo with idCallArity and idStrictness with idArgUsage.
+    -- We merge idDemandInfo with idUsage and idStrictness with idArgUsage.
     -- Since Demand.hs doesn't seem to enforce the equivalences from the paper,
     -- we first convert everything to the representation of Usage.hs.
     old_demand = idDemandInfo id
     old_str_sig = idStrictness id
     (old_arg_dmds, _) = splitStrictSig old_str_sig
     str_sig_comparable_to_usg_sig = idArity id == length old_arg_dmds -- See further below at `new_str_sig`
-    ca_usage = idCallArity id
+    ca_usage = idUsage id
     ca_usg_sig = idArgUsage id
 
     old_usage = usageFromDemand old_demand
@@ -66,7 +66,7 @@ mergeInfo top_lvl is_lam_bndr id
     new_str_sig 
       | ca_usg_sig `leqUsageSig` old_usg_sig 
       , idArity id <= length old_arg_dmds
-      -- This is only safe if DmdAnal used the same arity as CallArity.
+      -- This is only safe if DmdAnal used the same arity as UsageAnal.
       -- Otherwise we get into nasty situations where arity /= #top-level binders,
       -- like with IO's RealWorld tokens. In that situation we have
       -- a more precise usage signature, but at the cost of a higher arity.
@@ -81,7 +81,7 @@ mergeInfo top_lvl is_lam_bndr id
 
     leqUsage l r = l `lubUsage` r == r
     leqUsageSig l r = l `lubUsageSig` r == r
-    has_usage = idCallArity id /= topUsage || old_usage /= topUsage
+    has_usage = idUsage id /= topUsage || old_usage /= topUsage
     has_usg_sig = isTopLevel top_lvl
     id' = id 
       `setIdDemandInfo` new_demand
@@ -97,7 +97,7 @@ mapBndrsBind top_lvl f (Rec bndrs) = Rec (map (\(id, e) -> (f top_lvl False id, 
 
 mapBndrsExprIfNotAbsent :: Var -> InfoMerger -> CoreExpr -> CoreExpr
 mapBndrsExprIfNotAbsent id f e
-  | Absent <- idCallArity id = e -- we won't have annotated e in this case.
+  | Absent <- idUsage id = e -- we won't have annotated e in this case.
   | otherwise = mapBndrsExpr f e
 
 mapBndrsExpr :: InfoMerger -> CoreExpr -> CoreExpr

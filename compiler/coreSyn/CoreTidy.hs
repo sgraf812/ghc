@@ -203,7 +203,7 @@ tidyLetBndr rec_tidy_env env@(tidy_env, var_env) (id,rhs)
                     `setStrictnessInfo` zapUsageEnvSig (strictnessInfo old_info)
                     `setDemandInfo`     demandInfo old_info
                     `setArgUsageInfo`   argUsageInfo old_info
-                    `setCallArityInfo`  callArityInfo old_info
+                    `setUsageInfo`      usageInfo old_info
                     `setInlinePragInfo` inlinePragInfo old_info
                     `setUnfoldingInfo`  new_unf
 
