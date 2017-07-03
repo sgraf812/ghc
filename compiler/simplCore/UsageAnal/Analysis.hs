@@ -983,7 +983,6 @@ registerBindingGroup env = go env emptyVarEnv . zip [1..] -- `zip` for `descend`
 
 changeDetectorUsageType :: ChangeDetector
 changeDetectorUsageType _ (old, _) (new, _) =
-  -- It's crucial for termination that we don't have to check the annotated expressions.
   ASSERT2( old_sig `leqUsageSig` new_sig, text "UsageAnal.changeDetector: usage sig not monotone")
   old_sig /= new_sig ||
   ASSERT2( sizeUFM old_uses <= sizeUFM new_uses, text "UsageAnal.changeDetector: uses not monotone")
@@ -1033,7 +1032,7 @@ unleashLet env rec_flag transferred_binds ut_usage ut_body = do
   ids'' <- forM ids' (annotateIdArgUsage env) 
 
   -- This intentionally still contains the @Id@s of the binding group, because
-  -- the recursive rule looks at their usages to determine stability.
+  -- the recursive rule looks at their usages in the next iteration.
   return (ut_final, zip ids'' rhss')
 
 annotateIdArgUsage
@@ -1061,6 +1060,8 @@ annotateIdArgUsage env id
 -- Non-trivial expressions (as per `exprIsTrivial`) are considered shared,
 -- while the transferred result for trivial expressions is multiplied
 -- according to usage multiplicity.
+--
+-- This generalises both lifting operators from the thesis.
 unleashUsage
   :: CoreExpr
   -> (Use -> TransferFunction AnalResult)
