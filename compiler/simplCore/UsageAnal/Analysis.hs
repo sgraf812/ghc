@@ -445,9 +445,12 @@ descend :: Int -> AnalEnv -> AnalEnv
 descend n env 
   = env { ae_predicted_nodes = subForest (ae_predicted_nodes env) !! n }
 
+predictSizeOfExpr :: AnalEnv -> Int
+predictSizeOfExpr = rootLabel . ae_predicted_nodes
+
 predictSizeOfLetBody :: AnalEnv -> Int
 -- The body is always the first child
-predictSizeOfLetBody = rootLabel . ae_predicted_nodes . descend 0 
+predictSizeOfLetBody = predictSizeOfExpr . descend 0 
 
 extendAnalEnv 
   :: AnalEnv 
@@ -687,6 +690,10 @@ usageAnalExpr env (Let bind e)
       --pprTrace "Let" (ppr (ut, let')) $ return ()
       return (delUsageTypes (bindersOf bind) ut, let')
     register node = do
+      -- Save the range of allocated nodes for the ChangeDetector.
+      -- The current `node` is *not* included, because it doesn't
+      -- influence annotations (that's what we track this for).
+      node_range <- nextRangeOfSize (predictSizeOfExpr env - 1)
       let initial_binds = flattenBinds [bind]
       -- We retain nodes we need for the body, so that they have lower
       -- priority than the bindings.
@@ -723,7 +730,7 @@ usageAnalExpr env (Let bind e)
                 | [(id', rhs')] <- binds'
                 -> return (ut, Let (NonRec id' rhs') e')
               _ -> return (ut, Let (Rec binds') e')
-      return (node, (transfer, changeDetectorAnalResult node))
+      return (node, (transfer, changeDetectorAnalResult node_range))
 
 coercionUsageType :: Coercion -> UsageType
 coercionUsageType co = multiplyUsages Many ut
@@ -931,16 +938,16 @@ exprForcedError = error "Expression component may not be used"
 useLetUp :: Id -> Bool
 useLetUp id = idArity id == 0
 
-transferUp :: Id -> CoreExpr -> FrameworkNode -> Use -> TransferFunction AnalResult
-transferUp id rhs node use = do
-  (ut, rhs') <- dependOnWithDefault (botUsageType, rhs) (node, use)
+transferUp :: Id -> (Use -> TransferFunction AnalResult) -> Use -> TransferFunction AnalResult
+transferUp id transfer_rhs use = do
+  (ut, rhs') <- transfer_rhs use
   if useLetUp id
     then return (ut, rhs')
-    else return (botUsageType, rhs')
+    else return (forgetFreeVarUsages ut, rhs')
 
-transferDown :: Id -> FrameworkNode -> Use -> TransferFunction UsageType
-transferDown id node use = do
-  (ut, _) <- dependOnWithDefault (botUsageType, exprForcedError) (node, use)
+transferDown :: Id -> (Use -> TransferFunction AnalResult) -> Use -> TransferFunction UsageType
+transferDown id transfer_rhs use = do
+  (ut, _) <- transfer_rhs use
   if useLetUp id
     then return (forgetFreeVarUsages ut)
     else return ut
@@ -953,32 +960,26 @@ registerBindingGroup env = go env emptyVarEnv . zip [1..] -- `zip` for `descend`
   where
     go env transfer_ups [] = return (env, transfer_ups)
     go env transfer_ups ((n, (id, rhs)):binds) =
-      registerTransferFunction $ \up_node ->
-        registerTransferFunction $ \down_node -> do
-          ret@(env', _) <- go
-            (extendAnalEnv env id (transferDown id down_node))
-            (extendVarEnv transfer_ups id (transferUp id rhs up_node))
-            binds
-          -- Now that the whole binding group is in scope in `env'`,
-          -- we actually have to attend to our duty and register the
-          -- transfer functions associated with `up_node` and `down_node`
-          transfer_rhs <- usageAnalExpr (descend n env') rhs
-          let transfer_annotate = monotonize up_node $ \use -> do
-                --use <- pprTrace "RHS:begin" (ppr id <+> text "::" <+> ppr use) $ return use
-                ret@(ut, rhs') <- transfer_rhs use 
-                --ret <- pprTrace "RHS:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr ut]) $ return ret
-                return ret
-          let transfer_args_only use = do
-                -- This makes sure to forget the annotated expression from the up_node, 
-                -- in order to have a more forgiving change detector. That's essential for 
-                -- termination of the analysis.
-                --use <- pprTrace "args:begin" (ppr id <+> text "::" <+> ppr use) $ return use
-                (ut, _) <- dependOnWithDefault (botUsageType, exprForcedError) (up_node, use)
-                --ut <- pprTrace "args:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr ut]) $ return ut
-                return (ut, exprForcedError)
-          let annotate = (transfer_annotate, changeDetectorAnalResult up_node) -- What we register for `up_node`
-          let args_only = (transfer_args_only, changeDetectorUsageType)        -- What we register for `down_node`
-          return ((ret, annotate), args_only) -- `registerTransferFunction`  will peel `snd`s away for registration
+      registerTransferFunction $ \rhs_node -> do
+        let deref_node use = dependOnWithDefault (botUsageType, rhs) (rhs_node, use)
+        ret@(env', _) <- go
+          (extendAnalEnv env id (transferDown id deref_node))
+          (extendVarEnv transfer_ups id (transferUp id deref_node))
+          binds
+        -- Now that the whole binding group is in scope in `env'`,
+        -- we actually have to attend to our duty and register the
+        -- transfer function associated with `rhs_node`
+        let env'' = descend n env'
+        -- We need to know what allocated nodes for the bound sub-expressions
+        -- range over. See `changeDetectorAnalResult` why.
+        node_range <- nextRangeOfSize (predictSizeOfExpr env'')
+        transfer_rhs <- usageAnalExpr env'' rhs
+        let transfer = monotonize rhs_node $ \use -> do
+              --use <- pprTrace "RHS:begin" (ppr id <+> text "::" <+> ppr use) $ return use
+              ret@(ut, rhs') <- transfer_rhs use 
+              --ret <- pprTrace "RHS:end" (vcat [ppr id <+> text "::" <+> ppr use, ppr ut]) $ return ret
+              return ret
+        return (ret, (transfer, changeDetectorAnalResult node_range))
 
 changeDetectorUsageType :: ChangeDetector
 changeDetectorUsageType _ (old, _) (new, _) =
@@ -998,14 +999,21 @@ changeDetectorUsageType _ (old, _) (new, _) =
     old_cocalled = ut_cocalled old
     new_cocalled = ut_cocalled new
 
-changeDetectorAnalResult :: FrameworkNode -> ChangeDetector
-changeDetectorAnalResult self_node changed_refs (old, e) (new, e') =
+-- | When detecting changes in annotated expressions, we have to be
+-- really conservative and assume an annotation changed if the changed
+-- node belongs to a sub-expression.
+--
+-- This is why we need to know the `FrameworkNodeRange`
+-- of the nodes allocated to sub-expressions: 
+-- If any changed ref falls within this range, we assume changed annotations.
+changeDetectorAnalResult :: FrameworkNodeRange -> ChangeDetector
+changeDetectorAnalResult node_range changed_refs old new =
   --pprTrace "changeDetector" (ppr $ Set.map fst changed_refs) $
-  not (Set.map fst changed_refs `Set.isSubsetOf` Set.singleton self_node) || 
-  changeDetectorUsageType changed_refs (old, e) (new, e')
+  Set.filter (withinRange node_range . fst) changed_refs /= Set.empty ||
+  changeDetectorUsageType changed_refs old new
 
 unleashLet
-  :: AnalEnv 
+  :: AnalEnv
   -> RecFlag
   -> [(Id, (CoreExpr, Use -> TransferFunction AnalResult))]
   -> UsageType
