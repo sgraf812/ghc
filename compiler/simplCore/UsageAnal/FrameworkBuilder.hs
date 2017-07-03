@@ -8,11 +8,14 @@ module UsageAnal.FrameworkBuilder
   , Worklist.alwaysChangeDetector
   , DataFlowFramework
   , FrameworkBuilder
+  , FrameworkNodeRange
   , RetainedChunk
   , retainNodes
   , freeRetainedNodes
   , registerTransferFunction
   , monotonize
+  , withinRange
+  , nextRangeOfSize
   , dependOnWithDefault
   , buildAndRun
   ) where
@@ -38,14 +41,14 @@ predictAllocatedNodes = expr
   where
     expr (App f a) = mk_parent . map expr $ [f, a]
     expr (Lam _ e) = expr e
-    expr (Let bs body) = map_lbl (+1) . mk_parent $ expr body:bind bs
+    expr (Let bs body) = add_one_node_per_child . mk_parent $ expr body:bind bs
     expr (Case scrut _ _ alts) = mk_parent (expr scrut:alt alts)
     expr (Cast e _) = expr e
     expr (Tick _ e) = expr e
     expr _ = empty_node
-    bind = map (map_lbl (+2) . expr) . rhssOfBind
+    bind = map expr . rhssOfBind
     alt = map expr . rhssOfAlts
-    map_lbl f (Node l cs) = Node (f l) cs -- Can't fmap, as that also increments children
+    add_one_node_per_child (Node p cs) = Node (p + length cs) cs
     add_child c (Node p cs) = Node (rootLabel c + p) (c:cs)
     empty_node = Node 0 []
     mk_parent = foldr add_child empty_node
@@ -78,7 +81,10 @@ data RetainedChunk
   = RC 
   { rc_start :: !Int 
   , rc_end :: !Int
-  }
+  } deriving (Eq, Ord, Show)
+
+data FrameworkNodeRange
+  = FrameworkNodeRange !FrameworkNode !FrameworkNode
 
 initialBuilderState :: BuilderState
 initialBuilderState = BS IntMap.empty (IntMap.singleton 0 maxBound)
@@ -161,6 +167,15 @@ monotonize node transfer use = do
   (ut_new, e') <- transfer use 
   (ut_old, _) <- fromMaybe (botUsageType, undefined) <$> Worklist.unsafePeekValue (node, use)
   return (lubUsageType ut_new ut_old, e')
+
+withinRange :: FrameworkNodeRange -> FrameworkNode -> Bool
+withinRange (FrameworkNodeRange start end) node = start <= node && node < end
+
+nextRangeOfSize :: Int -> FrameworkBuilder FrameworkNodeRange
+nextRangeOfSize n = do
+  rc@(RC start end) <- retainNodes n
+  freeRetainedNodes rc
+  return (FrameworkNodeRange (FrameworkNode start) (FrameworkNode end))
 
 dependOnWithDefault :: AnalResult -> (FrameworkNode, Use) -> TransferFunction AnalResult
 dependOnWithDefault def which = do
