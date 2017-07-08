@@ -574,6 +574,7 @@ rhsEtaExpandArity dflags cheap_app e
     has_lam _          = False
 
     -- If the case wasn't cheap, the arityType would return ATop 0.
+    is_cheap_case (Tick _ e) = is_cheap_case e
     is_cheap_case Case{} = True
     is_cheap_case _ = False
 
