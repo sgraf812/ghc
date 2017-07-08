@@ -1428,7 +1428,12 @@ tryEtaExpandRhs env is_rec bndr rhs
       = return (exprArity rhs, rhs)
 
       | sm_eta_expand (getMode env)      -- Provided eta-expansion is on
-      , let cheap_arity = findRhsArity dflags bndr rhs old_arity
+      , let arity = findRhsArity dflags bndr rhs old_arity
+            -- This is so that we mimimic the behavior of Call Arity. 
+            -- Remove at some later point, see Note Eta expandint thunks in CoreArity.
+            cheap_arity 
+              | exprIsCheap rhs = max 1 arity
+              | otherwise = arity
             -- The following four lines can go away if CoreArity was aware
             -- of Usage information
             usage = idUsage bndr
