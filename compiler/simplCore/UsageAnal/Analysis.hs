@@ -25,6 +25,7 @@ import MkCore
 import Outputable
 import TyCon ( isDataProductTyCon_maybe, tyConSingleDataCon_maybe )
 import UniqFM
+import UniqSet
 import UnVarGraph
 import Usage
 import Util
@@ -476,7 +477,7 @@ programToExpr
 programToExpr orphan_rules = impl [] (rulesFreeVars orphan_rules)
   where
     impl top_level_ids exposed []
-      = (mkVarSet top_level_ids, mkBigCoreVarTup (nonDetEltsUFM exposed))
+      = (mkVarSet top_level_ids, mkBigCoreVarTup (nonDetEltsUniqSet exposed))
         -- nonDetEltsUFM is OK, because all product components will
         -- used in the same way anyway.
     impl top_level_ids exposed (bind:prog)
@@ -735,7 +736,7 @@ usageAnalExpr env (Let bind e)
 coercionUsageType :: Coercion -> UsageType
 coercionUsageType co = multiplyUsages Many ut
   where
-    ut = emptyUsageType { ut_uses = mapVarEnv (const topUse) (coVarsOfCo co) }
+    ut = emptyUsageType { ut_uses = mapVarEnv (const topUse) (getUniqSet $ coVarsOfCo co) }
 
 -- | Consider the expression
 --

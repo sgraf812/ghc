@@ -160,30 +160,30 @@ exprs =
                  , (go, mkLams [x] $ mkACase (Var f `mkVarApps` [x]) (Var go `mkApps` [Var n `mkVarApps` [x]]) ) ]) $
             Var go `mkApps` [mkLit 0, go `mkLApps` [0,1]]
   , ("a thunk (function type), in mutual recursion, absent",) $
-    mkLet d (f `mkLApps` [0]) $
+    mkNrLet d (f `mkLApps` [0]) $
         Let (Rec [ (n, Var go `mkApps` [d `mkLApps` [1]]) -- FIXME: Check UsageSigs
                  , (go, mkLams [x] $ mkACase (Var n) (Var go `mkApps` [Var n `mkVarApps` [x]]) ) ]) $
             Var go `mkApps` [mkLit 0, go `mkLApps` [0,1]]
   , ("a thunk (non-function-type) co-calls with the body (d 1*_ would be bad)",) $
     mkNrLet d (f `mkLApps` [0]) $
-        mkLet x (d `mkLApps` [1]) $
+        mkNrLet x (d `mkLApps` [1]) $
             Var d `mkVarApps` [x]
   , ("body cocalls d and n, n calls d (anything other than d w*C^w(U) = w*U would be bad)",) $
     mkNrLet d (f `mkLApps` [0]) $
-        mkLet n (mkLams [y] $ d `mkLApps` [1]) $
+        mkNrLet n (mkLams [y] $ d `mkLApps` [1]) $
             Var f `mkApps` [d `mkLApps` [0], n `mkLApps` [0]]
   , ("body calls d and n mutually exclusive, n calls d. d should be called once",) $
     mkNrLet d (f `mkLApps` [0]) $
-        mkLet n (mkLams [y] $ d `mkLApps` [1]) $
+        mkNrLet n (mkLams [y] $ d `mkLApps` [1]) $
             mkACase (d `mkLApps` [0]) (n `mkLApps` [0])
   -- Product related tests
   , ("calling the first tuple component once",) $
-    mkLet d (f `mkLApps` [0]) $
-        mkLet n (mkLams [y] $ d `mkLApps` [1]) $
+    mkNrLet d (f `mkLApps` [0]) $
+        mkNrLet n (mkLams [y] $ d `mkLApps` [1]) $
             elimPair (mkVarPair d n) (_1 `mkLApps` [0])
   , ("calling the second tuple component twice (expect n w*U and d w*U by transitivity)",) $
-    mkLet d (f `mkLApps` [0]) $
-        mkLet n (mkLams [y] $ d `mkLApps` [1]) $
+    mkNrLet d (f `mkLApps` [0]) $
+        mkNrLet n (mkLams [y] $ d `mkLApps` [1]) $
             elimPair (mkVarPair d n) (Var _2 `mkApps` [_2 `mkLApps` [0]])
   ]
 
@@ -198,7 +198,7 @@ main = do
                 Nothing -> return ()
             putMsg dflags (text n <> char ':')
             -- liftIO $ putMsg dflags (ppr e)
-            let e' = callArityRHS dflags emptyFamInstEnvs emptyVarSet e
+            let e' = usageAnalRHS dflags emptyFamInstEnvs emptyVarSet e
             let bndrs = nonDetEltsUniqSet (allBoundIds e')
               -- It should be OK to use nonDetEltsUniqSet here, if it becomes a
               -- problem we should use DVarSet

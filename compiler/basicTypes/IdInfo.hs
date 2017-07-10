@@ -29,7 +29,7 @@ module IdInfo (
         -- ** Zapping various forms of Info
         zapLamInfo, zapFragileInfo,
         zapDemandInfo, zapUsageInfo, zapUsageEnvInfo, zapUsedOnceInfo,
-        zapTailCallInfo, zapCallArityInfo,
+        zapTailCallInfo, zapUsageInfo',
 
         -- ** The ArityInfo type
         ArityInfo,
@@ -112,13 +112,9 @@ infixl  1 `setRuleInfo`,
           `setCafInfo`,
           `setStrictnessInfo`,
           `setDemandInfo`,
-<<<<<<< HEAD
           `setNeverLevPoly`,
-          `setLevityInfoWithType`
-          `setCallArityInfo`,
-=======
+          `setLevityInfoWithType`,
           `setUsageInfo`,
->>>>>>> Renamed CallArity to UsageAnal, also SingleUse -> Use
           `setArgUsageInfo`
 
 {-
@@ -314,12 +310,8 @@ vanillaIdInfo
             strictnessInfo      = nopSig,
             demandInfo          = topDmd,
             argUsageInfo        = topUsageSig,
-<<<<<<< HEAD
-            callArityInfo       = topUsage
+            usageInfo           = topUsage,
             levityInfo          = NoLevityInfo
-=======
-            usageInfo       = topUsage
->>>>>>> Renamed CallArity to UsageAnal, also SingleUse -> Use
             --cardinalityInfo     = emptyCardinalityInfo
            }
 
@@ -572,8 +564,8 @@ zapTailCallInfo info
         where
           safe_occ = occ { occ_tail = NoTailCallInfo }
 
-zapCallArityInfo :: IdInfo -> IdInfo
-zapCallArityInfo info = setCallArityInfo info 0
+zapUsageInfo' :: IdInfo -> IdInfo
+zapUsageInfo' info = setUsageInfo info topUsage
 
 {-
 ************************************************************************
