@@ -937,7 +937,7 @@ exprForcedError :: CoreExpr
 exprForcedError = error "Expression component may not be used"
 
 useLetUp :: Id -> Bool
-useLetUp id = idArity id == 0
+useLetUp id = idArity id == 0 && not (isJoinId id)
 
 transferUp :: Id -> (Use -> TransferFunction AnalResult) -> Use -> TransferFunction AnalResult
 transferUp id transfer_rhs use = do
