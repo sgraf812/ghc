@@ -39,6 +39,7 @@ import Data.Tree
 predictAllocatedNodes :: Expr b -> Tree Int
 predictAllocatedNodes = expr
   where
+    expr (App f (Type _)) = expr f
     expr (App f a) = mk_parent . map expr $ [f, a]
     expr (Lam _ e) = expr e
     expr (Let bs body) = add_one_node_per_child . mk_parent $ expr body:bind bs
