@@ -843,7 +843,7 @@ transferUp id transfer_rhs use = do
 -- In my thesis, this is done by the LetUp combinator.
 transferDown :: Id -> (Use -> TransferFunction AnalResult) -> Use -> TransferFunction UsageType
 transferDown id transfer_rhs use = do
-  (ut, _) <- transfer_rhs use
+  (ut, _) <- transfer_rhs (boundDepth 0 use)
   if useLetUp id
     then return (forgetFreeVarUsages ut)
     else return ut
