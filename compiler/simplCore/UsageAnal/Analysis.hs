@@ -27,7 +27,6 @@ import TyCon ( isDataProductTyCon_maybe, tyConSingleDataCon_maybe )
 import Type ( Type )
 import UniqFM
 import UniqSet
-import UnVarGraph
 import Usage
 import Util
 import Var ( isId, isTyVar )
@@ -227,7 +226,7 @@ usageAnalProgram dflags fam_envs orphan_rules
 -- put under use `topUse`.
 usageAnalRHS :: DynFlags -> FamInstEnvs -> VarSet -> CoreExpr -> CoreExpr
 usageAnalRHS dflags fam_envs need_sigs e
-  = ASSERT2( isEmptyUnVarSet (domType ut), text "Free vars in UsageType:" $$ ppr ut ) e'
+  = ASSERT2(  isEmptyVarEnv $ ut_usages ut, text "Free vars in UsageType:" $$ ppr ut ) e'
   where
     env = initialAnalEnv dflags fam_envs need_sigs (predictAllocatedNodes e)
     (ut, e') = buildAndRun (buildAnalFramework env e) topUse
@@ -426,18 +425,14 @@ changeDetectorUsageType :: ChangeDetector
 changeDetectorUsageType _ (old, _) (new, _) =
   ASSERT2( old_sig `leqUsageSig` new_sig, text "UsageAnal.changeDetector: usage sig not monotone")
   old_sig /= new_sig ||
-  ASSERT2( sizeUFM old_uses <= sizeUFM new_uses, text "UsageAnal.changeDetector: uses not monotone")
-  sizeUFM old_uses /= sizeUFM new_uses ||
-  old_uses /= new_uses ||
-  ASSERT2( edgeCount old_cocalled <= edgeCount new_cocalled, text "UsageAnal.changeDetector: edgeCount not monotone")
-  edgeCount old_cocalled /= edgeCount new_cocalled
+  ASSERT2( sizeUFM old_usages <= sizeUFM new_usages, text "UsageAnal.changeDetector: uses not monotone")
+  sizeUFM old_usages /= sizeUFM new_usages ||
+  old_usages /= new_usages
   where
     old_sig = ut_args old
     new_sig = ut_args new
-    old_uses = ut_uses old
-    new_uses = ut_uses new
-    old_cocalled = ut_cocalled old
-    new_cocalled = ut_cocalled new
+    old_usages = ut_usages old
+    new_usages = ut_usages new
 
 --
 -- * Transfer functions and related helpers
@@ -454,9 +449,8 @@ transferCast co transfer_e use = do
   return (ut `bothUsageType` coercionUsageType co, Cast e' co)
 
 coercionUsageType :: Coercion -> UsageType
-coercionUsageType co = multiplyUsages Many ut
-  where
-    ut = emptyUsageType { ut_uses = mapVarEnv (const topUse) (getUniqSet $ coVarsOfCo co) }
+coercionUsageType co 
+  = emptyUsageType { ut_usages = mapVarEnv (const topUsage) (getUniqSet $ coVarsOfCo co) }
 
 -- | This is the variable rule of the transfer function. We unleash the 
 -- identifier's usage transformer, which is differently approximated
@@ -891,7 +885,7 @@ substituteUsageTypes
   -> UsageType
 substituteUsageTypes rhss ut_body
     = --pprTrace "substituteUsageTypes" (vcat [ppr (map fst rhss), ppr (map snd rhss), ppr ut_body, ppr ut_new, ppr (map (lookupUsage Recursive ut_new . fst) rhss)]) $
-      ut_new
+      bothUsageTypes ut_all
   where
     (ids, ut_rhss) = unzip rhss
 
@@ -908,36 +902,6 @@ substituteUsageTypes rhss ut_body
     -- This is why we have to union in appropriate cross_calls, which basically
     -- perform substitution of Id to UsageType.
     ut_all = body_and_rhss (const True)
-
-    cross_calls (id, ut_rhs) = botUsageType { ut_uses = uses, ut_cocalled = graph }
-      where
-        -- ut_others excludes the defining rhs itself, because that is already
-        -- accounted for based on the recorded Usage, which is always manified
-        -- for recursive binders.
-        -- This ensures we don't duplicate shared work, while also manifying anything
-        -- under a lambda for recursive groups. In the case of a non-recursive
-        -- binding, there is no mention of the id in the rhs anyway.
-        ut_others = lubUsageTypes (body_and_rhss (\id_rhs -> id /= id_rhs))
-        -- Since Co-Call graphs are not transitive, but recursion is, we have to
-        -- conservatively assume that id was called with every neighbor in
-        -- ut_others of any of the ids of the binding group.
-        called_with_id = unionUnVarSets $ map (calledWith ut_others) ids
-        called_by_id = domType ut_rhs
-        -- As long as called_with_id does not contain every node in ut_others,
-        -- the whole Co-Call hassle played out: We can be more precise than
-        -- just smashing everything together with `bothUsageType` (which would
-        -- correspond exactly to the scenario called_with_id = domType ut_others).
-        graph = completeBipartiteGraph called_by_id called_with_id
-        uses = bothUseEnv (ut_uses ut_rhs) (restrict (ut_uses ut_others) called_with_id)
-        restrict = restrictVarEnv_UnVarSet
-
-    ut_new
-        -- Calculating cross_calls is expensive. Simply be conservative
-        -- if the mutually recursive group becomes too large.
-        -- Combining all rhs and the body with `bothUsageType` corresponds to
-        -- cocalls in the complete graph.
-        | length ut_rhss > 25 = bothUsageTypes ut_all
-        | otherwise           = lubUsageTypes (ut_all ++ map cross_calls rhss)
 
 --
 -- * Looking up `Usage` of binders in `UsageType`s and annotating them

@@ -1,7 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# OPTIONS_GHC -funbox-strict-fields #-}
-{-# OPTIONS_GHC -fprof-auto #-}
 module Worklist where
 
 import Control.Monad (forM_, when, (<=<))
