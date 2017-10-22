@@ -5,7 +5,7 @@
 \section[Demand]{@Demand@: A decoupled implementation of a demand domain}
 -}
 
-{-# LANGUAGE CPP, FlexibleInstances, TypeSynonymInstances, RecordWildCards #-}
+{-# LANGUAGE CPP, DeriveFunctor, FlexibleInstances, TypeSynonymInstances, RecordWildCards #-}
 
 module Demand (
         StrDmd, UseDmd(..), Count,
@@ -27,6 +27,7 @@ module Demand (
         BothDmdArg, mkBothDmdArg, toBothDmdArg,
 
         DmdEnv, emptyDmdEnv,
+        DmdEnv', emptyDmdEnv', unitDmdEnv', embedDmdEnv', lubDmdEnv', bothDmdEnv', nopDmdType', botDmdType', delDmdEnvList', splitFVs', flattenDmdEnv',
         peelFV, findIdDemand,
 
         DmdResult, CPRResult,
@@ -844,6 +845,11 @@ splitFVs is_thunk rhs_fvs
       | otherwise = ( addToUFM_Directly lazy_fv uniq (JD { sd = Lazy, ud = u })
                     , addToUFM_Directly sig_fv  uniq (JD { sd = s,    ud = Abs }) )
 
+splitFVs' :: Bool -> DmdEnv' -> (DmdEnv', DmdEnv')
+splitFVs' is_thunk rhs_fvs = (fst <$> split_fvs, snd <$> split_fvs)
+  where
+    split_fvs = splitFVs is_thunk <$> rhs_fvs
+
 data TypeShape = TsFun TypeShape
                | TsProd [TypeShape]
                | TsUnk
@@ -966,7 +972,7 @@ data Termination r
   = Diverges    -- Definitely diverges
   | ThrowsExn   -- Definitely throws an exception or diverges
   | Dunno r     -- Might diverge or converge
-  deriving( Eq, Show )
+  deriving( Eq, Show, Functor )
 
 type DmdResult = Termination CPRResult
 
@@ -1191,11 +1197,79 @@ in GHC itself where the tuple was DynFlags
 
 type DmdEnv = VarEnv Demand   -- See Note [Default demand on free variables]
 
+data AndOrTree a
+  = Lit a
+  | And DmdEnv' DmdEnv'
+  | Or DmdEnv' DmdEnv'
+  | OverrideTermination (Termination ()) DmdEnv' -- Adding a 'bottom' case isn't enough, because of 'catch'/'ExnStr'
+  deriving (Eq, Functor)
+
+type DmdEnv' = AndOrTree (VarEnv Demand)
+
+emptyDmdEnv' :: DmdEnv'
+emptyDmdEnv' = Lit emptyVarEnv
+
+botDmdEnv' :: DmdEnv'
+botDmdEnv' = OverrideTermination Diverges emptyDmdEnv'
+
+-- We (e.g. 'defaultDmd') don't really differentiate between botDmdEnv' and exnDmdEnv', 
+-- so this is only for consistency.
+exnDmdEnv' :: DmdEnv'
+exnDmdEnv' = OverrideTermination ThrowsExn emptyDmdEnv'
+
+unitDmdEnv' :: Var -> Demand -> DmdEnv'
+unitDmdEnv' id dmd = Lit (unitVarEnv id dmd)
+
+embedDmdEnv' :: DmdEnv -> DmdEnv'
+embedDmdEnv' = Lit
+
+overrideTerminationDmdEnv' :: Termination r -> DmdEnv' -> DmdEnv'
+overrideTerminationDmdEnv' res = OverrideTermination (() <$ res)
+
+bothDmdEnv' :: DmdEnv' -> DmdEnv' -> DmdEnv'
+bothDmdEnv' a b = And a b
+
+lubDmdEnv' :: DmdEnv' -> DmdEnv' -> DmdEnv'
+lubDmdEnv' a b = Or a b
+
+flattenDmdEnv' :: DmdEnv' -> (DmdEnv, Termination ())
+flattenDmdEnv' env = 
+  case env of
+    Lit fv -> (fv, Dunno ())
+    And env1 env2 -> 
+      (plusVarEnv_CD bothDmd fv1 (defaultDmd t1) fv2 (defaultDmd t2), bothTermination t1 t2)
+        where
+          (fv1, t1) = flattenDmdEnv' env1
+          (fv2, t2) = flattenDmdEnv' env2
+    Or env1 env2 -> 
+      (plusVarEnv_CD lubDmd fv1 (defaultDmd t1) fv2 (defaultDmd t2), lubTermination const t1 t2)
+        where
+          (fv1, t1) = flattenDmdEnv' env1
+          (fv2, t2) = flattenDmdEnv' env2
+    OverrideTermination t env -> (fst (flattenDmdEnv' env), t)
+
+lookupDmdEnv' :: DmdEnv' -> Termination r -> Var -> Demand
+lookupDmdEnv' fv res id = go fv (() <$ res)
+  where
+    go fv res =
+      case fv of
+        OverrideTermination res' fv' -> go fv' res'
+        Lit dmds -> lookupVarEnv dmds id `orElse` defaultDmd res
+        And fv1 fv2 -> bothDmd (go fv1 res) (go fv2 res)
+        Or fv1 fv2 -> lubDmd (go fv1 res) (go fv2 res)
+
+delDmdEnv' :: DmdEnv' -> Var -> DmdEnv'
+delDmdEnv' fv id = fmap (`delVarEnv` id) fv
+
+delDmdEnvList' :: DmdEnv' -> [Var] -> DmdEnv'
+delDmdEnvList' fv ids = fmap (`delVarEnvList` ids) fv
+
 data DmdType env = DmdType
-                  env           -- Demand on explicitly-mentioned
-                                --      free variables
-                  [Demand]      -- Demand on arguments
-                  DmdResult     -- See [Nature of result demand]
+                      env           -- Demand on explicitly-mentioned
+                                    --      free variables
+                      [Demand]      -- Demand on arguments
+                      DmdResult     -- See [Nature of result demand]
+                      deriving Functor
 
 {-
 Note [Nature of result demand]
@@ -1266,7 +1340,7 @@ instance Eq (DmdType DmdEnv) where
          -- Unique order, it is the same order for both
                               && ds1 == ds2 && res1 == res2
 
-lubDmdType :: DmdType DmdEnv -> DmdType DmdEnv -> DmdType DmdEnv
+lubDmdType :: DmdType DmdEnv' -> DmdType DmdEnv' -> DmdType DmdEnv'
 lubDmdType d1 d2
   = DmdType lub_fv lub_ds lub_res
   where
@@ -1274,7 +1348,7 @@ lubDmdType d1 d2
     (DmdType fv1 ds1 r1) = ensureArgs n d1
     (DmdType fv2 ds2 r2) = ensureArgs n d2
 
-    lub_fv  = plusVarEnv_CD lubDmd fv1 (defaultDmd r1) fv2 (defaultDmd r2)
+    lub_fv  = lubDmdEnv' fv1 fv2
     lub_ds  = zipWithEqual "lubDmdType" lubDmd ds1 ds2
     lub_res = lubDmdResult r1 r2
 
@@ -1288,24 +1362,20 @@ the demand put on arguments, nor cpr information. So we make that explicit by
 only passing the relevant information.
 -}
 
-type BothDmdArg = (DmdEnv, Termination ())
+type BothDmdArg = (DmdEnv', Termination ())
 
-mkBothDmdArg :: DmdEnv -> BothDmdArg
+mkBothDmdArg :: DmdEnv' -> BothDmdArg
 mkBothDmdArg env = (env, Dunno ())
 
-toBothDmdArg :: DmdType DmdEnv -> BothDmdArg
-toBothDmdArg (DmdType fv _ r) = (fv, go r)
-  where
-    go (Dunno {}) = Dunno ()
-    go ThrowsExn  = ThrowsExn
-    go Diverges   = Diverges
+toBothDmdArg :: DmdType DmdEnv' -> BothDmdArg
+toBothDmdArg (DmdType fv _ r) = (fv, () <$ r)
 
-bothDmdType :: DmdType DmdEnv -> BothDmdArg -> DmdType DmdEnv
+bothDmdType :: DmdType DmdEnv' -> BothDmdArg -> DmdType DmdEnv'
 bothDmdType (DmdType fv1 ds1 r1) (fv2, t2)
     -- See Note [Asymmetry of 'both' for DmdType and DmdResult]
     -- 'both' takes the argument/result info from its *first* arg,
     -- using its second arg just for its free-var info.
-  = DmdType (plusVarEnv_CD bothDmd fv1 (defaultDmd r1) fv2 (defaultDmd t2))
+  = DmdType (bothDmdEnv' fv1 fv2)
             ds1
             (r1 `bothDmdResult` t2)
 
@@ -1336,6 +1406,15 @@ nopDmdType = DmdType emptyDmdEnv [] topRes
 botDmdType = DmdType emptyDmdEnv [] botRes
 exnDmdType = DmdType emptyDmdEnv [] exnRes
 
+-- nopDmdType is the demand of doing nothing
+-- (lazy, absent, no CPR information, no termination information).
+-- Note that it is ''not'' the top of the lattice (which would be "may use everything"),
+-- so it is (no longer) called topDmd
+nopDmdType', botDmdType', exnDmdType' :: DmdType DmdEnv'
+nopDmdType' = DmdType emptyDmdEnv' [] topRes
+botDmdType' = DmdType botDmdEnv' [] botRes
+exnDmdType' = DmdType exnDmdEnv' [] exnRes
+
 cprProdDmdType :: Arity -> DmdType DmdEnv
 cprProdDmdType arity
   = DmdType emptyDmdEnv [] (vanillaCprProdRes arity)
@@ -1345,21 +1424,21 @@ isTopDmdType (DmdType env [] res)
   | isTopRes res && isEmptyVarEnv env = True
 isTopDmdType _                        = False
 
-mkDmdType :: DmdEnv -> [Demand] -> DmdResult -> DmdType DmdEnv
+mkDmdType :: env -> [Demand] -> DmdResult -> DmdType env
 mkDmdType fv ds res = DmdType fv ds res
 
-dmdTypeDepth :: DmdType DmdEnv -> Arity
+dmdTypeDepth :: DmdType env -> Arity
 dmdTypeDepth (DmdType _ ds _) = length ds
 
 -- Remove any demand on arguments. This is used in dmdAnalRhs on the body
-removeDmdTyArgs :: DmdType DmdEnv -> DmdType DmdEnv
+removeDmdTyArgs :: DmdType env -> DmdType env
 removeDmdTyArgs = ensureArgs 0
 
 -- This makes sure we can use the demand type with n arguments,
 -- It extends the argument list with the correct resTypeArgDmd
 -- It also adjusts the DmdResult: Divergence survives additional arguments,
 -- CPR information does not (and definite converge also would not).
-ensureArgs :: Arity -> DmdType DmdEnv -> DmdType DmdEnv
+ensureArgs :: Arity -> DmdType env -> DmdType env
 ensureArgs n d | n == depth = d
                | otherwise  = DmdType fv ds' r'
   where depth = dmdTypeDepth d
@@ -1378,7 +1457,7 @@ seqDmdType (DmdType env ds res) =
 seqDmdEnv :: DmdEnv -> ()
 seqDmdEnv env = seqEltsUFM seqDemandList env
 
-splitDmdTy :: DmdType DmdEnv -> (Demand, DmdType DmdEnv)
+splitDmdTy :: DmdType env -> (Demand, DmdType env)
 -- Split off one function argument
 -- We already have a suitable demand on all
 -- free vars, so no need to add more!
@@ -1393,9 +1472,9 @@ splitDmdTy ty@(DmdType _ [] res_ty)       = (resTypeArgDmd res_ty, ty)
 -- * We have to kill definite divergence
 -- * We can keep CPR information.
 -- See Note [IO hack in the demand analyser] in DmdAnal
-deferAfterIO :: DmdType DmdEnv -> DmdType DmdEnv
+deferAfterIO :: DmdType DmdEnv' -> DmdType DmdEnv'
 deferAfterIO d@(DmdType _ _ res) =
-    case d `lubDmdType` nopDmdType of
+    case d `lubDmdType` nopDmdType' of
         DmdType fv ds _ -> DmdType fv ds (defer_res res)
   where
   defer_res r@(Dunno {}) = r
@@ -1440,14 +1519,10 @@ toCleanDmd (JD { sd = s, ud = u }) expr_ty
 -- a function's argument demand. So we only care about what
 -- does to free variables, and whether it terminates.
 -- see Note [The need for BothDmdArg]
-postProcessDmdType :: DmdShell -> DmdType DmdEnv -> BothDmdArg
+postProcessDmdType :: DmdShell -> DmdType DmdEnv' -> BothDmdArg
 postProcessDmdType du@(JD { sd = ss }) (DmdType fv _ res_ty)
-    = (postProcessDmdEnv du fv, term_info)
-    where
-       term_info = case postProcessDmdResult ss res_ty of
-                     Dunno _   -> Dunno ()
-                     ThrowsExn -> ThrowsExn
-                     Diverges  -> Diverges
+    | let term_info = () <$ postProcessDmdResult ss res_ty
+    = (postProcessDmdEnv du term_info fv, term_info)
 
 postProcessDmdResult :: Str () -> DmdResult -> DmdResult
 postProcessDmdResult Lazy           _         = topRes
@@ -1455,28 +1530,29 @@ postProcessDmdResult (Str ExnStr _) ThrowsExn = topRes  -- Key point!
 -- Note that only ThrowsExn results can be caught, not Diverges
 postProcessDmdResult _              res       = res
 
-postProcessDmdEnv :: DmdShell -> DmdEnv -> DmdEnv
-postProcessDmdEnv ds@(JD { sd = ss, ud = us }) env
-  | Abs <- us       = emptyDmdEnv
+postProcessDmdEnv :: DmdShell -> Termination r -> DmdEnv' -> DmdEnv'
+postProcessDmdEnv ds@(JD { sd = ss, ud = us }) term_info env =
+  overrideTerminationDmdEnv' term_info $ case (ss, us) of
+    (_, Abs) -> emptyDmdEnv'
     -- In this case (postProcessDmd ds) == id; avoid a redundant rebuild
     -- of the environment. Be careful, bad things will happen if this doesn't
     -- match postProcessDmd (see #13977).
-  | Str VanStr _ <- ss
-  , Use One _ <- us = env
-  | otherwise       = mapVarEnv (postProcessDmd ds) env
-  -- For the Absent case just discard all usage information
-  -- We only processed the thing at all to analyse the body
-  -- See Note [Always analyse in virgin pass]
+    (Str VanStr _, Use One _) -> env
+    -- outer 'fmap' is for the 'DmdEnv'', inner for the 'VarEnv Demand'
+    _ -> fmap (fmap (postProcessDmd ds)) env
+    -- For the Absent case just discard all usage information
+    -- We only processed the thing at all to analyse the body
+    -- See Note [Always analyse in virgin pass]
 
-reuseEnv :: DmdEnv -> DmdEnv
-reuseEnv = mapVarEnv (postProcessDmd
-                        (JD { sd = Str VanStr (), ud = Use Many () }))
+reuseEnv :: DmdEnv' -> DmdEnv'
+reuseEnv = fmap (fmap (postProcessDmd (JD { sd = Str VanStr (), ud = Use Many () })))
 
-postProcessUnsat :: DmdShell -> DmdType DmdEnv -> DmdType DmdEnv
+postProcessUnsat :: DmdShell -> DmdType DmdEnv' -> DmdType DmdEnv'
 postProcessUnsat ds@(JD { sd = ss }) (DmdType fv args res_ty)
-  = DmdType (postProcessDmdEnv ds fv)
+  | let res = postProcessDmdResult ss res_ty
+  = DmdType (postProcessDmdEnv ds res fv)
             (map (postProcessDmd ds) args)
-            (postProcessDmdResult ss res_ty)
+            res
 
 postProcessDmd :: DmdShell -> Demand -> Demand
 postProcessDmd (JD { sd = ss, ud = us }) (JD { sd = s, ud = a})
@@ -1573,20 +1649,20 @@ peelCallDmd, which peels only one level, but also returns the demand put on the
 body of the function.
 -}
 
-peelFV :: DmdType DmdEnv -> Var -> (DmdType DmdEnv, Demand)
+peelFV :: DmdType DmdEnv' -> Var -> (DmdType DmdEnv', Demand)
 peelFV (DmdType fv ds res) id = -- pprTrace "rfv" (ppr id <+> ppr dmd $$ ppr fv)
                                (DmdType fv' ds res, dmd)
   where
-  fv' = fv `delVarEnv` id
+  fv' = fv `delDmdEnv'` id
   -- See Note [Default demand on free variables]
-  dmd  = lookupVarEnv fv id `orElse` defaultDmd res
+  dmd  = lookupDmdEnv' fv res id
 
-addDemand :: Demand -> DmdType DmdEnv -> DmdType DmdEnv
+addDemand :: Demand -> DmdType env -> DmdType env
 addDemand dmd (DmdType fv ds res) = DmdType fv (dmd:ds) res
 
-findIdDemand :: DmdType DmdEnv -> Var -> Demand
+findIdDemand :: DmdType DmdEnv' -> Var -> Demand
 findIdDemand (DmdType fv _ res) id
-  = lookupVarEnv fv id `orElse` defaultDmd res
+  = lookupDmdEnv' fv res id
 
 {-
 Note [Default demand on free variables]
@@ -1774,15 +1850,15 @@ cprProdSig arity = StrictSig (cprProdDmdType arity)
 seqStrictSig :: StrictSig -> ()
 seqStrictSig (StrictSig ty) = seqDmdType ty
 
-dmdTransformSig :: StrictSig -> CleanDemand -> DmdType DmdEnv
+dmdTransformSig :: StrictSig -> CleanDemand -> DmdType DmdEnv'
 -- (dmdTransformSig fun_sig dmd) considers a call to a function whose
 -- signature is fun_sig, with demand dmd.  We return the demand
 -- that the function places on its context (eg its args)
 dmdTransformSig (StrictSig dmd_ty@(DmdType _ arg_ds _)) cd
-  = postProcessUnsat (peelManyCalls (length arg_ds) cd) dmd_ty
+  = postProcessUnsat (peelManyCalls (length arg_ds) cd) (embedDmdEnv' <$> dmd_ty)
     -- see Note [Demands from unsaturated function calls]
 
-dmdTransformDataConSig :: Arity -> StrictSig -> CleanDemand -> DmdType DmdEnv
+dmdTransformDataConSig :: Arity -> StrictSig -> CleanDemand -> DmdType DmdEnv'
 -- Same as dmdTransformSig but for a data constructor (worker),
 -- which has a special kind of demand transformer.
 -- If the constructor is saturated, we feed the demand on
@@ -1791,11 +1867,11 @@ dmdTransformDataConSig arity (StrictSig (DmdType _ _ con_res))
                              (JD { sd = str, ud = abs })
   | Just str_dmds <- go_str arity str
   , Just abs_dmds <- go_abs arity abs
-  = DmdType emptyDmdEnv (mkJointDmds str_dmds abs_dmds) con_res
+  = DmdType emptyDmdEnv' (mkJointDmds str_dmds abs_dmds) con_res
                 -- Must remember whether it's a product, hence con_res, not TopRes
 
   | otherwise   -- Not saturated
-  = nopDmdType
+  = nopDmdType'
   where
     go_str 0 dmd        = splitStrProdDmd arity dmd
     go_str n (SCall s') = go_str (n-1) s'
@@ -1806,7 +1882,7 @@ dmdTransformDataConSig arity (StrictSig (DmdType _ _ con_res))
     go_abs n (UCall One u') = go_abs (n-1) u'
     go_abs _ _              = Nothing
 
-dmdTransformDictSelSig :: StrictSig -> CleanDemand -> DmdType DmdEnv
+dmdTransformDictSelSig :: StrictSig -> CleanDemand -> DmdType DmdEnv'
 -- Like dmdTransformDataConSig, we have a special demand transformer
 -- for dictionary selectors.  If the selector is saturated (ie has one
 -- argument: the dictionary), we feed the demand on the result into
@@ -1815,9 +1891,9 @@ dmdTransformDictSelSig (StrictSig (DmdType _ [dict_dmd] _)) cd
    | (cd',defer_use) <- peelCallDmd cd
    , Just jds <- splitProdDmd_maybe dict_dmd
    = postProcessUnsat defer_use $
-     DmdType emptyDmdEnv [mkOnceUsedDmd $ mkProdDmd $ map (enhance cd') jds] topRes
+     DmdType emptyDmdEnv' [mkOnceUsedDmd $ mkProdDmd $ map (enhance cd') jds] topRes
    | otherwise
-   = nopDmdType              -- See Note [Demand transformer for a dictionary selector]
+   = nopDmdType'              -- See Note [Demand transformer for a dictionary selector]
   where
     enhance cd old | isAbsDmd old = old
                    | otherwise    = mkOnceUsedDmd cd  -- This is the one!
