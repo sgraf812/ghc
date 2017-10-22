@@ -28,6 +28,7 @@ module Demand (
 
         DmdEnv, emptyDmdEnv,
         DmdEnv', emptyDmdEnv', unitDmdEnv', embedDmdEnv', lubDmdEnv', bothDmdEnv', nopDmdType', botDmdType', delDmdEnvList', splitFVs', flattenDmdEnv',
+        GraftingPoint, graft, ungrafted,
         peelFV, findIdDemand,
 
         DmdResult, CPRResult,
@@ -1207,6 +1208,14 @@ data AndOrTree a
 
 type DmdEnv' = AndOrTree (VarEnv Demand)
 
+newtype GraftingPoint a = GraftingPoint ((a -> a) -> a)
+
+graft :: (a -> a) -> GraftingPoint a -> a
+graft modify (GraftingPoint point) = point modify
+
+ungrafted :: GraftingPoint a -> a
+ungrafted = graft id
+
 emptyDmdEnv' :: DmdEnv'
 emptyDmdEnv' = Lit emptyVarEnv
 
@@ -1260,6 +1269,36 @@ lookupDmdEnv' fv res id = go fv (() <$ res)
 
 delDmdEnv' :: DmdEnv' -> Var -> DmdEnv'
 delDmdEnv' fv id = fmap (`delVarEnv` id) fv
+
+delDmdEnvRememberGraftingPoint' :: DmdEnv' -> Var -> GraftingPoint DmdEnv'
+delDmdEnvRememberGraftingPoint' fv id = GraftingPoint (maybe_gp `orElse` const no_occ)
+  where
+    (maybe_gp, no_occ) = go fv
+    go fv =
+      case fv of
+        Lit env
+          | elemVarEnv id env -> (Just ($ fv), fv)
+          | otherwise -> (Nothing, fv)
+        OverrideTermination res fv' -> (fmap (OverrideTermination res .) maybe_gp, OverrideTermination res no_occ)
+          where
+            (maybe_gp, no_occ) = go fv'
+        And fv1 fv2 -> and_or And fv1 fv2
+        Or fv1 fv2 -> and_or Or fv1 fv2
+    and_or f fv1 fv2 = (maybe_gp, no_occ)
+      where
+        (maybe_gp1, no_occ1) = go fv1
+        (maybe_gp2, no_occ2) = go fv2
+        no_occ = f no_occ1 no_occ2
+        maybe_gp =
+          case (maybe_gp1, maybe_gp2) of
+            -- No occurences of the variable to delete at all
+            (Nothing, Nothing) -> Nothing
+            -- this is the most recent common ancestor of both branches
+            (Just _, Just _) -> Just ($ no_occ) 
+            -- var only occured in one branch. This is not the MRCA.
+            -- Forward to the grafting point of the respective child.
+            (Just gp1, _) -> Just (\modify -> f (gp1 modify) no_occ2)
+            (_, Just gp2) -> Just (\modify -> f no_occ1 (gp2 modify))
 
 delDmdEnvList' :: DmdEnv' -> [Var] -> DmdEnv'
 delDmdEnvList' fv ids = fmap (`delVarEnvList` ids) fv
@@ -1642,11 +1681,11 @@ peelCallDmd, which peels only one level, but also returns the demand put on the
 body of the function.
 -}
 
-peelFV :: DmdType DmdEnv' -> Var -> (DmdType DmdEnv', Demand)
+peelFV :: DmdType DmdEnv' -> Var -> (DmdType (GraftingPoint DmdEnv'), Demand)
 peelFV (DmdType fv ds res) id = -- pprTrace "rfv" (ppr id <+> ppr dmd $$ ppr fv)
-                               (DmdType fv' ds res, dmd)
+                               (DmdType fv_gp' ds res, dmd)
   where
-  fv' = fv `delDmdEnv'` id
+  fv_gp' = fv `delDmdEnvRememberGraftingPoint'` id
   -- See Note [Default demand on free variables]
   dmd  = lookupDmdEnv' fv res id
 
