@@ -1199,9 +1199,9 @@ type DmdEnv = VarEnv Demand   -- See Note [Default demand on free variables]
 
 data AndOrTree a
   = Lit a
-  | And DmdEnv' DmdEnv'
-  | Or DmdEnv' DmdEnv'
-  | OverrideTermination (Termination ()) DmdEnv' -- Adding a 'bottom' case isn't enough, because of 'catch'/'ExnStr'
+  | And (AndOrTree a) (AndOrTree a)
+  | Or (AndOrTree a) (AndOrTree a)
+  | OverrideTermination (Termination ())  (AndOrTree a) -- Adding a 'bottom' case isn't enough, because of 'catch'/'ExnStr'
   deriving (Eq, Functor)
 
 type DmdEnv' = AndOrTree (VarEnv Demand)
