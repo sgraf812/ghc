@@ -1271,34 +1271,27 @@ delDmdEnv' :: DmdEnv' -> Var -> DmdEnv'
 delDmdEnv' fv id = fmap (`delVarEnv` id) fv
 
 delDmdEnvRememberGraftingPoint' :: DmdEnv' -> Var -> GraftingPoint DmdEnv'
-delDmdEnvRememberGraftingPoint' fv id = GraftingPoint (maybe_gp `orElse` const no_occ)
+delDmdEnvRememberGraftingPoint' fv var = GraftingPoint (go fv `orElse` const fv)
   where
-    (maybe_gp, no_occ) = go fv
     go fv =
       case fv of
         Lit env
-          | elemVarEnv id env -> (Just ($ fv), fv)
-          | otherwise -> (Nothing, fv)
-        OverrideTermination res fv' -> (fmap (OverrideTermination res .) maybe_gp, OverrideTermination res no_occ)
-          where
-            (maybe_gp, no_occ) = go fv'
+          | elemVarEnv var env -> Just ($ Lit (delVarEnv env var))
+          | otherwise -> Nothing
+        OverrideTermination res fv' -> fmap (OverrideTermination res .) (go fv')
         And fv1 fv2 -> and_or And fv1 fv2
         Or fv1 fv2 -> and_or Or fv1 fv2
-    and_or f fv1 fv2 = (maybe_gp, no_occ)
-      where
-        (maybe_gp1, no_occ1) = go fv1
-        (maybe_gp2, no_occ2) = go fv2
-        no_occ = f no_occ1 no_occ2
-        maybe_gp =
-          case (maybe_gp1, maybe_gp2) of
-            -- No occurences of the variable to delete at all
-            (Nothing, Nothing) -> Nothing
-            -- this is the most recent common ancestor of both branches
-            (Just _, Just _) -> Just ($ no_occ) 
-            -- var only occured in one branch. This is not the MRCA.
-            -- Forward to the grafting point of the respective child.
-            (Just gp1, _) -> Just (\modify -> f (gp1 modify) no_occ2)
-            (_, Just gp2) -> Just (\modify -> f no_occ1 (gp2 modify))
+    and_or f fv1 fv2 =
+      case (go fv1, go fv2) of
+        -- No occurences of the variable to delete at all
+        (Nothing, Nothing) -> Nothing
+        -- Occurences in both branches.
+        -- This is the most recent common ancestor of both branches
+        (Just gp1, Just gp2) -> Just ($ f (gp1 id) (gp2 id))
+        -- The var only occured in one branch. This is not the MRCA.
+        -- Forward to the grafting point of the respective child.
+        (Just gp1, Nothing) -> Just (\modify -> f (gp1 modify) fv2)
+        (Nothing, Just gp2) -> Just (\modify -> f fv1 (gp2 modify))
 
 delDmdEnvList' :: DmdEnv' -> [Var] -> DmdEnv'
 delDmdEnvList' fv ids = fmap (`delVarEnvList` ids) fv
