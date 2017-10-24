@@ -1278,9 +1278,9 @@ delDmdEnvRememberGraftingPoint' fv var = GraftingPoint (go fv `orElse` const fv)
         Lit env
           | elemVarEnv var env -> Just ($ Lit (delVarEnv env var))
           | otherwise -> Nothing
-        OverrideTermination res fv' -> fmap (OverrideTermination res .) (go fv')
-        And fv1 fv2 -> and_or And fv1 fv2
-        Or fv1 fv2 -> and_or Or fv1 fv2
+        Multiply ds fv -> fmap (Multiply ds .) (go fv)
+        And fv1 t1 fv2 t2 -> and_or (\fv1' fv2' -> And fv1' t1 fv2' t2) fv1 fv2
+        Or fv1 t1 fv2 t2 -> and_or (\fv1' fv2' -> Or fv1' t1 fv2' t2) fv1 fv2
     and_or f fv1 fv2 =
       case (go fv1, go fv2) of
         -- No occurences of the variable to delete at all
