@@ -531,7 +531,7 @@ dmdFix top_lvl env let_dmd orig_pairs
       where (lazy_fv, pairs') = step True (zapIdStrictness orig_pairs)
             -- Note [Lazy and unleashable free variables]
             non_lazy_fvs = plusVarEnvList $ map (strictSigDmdEnv . idStrictness . fst) pairs'
-            lazy_fv'     = lazy_fv `bothDmdEnv'` embedDmdEnv' (topDmd <$ non_lazy_fvs)
+            lazy_fv'     = bothDmdEnv' lazy_fv topRes (embedDmdEnv' (topDmd <$ non_lazy_fvs)) topRes
             zapped_pairs = zapIdStrictness pairs'
 
     -- The fixed-point varies the idStrictness field of the binders, and terminates if that
@@ -565,7 +565,7 @@ dmdFix top_lvl env let_dmd orig_pairs
           = ((env', lazy_fv'), (id', rhs'))
           where
             (lazy_fv1, id', rhs') = dmdAnalRhsLetDown top_lvl (Just bndrs) env let_dmd id rhs
-            lazy_fv'              = lazy_fv `bothDmdEnv'` lazy_fv1
+            lazy_fv'              = bothDmdEnv' lazy_fv topRes lazy_fv1 topRes
             env'                  = extendAnalEnv top_lvl env id (idStrictness id')
 
 
@@ -649,9 +649,7 @@ dmdAnalRhsLetDown top_lvl rec_flag env let_dmd id rhs
     body_ty'         = removeDmdTyArgs body_ty -- zap possible deep CPR info
     (DmdType rhs_fv rhs_dmds rhs_res, bndrs')
                      = annotateLamBndrs env (isDFunId id) body_ty' bndrs
-    (sig_fv, fv_res) = flattenDmdEnv' sig_fv'
-    sig_ty           = ASSERT2( (() <$ rhs_res2) == fv_res, ppr rhs_res2 $$ ppr fv_res )
-                       mkStrictSig (mkDmdType sig_fv rhs_dmds rhs_res2)
+    sig_ty           = mkStrictSig (mkDmdType (flattenDmdEnv' sig_fv') rhs_dmds rhs_res2)
     id'              = set_idStrictness env id sig_ty
         -- See Note [NOINLINE and strictness]
 
@@ -796,7 +794,7 @@ coercionDmdEnv co = embedDmdEnv' (topDmd <$ getUniqSet (coVarsOfCo co))
 
 addVarDmd :: DmdType DmdEnv' -> Var -> Demand -> DmdType DmdEnv'
 addVarDmd (DmdType fv ds res) var dmd
-  = DmdType (fv `bothDmdEnv'` unitDmdEnv' var dmd) ds res
+  = DmdType (bothDmdEnv' fv res (unitDmdEnv' var dmd) topRes) ds res
 
 addLazyFVs :: DmdType DmdEnv' -> DmdEnv' -> DmdType DmdEnv'
 addLazyFVs dmd_ty lazy_fvs

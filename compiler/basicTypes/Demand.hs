@@ -1199,9 +1199,10 @@ type DmdEnv = VarEnv Demand   -- See Note [Default demand on free variables]
 
 data AndOrTree a
   = Lit a
-  | And (AndOrTree a) (AndOrTree a)
-  | Or (AndOrTree a) (AndOrTree a)
-  | OverrideTermination (Termination ())  (AndOrTree a) -- Adding a 'bottom' case isn't enough, because of 'catch'/'ExnStr'
+  | And (AndOrTree a) (Termination ()) (AndOrTree a) (Termination ())
+  | Or (AndOrTree a) (Termination ()) (AndOrTree a) (Termination ())
+  | Multiply DmdShell (AndOrTree a)
+  -- ^ We need this constructor because of postProcessDmdEnv. 'fmap (fmap (postProcessDmdEnv ds))' does not work for recovering from Divergence.
   deriving (Eq, Functor)
 
 type DmdEnv' = AndOrTree (VarEnv Demand)
@@ -1209,60 +1210,65 @@ type DmdEnv' = AndOrTree (VarEnv Demand)
 emptyDmdEnv' :: DmdEnv'
 emptyDmdEnv' = Lit emptyVarEnv
 
-botDmdEnv' :: DmdEnv'
-botDmdEnv' = OverrideTermination Diverges emptyDmdEnv'
-
--- We (e.g. 'defaultDmd') don't really differentiate between botDmdEnv' and exnDmdEnv', 
--- so this is only for consistency.
-exnDmdEnv' :: DmdEnv'
-exnDmdEnv' = OverrideTermination ThrowsExn emptyDmdEnv'
-
 unitDmdEnv' :: Var -> Demand -> DmdEnv'
 unitDmdEnv' id dmd = Lit (unitVarEnv id dmd)
 
 embedDmdEnv' :: DmdEnv -> DmdEnv'
 embedDmdEnv' = Lit
 
-overrideTerminationDmdEnv' :: Termination r -> DmdEnv' -> DmdEnv'
-overrideTerminationDmdEnv' res = OverrideTermination (() <$ res)
+bothDmdEnv' :: DmdEnv' -> Termination r1 -> DmdEnv' -> Termination r2 -> DmdEnv'
+bothDmdEnv' fv1 t1 fv2 t2 = And fv1 (() <$ t1) fv2 (() <$ t2)
 
-bothDmdEnv' :: DmdEnv' -> DmdEnv' -> DmdEnv'
-bothDmdEnv' a b = And a b
+lubDmdEnv' :: DmdEnv' -> Termination r1 -> DmdEnv' -> Termination r2 -> DmdEnv'
+lubDmdEnv' fv1 t1 fv2 t2 = Or fv1 (() <$ t1) fv2 (() <$ t2)
 
-lubDmdEnv' :: DmdEnv' -> DmdEnv' -> DmdEnv'
-lubDmdEnv' a b = Or a b
+postProcessDmdEnv' :: DmdShell -> DmdEnv' -> DmdEnv'
+postProcessDmdEnv' = Multiply
 
-flattenDmdEnv' :: DmdEnv' -> (DmdEnv, Termination ())
-flattenDmdEnv' env = 
-  case env of
-    Lit fv -> (fv, Dunno ())
-    And env1 env2 -> 
-      (plusVarEnv_CD bothDmd fv1 (defaultDmd t1) fv2 (defaultDmd t2), bothTermination t1 t2)
-        where
-          (fv1, t1) = flattenDmdEnv' env1
-          (fv2, t2) = flattenDmdEnv' env2
-    Or env1 env2 -> 
-      (plusVarEnv_CD lubDmd fv1 (defaultDmd t1) fv2 (defaultDmd t2), lubTermination const t1 t2)
-        where
-          (fv1, t1) = flattenDmdEnv' env1
-          (fv2, t2) = flattenDmdEnv' env2
-    OverrideTermination t env -> (fst (flattenDmdEnv' env), t)
+flattenDmdEnv' :: DmdEnv' -> DmdEnv
+flattenDmdEnv' = go
+  where
+    go env =
+      case env of
+        Lit fv -> fv
+        And fv1 t1 fv2 t2 -> 
+          plusVarEnv_CD bothDmd (go fv1) (defaultDmd t1) (go fv2) (defaultDmd t2)
+        Or fv1 t1 fv2 t2 -> 
+          plusVarEnv_CD lubDmd (go fv1) (defaultDmd t1) (go fv2) (defaultDmd t2)
+        Multiply ds@(JD { sd = ss, ud = us }) fv ->
+          case (ss, us) of
+            -- TODO: do this in the smart constructor (postProcessDmdEnv')
+            -- For the Absent case just discard all usage information
+            -- We only processed the thing at all to analyse the body
+            -- See Note [Always analyse in virgin pass]
+            (_, Abs) -> emptyDmdEnv
+            -- In this case (postProcessDmd ds) == id; avoid a redundant rebuild
+            -- of the environment. Be careful, bad things will happen if this doesn't
+            -- match postProcessDmd (see #13977).
+            (Str VanStr _, Use One _) -> go fv
+            _ -> mapVarEnv (postProcessDmd ds) (go fv)
 
 lookupDmdEnv' :: DmdEnv' -> Termination r -> Var -> Demand
 lookupDmdEnv' fv res id = go fv (() <$ res)
   where
     go fv res =
       case fv of
-        OverrideTermination res' fv' -> go fv' res'
         Lit dmds -> lookupVarEnv dmds id `orElse` defaultDmd res
-        And fv1 fv2 -> bothDmd (go fv1 res) (go fv2 res)
-        Or fv1 fv2 -> lubDmd (go fv1 res) (go fv2 res)
+        And fv1 t1 fv2 t2 -> bothDmd (go fv1 t1) (go fv2 t2)
+        Or fv1 t1 fv2 t2 -> lubDmd (go fv1 t1) (go fv2 t2)
+        Multiply ds fv -> postProcessDmd ds (go fv res)
 
 delDmdEnv' :: DmdEnv' -> Var -> DmdEnv'
 delDmdEnv' fv id = fmap (`delVarEnv` id) fv
 
 delDmdEnvList' :: DmdEnv' -> [Var] -> DmdEnv'
 delDmdEnvList' fv ids = fmap (`delVarEnvList` ids) fv
+
+instance Outputable a => Outputable (AndOrTree a) where
+  ppr (Lit a) = text "Lit" <+> parens (ppr a)
+  ppr (And fv1 t1 fv2 t2) = hang (text "And") 2 ((char (head (show t1)) <+> ppr fv1) $$ (char (head (show t2)) <+> ppr fv2))
+  ppr (Or fv1 t1 fv2 t2) = hang (text "Or") 2 ((char (head (show t1)) <+> ppr fv1) $$ (char (head (show t2)) <+> ppr fv2))
+  ppr (Multiply ds fv) = hang (text "Multiply" <+> text (show ds)) 2 (ppr fv)
 
 data DmdType env = DmdType
                       env           -- Demand on explicitly-mentioned
@@ -1348,7 +1354,7 @@ lubDmdType d1 d2
     (DmdType fv1 ds1 r1) = ensureArgs n d1
     (DmdType fv2 ds2 r2) = ensureArgs n d2
 
-    lub_fv  = lubDmdEnv' fv1 fv2
+    lub_fv  = lubDmdEnv' fv1 r1 fv2 r2
     lub_ds  = zipWithEqual "lubDmdType" lubDmd ds1 ds2
     lub_res = lubDmdResult r1 r2
 
@@ -1375,13 +1381,13 @@ bothDmdType (DmdType fv1 ds1 r1) (fv2, t2)
     -- See Note [Asymmetry of 'both' for DmdType and DmdResult]
     -- 'both' takes the argument/result info from its *first* arg,
     -- using its second arg just for its free-var info.
-  = DmdType (bothDmdEnv' fv1 fv2)
+  = DmdType (bothDmdEnv' fv1 r1 fv2 t2)
             ds1
             (r1 `bothDmdResult` t2)
 
 -- TODO
 instance Outputable (DmdType DmdEnv') where
-  ppr (DmdType fv ds res) = ppr (DmdType (fst (flattenDmdEnv' fv)) ds res)
+  ppr (DmdType fv ds res) = ppr (DmdType (flattenDmdEnv' fv) ds res)
 
 instance Outputable (DmdType DmdEnv) where
   ppr (DmdType fv ds res)
@@ -1412,8 +1418,8 @@ exnDmdType = DmdType emptyDmdEnv [] exnRes
 -- so it is (no longer) called topDmd
 nopDmdType', botDmdType', exnDmdType' :: DmdType DmdEnv'
 nopDmdType' = DmdType emptyDmdEnv' [] topRes
-botDmdType' = DmdType botDmdEnv' [] botRes
-exnDmdType' = DmdType exnDmdEnv' [] exnRes
+botDmdType' = DmdType emptyDmdEnv' [] botRes
+exnDmdType' = DmdType emptyDmdEnv' [] exnRes
 
 cprProdDmdType :: Arity -> DmdType DmdEnv
 cprProdDmdType arity
@@ -1521,8 +1527,7 @@ toCleanDmd (JD { sd = s, ud = u }) expr_ty
 -- see Note [The need for BothDmdArg]
 postProcessDmdType :: DmdShell -> DmdType DmdEnv' -> BothDmdArg
 postProcessDmdType du@(JD { sd = ss }) (DmdType fv _ res_ty)
-    | let term_info = () <$ postProcessDmdResult ss res_ty
-    = (postProcessDmdEnv du term_info fv, term_info)
+    = (postProcessDmdEnv du fv, () <$ postProcessDmdResult ss res_ty)
 
 postProcessDmdResult :: Str () -> DmdResult -> DmdResult
 postProcessDmdResult Lazy           _         = topRes
@@ -1530,29 +1535,17 @@ postProcessDmdResult (Str ExnStr _) ThrowsExn = topRes  -- Key point!
 -- Note that only ThrowsExn results can be caught, not Diverges
 postProcessDmdResult _              res       = res
 
-postProcessDmdEnv :: DmdShell -> Termination r -> DmdEnv' -> DmdEnv'
-postProcessDmdEnv ds@(JD { sd = ss, ud = us }) term_info env =
-  overrideTerminationDmdEnv' term_info $ case (ss, us) of
-    (_, Abs) -> emptyDmdEnv'
-    -- In this case (postProcessDmd ds) == id; avoid a redundant rebuild
-    -- of the environment. Be careful, bad things will happen if this doesn't
-    -- match postProcessDmd (see #13977).
-    (Str VanStr _, Use One _) -> env
-    -- outer 'fmap' is for the 'DmdEnv'', inner for the 'VarEnv Demand'
-    _ -> fmap (fmap (postProcessDmd ds)) env
-    -- For the Absent case just discard all usage information
-    -- We only processed the thing at all to analyse the body
-    -- See Note [Always analyse in virgin pass]
+postProcessDmdEnv :: DmdShell -> DmdEnv' -> DmdEnv'
+postProcessDmdEnv = postProcessDmdEnv'
 
 reuseEnv :: DmdEnv' -> DmdEnv'
 reuseEnv = fmap (fmap (postProcessDmd (JD { sd = Str VanStr (), ud = Use Many () })))
 
 postProcessUnsat :: DmdShell -> DmdType DmdEnv' -> DmdType DmdEnv'
 postProcessUnsat ds@(JD { sd = ss }) (DmdType fv args res_ty)
-  | let res = postProcessDmdResult ss res_ty
-  = DmdType (postProcessDmdEnv ds res fv)
+  = DmdType (postProcessDmdEnv ds fv)
             (map (postProcessDmd ds) args)
-            res
+            (postProcessDmdResult ss res_ty)
 
 postProcessDmd :: DmdShell -> Demand -> Demand
 postProcessDmd (JD { sd = ss, ud = us }) (JD { sd = s, ud = a})
