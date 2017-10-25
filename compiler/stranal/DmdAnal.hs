@@ -1240,11 +1240,11 @@ findBndrsDmds env dmd_ty bndrs
 findBndrDmd :: AnalEnv -> Bool -> DmdType DmdEnv' -> Id -> (DmdType DmdEnv', Demand)
 findBndrDmd env arg_of_dfun dmd_ty id = (fmap ungrafted dmd_ty_gp, dmd)
   where
-    (dmd_ty_gp, dmd) = findBndrDmdAndGraftingPoint env arg_of_dfun dmd_ty id
+    (dmd_ty_gp, dmd) = findBndrDmdAndGraftPoint env arg_of_dfun dmd_ty id
 
-findBndrDmdAndGraftingPoint :: AnalEnv -> Bool -> DmdType DmdEnv' -> Id -> (DmdType (GraftingPoint DmdEnv'), Demand)
+findBndrDmdAndGraftPoint :: AnalEnv -> Bool -> DmdType DmdEnv' -> Id -> (DmdType (GraftPoint DmdEnv'), Demand)
 -- See Note [Trimming a demand to a type] in Demand.hs
-findBndrDmdAndGraftingPoint env arg_of_dfun dmd_ty id
+findBndrDmdAndGraftPoint env arg_of_dfun dmd_ty id
   = (dmd_ty_gp', dmd')
   where
     dmd' = killUsageDemand (ae_dflags env) $

@@ -28,7 +28,7 @@ module Demand (
 
         DmdEnv, emptyDmdEnv,
         DmdEnv', emptyDmdEnv', unitDmdEnv', embedDmdEnv', lubDmdEnv', bothDmdEnv', nopDmdType', botDmdType', delDmdEnvList', splitFVs', flattenDmdEnv',
-        GraftingPoint, graft, ungrafted,
+        GraftPoint, graft, ungrafted,
         peelFV, findIdDemand,
 
         DmdResult, CPRResult,
@@ -1208,12 +1208,12 @@ data AndOrTree a
 
 type DmdEnv' = AndOrTree (VarEnv Demand)
 
-newtype GraftingPoint a = GraftingPoint ((a -> a) -> a)
+newtype GraftPoint a = GraftPoint ((a -> a) -> a)
 
-graft :: (a -> a) -> GraftingPoint a -> a
-graft modify (GraftingPoint point) = point modify
+graft :: (a -> a) -> GraftPoint a -> a
+graft modify (GraftPoint point) = point modify
 
-ungrafted :: GraftingPoint a -> a
+ungrafted :: GraftPoint a -> a
 ungrafted = graft id
 
 emptyDmdEnv' :: DmdEnv'
@@ -1270,8 +1270,8 @@ lookupDmdEnv' fv res id = go fv (() <$ res)
 delDmdEnv' :: DmdEnv' -> Var -> DmdEnv'
 delDmdEnv' fv id = fmap (`delVarEnv` id) fv
 
-delDmdEnvRememberGraftingPoint' :: DmdEnv' -> Var -> GraftingPoint DmdEnv'
-delDmdEnvRememberGraftingPoint' fv var = GraftingPoint (go fv `orElse` const fv)
+delDmdEnvRememberGraftPoint' :: DmdEnv' -> Var -> GraftPoint DmdEnv'
+delDmdEnvRememberGraftPoint' fv var = GraftPoint (go fv `orElse` const fv)
   where
     go fv =
       case fv of
@@ -1674,11 +1674,11 @@ peelCallDmd, which peels only one level, but also returns the demand put on the
 body of the function.
 -}
 
-peelFV :: DmdType DmdEnv' -> Var -> (DmdType (GraftingPoint DmdEnv'), Demand)
+peelFV :: DmdType DmdEnv' -> Var -> (DmdType (GraftPoint DmdEnv'), Demand)
 peelFV (DmdType fv ds res) id = -- pprTrace "rfv" (ppr id <+> ppr dmd $$ ppr fv)
                                (DmdType fv_gp' ds res, dmd)
   where
-  fv_gp' = fv `delDmdEnvRememberGraftingPoint'` id
+  fv_gp' = fv `delDmdEnvRememberGraftPoint'` id
   -- See Note [Default demand on free variables]
   dmd  = lookupDmdEnv' fv res id
 
