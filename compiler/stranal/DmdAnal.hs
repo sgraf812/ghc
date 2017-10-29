@@ -300,16 +300,20 @@ dmdAnal' env dmd (Let (NonRec id rhs) body)
       -- so if we have a trival right hand side, fall through to that.
   = (final_ty, Let (NonRec id' rhs') body')
   where
-    (body_ty, body')   = dmdAnal env dmd body
-    (body_gp, id_dmd)  = findBndrDmdAndGraftPoint env notArgOfDfun body_ty id
-    id'                = setIdDemandInfo id id_dmd
+    -- Why aren't unlifted lets ('let x = 5#') converted to case of?
+    is_unlifted_let             = isUnliftedType (exprType rhs)
+    (body_ty, body')            = dmdAnal env dmd body
+    (body_gp, id_dmd)           = findBndrDmdAndGraftPoint env notArgOfDfun body_ty id
+    id'                         = setIdDemandInfo id id_dmd
 
-    ((rhs_env, rhs_term), rhs')     = dmdAnalStar env (dmdTransformThunkDmd rhs id_dmd) rhs
+    (rhs_ty@(rhs_env, rhs_term), rhs') = dmdAnalStar env (dmdTransformThunkDmd rhs id_dmd) rhs
     -- Using 'topRes' here, because it's the safest thing to assume.
     -- The truth is that I can't think of no easy way to determine the 
     -- 'Termination ()' with which to 'bothDmdTree' the RHS's into the body's
     -- 'DmdTree'. 'topRes' amounts to the most conservative assumption possible.
-    final_ty           = fmap (graft (\env -> bothDmdTree rhs_env rhs_term env (() <$ topRes))) body_gp
+    final_ty
+      | is_unlifted_let         = fmap ungrafted body_gp `bothDmdType` rhs_ty
+      | otherwise               = fmap (graft (\env -> bothDmdTree env (() <$ topRes) rhs_env rhs_term)) body_gp
 
 dmdAnal' env dmd (Let (NonRec id rhs) body)
   = (body_ty2, Let (NonRec id2 rhs') body')
