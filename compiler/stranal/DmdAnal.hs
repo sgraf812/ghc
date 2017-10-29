@@ -301,11 +301,15 @@ dmdAnal' env dmd (Let (NonRec id rhs) body)
   = (final_ty, Let (NonRec id' rhs') body')
   where
     (body_ty, body')   = dmdAnal env dmd body
-    (body_ty', id_dmd) = findBndrDmd env notArgOfDfun body_ty id
+    (body_gp, id_dmd)  = findBndrDmdAndGraftPoint env notArgOfDfun body_ty id
     id'                = setIdDemandInfo id id_dmd
 
-    (rhs_ty, rhs')     = dmdAnalStar env (dmdTransformThunkDmd rhs id_dmd) rhs
-    final_ty           = body_ty' `bothDmdType` rhs_ty
+    ((rhs_env, rhs_term), rhs')     = dmdAnalStar env (dmdTransformThunkDmd rhs id_dmd) rhs
+    -- Using 'topRes' here, because it's the safest thing to assume.
+    -- The truth is that I can't think of no easy way to determine the 
+    -- 'Termination ()' with which to 'bothDmdTree' the RHS's into the body's
+    -- 'DmdTree'. 'topRes' amounts to the most conservative assumption possible.
+    final_ty           = fmap (graft (\env -> bothDmdTree rhs_env rhs_term env (() <$ topRes))) body_gp
 
 dmdAnal' env dmd (Let (NonRec id rhs) body)
   = (body_ty2, Let (NonRec id2 rhs') body')
