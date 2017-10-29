@@ -149,7 +149,7 @@ dmdAnalStar env dmd e
 -- Main Demand Analsysis machinery
 dmdAnal, dmdAnal' :: AnalEnv
         -> CleanDemand         -- The main one takes a *CleanDemand*
-        -> CoreExpr -> (DmdType DmdEnv', CoreExpr)
+        -> CoreExpr -> (DmdType DmdTree, CoreExpr)
 
 -- The CleanDemand is always strict and not absent
 --    See Note [Ensure demand is strict]
@@ -352,7 +352,7 @@ io_hack_reqd scrut con bndrs
   | otherwise
   = False
 
-dmdAnalAlt :: AnalEnv -> CleanDemand -> Id -> Alt Var -> (DmdType DmdEnv', Alt Var)
+dmdAnalAlt :: AnalEnv -> CleanDemand -> Id -> Alt Var -> (DmdType DmdTree, Alt Var)
 dmdAnalAlt env dmd case_bndr (con,bndrs,rhs)
   | null bndrs    -- Literals, DEFAULT, and nullary constructors
   , (rhs_ty, rhs') <- dmdAnal env dmd rhs
@@ -473,7 +473,7 @@ strict in |y|.
 dmdTransform :: AnalEnv         -- The strictness environment
              -> Id              -- The function
              -> CleanDemand     -- The demand on the function
-             -> DmdType DmdEnv'  -- The demand type of the function in this context
+             -> DmdType DmdTree  -- The demand type of the function in this context
         -- Returned DmdEnv includes the demand on
         -- this function plus demand on its free variables
 
@@ -498,7 +498,7 @@ dmdTransform env var dmd
     else addVarDmd fn_ty var (mkOnceUsedDmd dmd)
 
   | otherwise                                    -- Local non-letrec-bound thing
-  = unitDmdType (unitDmdEnv' var (mkOnceUsedDmd dmd))
+  = unitDmdType (unitDmdTree var (mkOnceUsedDmd dmd))
 
 {-
 ************************************************************************
@@ -513,7 +513,7 @@ dmdFix :: TopLevelFlag
        -> AnalEnv                            -- Does not include bindings for this binding
        -> CleanDemand
        -> [(Id,CoreExpr)]
-       -> (AnalEnv, DmdEnv', [(Id,CoreExpr)]) -- Binders annotated with stricness info
+       -> (AnalEnv, DmdTree, [(Id,CoreExpr)]) -- Binders annotated with stricness info
 
 dmdFix top_lvl env let_dmd orig_pairs
   = loop 1 initial_pairs
@@ -526,17 +526,17 @@ dmdFix top_lvl env let_dmd orig_pairs
 
     -- If fixed-point iteration does not yield a result we use this instead
     -- See Note [Safe abortion in the fixed-point iteration]
-    abort :: (AnalEnv, DmdEnv', [(Id,CoreExpr)])
+    abort :: (AnalEnv, DmdTree, [(Id,CoreExpr)])
     abort = (env, lazy_fv', zapped_pairs)
       where (lazy_fv, pairs') = step True (zapIdStrictness orig_pairs)
             -- Note [Lazy and unleashable free variables]
             non_lazy_fvs = plusVarEnvList $ map (strictSigDmdEnv . idStrictness . fst) pairs'
-            lazy_fv'     = bothDmdEnv' lazy_fv topRes (embedDmdEnv' (topDmd <$ non_lazy_fvs)) topRes
+            lazy_fv'     = bothDmdTree lazy_fv topRes (embedDmdTree (topDmd <$ non_lazy_fvs)) topRes
             zapped_pairs = zapIdStrictness pairs'
 
     -- The fixed-point varies the idStrictness field of the binders, and terminates if that
     -- annotation does not change any more.
-    loop :: Int -> [(Id,CoreExpr)] -> (AnalEnv, DmdEnv', [(Id,CoreExpr)])
+    loop :: Int -> [(Id,CoreExpr)] -> (AnalEnv, DmdTree, [(Id,CoreExpr)])
     loop n pairs
       | found_fixpoint = (final_anal_env, lazy_fv, pairs')
       | n == 10        = abort
@@ -547,14 +547,14 @@ dmdFix top_lvl env let_dmd orig_pairs
         (lazy_fv, pairs') = step first_round pairs
         final_anal_env    = extendAnalEnvs top_lvl env (map fst pairs')
 
-    step :: Bool -> [(Id, CoreExpr)] -> (DmdEnv', [(Id, CoreExpr)])
+    step :: Bool -> [(Id, CoreExpr)] -> (DmdTree, [(Id, CoreExpr)])
     step first_round pairs = (lazy_fv, pairs')
       where
         -- In all but the first iteration, delete the virgin flag
         start_env | first_round = env
                   | otherwise   = nonVirgin env
 
-        start = (extendAnalEnvs top_lvl start_env (map fst pairs), emptyDmdEnv')
+        start = (extendAnalEnvs top_lvl start_env (map fst pairs), emptyDmdTree)
 
         ((_,lazy_fv), pairs') = mapAccumL my_downRhs start pairs
                 -- mapAccumL: Use the new signature to do the next pair
@@ -565,7 +565,7 @@ dmdFix top_lvl env let_dmd orig_pairs
           = ((env', lazy_fv'), (id', rhs'))
           where
             (lazy_fv1, id', rhs') = dmdAnalRhsLetDown top_lvl (Just bndrs) env let_dmd id rhs
-            lazy_fv'              = bothDmdEnv' lazy_fv topRes lazy_fv1 topRes
+            lazy_fv'              = bothDmdTree lazy_fv topRes lazy_fv1 topRes
             env'                  = extendAnalEnv top_lvl env id (idStrictness id')
 
 
@@ -594,13 +594,13 @@ environment, which effectively assigns them 'nopSig' (see "getStrictness")
 -- See Note [Demand analysis for trivial right-hand sides]
 dmdAnalTrivialRhs ::
     AnalEnv -> Id -> CoreExpr -> Var ->
-    (DmdEnv', Id, CoreExpr)
+    (DmdTree, Id, CoreExpr)
 dmdAnalTrivialRhs env id rhs fn
   = (fn_fv, set_idStrictness env id fn_str, rhs)
   where
     fn_str = getStrictness env fn
-    fn_fv | isLocalId fn = unitDmdEnv' fn topDmd
-          | otherwise    = emptyDmdEnv'
+    fn_fv | isLocalId fn = unitDmdTree fn topDmd
+          | otherwise    = emptyDmdTree
     -- Note [Remember to demand the function itself]
     -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     -- fn_fv: don't forget to produce a demand for fn itself
@@ -625,7 +625,7 @@ dmdAnalRhsLetDown :: TopLevelFlag
            -> Maybe [Id]   -- Just bs <=> recursive, Nothing <=> non-recursive
            -> AnalEnv -> CleanDemand
            -> Id -> CoreExpr
-           -> (DmdEnv', Id, CoreExpr)
+           -> (DmdTree, Id, CoreExpr)
 -- Process the RHS of the binding, add the strictness signature
 -- to the Id, and augment the environment with the signature as well.
 dmdAnalRhsLetDown top_lvl rec_flag env let_dmd id rhs
@@ -649,14 +649,14 @@ dmdAnalRhsLetDown top_lvl rec_flag env let_dmd id rhs
     body_ty'         = removeDmdTyArgs body_ty -- zap possible deep CPR info
     (DmdType rhs_fv rhs_dmds rhs_res, bndrs')
                      = annotateLamBndrs env (isDFunId id) body_ty' bndrs
-    sig_ty           = mkStrictSig (mkDmdType (flattenDmdEnv' sig_fv') rhs_dmds rhs_res2)
+    sig_ty           = mkStrictSig (mkDmdType (flattenDmdTree sig_fv') rhs_dmds rhs_res2)
     id'              = set_idStrictness env id sig_ty
         -- See Note [NOINLINE and strictness]
 
 
     -- See Note [Aggregated demand for cardinality]
     rhs_fv1 = case rec_flag of
-                Just bs -> reuseEnv (delDmdEnvList' rhs_fv bs)
+                Just bs -> reuseEnv (delDmdTreeList rhs_fv bs)
                 Nothing -> rhs_fv
 
     -- See Note [Lazy and unleashable free variables]
@@ -788,15 +788,15 @@ a product type.
 unitDmdType :: env -> DmdType env
 unitDmdType dmd_env = DmdType dmd_env [] topRes
 
-coercionDmdEnv :: Coercion -> DmdEnv'
-coercionDmdEnv co = embedDmdEnv' (topDmd <$ getUniqSet (coVarsOfCo co))
+coercionDmdEnv :: Coercion -> DmdTree
+coercionDmdEnv co = embedDmdTree (topDmd <$ getUniqSet (coVarsOfCo co))
                     -- The VarSet from coVarsOfCo is really a VarEnv Var
 
-addVarDmd :: DmdType DmdEnv' -> Var -> Demand -> DmdType DmdEnv'
+addVarDmd :: DmdType DmdTree -> Var -> Demand -> DmdType DmdTree
 addVarDmd (DmdType fv ds res) var dmd
-  = DmdType (bothDmdEnv' fv res (unitDmdEnv' var dmd) topRes) ds res
+  = DmdType (bothDmdTree fv res (unitDmdTree var dmd) topRes) ds res
 
-addLazyFVs :: DmdType DmdEnv' -> DmdEnv' -> DmdType DmdEnv'
+addLazyFVs :: DmdType DmdTree -> DmdTree -> DmdType DmdTree
 addLazyFVs dmd_ty lazy_fvs
   = dmd_ty `bothDmdType` mkBothDmdArg lazy_fvs
         -- Using bothDmdType (rather than just both'ing the envs)
@@ -838,7 +838,7 @@ setBndrsDemandInfo (b:bs) (d:ds)
 setBndrsDemandInfo [] ds = ASSERT( null ds ) []
 setBndrsDemandInfo bs _  = pprPanic "setBndrsDemandInfo" (ppr bs)
 
-annotateBndr :: AnalEnv -> DmdType DmdEnv' -> Var -> (DmdType DmdEnv', Var)
+annotateBndr :: AnalEnv -> DmdType DmdTree -> Var -> (DmdType DmdTree, Var)
 -- The returned env has the var deleted
 -- The returned var is annotated with demand info
 -- according to the result demand of the provided demand type
@@ -849,7 +849,7 @@ annotateBndr env dmd_ty var
   where
     (dmd_ty', dmd) = findBndrDmd env False dmd_ty var
 
-annotateLamBndrs :: AnalEnv -> DFunFlag -> DmdType DmdEnv' -> [Var] -> (DmdType DmdEnv', [Var])
+annotateLamBndrs :: AnalEnv -> DFunFlag -> DmdType DmdTree -> [Var] -> (DmdType DmdTree, [Var])
 annotateLamBndrs env args_of_dfun ty bndrs = mapAccumR annotate ty bndrs
   where
     annotate dmd_ty bndr
@@ -858,9 +858,9 @@ annotateLamBndrs env args_of_dfun ty bndrs = mapAccumR annotate ty bndrs
 
 annotateLamIdBndr :: AnalEnv
                   -> DFunFlag          -- is this lambda at the top of the RHS of a dfun?
-                  -> DmdType DmdEnv'   -- Demand type of body
+                  -> DmdType DmdTree   -- Demand type of body
                   -> Id                -- Lambda binder
-                  -> (DmdType DmdEnv', -- Demand type of lambda
+                  -> (DmdType DmdTree, -- Demand type of lambda
                       Id)              -- and binder annotated with demand
 
 annotateLamIdBndr env arg_of_dfun dmd_ty id
@@ -880,9 +880,9 @@ annotateLamIdBndr env arg_of_dfun dmd_ty id
     main_ty = addDemand dmd dmd_ty'
     (dmd_ty', dmd) = findBndrDmd env arg_of_dfun dmd_ty id
 
-deleteFVs :: DmdType DmdEnv' -> [Var] -> DmdType DmdEnv'
+deleteFVs :: DmdType DmdTree -> [Var] -> DmdType DmdTree
 deleteFVs (DmdType fvs dmds res) bndrs
-  = DmdType (delDmdEnvList' fvs bndrs) dmds res
+  = DmdType (delDmdTreeList fvs bndrs) dmds res
 
 {-
 Note [CPR for sum types]
@@ -1225,7 +1225,7 @@ addDataConStrictness con ds
                 , not (isAbsDmd dmd) = dmd `bothDmd` seqDmd
                 | otherwise          = dmd
 
-findBndrsDmds :: AnalEnv -> DmdType DmdEnv' -> [Var] -> (DmdType DmdEnv', [Demand])
+findBndrsDmds :: AnalEnv -> DmdType DmdTree -> [Var] -> (DmdType DmdTree, [Demand])
 -- Return the demands on the Ids in the [Var]
 findBndrsDmds env dmd_ty bndrs
   = go dmd_ty bndrs
@@ -1237,12 +1237,12 @@ findBndrsDmds env dmd_ty bndrs
                     in (dmd_ty2, dmd : dmds)
       | otherwise = go dmd_ty bs
 
-findBndrDmd :: AnalEnv -> Bool -> DmdType DmdEnv' -> Id -> (DmdType DmdEnv', Demand)
+findBndrDmd :: AnalEnv -> Bool -> DmdType DmdTree -> Id -> (DmdType DmdTree, Demand)
 findBndrDmd env arg_of_dfun dmd_ty id = (fmap ungrafted dmd_ty_gp, dmd)
   where
     (dmd_ty_gp, dmd) = findBndrDmdAndGraftPoint env arg_of_dfun dmd_ty id
 
-findBndrDmdAndGraftPoint :: AnalEnv -> Bool -> DmdType DmdEnv' -> Id -> (DmdType (GraftPoint DmdEnv'), Demand)
+findBndrDmdAndGraftPoint :: AnalEnv -> Bool -> DmdType DmdTree -> Id -> (DmdType (GraftPoint DmdTree), Demand)
 -- See Note [Trimming a demand to a type] in Demand.hs
 findBndrDmdAndGraftPoint env arg_of_dfun dmd_ty id
   = (dmd_ty_gp', dmd')

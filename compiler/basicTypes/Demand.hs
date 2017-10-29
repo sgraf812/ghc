@@ -27,7 +27,7 @@ module Demand (
         BothDmdArg, mkBothDmdArg, toBothDmdArg,
 
         DmdEnv, emptyDmdEnv,
-        DmdEnv', emptyDmdEnv', unitDmdEnv', embedDmdEnv', lubDmdEnv', bothDmdEnv', nopDmdType', botDmdType', delDmdEnvList', splitFVs', flattenDmdEnv',
+        DmdTree, emptyDmdTree, unitDmdTree, embedDmdTree, lubDmdTree, bothDmdTree, nopDmdType', botDmdType', delDmdTreeList, splitFVs', flattenDmdTree,
         GraftPoint, graft, ungrafted,
         peelFV, findIdDemand,
 
@@ -846,7 +846,7 @@ splitFVs is_thunk rhs_fvs
       | otherwise = ( addToUFM_Directly lazy_fv uniq (JD { sd = Lazy, ud = u })
                     , addToUFM_Directly sig_fv  uniq (JD { sd = s,    ud = Abs }) )
 
-splitFVs' :: Bool -> DmdEnv' -> (DmdEnv', DmdEnv')
+splitFVs' :: Bool -> DmdTree -> (DmdTree, DmdTree)
 splitFVs' is_thunk rhs_fvs = (fst <$> split_fvs, snd <$> split_fvs)
   where
     split_fvs = splitFVs is_thunk <$> rhs_fvs
@@ -1206,7 +1206,7 @@ data AndOrTree a
   -- ^ We need this constructor because of postProcessDmdEnv. 'fmap (fmap (postProcessDmdEnv ds))' does not work for recovering from Divergence.
   deriving (Eq, Functor)
 
-type DmdEnv' = AndOrTree (VarEnv Demand)
+type DmdTree = AndOrTree (VarEnv Demand)
 
 newtype GraftPoint a = GraftPoint ((a -> a) -> a)
 
@@ -1216,26 +1216,26 @@ graft modify (GraftPoint point) = point modify
 ungrafted :: GraftPoint a -> a
 ungrafted = graft id
 
-emptyDmdEnv' :: DmdEnv'
-emptyDmdEnv' = Lit emptyVarEnv
+emptyDmdTree :: DmdTree
+emptyDmdTree = Lit emptyVarEnv
 
-unitDmdEnv' :: Var -> Demand -> DmdEnv'
-unitDmdEnv' id dmd = Lit (unitVarEnv id dmd)
+unitDmdTree :: Var -> Demand -> DmdTree
+unitDmdTree id dmd = Lit (unitVarEnv id dmd)
 
-embedDmdEnv' :: DmdEnv -> DmdEnv'
-embedDmdEnv' = Lit
+embedDmdTree :: DmdEnv -> DmdTree
+embedDmdTree = Lit
 
-bothDmdEnv' :: DmdEnv' -> Termination r1 -> DmdEnv' -> Termination r2 -> DmdEnv'
-bothDmdEnv' fv1 t1 fv2 t2 = And fv1 (() <$ t1) fv2 (() <$ t2)
+bothDmdTree :: DmdTree -> Termination r1 -> DmdTree -> Termination r2 -> DmdTree
+bothDmdTree fv1 t1 fv2 t2 = And fv1 (() <$ t1) fv2 (() <$ t2)
 
-lubDmdEnv' :: DmdEnv' -> Termination r1 -> DmdEnv' -> Termination r2 -> DmdEnv'
-lubDmdEnv' fv1 t1 fv2 t2 = Or fv1 (() <$ t1) fv2 (() <$ t2)
+lubDmdTree :: DmdTree -> Termination r1 -> DmdTree -> Termination r2 -> DmdTree
+lubDmdTree fv1 t1 fv2 t2 = Or fv1 (() <$ t1) fv2 (() <$ t2)
 
-postProcessDmdEnv' :: DmdShell -> DmdEnv' -> DmdEnv'
-postProcessDmdEnv' = Multiply
+postProcessDmdTree :: DmdShell -> DmdTree -> DmdTree
+postProcessDmdTree = Multiply
 
-flattenDmdEnv' :: DmdEnv' -> DmdEnv
-flattenDmdEnv' = go
+flattenDmdTree :: DmdTree -> DmdEnv
+flattenDmdTree = go
   where
     go env =
       case env of
@@ -1246,7 +1246,7 @@ flattenDmdEnv' = go
           plusVarEnv_CD lubDmd (go fv1) (defaultDmd t1) (go fv2) (defaultDmd t2)
         Multiply ds@(JD { sd = ss, ud = us }) fv ->
           case (ss, us) of
-            -- TODO: do this in the smart constructor (postProcessDmdEnv')
+            -- TODO: do this in the smart constructor (postProcessDmdTree)
             -- For the Absent case just discard all usage information
             -- We only processed the thing at all to analyse the body
             -- See Note [Always analyse in virgin pass]
@@ -1257,8 +1257,8 @@ flattenDmdEnv' = go
             (Str VanStr _, Use One _) -> go fv
             _ -> mapVarEnv (postProcessDmd ds) (go fv)
 
-lookupDmdEnv' :: DmdEnv' -> Termination r -> Var -> Demand
-lookupDmdEnv' fv res id = go fv (() <$ res)
+lookupDmdTree :: DmdTree -> Termination r -> Var -> Demand
+lookupDmdTree fv res id = go fv (() <$ res)
   where
     go fv res =
       case fv of
@@ -1267,11 +1267,11 @@ lookupDmdEnv' fv res id = go fv (() <$ res)
         Or fv1 t1 fv2 t2 -> lubDmd (go fv1 t1) (go fv2 t2)
         Multiply ds fv -> postProcessDmd ds (go fv res)
 
-delDmdEnv' :: DmdEnv' -> Var -> DmdEnv'
-delDmdEnv' fv id = fmap (`delVarEnv` id) fv
+delDmdTree :: DmdTree -> Var -> DmdTree
+delDmdTree fv id = fmap (`delVarEnv` id) fv
 
-delDmdEnvRememberGraftPoint' :: DmdEnv' -> Var -> GraftPoint DmdEnv'
-delDmdEnvRememberGraftPoint' fv var = GraftPoint (go fv `orElse` const fv)
+delDmdTreeRememberGraftPoint :: DmdTree -> Var -> GraftPoint DmdTree
+delDmdTreeRememberGraftPoint fv var = GraftPoint (go fv `orElse` const fv)
   where
     go fv =
       case fv of
@@ -1293,8 +1293,8 @@ delDmdEnvRememberGraftPoint' fv var = GraftPoint (go fv `orElse` const fv)
         (Just gp1, Nothing) -> Just (\modify -> f (gp1 modify) fv2)
         (Nothing, Just gp2) -> Just (\modify -> f fv1 (gp2 modify))
 
-delDmdEnvList' :: DmdEnv' -> [Var] -> DmdEnv'
-delDmdEnvList' fv ids = fmap (`delVarEnvList` ids) fv
+delDmdTreeList :: DmdTree -> [Var] -> DmdTree
+delDmdTreeList fv ids = fmap (`delVarEnvList` ids) fv
 
 instance Outputable a => Outputable (AndOrTree a) where
   ppr (Lit a) = text "Lit" <+> parens (ppr a)
@@ -1378,7 +1378,7 @@ instance Eq (DmdType DmdEnv) where
          -- Unique order, it is the same order for both
                               && ds1 == ds2 && res1 == res2
 
-lubDmdType :: DmdType DmdEnv' -> DmdType DmdEnv' -> DmdType DmdEnv'
+lubDmdType :: DmdType DmdTree -> DmdType DmdTree -> DmdType DmdTree
 lubDmdType d1 d2
   = DmdType lub_fv lub_ds lub_res
   where
@@ -1386,7 +1386,7 @@ lubDmdType d1 d2
     (DmdType fv1 ds1 r1) = ensureArgs n d1
     (DmdType fv2 ds2 r2) = ensureArgs n d2
 
-    lub_fv  = lubDmdEnv' fv1 r1 fv2 r2
+    lub_fv  = lubDmdTree fv1 r1 fv2 r2
     lub_ds  = zipWithEqual "lubDmdType" lubDmd ds1 ds2
     lub_res = lubDmdResult r1 r2
 
@@ -1400,26 +1400,26 @@ the demand put on arguments, nor cpr information. So we make that explicit by
 only passing the relevant information.
 -}
 
-type BothDmdArg = (DmdEnv', Termination ())
+type BothDmdArg = (DmdTree, Termination ())
 
-mkBothDmdArg :: DmdEnv' -> BothDmdArg
+mkBothDmdArg :: DmdTree -> BothDmdArg
 mkBothDmdArg env = (env, Dunno ())
 
-toBothDmdArg :: DmdType DmdEnv' -> BothDmdArg
+toBothDmdArg :: DmdType DmdTree -> BothDmdArg
 toBothDmdArg (DmdType fv _ r) = (fv, () <$ r)
 
-bothDmdType :: DmdType DmdEnv' -> BothDmdArg -> DmdType DmdEnv'
+bothDmdType :: DmdType DmdTree -> BothDmdArg -> DmdType DmdTree
 bothDmdType (DmdType fv1 ds1 r1) (fv2, t2)
     -- See Note [Asymmetry of 'both' for DmdType and DmdResult]
     -- 'both' takes the argument/result info from its *first* arg,
     -- using its second arg just for its free-var info.
-  = DmdType (bothDmdEnv' fv1 r1 fv2 t2)
+  = DmdType (bothDmdTree fv1 r1 fv2 t2)
             ds1
             (r1 `bothDmdResult` t2)
 
 -- TODO
-instance Outputable (DmdType DmdEnv') where
-  ppr (DmdType fv ds res) = ppr (DmdType (flattenDmdEnv' fv) ds res)
+instance Outputable (DmdType DmdTree) where
+  ppr (DmdType fv ds res) = ppr (DmdType (flattenDmdTree fv) ds res)
 
 instance Outputable (DmdType DmdEnv) where
   ppr (DmdType fv ds res)
@@ -1448,10 +1448,10 @@ exnDmdType = DmdType emptyDmdEnv [] exnRes
 -- (lazy, absent, no CPR information, no termination information).
 -- Note that it is ''not'' the top of the lattice (which would be "may use everything"),
 -- so it is (no longer) called topDmd
-nopDmdType', botDmdType', exnDmdType' :: DmdType DmdEnv'
-nopDmdType' = DmdType emptyDmdEnv' [] topRes
-botDmdType' = DmdType emptyDmdEnv' [] botRes
-exnDmdType' = DmdType emptyDmdEnv' [] exnRes
+nopDmdType', botDmdType', exnDmdType' :: DmdType DmdTree
+nopDmdType' = DmdType emptyDmdTree [] topRes
+botDmdType' = DmdType emptyDmdTree [] botRes
+exnDmdType' = DmdType emptyDmdTree [] exnRes
 
 cprProdDmdType :: Arity -> DmdType DmdEnv
 cprProdDmdType arity
@@ -1510,7 +1510,7 @@ splitDmdTy ty@(DmdType _ [] res_ty)       = (resTypeArgDmd res_ty, ty)
 -- * We have to kill definite divergence
 -- * We can keep CPR information.
 -- See Note [IO hack in the demand analyser] in DmdAnal
-deferAfterIO :: DmdType DmdEnv' -> DmdType DmdEnv'
+deferAfterIO :: DmdType DmdTree -> DmdType DmdTree
 deferAfterIO d@(DmdType _ _ res) =
     case d `lubDmdType` nopDmdType' of
         DmdType fv ds _ -> DmdType fv ds (defer_res res)
@@ -1557,7 +1557,7 @@ toCleanDmd (JD { sd = s, ud = u }) expr_ty
 -- a function's argument demand. So we only care about what
 -- does to free variables, and whether it terminates.
 -- see Note [The need for BothDmdArg]
-postProcessDmdType :: DmdShell -> DmdType DmdEnv' -> BothDmdArg
+postProcessDmdType :: DmdShell -> DmdType DmdTree -> BothDmdArg
 postProcessDmdType du@(JD { sd = ss }) (DmdType fv _ res_ty)
     = (postProcessDmdEnv du fv, () <$ postProcessDmdResult ss res_ty)
 
@@ -1567,13 +1567,13 @@ postProcessDmdResult (Str ExnStr _) ThrowsExn = topRes  -- Key point!
 -- Note that only ThrowsExn results can be caught, not Diverges
 postProcessDmdResult _              res       = res
 
-postProcessDmdEnv :: DmdShell -> DmdEnv' -> DmdEnv'
-postProcessDmdEnv = postProcessDmdEnv'
+postProcessDmdEnv :: DmdShell -> DmdTree -> DmdTree
+postProcessDmdEnv = postProcessDmdTree
 
-reuseEnv :: DmdEnv' -> DmdEnv'
+reuseEnv :: DmdTree -> DmdTree
 reuseEnv = fmap (fmap (postProcessDmd (JD { sd = Str VanStr (), ud = Use Many () })))
 
-postProcessUnsat :: DmdShell -> DmdType DmdEnv' -> DmdType DmdEnv'
+postProcessUnsat :: DmdShell -> DmdType DmdTree -> DmdType DmdTree
 postProcessUnsat ds@(JD { sd = ss }) (DmdType fv args res_ty)
   = DmdType (postProcessDmdEnv ds fv)
             (map (postProcessDmd ds) args)
@@ -1674,20 +1674,20 @@ peelCallDmd, which peels only one level, but also returns the demand put on the
 body of the function.
 -}
 
-peelFV :: DmdType DmdEnv' -> Var -> (DmdType (GraftPoint DmdEnv'), Demand)
+peelFV :: DmdType DmdTree -> Var -> (DmdType (GraftPoint DmdTree), Demand)
 peelFV (DmdType fv ds res) id = -- pprTrace "rfv" (ppr id <+> ppr dmd $$ ppr fv)
                                (DmdType fv_gp' ds res, dmd)
   where
-  fv_gp' = fv `delDmdEnvRememberGraftPoint'` id
+  fv_gp' = fv `delDmdTreeRememberGraftPoint` id
   -- See Note [Default demand on free variables]
-  dmd  = lookupDmdEnv' fv res id
+  dmd  = lookupDmdTree fv res id
 
 addDemand :: Demand -> DmdType env -> DmdType env
 addDemand dmd (DmdType fv ds res) = DmdType fv (dmd:ds) res
 
-findIdDemand :: DmdType DmdEnv' -> Var -> Demand
+findIdDemand :: DmdType DmdTree -> Var -> Demand
 findIdDemand (DmdType fv _ res) id
-  = lookupDmdEnv' fv res id
+  = lookupDmdTree fv res id
 
 {-
 Note [Default demand on free variables]
@@ -1875,15 +1875,15 @@ cprProdSig arity = StrictSig (cprProdDmdType arity)
 seqStrictSig :: StrictSig -> ()
 seqStrictSig (StrictSig ty) = seqDmdType ty
 
-dmdTransformSig :: StrictSig -> CleanDemand -> DmdType DmdEnv'
+dmdTransformSig :: StrictSig -> CleanDemand -> DmdType DmdTree
 -- (dmdTransformSig fun_sig dmd) considers a call to a function whose
 -- signature is fun_sig, with demand dmd.  We return the demand
 -- that the function places on its context (eg its args)
 dmdTransformSig (StrictSig dmd_ty@(DmdType _ arg_ds _)) cd
-  = postProcessUnsat (peelManyCalls (length arg_ds) cd) (embedDmdEnv' <$> dmd_ty)
+  = postProcessUnsat (peelManyCalls (length arg_ds) cd) (embedDmdTree <$> dmd_ty)
     -- see Note [Demands from unsaturated function calls]
 
-dmdTransformDataConSig :: Arity -> StrictSig -> CleanDemand -> DmdType DmdEnv'
+dmdTransformDataConSig :: Arity -> StrictSig -> CleanDemand -> DmdType DmdTree
 -- Same as dmdTransformSig but for a data constructor (worker),
 -- which has a special kind of demand transformer.
 -- If the constructor is saturated, we feed the demand on
@@ -1892,7 +1892,7 @@ dmdTransformDataConSig arity (StrictSig (DmdType _ _ con_res))
                              (JD { sd = str, ud = abs })
   | Just str_dmds <- go_str arity str
   , Just abs_dmds <- go_abs arity abs
-  = DmdType emptyDmdEnv' (mkJointDmds str_dmds abs_dmds) con_res
+  = DmdType emptyDmdTree (mkJointDmds str_dmds abs_dmds) con_res
                 -- Must remember whether it's a product, hence con_res, not TopRes
 
   | otherwise   -- Not saturated
@@ -1907,7 +1907,7 @@ dmdTransformDataConSig arity (StrictSig (DmdType _ _ con_res))
     go_abs n (UCall One u') = go_abs (n-1) u'
     go_abs _ _              = Nothing
 
-dmdTransformDictSelSig :: StrictSig -> CleanDemand -> DmdType DmdEnv'
+dmdTransformDictSelSig :: StrictSig -> CleanDemand -> DmdType DmdTree
 -- Like dmdTransformDataConSig, we have a special demand transformer
 -- for dictionary selectors.  If the selector is saturated (ie has one
 -- argument: the dictionary), we feed the demand on the result into
@@ -1916,7 +1916,7 @@ dmdTransformDictSelSig (StrictSig (DmdType _ [dict_dmd] _)) cd
    | (cd',defer_use) <- peelCallDmd cd
    , Just jds <- splitProdDmd_maybe dict_dmd
    = postProcessUnsat defer_use $
-     DmdType emptyDmdEnv' [mkOnceUsedDmd $ mkProdDmd $ map (enhance cd') jds] topRes
+     DmdType emptyDmdTree [mkOnceUsedDmd $ mkProdDmd $ map (enhance cd') jds] topRes
    | otherwise
    = nopDmdType'              -- See Note [Demand transformer for a dictionary selector]
   where
