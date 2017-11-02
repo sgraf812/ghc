@@ -300,7 +300,6 @@ dmdAnal' env dmd (Let (NonRec id rhs) body)
       -- so if we have a trival right hand side, fall through to that.
   = (final_ty, Let (NonRec id' rhs') body')
   where
-    -- Why aren't unlifted lets ('let x = 5#') converted to case of?
     is_unlifted_let             = isUnliftedType (exprType rhs)
     (body_ty, body')            = dmdAnal env dmd body
     (body_gp, id_dmd)           = findBndrDmdAndGraftPoint env notArgOfDfun body_ty id
@@ -312,8 +311,8 @@ dmdAnal' env dmd (Let (NonRec id rhs) body)
     -- 'Termination ()' with which to 'bothDmdTree' the RHS's into the body's
     -- 'DmdTree'. 'topRes' amounts to the most conservative assumption possible.
     final_ty
-      | is_unlifted_let         = fmap ungrafted body_gp `bothDmdType` rhs_ty
-      | otherwise               = fmap (graft (\env -> bothDmdTree env (() <$ topRes) rhs_env rhs_term)) body_gp
+      | is_unlifted_let || True         = fmap ungrafted body_gp `bothDmdType` rhs_ty
+      | otherwise               = fmap (graft (\env -> bothDmdTree env topRes rhs_env rhs_term)) body_gp
 
 dmdAnal' env dmd (Let (NonRec id rhs) body)
   = (body_ty2, Let (NonRec id2 rhs') body')
@@ -802,7 +801,7 @@ coercionDmdEnv co = embedDmdTree (topDmd <$ getUniqSet (coVarsOfCo co))
 
 addVarDmd :: DmdType DmdTree -> Var -> Demand -> DmdType DmdTree
 addVarDmd (DmdType fv ds res) var dmd
-  = DmdType (bothDmdTree fv res (unitDmdTree var dmd) topRes) ds res
+  = DmdType (bothDmdTree fv topRes (unitDmdTree var dmd) topRes) ds res
 
 addLazyFVs :: DmdType DmdTree -> DmdTree -> DmdType DmdTree
 addLazyFVs dmd_ty lazy_fvs

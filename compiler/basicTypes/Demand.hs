@@ -1258,17 +1258,15 @@ flattenDmdTree = go
             _ -> mapVarEnv (postProcessDmd ds) (go fv)
 
 lookupDmdTree :: DmdTree -> Termination r -> Var -> Demand
-lookupDmdTree fv res id = go fv (() <$ res)
+lookupDmdTree fv res id = dmd
   where
+    dmd = go fv (() <$ res)
     go fv res =
       case fv of
         Lit dmds -> lookupVarEnv dmds id `orElse` defaultDmd res
         And fv1 t1 fv2 t2 -> bothDmd (go fv1 t1) (go fv2 t2)
         Or fv1 t1 fv2 t2 -> lubDmd (go fv1 t1) (go fv2 t2)
         Multiply ds fv -> postProcessDmd ds (go fv res)
-
-delDmdTree :: DmdTree -> Var -> DmdTree
-delDmdTree fv id = fmap (`delVarEnv` id) fv
 
 delDmdTreeRememberGraftPoint :: DmdTree -> Var -> GraftPoint DmdTree
 delDmdTreeRememberGraftPoint fv var = GraftPoint (go fv `orElse` const fv)
@@ -1298,8 +1296,8 @@ delDmdTreeList fv ids = fmap (`delVarEnvList` ids) fv
 
 instance Outputable a => Outputable (AndOrTree a) where
   ppr (Lit a) = text "Lit" <+> parens (ppr a)
-  ppr (And fv1 t1 fv2 t2) = hang (text "And") 2 ((char (head (show t1)) <+> ppr fv1) $$ (char (head (show t2)) <+> ppr fv2))
-  ppr (Or fv1 t1 fv2 t2) = hang (text "Or") 2 ((char (head (show t1)) <+> ppr fv1) $$ (char (head (show t2)) <+> ppr fv2))
+  ppr (And fv1 t1 fv2 t2) = hang (text "And") 2 ((ppr t1 <+> ppr fv1) $$ (ppr t2 <+> ppr fv2))
+  ppr (Or fv1 t1 fv2 t2) = hang (text "Or") 2 ((ppr t1 <+> ppr fv1) $$ (ppr t2 <+> ppr fv2))
   ppr (Multiply ds fv) = hang (text "Multiply" <+> text (show ds)) 2 (ppr fv)
 
 data DmdType env = DmdType
@@ -1448,10 +1446,9 @@ exnDmdType = DmdType emptyDmdEnv [] exnRes
 -- (lazy, absent, no CPR information, no termination information).
 -- Note that it is ''not'' the top of the lattice (which would be "may use everything"),
 -- so it is (no longer) called topDmd
-nopDmdType', botDmdType', exnDmdType' :: DmdType DmdTree
+nopDmdType', botDmdType' :: DmdType DmdTree
 nopDmdType' = DmdType emptyDmdTree [] topRes
 botDmdType' = DmdType emptyDmdTree [] botRes
-exnDmdType' = DmdType emptyDmdTree [] exnRes
 
 cprProdDmdType :: Arity -> DmdType DmdEnv
 cprProdDmdType arity
