@@ -1059,7 +1059,7 @@ isTopRes :: DmdResult -> Bool
 isTopRes (Dunno NoCPR) = True
 isTopRes _             = False
 
-isBotRes :: DmdResult -> Bool
+isBotRes :: Termination r -> Bool
 -- True if the result diverges or throws an exception
 isBotRes Diverges   = True
 isBotRes ThrowsExn  = True
@@ -1226,13 +1226,34 @@ embedDmdTree :: DmdEnv -> DmdTree
 embedDmdTree = Lit
 
 bothDmdTree :: DmdTree -> Termination r1 -> DmdTree -> Termination r2 -> DmdTree
+bothDmdTree (Lit env) Dunno{} fv _
+  | isEmptyVarEnv env = fv
+bothDmdTree fv _ (Lit env) Dunno{}
+  | isEmptyVarEnv env = fv
+bothDmdTree (Lit env1) t1 (Lit env2) t2
+  = Lit (plusVarEnv_CD bothDmd env1 (defaultDmd t1) env2 (defaultDmd t2))
 bothDmdTree fv1 t1 fv2 t2 = And fv1 (() <$ t1) fv2 (() <$ t2)
 
 lubDmdTree :: DmdTree -> Termination r1 -> DmdTree -> Termination r2 -> DmdTree
+lubDmdTree (Lit env) t fv _
+  | isEmptyVarEnv env, isBotRes t = fv
+lubDmdTree fv _ (Lit env) t
+  | isEmptyVarEnv env, isBotRes t = fv
 lubDmdTree fv1 t1 fv2 t2 = Or fv1 (() <$ t1) fv2 (() <$ t2)
 
 postProcessDmdTree :: DmdShell -> DmdTree -> DmdTree
-postProcessDmdTree = Multiply
+postProcessDmdTree _ (Lit env) | isEmptyVarEnv env = Lit emptyVarEnv
+postProcessDmdTree ds@(JD { sd = ss, ud = us }) fv =
+  case (ss, us) of
+    -- For the Absent case just discard all usage information
+    -- We only processed the thing at all to analyse the body
+    -- See Note [Always analyse in virgin pass]
+    (_, Abs)                  -> emptyDmdTree
+    -- In this case (postProcessDmd ds) == id; avoid a redundant rebuild
+    -- of the environment. Be careful, bad things will happen if this doesn't
+    -- match postProcessDmd (see #13977).
+    (Str VanStr _, Use One _) -> fv
+    _                         -> Multiply ds fv
 
 flattenDmdTree :: DmdTree -> DmdEnv
 flattenDmdTree = go
@@ -1240,33 +1261,29 @@ flattenDmdTree = go
     go env =
       case env of
         Lit fv -> fv
-        And fv1 t1 fv2 t2 -> 
+        And fv1 t1 fv2 t2 ->
           plusVarEnv_CD bothDmd (go fv1) (defaultDmd t1) (go fv2) (defaultDmd t2)
-        Or fv1 t1 fv2 t2 -> 
+        Or fv1 t1 fv2 t2 ->
           plusVarEnv_CD lubDmd (go fv1) (defaultDmd t1) (go fv2) (defaultDmd t2)
-        Multiply ds@(JD { sd = ss, ud = us }) fv ->
-          case (ss, us) of
-            -- TODO: do this in the smart constructor (postProcessDmdTree)
-            -- For the Absent case just discard all usage information
-            -- We only processed the thing at all to analyse the body
-            -- See Note [Always analyse in virgin pass]
-            (_, Abs) -> emptyDmdEnv
-            -- In this case (postProcessDmd ds) == id; avoid a redundant rebuild
-            -- of the environment. Be careful, bad things will happen if this doesn't
-            -- match postProcessDmd (see #13977).
-            (Str VanStr _, Use One _) -> go fv
-            _ -> mapVarEnv (postProcessDmd ds) (go fv)
+        Multiply ds fv ->
+          mapVarEnv (postProcessDmd ds) (go fv)
 
 lookupDmdTree :: DmdTree -> Termination r -> Var -> Demand
 lookupDmdTree fv res id = dmd
   where
-    dmd = go fv (() <$ res)
-    go fv res =
+    orDefaultDmd maybe_dmd res = maybe_dmd `orElse` defaultDmd res
+    dmd = go fv `orDefaultDmd` res
+    combine f fv1 t1 fv2 t2 =
+      case (go fv1, go fv2) of
+        (Nothing, Nothing) -> Nothing
+        (maybe_dmd1, maybe_dmd2) ->
+          Just (f (maybe_dmd1 `orDefaultDmd` t1) (maybe_dmd2 `orDefaultDmd` t2))
+    go fv =
       case fv of
-        Lit dmds -> lookupVarEnv dmds id `orElse` defaultDmd res
-        And fv1 t1 fv2 t2 -> bothDmd (go fv1 t1) (go fv2 t2)
-        Or fv1 t1 fv2 t2 -> lubDmd (go fv1 t1) (go fv2 t2)
-        Multiply ds fv -> postProcessDmd ds (go fv res)
+        Lit dmds          -> lookupVarEnv dmds id
+        Multiply ds fv    -> postProcessDmd ds <$> go fv
+        And fv1 t1 fv2 t2 -> combine bothDmd fv1 t1 fv2 t2
+        Or fv1 t1 fv2 t2  -> combine lubDmd fv1 t1 fv2 t2
 
 delDmdTreeRememberGraftPoint :: DmdTree -> Var -> GraftPoint DmdTree
 delDmdTreeRememberGraftPoint fv var = GraftPoint (go fv `orElse` const fv)
@@ -1276,29 +1293,34 @@ delDmdTreeRememberGraftPoint fv var = GraftPoint (go fv `orElse` const fv)
         Lit env
           | elemVarEnv var env -> Just ($ Lit (delVarEnv env var))
           | otherwise -> Nothing
-        Multiply ds fv -> fmap (Multiply ds .) (go fv)
-        And fv1 t1 fv2 t2 -> and_or (\fv1' fv2' -> And fv1' t1 fv2' t2) fv1 fv2
-        Or fv1 t1 fv2 t2 -> and_or (\fv1' fv2' -> Or fv1' t1 fv2' t2) fv1 fv2
+        Multiply ds fv -> fmap (postProcessDmdTree ds .) (go fv)
+        And fv1 t1 fv2 t2 -> and_or (\fv1' fv2' -> bothDmdTree fv1' t1 fv2' t2) fv1 fv2
+        Or fv1 t1 fv2 t2 -> and_or (\fv1' fv2' -> lubDmdTree fv1' t1 fv2' t2) fv1 fv2
     and_or f fv1 fv2 =
       case (go fv1, go fv2) of
         -- No occurences of the variable to delete at all
-        (Nothing, Nothing) -> Nothing
+        (Nothing, Nothing)   -> Nothing
         -- Occurences in both branches.
         -- This is the most recent common ancestor of both branches
         (Just gp1, Just gp2) -> Just ($ f (gp1 id) (gp2 id))
         -- The var only occured in one branch. This is not the MRCA.
         -- Forward to the grafting point of the respective child.
-        (Just gp1, Nothing) -> Just (\modify -> f (gp1 modify) fv2)
-        (Nothing, Just gp2) -> Just (\modify -> f fv1 (gp2 modify))
+        (Just gp1, Nothing)  -> Just (\modify -> f (gp1 modify) fv2)
+        (Nothing, Just gp2)  -> Just (\modify -> f fv1 (gp2 modify))
 
 delDmdTreeList :: DmdTree -> [Var] -> DmdTree
-delDmdTreeList fv ids = fmap (`delVarEnvList` ids) fv
+delDmdTreeList fv ids = go fv
+  where
+    go (Lit env)           = Lit (delVarEnvList env ids)
+    go (Multiply ds fv)    = postProcessDmdTree ds (go fv)
+    go (And fv1 t1 fv2 t2) = bothDmdTree (go fv1) t1 (go fv2) t2
+    go (Or fv1 t1 fv2 t2)  = lubDmdTree (go fv1) t1 (go fv2) t2
 
 instance Outputable a => Outputable (AndOrTree a) where
-  ppr (Lit a) = text "Lit" <+> parens (ppr a)
-  ppr (And fv1 t1 fv2 t2) = hang (text "And") 2 ((ppr t1 <+> ppr fv1) $$ (ppr t2 <+> ppr fv2))
-  ppr (Or fv1 t1 fv2 t2) = hang (text "Or") 2 ((ppr t1 <+> ppr fv1) $$ (ppr t2 <+> ppr fv2))
-  ppr (Multiply ds fv) = hang (text "Multiply" <+> text (show ds)) 2 (ppr fv)
+  ppr (Lit a) = parens (text "Lit" <+> ppr a)
+  ppr (And fv1 t1 fv2 t2) = parens (hang (text "And") 2 ((ppr t1 <+> ppr fv1) $$ (ppr t2 <+> ppr fv2)))
+  ppr (Or fv1 t1 fv2 t2) = parens (hang (text "Or") 2 ((ppr t1 <+> ppr fv1) $$ (ppr t2 <+> ppr fv2)))
+  ppr (Multiply ds fv) = parens (hang (text "Multiply" <+> text (show ds)) 2 (ppr fv))
 
 data DmdType env = DmdType
                       env           -- Demand on explicitly-mentioned
@@ -1568,7 +1590,7 @@ postProcessDmdEnv :: DmdShell -> DmdTree -> DmdTree
 postProcessDmdEnv = postProcessDmdTree
 
 reuseEnv :: DmdTree -> DmdTree
-reuseEnv = fmap (fmap (postProcessDmd (JD { sd = Str VanStr (), ud = Use Many () })))
+reuseEnv = postProcessDmdTree (JD { sd = Str VanStr (), ud = Use Many () })
 
 postProcessUnsat :: DmdShell -> DmdType DmdTree -> DmdType DmdTree
 postProcessUnsat ds@(JD { sd = ss }) (DmdType fv args res_ty)
