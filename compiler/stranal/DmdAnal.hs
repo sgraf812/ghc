@@ -13,32 +13,32 @@ module DmdAnal ( dmdAnalProgram ) where
 
 #include "HsVersions.h"
 
-import GhcPrelude
+import           GhcPrelude
 
-import DynFlags
-import WwLib            ( findTypeShape, deepSplitProductType_maybe )
-import Demand   -- All of it
-import CoreSyn
-import CoreSeq          ( seqBinds )
-import Outputable
-import VarEnv
-import BasicTypes
-import Data.List
-import DataCon
-import Id
-import CoreUtils        ( exprIsHNF, exprType, exprIsTrivial )
-import TyCon
-import Type
-import Coercion         ( Coercion, coVarsOfCo )
-import FamInstEnv
-import Util
-import Maybes           ( isJust )
-import TysWiredIn
-import TysPrim          ( realWorldStatePrimTy )
-import ErrUtils         ( dumpIfSet_dyn )
-import Name             ( getName, stableNameCmp )
-import Data.Function    ( on )
-import UniqSet
+import           BasicTypes
+import           Coercion      (Coercion, coVarsOfCo)
+import           CoreSeq       (seqBinds)
+import           CoreSyn
+import           CoreUtils     (exprIsHNF, exprIsTrivial, exprType)
+import           Data.Function (on)
+import           Data.List
+import           DataCon
+import           Demand
+import           DynFlags
+import           ErrUtils      (dumpIfSet_dyn)
+import           FamInstEnv
+import           Id
+import           Maybes        (isJust)
+import           Name          (getName, stableNameCmp)
+import           Outputable
+import           TyCon
+import           Type
+import           TysPrim       (realWorldStatePrimTy)
+import           TysWiredIn
+import           UniqSet
+import           Util
+import           VarEnv
+import           WwLib         (deepSplitProductType_maybe, findTypeShape)
 
 {-
 ************************************************************************
@@ -307,12 +307,12 @@ dmdAnal' env dmd (Let (NonRec id rhs) body)
 
     (rhs_ty@(rhs_env, rhs_term), rhs') = dmdAnalStar env (dmdTransformThunkDmd rhs id_dmd) rhs
     -- Using 'topRes' here, because it's the safest thing to assume.
-    -- The truth is that I can't think of no easy way to determine the 
+    -- The truth is that I can't think of no easy way to determine the
     -- 'Termination ()' with which to 'bothDmdTree' the RHS's into the body's
     -- 'DmdTree'. 'topRes' amounts to the most conservative assumption possible.
     final_ty
-      | is_unlifted_let || True         = fmap ungrafted body_gp `bothDmdType` rhs_ty
-      | otherwise               = fmap (graft (\env -> bothDmdTree env topRes rhs_env rhs_term)) body_gp
+      | is_unlifted_let = fmap ungrafted body_gp `bothDmdType` rhs_ty
+      | otherwise       = fmap (graft (\env -> bothDmdTree env topRes rhs_env rhs_term)) body_gp
 
 dmdAnal' env dmd (Let (NonRec id rhs) body)
   = (body_ty2, Let (NonRec id2 rhs') body')
@@ -692,11 +692,11 @@ unpackTrivial :: CoreExpr -> Maybe Id
 -- Returns (Just v) if the arg is really equal to v, modulo
 -- casts, type applications etc
 -- See Note [Demand analysis for trivial right-hand sides]
-unpackTrivial (Var v)                 = Just v
-unpackTrivial (Cast e _)              = unpackTrivial e
-unpackTrivial (Lam v e) | isTyVar v   = unpackTrivial e
-unpackTrivial (App e a) | isTypeArg a = unpackTrivial e
-unpackTrivial _                       = Nothing
+unpackTrivial (Var v)    = Just v
+unpackTrivial (Cast e _) = unpackTrivial e
+unpackTrivial (Lam v e)  | isTyVar v   = unpackTrivial e
+unpackTrivial (App e a)  | isTypeArg a = unpackTrivial e
+unpackTrivial _          = Nothing
 
 -- | If given the RHS of a let-binding, this 'useLetUp' determines
 -- whether we should process the binding up (body before rhs) or
@@ -708,8 +708,8 @@ unpackTrivial _                       = Nothing
 useLetUp :: Var -> CoreExpr -> Bool
 useLetUp f _         | isJoinId f = False
 useLetUp f (Lam v e) | isTyVar v  = useLetUp f e
-useLetUp _ (Lam _ _)              = False
-useLetUp _ _                      = True
+useLetUp _ (Lam _ _) = False
+useLetUp _ _         = True
 
 
 {- Note [Demand analysis for join points]
@@ -1121,11 +1121,11 @@ notArgOfDfun :: DFunFlag
 notArgOfDfun = False
 
 data AnalEnv
-  = AE { ae_dflags :: DynFlags
-       , ae_sigs   :: SigEnv
-       , ae_virgin :: Bool    -- True on first iteration only
+  = AE { ae_dflags   :: DynFlags
+       , ae_sigs     :: SigEnv
+       , ae_virgin   :: Bool    -- True on first iteration only
                               -- See Note [Initialising strictness]
-       , ae_rec_tc :: RecTcChecker
+       , ae_rec_tc   :: RecTcChecker
        , ae_fam_envs :: FamInstEnvs
  }
 
