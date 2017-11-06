@@ -1202,7 +1202,6 @@ data AndOrTree a
   = Lit a
   | And (AndOrTree a) (Termination ()) (AndOrTree a) (Termination ())
   | Or (AndOrTree a) (Termination ()) (AndOrTree a) (Termination ())
-  | Multiply DmdShell (AndOrTree a)
   -- ^ We need this constructor because of postProcessDmdEnv. 'fmap (fmap (postProcessDmdEnv ds))' does not work for recovering from Divergence.
   deriving (Eq, Functor)
 
@@ -1253,7 +1252,7 @@ postProcessDmdTree ds@(JD { sd = ss, ud = us }) fv =
     -- of the environment. Be careful, bad things will happen if this doesn't
     -- match postProcessDmd (see #13977).
     (Str VanStr _, Use One _) -> fv
-    _                         -> Multiply ds fv
+    _                         -> mapVarEnv (postProcessDmd ds) <$> fv
 
 flattenDmdTree :: DmdTree -> DmdEnv
 flattenDmdTree = go
@@ -1265,8 +1264,6 @@ flattenDmdTree = go
           plusVarEnv_CD bothDmd (go fv1) (defaultDmd t1) (go fv2) (defaultDmd t2)
         Or fv1 t1 fv2 t2 ->
           plusVarEnv_CD lubDmd (go fv1) (defaultDmd t1) (go fv2) (defaultDmd t2)
-        Multiply ds fv ->
-          mapVarEnv (postProcessDmd ds) (go fv)
 
 lookupDmdTree :: DmdTree -> Termination r -> Var -> Demand
 lookupDmdTree fv res id = dmd
@@ -1281,7 +1278,6 @@ lookupDmdTree fv res id = dmd
     go fv =
       case fv of
         Lit dmds          -> lookupVarEnv dmds id
-        Multiply ds fv    -> postProcessDmd ds <$> go fv
         And fv1 t1 fv2 t2 -> combine bothDmd fv1 t1 fv2 t2
         Or fv1 t1 fv2 t2  -> combine lubDmd fv1 t1 fv2 t2
 
@@ -1293,7 +1289,6 @@ delDmdTreeRememberGraftPoint fv var = GraftPoint (go fv `orElse` const fv)
         Lit env
           | elemVarEnv var env -> Just ($ Lit (delVarEnv env var))
           | otherwise -> Nothing
-        Multiply ds fv -> fmap (postProcessDmdTree ds .) (go fv)
         And fv1 t1 fv2 t2 -> and_or (\fv1' fv2' -> bothDmdTree fv1' t1 fv2' t2) fv1 fv2
         Or fv1 t1 fv2 t2 -> and_or (\fv1' fv2' -> lubDmdTree fv1' t1 fv2' t2) fv1 fv2
     and_or f fv1 fv2 =
@@ -1312,7 +1307,6 @@ delDmdTreeList :: DmdTree -> [Var] -> DmdTree
 delDmdTreeList fv ids = go fv
   where
     go (Lit env)           = Lit (delVarEnvList env ids)
-    go (Multiply ds fv)    = postProcessDmdTree ds (go fv)
     go (And fv1 t1 fv2 t2) = bothDmdTree (go fv1) t1 (go fv2) t2
     go (Or fv1 t1 fv2 t2)  = lubDmdTree (go fv1) t1 (go fv2) t2
 
@@ -1320,7 +1314,6 @@ instance Outputable a => Outputable (AndOrTree a) where
   ppr (Lit a) = parens (text "Lit" <+> ppr a)
   ppr (And fv1 t1 fv2 t2) = parens (hang (text "And") 2 ((ppr t1 <+> ppr fv1) $$ (ppr t2 <+> ppr fv2)))
   ppr (Or fv1 t1 fv2 t2) = parens (hang (text "Or") 2 ((ppr t1 <+> ppr fv1) $$ (ppr t2 <+> ppr fv2)))
-  ppr (Multiply ds fv) = parens (hang (text "Multiply" <+> text (show ds)) 2 (ppr fv))
 
 data DmdType env = DmdType
                       env           -- Demand on explicitly-mentioned
@@ -1598,6 +1591,8 @@ postProcessUnsat ds@(JD { sd = ss }) (DmdType fv args res_ty)
             (map (postProcessDmd ds) args)
             (postProcessDmdResult ss res_ty)
 
+-- | \'Multiplies\' (in the sense of 'bothDmd') a 'DmdShell' onto a 'Demand', 
+-- doing the right thing for 'ExnStr' and multi use 'DmdShell's.
 postProcessDmd :: DmdShell -> Demand -> Demand
 postProcessDmd (JD { sd = ss, ud = us }) (JD { sd = s, ud = a})
   = JD { sd = s', ud = a' }
