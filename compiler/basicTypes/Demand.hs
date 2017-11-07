@@ -27,8 +27,8 @@ module Demand (
         BothDmdArg, mkBothDmdArg, toBothDmdArg,
 
         DmdEnv, emptyDmdEnv,
-        DmdTree, emptyDmdTree, unitDmdTree, embedDmdTree, lubDmdTree, bothDmdTree, nopDmdType', botDmdType', delDmdTreeList, splitFVs', flattenDmdTree,
-        GraftPoint, graft, ungrafted,
+        DmdTree, emptyDmdTree, unitDmdTree, embedDmdTree, lubDmdTree, bothDmdTree, nopDmdType', botDmdType', delDmdTreeList, substDmdTree, splitFVs', flattenDmdTree,
+        DmdTreeCtx, fillHoles,
         peelFV, findIdDemand,
 
         DmdResult, CPRResult,
@@ -1227,13 +1227,12 @@ data AndOrTree a
 
 type DmdTree = AndOrTree (VarEnv Demand)
 
-newtype GraftPoint a = GraftPoint ((a -> a) -> a)
+-- | A 'DmdTree' with an arbitrary number of holes, in which
+-- a 'DmdTree' can be plugged.
+newtype DmdTreeCtx = DmdTreeCtx (DmdTree -> DmdTree)
 
-graft :: (a -> a) -> GraftPoint a -> a
-graft modify (GraftPoint point) = point modify
-
-ungrafted :: GraftPoint a -> a
-ungrafted = graft id
+fillHoles :: DmdTree -> DmdTreeCtx -> DmdTree
+fillHoles filler (DmdTreeCtx ctx) = ctx filler
 
 emptyDmdTree :: DmdTree
 emptyDmdTree = Lit emptyVarEnv
@@ -1301,27 +1300,88 @@ lookupDmdTree fv res id = dmd
         And fv1 t1 fv2 t2 -> combine bothDmd fv1 t1 fv2 t2
         Or fv1 t1 fv2 t2  -> combine lubDmd fv1 t1 fv2 t2
 
-delDmdTreeRememberGraftPoint :: DmdTree -> Var -> GraftPoint DmdTree
-delDmdTreeRememberGraftPoint fv var = GraftPoint (go fv `orElse` const fv)
+substDmdTree :: Var -> Type -> (Demand -> Demand) -> (DmdTree, DmdResult) -> DmdTree -> DmdTree
+substDmdTree var ty transform_dmd (clean_rhs_fv, rhs_res) fv = 
+  case go fv of
+    Nothing -> fv
+    Just (_, _, grafted) -> grafted
   where
+    -- This is the actual substitution logic, based on the incoming 'Demand'
+    -- in the subtree where we substitute.
+    -- This has some overlap with 'dmdAnalStar' in DmdAnal.hs.
+    -- The rest of this function is concerned with finding the correct places
+    -- *where* we substitute.
+    graft :: Demand -> DmdTree -> DmdTree
+    graft dmd fv
+      | (dmd_shell, _) <- toCleanDmd (transform_dmd dmd) ty
+      , let rhs_fv = postProcessDmdTree dmd_shell clean_rhs_fv
+      , let rhs_res' = postProcessDmdResult (sd dmd_shell) rhs_res
+      = bothDmdTree rhs_fv rhs_res' fv topRes
+    -- There are mostly two concerns:
+    --   1. Don't destroy sharing
+    --   2. Substitute as near to the leaves as possible, as there we have more
+    --      precise incoming demands available.
+    -- For this we track whether the subtree mentions 'var' through a 'Maybe'
+    -- and if so, we note 
+    --   1. The demand from the subtree 
+    --      ('dmd')
+    --   2. A version of the subtree where we deleted all occurences of 'var'
+    --      ('ungrafted')
+    --   3. A version of the subtree where we additionally 'graft'ed on 
+    --      'clean_rhs_ty' at the bottom-most position possible so far.
+    --      ('grafted')
+    go :: DmdTree -> Maybe (Demand, DmdTree, DmdTree)
     go fv =
       case fv of
         Lit env
-          | elemVarEnv var env -> Just ($ Lit (delVarEnv env var))
-          | otherwise -> Nothing
-        And fv1 t1 fv2 t2 -> and_or (\fv1' fv2' -> bothDmdTree fv1' t1 fv2' t2) fv1 fv2
-        Or fv1 t1 fv2 t2 -> and_or (\fv1' fv2' -> lubDmdTree fv1' t1 fv2' t2) fv1 fv2
-    and_or f fv1 fv2 =
-      case (go fv1, go fv2) of
-        -- No occurences of the variable to delete at all
-        (Nothing, Nothing)   -> Nothing
-        -- Occurences in both branches.
-        -- This is the most recent common ancestor of both branches
-        (Just gp1, Just gp2) -> Just ($ f (gp1 id) (gp2 id))
-        -- The var only occured in one branch. This is not the MRCA.
-        -- Forward to the grafting point of the respective child.
-        (Just gp1, Nothing)  -> Just (\modify -> f (gp1 modify) fv2)
-        (Nothing, Just gp2)  -> Just (\modify -> f fv1 (gp2 modify))
+          | Just dmd <- lookupVarEnv env var
+          , let ungrafted = Lit (delVarEnv env var)
+          -> Just (dmd, ungrafted, graft dmd ungrafted)
+          | otherwise
+          -> Nothing
+        And fv1 t1 fv2 t2 ->
+          case (go fv1, go fv2) of
+            -- No occurences of the variable to delete at all
+            (Nothing, Nothing)   -> Nothing
+            -- Occurences in both branches.
+            -- This is the most recent common ancestor of both branches,
+            -- so graft here.
+            (Just (dmd1, ungrafted1, _), Just (dmd2, ungrafted2, _))
+              | let dmd = bothDmd dmd1 dmd2
+              , let ungrafted = bothDmdTree ungrafted1 t1 ungrafted2 t2
+              -> Just (dmd, ungrafted, graft dmd ungrafted)
+            -- The var only occured in one branch. This is not the MRCA.
+            (Just (dmd1, ungrafted1, grafted1), Nothing)
+              | let dmd = bothDmd dmd1 (defaultDmd t2)
+              -> Just (dmd, bothDmdTree ungrafted1 t1 fv2 t2, bothDmdTree grafted1 t1 fv2 t2)
+            (Nothing, Just (dmd2, ungrafted2, grafted2))
+              | let dmd = bothDmd (defaultDmd t1) dmd2
+              -> Just (dmd, bothDmdTree fv1 t1 ungrafted2 t2, bothDmdTree fv1 t1 grafted2 t2)
+        Or fv1 t1 fv2 t2 ->
+          case (go fv1, go fv2) of
+            -- No occurences of the variable to delete at all
+            (Nothing, Nothing)   -> Nothing
+            -- Occurences in both branches.
+            -- This is the most recent common ancestor of both branches,
+            -- so graft here.
+            (Just (dmd1, ungrafted1, _), Just (dmd2, ungrafted2, _))
+              | let dmd = lubDmd dmd1 dmd2
+              , let ungrafted = lubDmdTree ungrafted1 t1 ungrafted2 t2
+              -> Just (dmd, ungrafted, graft dmd ungrafted)
+            -- The var only occured in one branch. This is not the MRCA.
+            (Just (dmd1, ungrafted1, grafted1), Nothing)
+              | let dmd = lubDmd dmd1 (defaultDmd t2)
+              -> Just (dmd, lubDmdTree ungrafted1 t1 fv2 t2, lubDmdTree grafted1 t1 fv2 t2)
+            (Nothing, Just (dmd2, ungrafted2, grafted2))
+              | let dmd = lubDmd (defaultDmd t1) dmd2
+              -> Just (dmd, lubDmdTree fv1 t1 ungrafted2 t2, lubDmdTree fv1 t1 grafted2 t2)
+
+delDmdTree :: Uniquable key => DmdTree -> key -> DmdTree
+delDmdTree fv id = go fv
+  where
+    go (Lit env)           = Lit (delFromUFM env id)
+    go (And fv1 t1 fv2 t2) = bothDmdTree (go fv1) t1 (go fv2) t2
+    go (Or fv1 t1 fv2 t2)  = lubDmdTree (go fv1) t1 (go fv2) t2
 
 delDmdTreeList :: Uniquable key => DmdTree -> [key] -> DmdTree
 delDmdTreeList fv ids = go fv
@@ -1708,19 +1768,16 @@ peelCallDmd, which peels only one level, but also returns the demand put on the
 body of the function.
 -}
 
-peelFV :: DmdType DmdTree -> Var -> (DmdType (GraftPoint DmdTree), Demand)
-peelFV (DmdType fv ds res) id = -- pprTrace "rfv" (ppr id <+> ppr dmd $$ ppr fv)
-                               (DmdType fv_gp' ds res, dmd)
-  where
-  fv_gp' = fv `delDmdTreeRememberGraftPoint` id
-  -- See Note [Default demand on free variables]
-  dmd  = lookupDmdTree fv res id
+peelFV :: DmdType DmdTree -> Var -> (DmdType DmdTree, Demand)
+peelFV ty id = -- pprTrace "rfv" (ppr id <+> ppr dmd $$ ppr fv)
+               (flip delDmdTree id <$> ty, findIdDemand ty id)
 
 addDemand :: Demand -> DmdType env -> DmdType env
 addDemand dmd (DmdType fv ds res) = DmdType fv (dmd:ds) res
 
 findIdDemand :: DmdType DmdTree -> Var -> Demand
 findIdDemand (DmdType fv _ res) id
+  -- See Note [Default demand on free variables]
   = lookupDmdTree fv res id
 
 {-

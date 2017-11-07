@@ -300,19 +300,22 @@ dmdAnal' env dmd (Let (NonRec id rhs) body)
       -- so if we have a trival right hand side, fall through to that.
   = (final_ty, Let (NonRec id' rhs') body')
   where
-    is_unlifted_let             = isUnliftedType (exprType rhs)
-    (body_ty, body')            = dmdAnal env dmd body
-    (body_gp, id_dmd)           = findBndrDmdAndGraftPoint env notArgOfDfun body_ty id
-    id'                         = setIdDemandInfo id id_dmd
+    rhs_type = idType id
+    is_unlifted_let            = isUnliftedType rhs_type
+    (body_ty, body')           = dmdAnal env dmd body
+    (_, id_dmd)                = findBndrDmd env notArgOfDfun body_ty id
+    id'                        = setIdDemandInfo id id_dmd
+    -- This partially unfolds dmdAnalStar, but we don't post process with
+    -- the 'DmdShell'. Instead, this is done as needed when substituting
+    -- into the body_ty.
+    (_, clean_dmd)             = toCleanDmd id_dmd rhs_type
+    (clean_rhs_ty, rhs')       = dmdAnal env clean_dmd rhs
+    DmdType rhs_fv _ rhs_res   = clean_rhs_ty
+    body_ty'                   = substDmdTree id rhs_type (dmdTransformThunkDmd rhs) (rhs_fv, rhs_res) <$> body_ty
 
-    (rhs_ty@(rhs_env, rhs_term), rhs') = dmdAnalStar env (dmdTransformThunkDmd rhs id_dmd) rhs
-    -- Using 'topRes' here, because it's the safest thing to assume.
-    -- The truth is that I can't think of no easy way to determine the
-    -- 'Termination ()' with which to 'bothDmdTree' the RHS's into the body's
-    -- 'DmdTree'. 'topRes' amounts to the most conservative assumption possible.
     final_ty
-      | is_unlifted_let = fmap ungrafted body_gp `bothDmdType` rhs_ty
-      | otherwise       = fmap (graft (\env -> bothDmdTree env topRes rhs_env rhs_term)) body_gp
+      | is_unlifted_let = body_ty' -- TODO
+      | otherwise       = body_ty'
 
 dmdAnal' env dmd (Let (NonRec id rhs) body)
   = (body_ty2, Let (NonRec id2 rhs') body')
@@ -1247,20 +1250,15 @@ findBndrsDmds env dmd_ty bndrs
       | otherwise = go dmd_ty bs
 
 findBndrDmd :: AnalEnv -> Bool -> DmdType DmdTree -> Id -> (DmdType DmdTree, Demand)
-findBndrDmd env arg_of_dfun dmd_ty id = (fmap ungrafted dmd_ty_gp, dmd)
-  where
-    (dmd_ty_gp, dmd) = findBndrDmdAndGraftPoint env arg_of_dfun dmd_ty id
-
-findBndrDmdAndGraftPoint :: AnalEnv -> Bool -> DmdType DmdTree -> Id -> (DmdType (GraftPoint DmdTree), Demand)
 -- See Note [Trimming a demand to a type] in Demand.hs
-findBndrDmdAndGraftPoint env arg_of_dfun dmd_ty id
-  = (dmd_ty_gp', dmd')
+findBndrDmd env arg_of_dfun dmd_ty id
+  = (dmd_ty', dmd')
   where
     dmd' = killUsageDemand (ae_dflags env) $
            strictify $
            trimToType starting_dmd (findTypeShape fam_envs id_ty)
 
-    (dmd_ty_gp', starting_dmd) = peelFV dmd_ty id
+    (dmd_ty', starting_dmd) = peelFV dmd_ty id
 
     id_ty = idType id
 
