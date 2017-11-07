@@ -656,7 +656,7 @@ dmdAnalRhsLetDown top_lvl rec_flag env let_dmd id rhs
     body_ty'         = removeDmdTyArgs body_ty -- zap possible deep CPR info
     (DmdType rhs_fv rhs_dmds rhs_res, bndrs')
                      = annotateLamBndrs env (isDFunId id) body_ty' bndrs
-    sig_ty           = mkStrictSig (mkDmdType (flattenDmdTree sig_fv') rhs_dmds rhs_res2)
+    sig_ty           = mkStrictSig (mkDmdType sig_fv rhs_dmds rhs_res2)
     id'              = set_idStrictness env id sig_ty
         -- See Note [NOINLINE and strictness]
 
@@ -667,7 +667,9 @@ dmdAnalRhsLetDown top_lvl rec_flag env let_dmd id rhs
                 Nothing -> rhs_fv
 
     -- See Note [Lazy and unleashable free variables]
-    (lazy_fv, sig_fv') = splitFVs' is_thunk rhs_fv1
+    lazy_fv :: DmdTree -- unleashed like LetUp, already lazified ('postProcess'ed)
+    sig_fv  :: DmdEnv  -- unleashed at call sites
+    (lazy_fv, sig_fv) = splitFVs' is_thunk rhs_fv1
 
     rhs_res2  = trimCPRInfo trim_all trim_sums rhs_res
     trim_all  = is_thunk && not_strict

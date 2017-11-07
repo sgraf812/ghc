@@ -71,6 +71,7 @@ import Outputable
 import Var ( Var )
 import VarEnv
 import UniqFM
+import Unique
 import Util
 import BasicTypes
 import Binary
@@ -844,12 +845,32 @@ splitFVs is_thunk rhs_fvs
     add uniq dmd@(JD { sd = s, ud = u }) (lazy_fv, sig_fv)
       | Lazy <- s = (addToUFM_Directly lazy_fv uniq dmd, sig_fv)
       | otherwise = ( addToUFM_Directly lazy_fv uniq (JD { sd = Lazy, ud = u })
-                    , addToUFM_Directly sig_fv  uniq (JD { sd = s,    ud = Abs }) )
+                    -- This makes sure we don't unleash usage demands of thunks through LetDown.
+                    -- That would be imprecise, as LetDown doesn't care about sharing.
+                    -- Instead, strictness is unleashed at call sites, whereas usage is unleashed
+                    -- like in the LetUp case, if not absent.
+                    -- Note that this is a little ugly as we destroy a sane invariant here,
+                    -- namely that strictness is a lower bound and usage an upper bound
+                    -- on evaluation cardinality, so e.g. <S,A> doesn't actually make sense.
+                    , addToUFM_Directly sig_fv  uniq (JD { sd = s,    ud = Abs }) ) 
 
-splitFVs' :: Bool -> DmdTree -> (DmdTree, DmdTree)
-splitFVs' is_thunk rhs_fvs = (fst <$> split_fvs, snd <$> split_fvs)
+splitFVs' :: Bool -> DmdTree -> (DmdTree, DmdEnv)
+splitFVs' is_thunk rhs_fvs = (lazy_fv_tree, sig_fv_env)
   where
-    split_fvs = splitFVs is_thunk <$> rhs_fvs
+    (_, sig_fv_env) = splitFVs is_thunk (flattenDmdTree rhs_fvs)
+    lazy_fv_tree 
+      | is_thunk  = postProcessDmdTree (JD { sd = Lazy, ud = Use One () }) rhs_fvs
+                    -- See the comment in 'splitFVs' about the thunk case and
+                    -- LetUp.
+                    -- This effectively makes the conservative assumption that
+                    -- the thunk wasn't possibly evaluated at all, so that
+                    -- no strict demand is accidentally unleashed as lazy_fv.
+                    -- It would be more elegant to put this into 'dmdAnalRhsLetDown',
+                    -- where we could use a variant of 'dmdAnalStar' instead to
+                    -- postprocess with the proper 'DmdShell' from the body.
+      | otherwise = delDmdTreeList rhs_fvs (nonDetKeysUFM sig_fv_env) 
+                    -- It's OK to use nonDetKeysUFM because
+                    -- it doesn't matter in which order we delete
 
 data TypeShape = TsFun TypeShape
                | TsProd [TypeShape]
@@ -1202,7 +1223,6 @@ data AndOrTree a
   = Lit a
   | And (AndOrTree a) (Termination ()) (AndOrTree a) (Termination ())
   | Or (AndOrTree a) (Termination ()) (AndOrTree a) (Termination ())
-  -- ^ We need this constructor because of postProcessDmdEnv. 'fmap (fmap (postProcessDmdEnv ds))' does not work for recovering from Divergence.
   deriving (Eq, Functor)
 
 type DmdTree = AndOrTree (VarEnv Demand)
@@ -1303,10 +1323,10 @@ delDmdTreeRememberGraftPoint fv var = GraftPoint (go fv `orElse` const fv)
         (Just gp1, Nothing)  -> Just (\modify -> f (gp1 modify) fv2)
         (Nothing, Just gp2)  -> Just (\modify -> f fv1 (gp2 modify))
 
-delDmdTreeList :: DmdTree -> [Var] -> DmdTree
+delDmdTreeList :: Uniquable key => DmdTree -> [key] -> DmdTree
 delDmdTreeList fv ids = go fv
   where
-    go (Lit env)           = Lit (delVarEnvList env ids)
+    go (Lit env)           = Lit (delListFromUFM env ids)
     go (And fv1 t1 fv2 t2) = bothDmdTree (go fv1) t1 (go fv2) t2
     go (Or fv1 t1 fv2 t2)  = lubDmdTree (go fv1) t1 (go fv2) t2
 
