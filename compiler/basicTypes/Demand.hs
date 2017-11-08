@@ -1364,10 +1364,11 @@ substDmdTree var ty transform_dmd (clean_rhs_fv, rhs_res) fv =
             -- Occurences in both branches.
             -- This is the most recent common ancestor of both branches,
             -- so graft here.
-            (Just (dmd1, ungrafted1, _), Just (dmd2, ungrafted2, _))
-              | let dmd = lubDmd dmd1 dmd2
+            (Just (dmd1, ungrafted1, grafted1), Just (dmd2, ungrafted2, grafted2))
+              | let dmd       = lubDmd dmd1 dmd2
               , let ungrafted = lubDmdTree ungrafted1 t1 ungrafted2 t2
-              -> Just (dmd, ungrafted, graft dmd ungrafted)
+              , let grafted   = lubDmdTree grafted1 t1 grafted2 t2
+              -> Just (dmd, ungrafted, grafted)
             -- The var only occured in one branch. This is not the MRCA.
             (Just (dmd1, ungrafted1, grafted1), Nothing)
               | let dmd = lubDmd dmd1 (defaultDmd t2)
