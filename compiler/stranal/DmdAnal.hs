@@ -314,7 +314,9 @@ dmdAnal' env dmd (Let (NonRec id rhs) body)
     body_ty'                   = substDmdTree id rhs_type (dmdTransformThunkDmd rhs) (rhs_fv, rhs_res) <$> body_ty
 
     final_ty
-      | is_unlifted_let = body_ty' -- TODO
+      -- For unlifted lets, there's no post-processing or substitution needed, 
+      -- exactly one evaluation!
+      | is_unlifted_let = body_ty `bothDmdType` toBothDmdArg clean_rhs_ty 
       | otherwise       = body_ty'
 
 dmdAnal' env dmd (Let (NonRec id rhs) body)
