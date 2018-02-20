@@ -1091,10 +1091,14 @@ data ScUsage
      }                                  -- The domain is OutIds
 
 type CallEnv = IdEnv [Call]
-data Call = Call Id [CoreArg] ValueEnv
-        -- The arguments of the call, together with the
-        -- env giving the constructor bindings at the call site
-        -- We keep the function mainly for debug output
+data Call = Call 
+  { _call_recv :: Id
+  -- ^ Receiver of the call. Kept mainly for debug output.
+  , call_args :: [CoreArg]
+  -- ^ The arguments of the call.
+  , _call_vals :: ValueEnv
+  -- ^ Gives constructor bindings at the call site.
+  }
 
 instance Outputable ScUsage where
   ppr (SCU { scu_calls = calls, scu_occs = occs })
@@ -1136,6 +1140,9 @@ data ArgOcc = NoOcc     -- Doesn't occur at all; or a type argument
 
             | ScrutOcc  -- See Note [ScrutOcc]
                  (DataConEnv [ArgOcc])   -- How the sub-components are used
+            
+            | CallOcc [Call] ArgOcc -- argument function call(s) and 
+                                    -- how the result is used
 
 type DataConEnv a = UniqFM a     -- Keyed by DataCon
 
@@ -1158,12 +1165,10 @@ A pattern binds b, x::a, y::b, z::b->a, but not 'a'!
 -}
 
 instance Outputable ArgOcc where
-  ppr (ScrutOcc xs) = text "scrut-occ" <> ppr xs
-  ppr UnkOcc        = text "unk-occ"
-  ppr NoOcc         = text "no-occ"
-
-evalScrutOcc :: ArgOcc
-evalScrutOcc = ScrutOcc emptyUFM
+  ppr (CallOcc call occ) = text "call-occ" <+> ppr call <+> ppr occ
+  ppr (ScrutOcc xs)      = text "scrut-occ" <+> ppr xs
+  ppr UnkOcc             = text "unk-occ"
+  ppr NoOcc              = text "no-occ"
 
 -- Experimentally, this vesion of combineOcc makes ScrutOcc "win", so
 -- that if the thing is scrutinised anywhere then we get to see that
@@ -1176,6 +1181,12 @@ combineOcc (ScrutOcc xs) (ScrutOcc ys) = ScrutOcc (plusUFM_C combineOccs xs ys)
 combineOcc UnkOcc        (ScrutOcc ys) = ScrutOcc ys
 combineOcc (ScrutOcc xs) UnkOcc        = ScrutOcc xs
 combineOcc UnkOcc        UnkOcc        = UnkOcc
+combineOcc UnkOcc        c@CallOcc{}   = c
+combineOcc c@CallOcc{}   UnkOcc        = c
+combineOcc c@CallOcc{}   (ScrutOcc _)  = c -- E.g. combines a call with a seq
+combineOcc (ScrutOcc _)  c@CallOcc{}   = c
+-- TODO: Sanitize (ids match? number of args?)
+combineOcc (CallOcc cs1 occ1) (CallOcc cs2 occ2) = CallOcc (cs1 ++ cs2) (combineOcc occ1 occ2)
 
 combineOccs :: [ArgOcc] -> [ArgOcc] -> [ArgOcc]
 combineOccs xs ys = zipWithEqual "combineOccs" combineOcc xs ys
@@ -1221,7 +1232,7 @@ scExpr' env (Cast e co)  = do (usg, e') <- scExpr env e
                               return (usg, mkCast e' (scSubstCo env co))
                               -- Important to use mkCast here
                               -- See Note [SpecConstr call patterns]
-scExpr' env e@(App _ _)  = scApp env (collectArgs e)
+scExpr' env e@(App _ _)  = pprTraceIt "scApp" <$> scApp env (collectArgs e)
 scExpr' env (Lam b e)    = do let (env', b') = extendBndr env b
                               (usg, e') <- scExpr env' e
                               return (usg, Lam b' e')
@@ -1369,15 +1380,19 @@ scApp env (other_fn, args)
 mkVarUsage :: ScEnv -> Id -> [CoreExpr] -> ScUsage
 mkVarUsage env fn args
   = case lookupHowBound env fn of
-        Just RecFun -> SCU { scu_calls = unitVarEnv fn [Call fn args (sc_vals env)]
+        Just RecFun -> SCU { scu_calls = unitVarEnv fn [call]
                            , scu_occs  = emptyVarEnv }
         Just RecArg -> SCU { scu_calls = emptyVarEnv
                            , scu_occs  = unitVarEnv fn arg_occ }
         Nothing     -> nullUsage
   where
-    -- I rather think we could use UnkOcc all the time
+    call = Call fn args (sc_vals env)
+    -- TODO: Maybe use CallOcc all the time? Maybe even make the 'call'
+    -- mandatory? After all, every application should finally be a call to
+    -- some identifier.
+    -- Or just equate @CallOcc (Call id [] emptyEnv) UnkOcc@ with @UnkOcc@.
     arg_occ | null args = UnkOcc
-            | otherwise = evalScrutOcc
+            | otherwise = CallOcc [call] UnkOcc
 
 ----------------------
 scTopBindEnv :: ScEnv -> CoreBind -> UniqSM (ScEnv, CoreBind)
@@ -1867,13 +1882,13 @@ See Trac # 5458.  Yuk.
 
 Note [SpecConstr call patterns]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-A "call patterns" that we collect is going to become the LHS of a RULE.
+A "call pattern" that we collect is going to become the LHS of a RULE.
 It's important that it doesn't have
      e |> Refl
 or
     e |> g1 |> g2
 because both of these will be optimised by Simplify.simplRule. In the
-former case such optimisation benign, because the rule will match more
+former case such optimisation is benign, because the rule will match more
 terms; but in the latter we may lose a binding of 'g1' or 'g2', and
 end up with a rule LHS that doesn't bind the template variables
 (Trac #10602).
@@ -1949,7 +1964,6 @@ callsToNewPats :: ScEnv -> Id
         -- Bool indicates that there was at least one boring pattern
 callsToNewPats env fn spec_info@(SI { si_specs = done_specs }) bndr_occs calls
   = do  { mb_pats <- mapM (callToPats env bndr_occs) calls
-
         ; let have_boring_call = any isNothing mb_pats
 
               good_pats :: [CallPat]
@@ -1976,6 +1990,8 @@ callsToNewPats env fn spec_info@(SI { si_specs = done_specs }) bndr_occs calls
 --                                       , text "done_specs:" <+> ppr (map os_pat done_specs)
 --                                       , text "good_pats:" <+> ppr good_pats ]) $
 --          return ()
+        ; pprTrace "callsToNewPats" (vcat [ppr fn, ppr bndr_occs, ppr calls, ppr mb_pats, ppr trimmed_pats]) $ return ()
+
 
         ; return (have_boring_call, trimmed_pats) }
 
@@ -2143,19 +2159,18 @@ argToPat env in_scope val_env (Cast arg co) arg_occ
   where
     Pair ty1 ty2 = coercionKind co
 
-
-
-{-      Disabling lambda specialisation for now
-        It's fragile, and the spec_loop can be infinite
-argToPat in_scope val_env arg arg_occ
-  | is_value_lam arg
+-- Value lambdas with correspond call occurences
+argToPat _env _in_scope _val_env arg (CallOcc calls _occ)
+  | any isId bndrs -- any leading value lambda at all?
+  -- Only apply for saturated calls. This requirement could be lifted, but
+  -- note that we apply the same requirement for inlining, so this seems
+  -- reasonable.
+  , at_least_one_saturated_call
   = return (True, arg)
   where
-    is_value_lam (Lam v e)         -- Spot a value lambda, even if
-        | isId v       = True      -- it is inside a type lambda
-        | otherwise    = is_value_lam e
-    is_value_lam other = False
--}
+    (bndrs, _) = collectBinders arg
+    at_least_one_saturated_call
+      =  length bndrs <= maximum (map (length . call_args) calls)
 
   -- Check for a constructor application
   -- NB: this *precedes* the Var case, so that we catch nullary constrs
