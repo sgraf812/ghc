@@ -25,7 +25,7 @@ import CoreSyn
 import CoreSubst
 import CoreUtils
 import CoreUnfold       ( couldBeSmallEnoughToInline )
-import CoreFVs          ( exprsFreeVarsList )
+import CoreFVs          ( exprFreeVarsList, exprsFreeVarsList )
 import CoreMonad
 import Literal          ( litIsLifted )
 import HscTypes         ( ModGuts(..) )
@@ -37,7 +37,7 @@ import Type             hiding ( substTy )
 import TyCon            ( tyConName )
 import Id
 import PprCore          ( pprParendExpr )
-import MkCore           ( mkImpossibleExpr )
+import MkCore           ( mkImpossibleExpr, mkCoreLams, mkCoreLets )
 import Var
 import VarEnv
 import VarSet
@@ -2170,16 +2170,28 @@ argToPat env in_scope val_env (Cast arg co) arg_occ
     Pair ty1 ty2 = coercionKind co
 
 -- Value lambdas with correspond call occurences
-argToPat _env _in_scope _val_env arg (CallOcc calls _occ)
+argToPat env in_scope val_env arg (CallOcc calls _occ)
   | any isId bndrs -- any leading value lambda at all?
   -- Only apply for saturated calls. This requirement could be lifted, but
   -- note that we apply the same requirement for inlining, so this seems
   -- reasonable.
   , at_least_one_saturated_call
-  --, pprTrace "argToPat" (ppr arg <+> ppr (map (isValue _val_env . Var) (exprsFreeVarsList [arg]))) True
-  = return (True, arg)
+  , Just fv_occs <- mb_fv_scrut
+  = do  { (_, fv_exprs') <- argsToPats env in_scope val_env fv_exprs fv_occs
+        ; let arg' = mkCoreLams bndrs (mkCoreLets (zipWith NonRec (filter isId fvs) fv_exprs') body)
+        ; pprTrace "argToPat" (vcat [ppr arg, ppr arg']) (return ())
+        ; return (True, arg') }
   where
-    (bndrs, _) = collectBinders arg
+    fvs         = exprFreeVarsList arg
+    fv_exprs    = varsToCoreExprs (filter isId fvs)
+    (bndrs, body)  = collectBinders arg
+    -- look at arg to see how and if its free variables are scrutinised
+    -- just assume we have a SPEC for now and don't worry about matching Occs.
+    -- Later on, we probably have to scExpr under the assumption of val_env here
+    -- Also then _occ might be of interest. Case-of-case should make sure this
+    -- info appropriately percolates after beta reduction in the specialised body.
+    mb_fv_scrut = Just (repeat UnkOcc)
+               
     at_least_one_saturated_call
       = length bndrs <= maximum (map (length . call_args) calls)
 
