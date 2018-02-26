@@ -408,7 +408,7 @@ This seeding is done in the binding for seed_calls in specRec.
    based on
      (a) the call patterns in the RHS
      (b) the call patterns in the rest of the top-level bindings
-   NB: before Apr 15 we used (a) only, but Dimitrios had an example
+   NB: before Apr 15 2015 we used (a) only, but Dimitrios had an example
        where (b) was crucial, so I added that.
        Adding (b) also improved nofib allocation results:
                   multiplier: 4%   better
@@ -1232,7 +1232,7 @@ scExpr' env (Cast e co)  = do (usg, e') <- scExpr env e
                               return (usg, mkCast e' (scSubstCo env co))
                               -- Important to use mkCast here
                               -- See Note [SpecConstr call patterns]
-scExpr' env e@(App _ _)  = pprTraceIt "scApp" <$> scApp env (collectArgs e)
+scExpr' env e@(App _ _)  = scApp env (collectArgs e)
 scExpr' env (Lam b e)    = do let (env', b') = extendBndr env b
                               (usg, e') <- scExpr env' e
                               return (usg, Lam b' e')
@@ -1441,7 +1441,10 @@ scTopBind env body_usage (Rec prs)
     force_spec   = any (forceSpecBndr env) bndrs
       -- Note [Forcing specialisation]
 
-scTopBind env usage (NonRec bndr rhs)   -- Oddly, we don't seem to specialise top-level non-rec functions
+-- We don't specialise non-recursive bindings as inlining is a more radical way
+-- to achieve the same effect. There might be wins in and due to code size,
+-- though.
+scTopBind env usage (NonRec bndr rhs)
   = do  { (rhs_usg', rhs') <- scExpr env rhs
         ; return (usage `combineUsage` rhs_usg', NonRec bndr rhs') }
 
@@ -2131,13 +2134,20 @@ argToPat env in_scope val_env (Tick _ arg) arg_occ
         -- ride roughshod over them all for now.
         --- See Note [Notes in RULE matching] in Rules
 
-argToPat env in_scope val_env (Let _ arg) arg_occ
-  = argToPat env in_scope val_env arg arg_occ
+argToPat env in_scope val_env (Let (NonRec bndr rhs) arg) arg_occ
+  -- Try this for non-recursive bindings only for now.
+  -- Should recursive bindings be tested for values, too?
+  | Just val <- isValue val_env rhs
+  , let val_env' = extendVarEnv val_env bndr val
+  = argToPat env in_scope val_env' arg arg_occ
         -- See Note [Matching lets] in Rule.hs
         -- Look through let expressions
         -- e.g.         f (let v = rhs in (v,w))
         -- Here we can specialise for f (v,w)
         -- because the rule-matcher will look through the let.
+
+argToPat env in_scope val_env (Let _ arg) arg_occ
+  = argToPat env in_scope val_env arg arg_occ
 
 {- Disabled; see Note [Matching cases] in Rule.hs
 argToPat env in_scope val_env (Case scrut _ _ [(_, _, rhs)]) arg_occ
@@ -2166,11 +2176,12 @@ argToPat _env _in_scope _val_env arg (CallOcc calls _occ)
   -- note that we apply the same requirement for inlining, so this seems
   -- reasonable.
   , at_least_one_saturated_call
+  --, pprTrace "argToPat" (ppr arg <+> ppr (map (isValue _val_env . Var) (exprsFreeVarsList [arg]))) True
   = return (True, arg)
   where
     (bndrs, _) = collectBinders arg
     at_least_one_saturated_call
-      =  length bndrs <= maximum (map (length . call_args) calls)
+      = length bndrs <= maximum (map (length . call_args) calls)
 
   -- Check for a constructor application
   -- NB: this *precedes* the Var case, so that we catch nullary constrs
