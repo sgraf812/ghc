@@ -38,7 +38,7 @@ import Type             hiding ( substTy )
 import TyCon            ( tyConName )
 import Id
 import PprCore          ( pprParendExpr )
-import MkCore           ( mkImpossibleExpr, mkCoreLams, mkCoreLets )
+import MkCore           ( mkImpossibleExpr, mkCoreLams, mkCoreLets, mkCoreApps )
 import Var
 import VarEnv
 import VarSet
@@ -1781,6 +1781,13 @@ spec_one env fn arg_bndrs body (call_pat@(qvars, pats), rule_number)
               rule       = mkRule this_mod True {- Auto -} True {- Local -}
                                   rule_name inline_act fn_name qvars pats rule_rhs
                            -- See Note [Transfer activation]
+              in_scope   = substInScope (sc_subst env)
+        ; if isJust (lookupRule (sc_dflags env) (in_scope, realIdUnfolding)
+                                       (const True) fn pats [rule])
+            then pprTrace "yes" (ppr rule) (return ())
+            else pprTrace "nope" (vcat [ text "SpecConstr RULE is unmatchable"
+                          , text "rule:" <+> ppr rule
+                          , text "call-pattern:" <+> ppr (Var fn `mkCoreApps` pats)]) return ()
         ; return (spec_usg, OS { os_pat = call_pat, os_rule = rule
                                , os_id = spec_id
                                , os_rhs = spec_rhs }) }
@@ -2164,12 +2171,13 @@ argToPat env in_scope val_env (Let bind@(NonRec bndr rhs) body) arg_occ
   | Just val <- isValue val_env rhs
   , let val_env' = extendVarEnv val_env bndr val
   = do  { (interesting, body') <- argToPat env in_scope val_env' body arg_occ
-        ; return (interesting, Let bind body') }
-        -- See Note [Matching lets] in Rule.hs
+        ; return (interesting, body') }
+        -- See Note [Matching lets] and Note [Expanding variables] in Rule.hs
         -- Look through let expressions
-        -- e.g.         f (let v = rhs in (v,w))
-        -- Here we can specialise for f (v,w)
-        -- because the rule-matcher will look through the let.
+        -- e.g.         f (let v = Just rhs in (v,w))
+        -- Here we can specialise for f (Just rhs,w)
+        -- because the rule-matcher will look through the let but look into
+        -- expandable unfoldings of ids (where the RHS is in WHNF or CONLIKE).
 
 argToPat env in_scope val_env (Let _ body) arg_occ
   = argToPat env in_scope val_env body arg_occ
@@ -2201,8 +2209,11 @@ argToPat env in_scope val_env arg (CallOcc calls _occ)
   -- note that we apply the same requirement for inlining, so this seems
   -- reasonable.
   , at_least_one_saturated_call
-  = do  { pprTrace "argToPat" (ppr arg) (return ())
-        ; return (True, arg) }
+  , Just fv_occs <- mb_fv_scrut
+  = do  { (_, fv_exprs') <- argsToPats env in_scope val_env fv_exprs fv_occs
+        ; let arg' = simpleOptExpr (mkCoreLams bndrs (mkCoreLets (zipWith NonRec (filter isId fvs) fv_exprs') body))
+        ; pprTrace "argToPat" (vcat [ppr arg, ppr arg']) (return ())
+        ; return (True, arg') }
   where
     fvs         = exprFreeVarsList arg
     fv_exprs    = varsToCoreExprs (filter isId fvs)
