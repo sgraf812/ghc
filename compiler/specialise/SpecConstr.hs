@@ -21,6 +21,7 @@ module SpecConstr(
 
 import GhcPrelude
 
+import CoreOpt (simpleOptExpr)
 import CoreSyn
 import CoreSubst
 import CoreUtils
@@ -855,6 +856,13 @@ type ValueEnv = IdEnv Value             -- Domain is OutIds
 data Value    = ConVal AltCon [CoreArg] -- _Saturated_ constructors
                                         --   The AltCon is never DEFAULT
               | LambdaVal               -- Inlinable lambdas or PAPs
+              | LetV CoreBind Value     -- A let-binding with a value as body
+
+peelLetVs :: Value -> ([CoreBind], Value)
+peelLetVs = go []
+  where
+    go binds (LetV bind val) = go (bind:binds) val
+    go binds val             = (reverse binds, val)
 
 instance Outputable Value where
    ppr (ConVal con args) = ppr con <+> interpp'SP args
@@ -944,12 +952,14 @@ extendBndr  env bndr  = (env { sc_subst = subst' }, bndr')
                       where
                         (subst', bndr') = substBndr (sc_subst env) bndr
 
-extendValEnv :: ScEnv -> Id -> Maybe Value -> ScEnv
-extendValEnv env _  Nothing   = env
-extendValEnv env id (Just cv)
+modifyVals :: (ValueEnv -> ValueEnv) -> ScEnv -> ScEnv
+modifyVals f env = env { sc_vals = f (sc_vals env) }
+
+extendValueEnv :: Id -> Maybe Value -> ValueEnv ->  ValueEnv
+extendValueEnv id (Just cv) env
  | valueIsWorkFree cv      -- Don't duplicate work!!  Trac #7865
- = env { sc_vals = extendVarEnv (sc_vals env) id cv }
-extendValEnv env _ _ = env
+ = extendVarEnv env id cv
+extendValueEnv _ _ env = env
 
 extendCaseBndrs :: ScEnv -> OutExpr -> OutId -> AltCon -> [Var] -> (ScEnv, [Var])
 -- When we encounter
@@ -964,9 +974,9 @@ extendCaseBndrs env scrut case_bndr con alt_bndrs
  where
    live_case_bndr = not (isDeadBinder case_bndr)
    env1 | Var v <- stripTicksTopE (const True) scrut
-                         = extendValEnv env v cval
+                         = modifyVals (extendValueEnv v cval) env
         | otherwise      = env  -- See Note [Add scrutinee to ValueEnv too]
-   env2 | live_case_bndr = extendValEnv env1 case_bndr cval
+   env2 | live_case_bndr = modifyVals (extendValueEnv case_bndr cval) env1
         | otherwise      = env1
 
    alt_bndrs' | case scrut of { Var {} -> True; _ -> live_case_bndr }
@@ -1237,18 +1247,30 @@ scExpr' env (Lam b e)    = do let (env', b') = extendBndr env b
                               (usg, e') <- scExpr env' e
                               return (usg, Lam b' e')
 
+scExpr' env (Case (Let bind e) b ty alts)
+                         -- Specialising for args that include some let binders
+                         -- may introduce case-on-lets, which we take care
+                         -- of by just floating them out when we see them.
+                         | pprTrace "case-of-let" empty True
+                         = scExpr env (Let bind (Case e b ty alts))
 scExpr' env (Case scrut b ty alts)
   = do  { (scrut_usg, scrut') <- scExpr env scrut
         ; case isValue (sc_vals env) scrut' of
-                Just (ConVal con args) -> sc_con_app con args scrut'
-                _other                 -> sc_vanilla scrut_usg scrut'
+                Just val
+                  | (binds, ConVal con args) <- peelLetVs val
+                  , pprTrace "scExpr:Case" (ppr scrut $$ ppr scrut') True 
+                  -> sc_con_app con args binds scrut'
+                _other
+                  | pprTrace "scExpr:noval" (ppr scrut') True
+                  -> sc_vanilla scrut_usg scrut'
         }
   where
-    sc_con_app con args scrut'  -- Known constructor; simplify
+    sc_con_app con args binds scrut'  -- Known constructor; simplify
      = do { let (_, bs, rhs) = findAlt con alts
                                   `orElse` (DEFAULT, [], mkImpossibleExpr ty)
                 alt_env'     = extendScSubstList env ((b,scrut') : bs `zip` trimConArgs con args)
-          ; scExpr alt_env' rhs }
+          ; pprTrace "sc_con_app" (vcat [text "con:" <+> ppr con, text "args:" <+> ppr args, text "rhs:" <+> ppr rhs]) (return ())
+          ; scExpr alt_env' (mkCoreLets binds rhs) }
 
     sc_vanilla scrut_usg scrut' -- Normal case
      = do { let (alt_env,b') = extendBndrWith RecArg env b
@@ -1287,7 +1309,8 @@ scExpr' env (Let (NonRec bndr rhs) body)
         ; let body_env2 = extendHowBound body_env [bndr'] RecFun
                            -- Note [Local let bindings]
               rhs'      = ri_new_rhs rhs_info
-              body_env3 = extendValEnv body_env2 bndr' (isValue (sc_vals env) rhs')
+              mb_val    = isValue (sc_vals env) rhs'
+              body_env3 = modifyVals (extendValueEnv bndr' mb_val) body_env2
 
         ; (body_usg, body') <- scExpr body_env3 body
 
@@ -1407,7 +1430,8 @@ scTopBindEnv env (Rec prs)
 
 scTopBindEnv env (NonRec bndr rhs)
   = do  { let (env1, bndr') = extendBndr env bndr
-              env2          = extendValEnv env1 bndr' (isValue (sc_vals env) rhs)
+              mb_val        = isValue (sc_vals env) rhs
+              env2          = modifyVals (extendValueEnv bndr' mb_val) env1
         ; return (env2, NonRec bndr' rhs) }
 
 ----------------------
@@ -1717,15 +1741,15 @@ spec_one env fn arg_bndrs body (call_pat@(qvars, pats), rule_number)
               -- changes (#4012).
               rule_name  = mkFastString ("SC:" ++ occNameString fn_occ ++ show rule_number)
               spec_name  = mkInternalName spec_uniq spec_occ fn_loc
---      ; pprTrace "{spec_one" (ppr (sc_count env) <+> ppr fn
---                              <+> ppr pats <+> text "-->" <+> ppr spec_name) $
---        return ()
+        ; pprTrace "{spec_one" (ppr (sc_count env) <+> ppr fn
+                                <+> ppr pats <+> text "-->" <+> ppr spec_name) $
+          return ()
 
         -- Specialise the body
         ; (spec_usg, spec_body) <- scExpr spec_env body
 
---      ; pprTrace "done spec_one}" (ppr fn) $
---        return ()
+        ; pprTrace "done spec_one}" (ppr fn $$ ppr spec_body $$ ppr spec_usg) $
+          return ()
 
                 -- And build the results
         ; let (spec_lam_args, spec_call_args) = mkWorkerArgs (sc_dflags env)
@@ -1989,11 +2013,11 @@ callsToNewPats env fn spec_info@(SI { si_specs = done_specs }) bndr_occs calls
                 -- Discard specialisations if there are too many of them
               trimmed_pats = trim_pats env fn spec_info small_pats
 
---        ; pprTrace "callsToPats" (vcat [ text "calls to" <+> ppr fn <> colon <+> ppr calls
---                                       , text "done_specs:" <+> ppr (map os_pat done_specs)
---                                       , text "good_pats:" <+> ppr good_pats ]) $
---          return ()
-        ; pprTrace "callsToNewPats" (vcat [ppr fn, ppr bndr_occs, ppr calls, ppr mb_pats, ppr trimmed_pats]) $ return ()
+        ; pprTrace "callsToNewPats" (vcat [ text "calls to" <+> ppr fn <> colon <+> ppr calls
+                                          , text "done_specs:" <+> ppr (map os_pat done_specs)
+                                          , text "good_pats:" <+> ppr good_pats
+                                          , text "trimmed_pats:" <+> ppr trimmed_pats ]) $
+          return ()
 
 
         ; return (have_boring_call, trimmed_pats) }
@@ -2134,20 +2158,21 @@ argToPat env in_scope val_env (Tick _ arg) arg_occ
         -- ride roughshod over them all for now.
         --- See Note [Notes in RULE matching] in Rules
 
-argToPat env in_scope val_env (Let (NonRec bndr rhs) arg) arg_occ
+argToPat env in_scope val_env (Let bind@(NonRec bndr rhs) body) arg_occ
   -- Try this for non-recursive bindings only for now.
   -- Should recursive bindings be tested for values, too?
   | Just val <- isValue val_env rhs
   , let val_env' = extendVarEnv val_env bndr val
-  = argToPat env in_scope val_env' arg arg_occ
+  = do  { (interesting, body') <- argToPat env in_scope val_env' body arg_occ
+        ; return (interesting, Let bind body') }
         -- See Note [Matching lets] in Rule.hs
         -- Look through let expressions
         -- e.g.         f (let v = rhs in (v,w))
         -- Here we can specialise for f (v,w)
         -- because the rule-matcher will look through the let.
 
-argToPat env in_scope val_env (Let _ arg) arg_occ
-  = argToPat env in_scope val_env arg arg_occ
+argToPat env in_scope val_env (Let _ body) arg_occ
+  = argToPat env in_scope val_env body arg_occ
 
 {- Disabled; see Note [Matching cases] in Rule.hs
 argToPat env in_scope val_env (Case scrut _ _ [(_, _, rhs)]) arg_occ
@@ -2176,11 +2201,8 @@ argToPat env in_scope val_env arg (CallOcc calls _occ)
   -- note that we apply the same requirement for inlining, so this seems
   -- reasonable.
   , at_least_one_saturated_call
-  , Just fv_occs <- mb_fv_scrut
-  = do  { (_, fv_exprs') <- argsToPats env in_scope val_env fv_exprs fv_occs
-        ; let arg' = mkCoreLams bndrs (mkCoreLets (zipWith NonRec (filter isId fvs) fv_exprs') body)
-        ; pprTrace "argToPat" (vcat [ppr arg, ppr arg']) (return ())
-        ; return (True, arg') }
+  = do  { pprTrace "argToPat" (ppr arg) (return ())
+        ; return (True, arg) }
   where
     fvs         = exprFreeVarsList arg
     fv_exprs    = varsToCoreExprs (filter isId fvs)
@@ -2288,6 +2310,13 @@ isValue env (Var v)
     unf = idUnfolding v
         -- However we do want to consult the unfolding
         -- as well, for let-bound constructors!
+
+isValue env (Let bind@(NonRec bndr rhs) body)
+  | let env' = extendValueEnv bndr (isValue env rhs) env
+  = LetV bind <$> isValue env' body
+
+isValue env (Let bind body)
+  = LetV bind <$> isValue env body
 
 isValue env (Lam b e)
   | isTyVar b = case isValue env e of
