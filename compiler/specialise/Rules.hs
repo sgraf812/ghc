@@ -30,33 +30,33 @@ module Rules (
 
 import GhcPrelude
 
-import CoreSyn          -- All of it
-import Module           ( Module, ModuleSet, elemModuleSet )
+import CoreSyn              -- All of it
+import Module               ( Module, ModuleSet, elemModuleSet )
 import CoreSubst
-import CoreOpt          ( exprIsLambda_maybe )
-import CoreFVs          ( exprFreeVars, exprsFreeVars, bindFreeVars
-                        , rulesFreeVarsDSet, exprsOrphNames, exprFreeVarsList )
-import CoreUtils        ( exprType, eqExpr, mkTick, mkTicks,
-                          stripTicksTopT, stripTicksTopE,
-                          isJoinBind, exprIsExpandable )
-import PprCore          ( pprRules )
-import Type             ( Type, substTy, mkTCvSubst )
-import TcType           ( tcSplitTyConApp_maybe )
-import TysWiredIn       ( anyTypeOfKind )
+import CoreOpt              ( exprIsLambda_maybe )
+import CoreFVs              ( exprFreeVars, exprsFreeVars, bindFreeVars
+                            , rulesFreeVarsDSet, exprsOrphNames, exprFreeVarsList )
+import CoreUtils            ( exprType, eqExpr, mkTick, mkTicks,
+                              stripTicksTopT, stripTicksTopE,
+                              isJoinBind, exprIsExpandable )
+import PprCore              ( pprRules )
+import Type                 ( Type, substTy, mkTCvSubst )
+import TcType               ( tcSplitTyConApp_maybe )
+import TysWiredIn           ( anyTypeOfKind )
 import Coercion
-import CoreTidy         ( tidyRules )
+import CoreTidy             ( tidyRules )
 import Id
-import IdInfo           ( RuleInfo( RuleInfo ) )
+import IdInfo               ( RuleInfo( RuleInfo ) )
 import Var
 import VarEnv
 import VarSet
-import Name             ( Name, NamedThing(..), nameIsLocalOrFrom )
+import Name                 ( Name, NamedThing(..), nameIsLocalOrFrom )
 import NameSet
 import NameEnv
 import UniqFM
-import Unify            ( ruleMatchTyKiX )
-import BasicTypes       ( Activation, CompilerPhase, isActive, pprRuleName )
-import DynFlags         ( DynFlags )
+import Unify                ( ruleMatchTyKiX )
+import BasicTypes           ( Activation, CompilerPhase, isActive, pprRuleName )
+import DynFlags             ( DynFlags )
 import Outputable
 import FastString
 import Maybes
@@ -64,8 +64,8 @@ import Bag
 import Util
 import Data.List
 import Data.Ord
-import Control.Monad    ( guard )
-import Control.Applicative ( (<|>) )
+import Control.Monad        ( guard )
+import Control.Applicative  ( (<|>) )
 
 {-
 Note [Overall plumbing for rules]
@@ -517,7 +517,7 @@ matchRule _ in_scope is_active _ args rough_args
                 , ru_bndrs = tpl_vars, ru_args = tpl_args, ru_rhs = rhs })
   | not (is_active act)               = Nothing
   | ruleCantMatch tpl_tops rough_args = Nothing
-  | pprTrace "matchRule" (ppr rule_name $$ ppr tpl_args $$ ppr args) otherwise
+  | otherwise
   = case matchN in_scope rule_name tpl_vars tpl_args args of
         Nothing                        -> Nothing
         Just (bind_wrapper, tpl_vals) -> Just (bind_wrapper $
@@ -687,12 +687,13 @@ data RuleMatchEnv
 rvInScopeEnv :: RuleMatchEnv -> InScopeEnv
 rvInScopeEnv renv = (rnInScopeSet (rv_lcl renv), rv_unf renv)
 
-data RuleSubst = RS { rs_tv_subst :: TvSubstEnv      -- Range is the
-                    , rs_id_subst :: IdSubstEnv      --   template variables
-                    , rs_binds    :: BindWrapper     -- Floated bindings
-                    , rs_bndrs    :: VarSet          -- Variables bound by floated lets
-                    , rs_rhss     :: VarEnv CoreExpr -- RHS of floated lets
-                    }
+data RuleSubst
+  = RS { rs_tv_subst :: TvSubstEnv      -- Range is the
+       , rs_id_subst :: IdSubstEnv      --   template variables
+       , rs_binds    :: BindWrapper     -- Floated bindings
+       , rs_bndrs    :: VarSet          -- Variables bound by floated lets
+       , rs_rhss     :: VarEnv CoreExpr -- RHS of floated lets
+       }
 
 type BindWrapper = CoreExpr -> CoreExpr
   -- See Notes [Matching lets] and [Matching cases]
@@ -751,10 +752,8 @@ match renv subst (Var v1)    e2 = match_var renv subst v1 e2
 
 match renv subst e1 (Var v2)      -- Note [Expanding variables]
   | not (inRnEnvR rn_env v2) -- Note [Do not expand locally-bound variables]
-  , pprTrace "match:Var" (ppr v2 <+> ppr (expandUnfolding_maybe (idUnfolding v2))) True
   , Just e2' <- expandUnfolding_maybe (rv_unf renv v2')
                  <|> hasExpandableRHS subst v2'
-  , pprTrace "match:Var2" (ppr v2 <+> ppr e2') True
   = match (renv { rv_lcl = nukeRnEnvR rn_env }) subst e1 e2'
   where
     v2'    = lookupRnInScope rn_env v2
@@ -764,12 +763,8 @@ match renv subst e1 (Var v2)      -- Note [Expanding variables]
         -- No need to apply any renaming first (hence no rnOccR)
         -- because of the not-inRnEnvR
 
-match renv subst (Let bind@(NonRec bndr rhs) e1) e2
-  | pprTrace "match:LLet" (vcat [ppr bind, ppr (expandUnfolding_maybe $ idUnfolding bndr)]) $ False
-  = undefined
-
 match renv subst e1 (Let bind e2)
-  | pprTrace "match:Let" (vcat [ppr bind, ppr $ okToFloat (rv_lcl renv) (bindFreeVars bind)]) $
+  | -- pprTrace "match:Let" (vcat [ppr bind, ppr $ okToFloat (rv_lcl renv) (bindFreeVars bind)]) $
     not (isJoinBind bind) -- can't float join point out of argument position
   , okToFloat (rv_lcl renv) (bindFreeVars bind) -- See Note [Matching lets]
   = match (renv { rv_fltR = flt_subst' })

@@ -21,7 +21,7 @@ module SpecConstr(
 
 import GhcPrelude
 
-import CoreOpt (simpleOptExpr)
+import CoreOpt          ( simpleOptExpr )
 import CoreSyn
 import CoreSubst
 import CoreUtils
@@ -856,12 +856,12 @@ type ValueEnv = IdEnv Value             -- Domain is OutIds
 data Value    = ConVal AltCon [CoreArg] -- _Saturated_ constructors
                                         --   The AltCon is never DEFAULT
               | LambdaVal               -- Inlinable lambdas or PAPs
-              | LetV CoreBind Value     -- A let-binding with a value as body
+              | LetVal CoreBind Value   -- A let-binding with a value as body
 
-peelLetVs :: Value -> ([CoreBind], Value)
-peelLetVs = go []
+peelLetVals :: Value -> ([CoreBind], Value)
+peelLetVals = go []
   where
-    go binds (LetV bind val) = go (bind:binds) val
+    go binds (LetVal bind val) = go (bind:binds) val
     go binds val             = (reverse binds, val)
 
 instance Outputable Value where
@@ -1101,7 +1101,7 @@ data ScUsage
      }                                  -- The domain is OutIds
 
 type CallEnv = IdEnv [Call]
-data Call = Call 
+data Call = Call
   { _call_recv :: Id
   -- ^ Receiver of the call. Kept mainly for debug output.
   , call_args :: [CoreArg]
@@ -1150,8 +1150,8 @@ data ArgOcc = NoOcc     -- Doesn't occur at all; or a type argument
 
             | ScrutOcc  -- See Note [ScrutOcc]
                  (DataConEnv [ArgOcc])   -- How the sub-components are used
-            
-            | CallOcc [Call] ArgOcc -- argument function call(s) and 
+
+            | CallOcc [Call] ArgOcc -- argument function call(s) and
                                     -- how the result is used
 
 type DataConEnv a = UniqFM a     -- Keyed by DataCon
@@ -1247,29 +1247,19 @@ scExpr' env (Lam b e)    = do let (env', b') = extendBndr env b
                               (usg, e') <- scExpr env' e
                               return (usg, Lam b' e')
 
-scExpr' env (Case (Let bind e) b ty alts)
-                         -- Specialising for args that include some let binders
-                         -- may introduce case-on-lets, which we take care
-                         -- of by just floating them out when we see them.
-                         | pprTrace "case-of-let" empty True
-                         = scExpr env (Let bind (Case e b ty alts))
 scExpr' env (Case scrut b ty alts)
   = do  { (scrut_usg, scrut') <- scExpr env scrut
         ; case isValue (sc_vals env) scrut' of
                 Just val
-                  | (binds, ConVal con args) <- peelLetVs val
-                  , pprTrace "scExpr:Case" (ppr scrut $$ ppr scrut') True 
+                  | (binds, ConVal con args) <- peelLetVals val
                   -> sc_con_app con args binds scrut'
-                _other
-                  | pprTrace "scExpr:noval" (ppr scrut') True
-                  -> sc_vanilla scrut_usg scrut'
+                _other -> sc_vanilla scrut_usg scrut'
         }
   where
     sc_con_app con args binds scrut'  -- Known constructor; simplify
      = do { let (_, bs, rhs) = findAlt con alts
                                   `orElse` (DEFAULT, [], mkImpossibleExpr ty)
                 alt_env'     = extendScSubstList env ((b,scrut') : bs `zip` trimConArgs con args)
-          ; pprTrace "sc_con_app" (vcat [text "con:" <+> ppr con, text "args:" <+> ppr args, text "rhs:" <+> ppr rhs]) (return ())
           ; scExpr alt_env' (mkCoreLets binds rhs) }
 
     sc_vanilla scrut_usg scrut' -- Normal case
@@ -1741,15 +1731,15 @@ spec_one env fn arg_bndrs body (call_pat@(qvars, pats), rule_number)
               -- changes (#4012).
               rule_name  = mkFastString ("SC:" ++ occNameString fn_occ ++ show rule_number)
               spec_name  = mkInternalName spec_uniq spec_occ fn_loc
-        ; pprTrace "{spec_one" (ppr (sc_count env) <+> ppr fn
-                                <+> ppr pats <+> text "-->" <+> ppr spec_name) $
-          return ()
+--      ; pprTrace "{spec_one" (ppr (sc_count env) <+> ppr fn
+--                              <+> ppr pats <+> text "-->" <+> ppr spec_name) $
+--        return ()
 
         -- Specialise the body
         ; (spec_usg, spec_body) <- scExpr spec_env body
 
-        ; pprTrace "done spec_one}" (ppr fn $$ ppr spec_body $$ ppr spec_usg) $
-          return ()
+--      ; pprTrace "done spec_one}" (ppr fn) $
+--        return ()
 
                 -- And build the results
         ; let (spec_lam_args, spec_call_args) = mkWorkerArgs (sc_dflags env)
@@ -1782,12 +1772,12 @@ spec_one env fn arg_bndrs body (call_pat@(qvars, pats), rule_number)
                                   rule_name inline_act fn_name qvars pats rule_rhs
                            -- See Note [Transfer activation]
               in_scope   = substInScope (sc_subst env)
-        ; if isJust (lookupRule (sc_dflags env) (in_scope, realIdUnfolding)
+        ; MASSERT2( isJust (lookupRule (sc_dflags env) (in_scope, realIdUnfolding)
                                        (const True) fn pats [rule])
-            then pprTrace "yes" (ppr rule) (return ())
-            else pprTrace "nope" (vcat [ text "SpecConstr RULE is unmatchable"
+                  , (vcat [ text "SpecConstr RULE is unmatchable"
                           , text "rule:" <+> ppr rule
-                          , text "call-pattern:" <+> ppr (Var fn `mkCoreApps` pats)]) return ()
+                          , text "call-pattern:" <+> ppr (Var fn `mkCoreApps` pats)])
+                  )
         ; return (spec_usg, OS { os_pat = call_pat, os_rule = rule
                                , os_id = spec_id
                                , os_rhs = spec_rhs }) }
@@ -1998,6 +1988,7 @@ callsToNewPats :: ScEnv -> Id
         -- Bool indicates that there was at least one boring pattern
 callsToNewPats env fn spec_info@(SI { si_specs = done_specs }) bndr_occs calls
   = do  { mb_pats <- mapM (callToPats env bndr_occs) calls
+
         ; let have_boring_call = any isNothing mb_pats
 
               good_pats :: [CallPat]
@@ -2020,12 +2011,11 @@ callsToNewPats env fn spec_info@(SI { si_specs = done_specs }) bndr_occs calls
                 -- Discard specialisations if there are too many of them
               trimmed_pats = trim_pats env fn spec_info small_pats
 
-        ; pprTrace "callsToNewPats" (vcat [ text "calls to" <+> ppr fn <> colon <+> ppr calls
-                                          , text "done_specs:" <+> ppr (map os_pat done_specs)
-                                          , text "good_pats:" <+> ppr good_pats
-                                          , text "trimmed_pats:" <+> ppr trimmed_pats ]) $
-          return ()
-
+--        ; pprTrace "callsToNewPats" (vcat [ text "calls to" <+> ppr fn <> colon <+> ppr calls
+--                                          , text "done_specs:" <+> ppr (map os_pat done_specs)
+--                                          , text "good_pats:" <+> ppr good_pats
+--                                          , text "trimmed_pats:" <+> ppr trimmed_pats ]) $
+--          return ()
 
         ; return (have_boring_call, trimmed_pats) }
 
@@ -2202,7 +2192,7 @@ argToPat env in_scope val_env (Cast arg co) arg_occ
   where
     Pair ty1 ty2 = coercionKind co
 
--- Value lambdas with correspond call occurences
+-- Value lambdas with corresponding call occurences
 argToPat env in_scope val_env arg (CallOcc calls _occ)
   | any isId bndrs -- any leading value lambda at all?
   -- Only apply for saturated calls. This requirement could be lifted, but
@@ -2212,7 +2202,7 @@ argToPat env in_scope val_env arg (CallOcc calls _occ)
   , Just fv_occs <- mb_fv_scrut
   = do  { (_, fv_exprs') <- argsToPats env in_scope val_env fv_exprs fv_occs
         ; let arg' = simpleOptExpr (mkCoreLams bndrs (mkCoreLets (zipWith NonRec (filter isId fvs) fv_exprs') body))
-        ; pprTrace "argToPat" (vcat [ppr arg, ppr arg']) (return ())
+        -- ; pprTrace "argToPat" (vcat [ppr arg, ppr arg']) (return ())
         ; return (True, arg') }
   where
     fvs         = exprFreeVarsList arg
@@ -2224,7 +2214,7 @@ argToPat env in_scope val_env arg (CallOcc calls _occ)
     -- Also then _occ might be of interest. Case-of-case should make sure this
     -- info appropriately percolates after beta reduction in the specialised body.
     mb_fv_scrut = Just (repeat UnkOcc)
-               
+
     at_least_one_saturated_call
       = length bndrs <= maximum (map (length . call_args) calls)
 
@@ -2324,10 +2314,10 @@ isValue env (Var v)
 
 isValue env (Let bind@(NonRec bndr rhs) body)
   | let env' = extendValueEnv bndr (isValue env rhs) env
-  = LetV bind <$> isValue env' body
+  = LetVal bind <$> isValue env' body
 
 isValue env (Let bind body)
-  = LetV bind <$> isValue env body
+  = LetVal bind <$> isValue env body
 
 isValue env (Lam b e)
   | isTyVar b = case isValue env e of
