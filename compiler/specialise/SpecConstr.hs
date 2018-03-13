@@ -56,7 +56,8 @@ import Outputable
 import FastString
 import UniqFM
 import MonadUtils
-import Control.Monad    ( zipWithM )
+import Control.Monad    ( zipWithM, zipWithM_, guard, mzero )
+import Control.Monad.Trans.State.Strict (execStateT, modify')
 import Data.List
 import PrelNames        ( specTyConName )
 import Module
@@ -947,6 +948,11 @@ extendRecBndrs env bndrs  = (env { sc_subst = subst' }, bndrs')
                       where
                         (subst', bndrs') = substRecBndrs (sc_subst env) bndrs
 
+extendBndrs :: ScEnv -> [Var] -> (ScEnv, [Var])
+extendBndrs env bndrs = (env { sc_subst = subst' }, bndrs')
+                      where
+                        (subst', bndrs') = substBndrs (sc_subst env) bndrs
+
 extendBndr :: ScEnv -> Var -> (ScEnv, Var)
 extendBndr  env bndr  = (env { sc_subst = subst' }, bndr')
                       where
@@ -1145,14 +1151,24 @@ lookupOccs (SCU { scu_calls = sc_calls, scu_occs = sc_occs }) bndrs
   = (SCU {scu_calls = sc_calls, scu_occs = delVarEnvList sc_occs bndrs},
      [lookupVarEnv sc_occs b `orElse` NoOcc | b <- bndrs])
 
-data ArgOcc = NoOcc     -- Doesn't occur at all; or a type argument
-            | UnkOcc    -- Used in some unknown way
-
-            | ScrutOcc  -- See Note [ScrutOcc]
-                 (DataConEnv [ArgOcc])   -- How the sub-components are used
-
-            | CallOcc [Call] ArgOcc -- argument function call(s) and
-                                    -- how the result is used
+data ArgOcc
+  = NoOcc
+  -- ^ Doesn't occur at all; or a type argument
+  | UnkOcc
+  -- ^ Used in some unknown way
+  | ScrutOcc (DataConEnv [ArgOcc])
+  -- ^ How the sub-components are used. See Note [ScrutOcc]
+  | CallOcc Arity ArgOcc
+  -- ^ Argument function call, with highest call arity and how the result is used.
+  -- E.g. @(\f x. case f x of Just -> ...; Nothing -> ...)@
+  -- should record @CallOcc 1 (ScrutOcc [Just -> ..., Nothing -> ...])@ for @f@.
+  --
+  -- Whether the arguments at call sites are actually values or not is
+  -- unimportant, because we want to allow to specialise @map (\x. x + 1) xs@
+  -- and @map@ doesn't pass a value to the lambda.
+  -- We still need to make sure that the lambda can at least simplify one
+  -- 'ArgOcc' in a call with the given arity, otherwise specialisation is
+  -- useless.
 
 type DataConEnv a = UniqFM a     -- Keyed by DataCon
 
@@ -1175,10 +1191,10 @@ A pattern binds b, x::a, y::b, z::b->a, but not 'a'!
 -}
 
 instance Outputable ArgOcc where
-  ppr (CallOcc call occ) = text "call-occ" <+> ppr call <+> ppr occ
-  ppr (ScrutOcc xs)      = text "scrut-occ" <+> ppr xs
-  ppr UnkOcc             = text "unk-occ"
-  ppr NoOcc              = text "no-occ"
+  ppr (CallOcc nargs occ) = text "call-occ" <+> ppr nargs <+> ppr occ
+  ppr (ScrutOcc xs)       = text "scrut-occ" <+> ppr xs
+  ppr UnkOcc              = text "unk-occ"
+  ppr NoOcc               = text "no-occ"
 
 -- Experimentally, this vesion of combineOcc makes ScrutOcc "win", so
 -- that if the thing is scrutinised anywhere then we get to see that
@@ -1195,8 +1211,7 @@ combineOcc UnkOcc        c@CallOcc{}   = c
 combineOcc c@CallOcc{}   UnkOcc        = c
 combineOcc c@CallOcc{}   (ScrutOcc _)  = c -- E.g. combines a call with a seq
 combineOcc (ScrutOcc _)  c@CallOcc{}   = c
--- TODO: Sanitize (ids match? number of args?)
-combineOcc (CallOcc cs1 occ1) (CallOcc cs2 occ2) = CallOcc (cs1 ++ cs2) (combineOcc occ1 occ2)
+combineOcc (CallOcc n1 o1) (CallOcc n2 o2) = CallOcc (max n1 n2) (combineOcc o1 o2)
 
 combineOccs :: [ArgOcc] -> [ArgOcc] -> [ArgOcc]
 combineOccs xs ys = zipWithEqual "combineOccs" combineOcc xs ys
@@ -1248,7 +1263,7 @@ scExpr' env (Lam b e)    = do let (env', b') = extendBndr env b
                               return (usg, Lam b' e')
 
 scExpr' env (Case scrut b ty alts)
-  = do  { (scrut_usg, scrut') <- scExpr env scrut
+  = do  { (scrut_usg, scrut') <- scExpr env (pprTraceIt "scrut" scrut)
         ; case isValue (sc_vals env) scrut' of
                 Just val
                   | (binds, ConVal con args) <- peelLetVals val
@@ -1293,6 +1308,7 @@ scExpr' env (Let (NonRec bndr rhs) body)
   = scExpr' (extendScSubst env bndr rhs) body
 
   | otherwise
+  , pprTrace "Let" (ppr bndr <+> ppr body) True
   = do  { let (body_env, bndr') = extendBndr env bndr
         ; rhs_info  <- scRecRhs env (bndr',rhs)
 
@@ -1405,7 +1421,7 @@ mkVarUsage env fn args
     -- some identifier.
     -- Or just equate @CallOcc (Call id [] emptyEnv) UnkOcc@ with @UnkOcc@.
     arg_occ | null args = UnkOcc
-            | otherwise = CallOcc [call] UnkOcc
+            | otherwise = CallOcc (length args) UnkOcc
 
 ----------------------
 scTopBindEnv :: ScEnv -> CoreBind -> UniqSM (ScEnv, CoreBind)
@@ -1576,9 +1592,9 @@ specRec top_lvl env body_usg rhs_infos
        -> UniqSM (ScUsage, [SpecInfo])
     go n_iter seed_calls usg_so_far spec_infos
       | isEmptyVarEnv seed_calls
-      = -- pprTrace "specRec1" (vcat [ ppr (map ri_fn rhs_infos)
-        --                           , ppr seed_calls
-        --                           , ppr body_usg ]) $
+      = pprTrace "specRec1" (vcat [ ppr (map ri_fn rhs_infos)
+                                  , ppr seed_calls
+                                  , ppr body_usg ]) $
         return (usg_so_far, spec_infos)
 
       -- Limit recursive specialisation
@@ -1588,14 +1604,14 @@ specRec top_lvl env body_usg rhs_infos
            -- If both of these are false, the sc_count
            -- threshold will prevent non-termination
       , any ((> the_limit) . si_n_specs) spec_infos
-      = -- pprTrace "specRec2" (ppr (map (map os_pat . si_specs) spec_infos)) $
+      = pprTrace "specRec2" (ppr (map (map os_pat . si_specs) spec_infos)) $
         return (usg_so_far, spec_infos)
 
       | otherwise
-      = -- pprTrace "specRec3" (vcat [ text "bndrs" <+> ppr (map ri_fn rhs_infos)
-        --                           , text "iteration" <+> int n_iter
-        --                          , text "spec_infos" <+> ppr (map (map os_pat . si_specs) spec_infos)
-        --                    ]) $
+      = pprTrace "specRec3" (vcat [ text "bndrs" <+> ppr (map ri_fn rhs_infos)
+                                  , text "iteration" <+> int n_iter
+                                  , text "spec_infos" <+> ppr (map (map os_pat . si_specs) spec_infos)
+                            ]) $
         do  { specs_w_usg <- zipWithM (specialise env seed_calls) rhs_infos spec_infos
             ; let (extra_usg_s, new_spec_infos) = unzip specs_w_usg
                   extra_usg = combineUsages extra_usg_s
@@ -1643,17 +1659,17 @@ specialise env bind_calls (RI { ri_fn = fn, ri_lam_bndrs = arg_bndrs
       Nothing      -> return (nullUsage, spec_info)
 
   | Just all_calls <- lookupVarEnv bind_calls fn
-  = -- pprTrace "specialise entry {" (ppr fn <+> ppr all_calls) $
+  = pprTrace "specialise entry {" (ppr fn <+> ppr all_calls) $
     do  { (boring_call, new_pats) <- callsToNewPats env fn spec_info arg_occs all_calls
 
         ; let n_pats = length new_pats
---        ; if (not (null new_pats) || isJust mb_unspec) then
---            pprTrace "specialise" (vcat [ ppr fn <+> text "with" <+> int n_pats <+> text "good patterns"
---                                        , text "mb_unspec" <+> ppr (isJust mb_unspec)
---                                        , text "arg_occs" <+> ppr arg_occs
---                                        , text "good pats" <+> ppr new_pats])  $
---               return ()
---          else return ()
+        ; if (not (null new_pats) || isJust mb_unspec) then
+            pprTrace "specialise" (vcat [ ppr fn <+> text "with" <+> int n_pats <+> text "good patterns"
+                                        , text "mb_unspec" <+> ppr mb_unspec
+                                        , text "arg_occs" <+> ppr arg_occs
+                                        , text "good pats" <+> ppr new_pats])  $
+               return ()
+          else return ()
 
         ; let spec_env = decreaseSpecCount env n_pats
         ; (spec_usgs, new_specs) <- mapAndUnzipM (spec_one spec_env fn arg_bndrs body)
@@ -1671,11 +1687,11 @@ specialise env bind_calls (RI { ri_fn = fn, ri_lam_bndrs = arg_bndrs
                       Just rhs_usg | boring_call -> (spec_usg `combineUsage` rhs_usg, Nothing)
                       _                          -> (spec_usg,                      mb_unspec)
 
---        ; pprTrace "specialise return }"
---             (vcat [ ppr fn
---                   , text "boring_call:" <+> ppr boring_call
---                   , text "new calls:" <+> ppr (scu_calls new_usg)]) $
---          return ()
+        ; pprTrace "specialise return }"
+             (vcat [ ppr fn
+                   , text "boring_call:" <+> ppr boring_call
+                   , text "new calls:" <+> ppr (scu_calls new_usg)]) $
+          return ()
 
           ; return (new_usg, SI { si_specs = new_specs ++ specs
                                 , si_n_specs = spec_count + n_pats
@@ -1717,7 +1733,7 @@ spec_one :: ScEnv
             f (b,c) ((:) (a,(b,c)) (x,v) hw) = f_spec b c v hw
 -}
 
-spec_one env fn arg_bndrs body (call_pat@(qvars, pats), rule_number)
+spec_one env fn arg_bndrs body (call_pat@(CP qvars pats), rule_number)
   = do  { spec_uniq <- getUniqueM
         ; let spec_env   = extendScSubstList (extendScInScope env qvars)
                                              (arg_bndrs `zip` pats)
@@ -1976,8 +1992,229 @@ alternative would be to discard calls that mention coercion variables
 only in kind-casts, but I'm doing the simple thing for now.
 -}
 
-type CallPat = ([Var], [CoreExpr])      -- Quantified variables and arguments
-                                        -- See Note [SpecConstr call patterns]
+-- | See Note [SpecConstr call patterns]
+data CallPat
+  = CP 
+  { cp_vars :: [Var] 
+  -- ^ Pattern variables. These are meta variables when trying to match
+  -- particular call sites against 'cp_args'.
+  -- Synonym: quantified variable
+  , cp_args :: [CoreExpr] 
+  -- ^ Argument expressions referencing pattern variables.
+  }
+
+instance Eq CallPat where
+  cp1@(CP vs1 as1) == cp2@(CP vs2 as2)
+    -- | pprTrace "CallPat.(==)" (ppr new $$ ppr cp1 $$ ppr cp2) True
+    = WARN( not new && old, text "old => new hurt") new
+    where
+      new = (compareSpecificity cp1 cp2 >>= snd) == Just EQ
+      old = all2 same as1 as2
+      same (Var v1) (Var v2)
+          | v1 `elem` vs1 = v2 `elem` vs2
+          | v2 `elem` vs2 = False
+          | otherwise     = v1 == v2
+
+      same (Lit l1)    (Lit l2)    = l1==l2
+      same (App f1 a1) (App f2 a2) = same f1 f2 && same a1 a2
+
+      same (Type {}) (Type {}) = True     -- Note [Ignore type differences]
+      same (Coercion {}) (Coercion {}) = True
+      same (Tick _ e1) e2 = same e1 e2  -- Ignore casts and notes
+      same (Cast e1 _) e2 = same e1 e2
+      same e1 (Tick _ e2) = same e1 e2
+      same e1 (Cast e2 _) = same e1 e2
+
+      same e1 e2 = WARN( bad e1 || bad e2, ppr e1 $$ ppr e2)
+                  False  -- Let, lambda, case should not occur
+      bad (Case {}) = True
+      bad (Let {})  = True
+      bad (Lam {})  = True
+      bad _other    = False
+
+-- | Format like in the paper
+instance Outputable CallPat where
+  ppr (CP vs as) = ppr vs <+> text "|>" <+> ppr as
+
+-- | Meta variables occuring in the 'CallPat's spine.
+-- Synonym: quantified variable, pattern variable
+patMetaVars :: CallPat -> [Var]
+patMetaVars (CP mvs _) = mvs
+
+-- | The spine of the 'CallPat', e.g. the arguments of a function call,
+-- with occurrences of 'patMetaVars'.
+patSpine :: CallPat -> [CoreExpr]
+patSpine (CP _ spine) = spine
+
+patFreeAndMetaVars :: CallPat -> [Var]
+patFreeAndMetaVars = exprsFreeVarsList . patSpine
+
+-- | A pair of 'VarEnv's to 'CoreExpr's that unifies two expressions @e1@ and
+-- @e2@ by substituting all 'Var's in @e1@ with 'uni_fw' and all 'Var's in @e2@
+-- with 'uni_bw'. The resulting expressions are \(\alpha\)-equivalent.
+data Unifier
+  = Uni
+  { uni_fw :: VarEnv CoreExpr
+  , uni_bw :: VarEnv CoreExpr
+  }
+
+emptyUnifier :: Unifier
+emptyUnifier = Uni emptyVarEnv emptyVarEnv
+
+extendUniFW :: Unifier -> Var -> CoreExpr -> Unifier
+extendUniFW uni v e = uni { uni_fw = extendVarEnv (uni_fw uni) v e }
+
+extendUniBW :: Unifier -> Var -> CoreExpr -> Unifier
+extendUniBW uni v e = uni { uni_bw = extendVarEnv (uni_bw uni) v e }
+
+data Permutation
+  = Perm
+  { perm_fw :: VarEnv Var
+  , perm_bw :: VarEnv Var
+  }
+
+emptyPermutation :: Permutation
+emptyPermutation = Perm emptyVarEnv emptyVarEnv
+
+extendPermutation :: Permutation -> Var -> Var -> Permutation
+extendPermutation (Perm fw bw) l r
+  = ASSERT( not (elemVarEnv l fw) && not (elemVarEnv r bw) )
+    Perm (extendVarEnv fw l r) (extendVarEnv bw r l)
+
+extendPermutationList :: Permutation -> [(Var, Var)] -> Permutation
+extendPermutationList = foldr (\(l, r) p -> extendPermutation p l r)
+
+permuteFW :: Permutation -> Var -> Var
+permuteFW (Perm fw _) l = lookupVarEnv fw l `orElse` l
+
+permuteBW :: Permutation -> Var -> Var
+permuteBW (Perm fw bw) = permuteFW (Perm bw fw)
+
+permSubstFW :: Subst -> Permutation -> Subst
+permSubstFW subst0 perm = foldr (\(l, r) s -> extendSubstWithVar s l r) subst1 pairings
+  where
+    subst1   = extendInScopeList subst0 (nonDetEltsUFM (perm_fw perm))
+    pairings = map (\f -> (f, permuteFW perm f)) (nonDetEltsUFM (perm_bw perm))
+      -- non-det is OK, because the variables don't overlap and as such don't
+      -- influence any substitution.
+
+permSubstBW :: Subst -> Permutation -> Subst
+permSubstBW subst (Perm fw bw) = permSubstFW subst (Perm bw fw)
+
+-- | Tries to compute a most general 'Unifier' for two 'CallPat's.
+-- This algorithm crucially relies on meta-variables in 'CallPat's to occur
+-- linearly!
+unifyCallPat :: CallPat -> CallPat -> Maybe Unifier
+unifyCallPat cp1 cp2
+  = execStateT (spine emptyPermutation (patSpine cp1) (patSpine cp2)) emptyUnifier
+  where
+    is_meta_var = (`elemVarSet` mkVarSet (patMetaVars cp1 ++ patMetaVars cp2))
+
+    -- When we apply renaming permutations for local binders, we have to be
+    -- careful not to introduce clashes. It's not enough to just add the range
+    -- of the renaming permutation, for example:
+    --
+    --   [x |-> y, y |-> x]((\x. y x z) x) = (\x'. x x' z) y
+    --
+    -- We had to rename the lambda bound x to a fresh x' here. There's nothing
+    -- preventing the substitution to choose z as the fresh name, though!
+    -- This is why we have to include the free (and meta) vars of the pattern
+    -- we substitute into.
+    subst_init_fw = extendInScopeList emptySubst (patFreeAndMetaVars cp1)
+    subst_init_bw = extendInScopeList emptySubst (patFreeAndMetaVars cp2)
+
+    -- TODO: Detect non-linear meta-var occurrences
+    solve_fw v e = modify' (\u -> extendUniFW u v e)
+    solve_bw v e = modify' (\u -> extendUniBW u v e)
+
+    spine perm es1 es2 = do
+      guard (es1 `equalLength` es2)
+      zipWithM_ (expr perm) es1 es2
+
+    expr perm (Var v1) (Var v2)
+      | not (is_meta_var v1)
+      , not (is_meta_var v2)
+      , permuteFW perm v1 == v2 = return ()
+    expr perm (Var v1) e
+      | is_meta_var v1
+      = solve_fw v1 (substExprSC (text "SpecConstr.unify") (permSubstBW subst_init_bw perm) e)
+    expr perm e (Var v2)
+      | is_meta_var v2
+      = solve_bw v2 (substExprSC (text "SpecConstr.unify") (permSubstFW subst_init_fw perm) e)
+
+    expr _ (Lit l1)    (Lit l2)    = guard (l1 == l2)
+    expr perm (App f1 a1) (App f2 a2) = expr perm f1 f2 >> expr perm a1 a2
+
+    -- Note [Ignore type differences]
+    expr perm (Type {}) (Type {}) = return ()
+    expr perm (Coercion {}) (Coercion {}) = return ()
+    expr perm (Tick _ e1) e2 = expr perm e1 e2  -- Ignore casts and notes
+    expr perm (Cast e1 _) e2 = expr perm e1 e2
+    expr perm e1 (Tick _ e2) = expr perm e1 e2
+    expr perm e1 (Cast e2 _) = expr perm e1 e2
+
+    expr perm (Lam b1 e1) (Lam b2 e2) = expr (extendPermutation perm b1 b2) e1 e2
+
+    expr perm (Case e1 b1 _ as1) (Case e2 b2 _ as2) = do
+      expr perm e1 e2
+      guard (as1 `equalLength` as2)
+      zipWithM_ (alt (extendPermutation perm b1 b2)) as1 as2
+
+    expr perm (Let bind1 e1) (Let bind2 e2) = do
+      let (bndrs1, rhss1) = unzip (flattenBinds [bind1])
+          (bndrs2, rhss2) = unzip (flattenBinds [bind2])
+          perm' = extendPermutationList perm (zip bndrs1 bndrs2)
+      zipWithM_ (expr perm') rhss1 rhss2
+      expr perm' e1 e2
+
+    expr _ _ _ = mzero
+
+    alt perm (dc1, bndrs1, rhs1) (dc2, bndrs2, rhs2) = do
+      guard (dc1 == dc2)
+      guard (bndrs1 `equalLength` bndrs2)
+      let perm' = extendPermutationList perm (zip bndrs1 bndrs2)
+      expr perm' rhs1 rhs2
+
+{-
+Note [Ignore type differences]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We do not want to generate specialisations where the call patterns
+differ only in their type arguments!  Not only is it utterly useless,
+but it also means that (with polymorphic recursion) we can generate
+an infinite number of specialisations. Example is Data.Sequence.adjustTree,
+I think.
+-}
+
+-- | @compareSpecificity cp1 cp2 >>= snd@ is the partial ordering of 'CallPat's
+-- by specificity. A 'CallPat' @cp1@ is more specific than @cp2@ if any call
+-- matching @cp1@ also matches @cp2@.
+-- For efficiency reasons, this function also returns the 'Unifier' computed by
+-- 'tryUnify' if successful.
+compareSpecificity :: CallPat -> CallPat -> Maybe (Unifier, Maybe Ordering)
+compareSpecificity cp1 cp2 = do
+  u@(Uni fw bw) <- unifyCallPat cp1 cp2
+  let is_var e = case e of Var _ -> True; _ -> False
+  let m_ord =
+        case (allUFM is_var fw, allUFM is_var bw) of
+          (False, False) -> Nothing
+          (True, False) -> Just LT
+          (False, True) -> Just GT
+          (True, True) -> Just EQ
+  return (u, m_ord)
+
+-- | A set of 'CallPat's.
+newtype CallPatSet = CallPatSet [CallPat]
+
+emptyCallPatSet :: CallPatSet
+emptyCallPatSet = CallPatSet []
+
+elemCallPatSet :: CallPat -> CallPatSet -> Bool
+elemCallPatSet pat (CallPatSet pats) = pat `elem` pats
+
+insertCallPat :: CallPat -> CallPatSet -> CallPatSet
+insertCallPat pat (CallPatSet pats)
+  | pat `elem` pats = CallPatSet pats
+  | otherwise = CallPatSet (pat:pats)
 
 callsToNewPats :: ScEnv -> Id
                -> SpecInfo
@@ -1996,14 +2233,14 @@ callsToNewPats env fn spec_info@(SI { si_specs = done_specs }) bndr_occs calls
 
               -- Remove patterns we have already done
               new_pats = filterOut is_done good_pats
-              is_done p = any (samePat p . os_pat) done_specs
+              is_done p = any ((== p) . os_pat) done_specs
 
               -- Remove duplicates
-              non_dups = nubBy samePat new_pats
+              non_dups = nub new_pats
 
               -- Remove ones that have too many worker variables
               small_pats = filterOut too_big non_dups
-              too_big (vars,_) = not (isWorkerSmallEnough (sc_dflags env) vars)
+              too_big pat = not (isWorkerSmallEnough (sc_dflags env) (cp_vars pat))
                   -- We are about to construct w/w pair in 'spec_one'.
                   -- Omit specialisation leading to high arity workers.
                   -- See Note [Limit w/w arity] in WwLib
@@ -2050,7 +2287,7 @@ trim_pats env fn (SI { si_n_specs = done_spec_count }) pats
     pat_cons :: CallPat -> Int
     -- How many data constructors of literals are in
     -- the pattern.  More data-cons => less general
-    pat_cons (qs, ps) = foldr ((+) . n_cons) 0 ps
+    pat_cons (CP qs ps) = foldr ((+) . n_cons) 0 ps
        where
           q_set = mkVarSet qs
           n_cons (Var v) | v `elemVarSet` q_set = 0
@@ -2086,7 +2323,8 @@ callToPats env bndr_occs call@(Call _ args con_env)
   = return Nothing
   | otherwise
   = do  { let in_scope      = substInScope (sc_subst env)
-        ; (interesting, pats) <- argsToPats env in_scope con_env args bndr_occs
+        ; pprTrace "callToPats" (ppr in_scope) (return ())
+        ; (interesting, pats) <- argsToPats env in_scope con_env emptyVarSet args bndr_occs
         ; let pat_fvs       = exprsFreeVarsList pats
                 -- To get determinism we need the list of free variables in
                 -- deterministic order. Otherwise we end up creating
@@ -2117,18 +2355,18 @@ callToPats env bndr_occs call@(Call _ args con_env)
           WARN( not (null bad_covars), text "SpecConstr: bad covars:" <+> ppr bad_covars
                                        $$ ppr call )
           if interesting && null bad_covars
-          then return (Just (qvars', pats))
+          then return (Just (CP qvars' pats))
           else return Nothing }
 
-    -- argToPat takes an actual argument, and returns an abstracted
-    -- version, consisting of just the "constructor skeleton" of the
-    -- argument, with non-constructor sub-expression replaced by new
-    -- placeholder variables.  For example:
-    --    C a (D (f x) (g y))  ==>  C p1 (D p2 p3)
-
+-- | 'argToPat' takes an actual argument, and returns an abstracted
+-- version, consisting of just the "constructor skeleton" of the
+-- argument, with non-constructor sub-expression replaced by new
+-- placeholder variables.  For example:
+--    C a (D (f x) (g y))  ==>  C p1 (D p2 p3)
 argToPat :: ScEnv
          -> InScopeSet                  -- What's in scope at the fn defn site
          -> ValueEnv                    -- ValueEnv at the call site
+         -> VarSet                      -- Variables bound in the arguments
          -> CoreArg                     -- A call arg (or component thereof)
          -> ArgOcc
          -> UniqSM (Bool, CoreArg)
@@ -2143,11 +2381,11 @@ argToPat :: ScEnv
 --              lvl7         --> (True, lvl7)      if lvl7 is bound
 --                                                 somewhere further out
 
-argToPat _env _in_scope _val_env arg@(Type {}) _arg_occ
+argToPat _env _in_scope _val_env _bound arg@(Type {}) _arg_occ
   = return (False, arg)
 
-argToPat env in_scope val_env (Tick _ arg) arg_occ
-  = argToPat env in_scope val_env arg arg_occ
+argToPat env in_scope val_env bound (Tick _ arg) arg_occ
+  = argToPat env in_scope val_env bound arg arg_occ
         -- Note [Notes in call patterns]
         -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         -- Ignore Notes.  In particular, we want to ignore any InlineMe notes
@@ -2155,12 +2393,12 @@ argToPat env in_scope val_env (Tick _ arg) arg_occ
         -- ride roughshod over them all for now.
         --- See Note [Notes in RULE matching] in Rules
 
-argToPat env in_scope val_env (Let bind@(NonRec bndr rhs) body) arg_occ
+argToPat env in_scope val_env bound (Let bind@(NonRec bndr rhs) body) arg_occ
   -- Try this for non-recursive bindings only for now.
   -- Should recursive bindings be tested for values, too?
   | Just val <- isValue val_env rhs
   , let val_env' = extendVarEnv val_env bndr val
-  = do  { (interesting, body') <- argToPat env in_scope val_env' body arg_occ
+  = do  { (interesting, body') <- argToPat env in_scope val_env' bound body arg_occ
         ; return (interesting, body') }
         -- See Note [Matching lets] and Note [Expanding variables] in Rule.hs
         -- Look through let expressions
@@ -2169,8 +2407,8 @@ argToPat env in_scope val_env (Let bind@(NonRec bndr rhs) body) arg_occ
         -- because the rule-matcher will look through the let but look into
         -- expandable unfoldings of ids (where the RHS is in WHNF or CONLIKE).
 
-argToPat env in_scope val_env (Let _ body) arg_occ
-  = argToPat env in_scope val_env body arg_occ
+argToPat env in_scope val_env bound (Let _ body) arg_occ
+  = argToPat env in_scope val_env bound body arg_occ
 
 {- Disabled; see Note [Matching cases] in Rule.hs
 argToPat env in_scope val_env (Case scrut _ _ [(_, _, rhs)]) arg_occ
@@ -2178,9 +2416,24 @@ argToPat env in_scope val_env (Case scrut _ _ [(_, _, rhs)]) arg_occ
   = argToPat env in_scope val_env rhs arg_occ
 -}
 
-argToPat env in_scope val_env (Cast arg co) arg_occ
+-- This variant of matching cases seems safe, though?!
+argToPat env in_scope val_env bound (Case scrut b ty alts) arg_occ
+  = do  -- It's safe to say that scrut won't expose a new value, otherwise
+        -- case-of-known-constructor would have fired. So we just assume an
+        -- UnkOcc and don't bother if this was interesting or not.
+        { (_, scrut') <- argToPat env in_scope val_env bound scrut UnkOcc
+        ; let bound' = extendVarSet bound b
+        ; (interestings, alts') <- mapAndUnzipM (alt_to_pat bound') alts
+        ; return (or interestings, Case scrut' b ty alts') }
+  where
+    alt_to_pat bound (con, bs, rhs)
+      = do  { let bound' = extendVarSetList bound bs
+            ; (interesting, rhs') <- argToPat env in_scope val_env bound' rhs arg_occ
+            ; return (interesting, (con, bs, rhs')) }
+
+argToPat env in_scope val_env bound (Cast arg co) arg_occ
   | not (ignoreType env ty2)
-  = do  { (interesting, arg') <- argToPat env in_scope val_env arg arg_occ
+  = do  { (interesting, arg') <- argToPat env in_scope val_env bound arg arg_occ
         ; if not interesting then
                 wildCardPat ty2
           else do
@@ -2193,17 +2446,38 @@ argToPat env in_scope val_env (Cast arg co) arg_occ
     Pair ty1 ty2 = coercionKind co
 
 -- Value lambdas with corresponding call occurences
-argToPat env in_scope val_env arg (CallOcc calls _occ)
+argToPat env in_scope val_env bound arg (CallOcc nargs occ)
   | any isId bndrs -- any leading value lambda at all?
   -- Only apply for saturated calls. This requirement could be lifted, but
   -- note that we apply the same requirement for inlining, so this seems
   -- reasonable.
-  , at_least_one_saturated_call
+  , length bndrs <= nargs
   , Just fv_occs <- mb_fv_scrut
-  = do  { (_, fv_exprs') <- argsToPats env in_scope val_env fv_exprs fv_occs
-        ; let arg' = simpleOptExpr (mkCoreLams bndrs (mkCoreLets (zipWith NonRec (filter isId fvs) fv_exprs') body))
-        -- ; pprTrace "argToPat" (vcat [ppr arg, ppr arg']) (return ())
-        ; return (True, arg') }
+  = do  -- { (_, fv_exprs') <- argsToPats env in_scope val_env fv_exprs fv_occs
+        -- float value bindings in and optimize so they can inline
+        -- TODO: Maybe just inline them directly. This seems brittle, as
+        --       simpleOptExpr will only inline bindings occuring once.
+        --       Multiple occurrences may happen as the return value of the
+        --       lambda. It's important that the rule doesn't mention any lets
+        --       as that confuses the RULE engine, I believe.
+        --{ let arg' = simpleOptExpr 
+        --           . mkCoreLams bndrs
+        --           -- . mkCoreLets (zipWith NonRec (filter isId fvs) fv_exprs')
+        --           $ body
+        -- We need to find out how the argument function uses its parameters
+        -- and free variables.
+        -- For specialisation to be beneficial, at least one argument that is
+        -- a value must have a matching `ArgOcc` OR the function returns a value
+        -- that is scrutinised after the call (e.g. occ is a `ScrutOcc`).
+        { let bound' = extendVarSetList bound bndrs
+        --; let (env2, fvs') = extendBndrsWith RecArg env fvs
+        ; (_, body') <- argToPat env in_scope val_env bound' body occ
+        ; pprTrace "argToPat" (text "body'" $$ ppr body $$ ppr body') (return ())
+        -- ; let (_, arg_arg_occs) = lookupOccs usg bndrs'
+        -- ; let (_, arg_fv_occs)  = lookupOccs usg fvs'
+        
+        --; pprTrace "argToPat:Lam" (vcat [ppr arg, ppr arg', ppr body]) (return ())
+        ; return (True, simpleOptExpr (mkCoreLams bndrs body')) }
   where
     fvs         = exprFreeVarsList arg
     fv_exprs    = varsToCoreExprs (filter isId fvs)
@@ -2215,17 +2489,14 @@ argToPat env in_scope val_env arg (CallOcc calls _occ)
     -- info appropriately percolates after beta reduction in the specialised body.
     mb_fv_scrut = Just (repeat UnkOcc)
 
-    at_least_one_saturated_call
-      = length bndrs <= maximum (map (length . call_args) calls)
-
   -- Check for a constructor application
   -- NB: this *precedes* the Var case, so that we catch nullary constrs
-argToPat env in_scope val_env arg arg_occ
+argToPat env in_scope val_env bound arg arg_occ
   | Just (ConVal (DataAlt dc) args) <- isValue val_env arg
   , not (ignoreDataCon env dc)        -- See Note [NoSpecConstr]
   , Just arg_occs <- mb_scrut dc
   = do  { let (ty_args, rest_args) = splitAtList (dataConUnivTyVars dc) args
-        ; (_, args') <- argsToPats env in_scope val_env rest_args arg_occs
+        ; (_, args') <- argsToPats env in_scope val_env bound rest_args arg_occs
         ; return (True,
                   mkConApp dc (ty_args ++ args')) }
   where
@@ -2241,7 +2512,7 @@ argToPat env in_scope val_env arg arg_occ
   --    (a) is used in an interesting way in the function body
   --    (b) we know what its value is
   -- In that case it counts as "interesting"
-argToPat env in_scope val_env (Var v) arg_occ
+argToPat env in_scope val_env _bound (Var v) arg_occ
   | sc_force env || case arg_occ of { UnkOcc -> False; _other -> True }, -- (a)
     is_value,                                                            -- (b)
        -- Ignoring sc_keen here to avoid gratuitously incurring Note [Reboxing]
@@ -2275,9 +2546,24 @@ argToPat env in_scope val_env (Var v) arg_occ
         --       f x y = letrec g z = ... in g (x,y)
         -- We don't want to specialise for that *particular* x,y
 
+-- This should work better. The idea is that in a call like
+--   f (\x. case x of Just y -> y; Nothing -> False)
+-- we want occurrences of both lambda-bound vars and case binders not to be
+-- replaced by a wildcard. e.g.
+--   f (\x. case x' of Just y -> y'; Nothing -> False)
+-- where x' and y' are meta-vars is wrong and doesn't match the original
+-- call-pattern anymore.
+--
+-- We never include let-bound variables in this, because of
+-- Note [Matching lets] in Rules. If there's a value to be exposed, it will have
+-- an entry in the ValueEnv and the previous case will take care of it.
+argToPat env in_scope val_env bound (Var v) _occ
+  | v `elemVarSet` bound
+  = return (False, Var v)
+
   -- The default case: make a wild-card
   -- We use this for coercions too
-argToPat _env _in_scope _val_env arg _arg_occ
+argToPat _env _in_scope _val_env _bound arg _arg_occ
   = wildCardPat (exprType arg)
 
 wildCardPat :: Type -> UniqSM (Bool, CoreArg)
@@ -2287,10 +2573,10 @@ wildCardPat ty
        ; return (False, varToCoreExpr id) }
 
 argsToPats :: ScEnv -> InScopeSet -> ValueEnv
-           -> [CoreArg] -> [ArgOcc]  -- Should be same length
+           -> VarSet -> [CoreArg] -> [ArgOcc]  -- Should be same length
            -> UniqSM (Bool, [CoreArg])
-argsToPats env in_scope val_env args occs
-  = do { stuff <- zipWithM (argToPat env in_scope val_env) args occs
+argsToPats env in_scope val_env bound args occs
+  = do { stuff <- zipWithM (argToPat env in_scope val_env bound) args occs
        ; let (interesting_s, args') = unzip stuff
        ; return (or interesting_s, args') }
 
@@ -2349,39 +2635,3 @@ isValue _env _expr = Nothing
 valueIsWorkFree :: Value -> Bool
 valueIsWorkFree LambdaVal       = True
 valueIsWorkFree (ConVal _ args) = all exprIsWorkFree args
-
-samePat :: CallPat -> CallPat -> Bool
-samePat (vs1, as1) (vs2, as2)
-  = all2 same as1 as2
-  where
-    same (Var v1) (Var v2)
-        | v1 `elem` vs1 = v2 `elem` vs2
-        | v2 `elem` vs2 = False
-        | otherwise     = v1 == v2
-
-    same (Lit l1)    (Lit l2)    = l1==l2
-    same (App f1 a1) (App f2 a2) = same f1 f2 && same a1 a2
-
-    same (Type {}) (Type {}) = True     -- Note [Ignore type differences]
-    same (Coercion {}) (Coercion {}) = True
-    same (Tick _ e1) e2 = same e1 e2  -- Ignore casts and notes
-    same (Cast e1 _) e2 = same e1 e2
-    same e1 (Tick _ e2) = same e1 e2
-    same e1 (Cast e2 _) = same e1 e2
-
-    same e1 e2 = WARN( bad e1 || bad e2, ppr e1 $$ ppr e2)
-                 False  -- Let, lambda, case should not occur
-    bad (Case {}) = True
-    bad (Let {})  = True
-    bad (Lam {})  = True
-    bad _other    = False
-
-{-
-Note [Ignore type differences]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We do not want to generate specialisations where the call patterns
-differ only in their type arguments!  Not only is it utterly useless,
-but it also means that (with polymorphic recursion) we can generate
-an infinite number of specialisations. Example is Data.Sequence.adjustTree,
-I think.
--}
