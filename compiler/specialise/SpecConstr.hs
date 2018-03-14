@@ -1221,9 +1221,14 @@ setScrutOcc :: ScEnv -> ScUsage -> OutExpr -> ArgOcc -> ScUsage
 -- is a variable, and an interesting variable
 setScrutOcc env usg (Cast e _) occ      = setScrutOcc env usg e occ
 setScrutOcc env usg (Tick _ e) occ      = setScrutOcc env usg e occ
+setScrutOcc env usg (Let _ e)  occ      = setScrutOcc env usg e occ
 setScrutOcc env usg (Var v)    occ
-  | Just RecArg <- lookupHowBound env v = usg { scu_occs = extendVarEnv (scu_occs usg) v occ }
-  | otherwise                           = usg
+  | Just RecArg <- lookupHowBound env v
+  = usg { scu_occs = extendVarEnv (scu_occs usg) v occ }
+setScrutOcc env usg e@App{}    occ
+  | (Var f, args) <- collectArgs e
+  , Just RecArg <- lookupHowBound env f
+  = usg { scu_occs = extendVarEnv (scu_occs usg) f (CallOcc (length args) occ) }
 setScrutOcc _env usg _other _occ        -- Catch-all
   = usg
 
@@ -1263,7 +1268,7 @@ scExpr' env (Lam b e)    = do let (env', b') = extendBndr env b
                               return (usg, Lam b' e')
 
 scExpr' env (Case scrut b ty alts)
-  = do  { (scrut_usg, scrut') <- scExpr env (pprTraceIt "scrut" scrut)
+  = do  { (scrut_usg, scrut') <- scExpr env scrut
         ; case isValue (sc_vals env) scrut' of
                 Just val
                   | (binds, ConVal con args) <- peelLetVals val
@@ -1308,7 +1313,6 @@ scExpr' env (Let (NonRec bndr rhs) body)
   = scExpr' (extendScSubst env bndr rhs) body
 
   | otherwise
-  , pprTrace "Let" (ppr bndr <+> ppr body) True
   = do  { let (body_env, bndr') = extendBndr env bndr
         ; rhs_info  <- scRecRhs env (bndr',rhs)
 
@@ -1659,17 +1663,17 @@ specialise env bind_calls (RI { ri_fn = fn, ri_lam_bndrs = arg_bndrs
       Nothing      -> return (nullUsage, spec_info)
 
   | Just all_calls <- lookupVarEnv bind_calls fn
-  = pprTrace "specialise entry {" (ppr fn <+> ppr all_calls) $
+  = -- pprTrace "specialise entry {" (ppr fn <+> ppr all_calls) $
     do  { (boring_call, new_pats) <- callsToNewPats env fn spec_info arg_occs all_calls
 
         ; let n_pats = length new_pats
-        ; if (not (null new_pats) || isJust mb_unspec) then
-            pprTrace "specialise" (vcat [ ppr fn <+> text "with" <+> int n_pats <+> text "good patterns"
-                                        , text "mb_unspec" <+> ppr mb_unspec
-                                        , text "arg_occs" <+> ppr arg_occs
-                                        , text "good pats" <+> ppr new_pats])  $
-               return ()
-          else return ()
+--        ; if (not (null new_pats) || isJust mb_unspec) then
+--            pprTrace "specialise" (vcat [ ppr fn <+> text "with" <+> int n_pats <+> text "good patterns"
+--                                        , text "mb_unspec" <+> ppr (isJust mb_unspec)
+--                                        , text "arg_occs" <+> ppr arg_occs
+--                                        , text "good pats" <+> ppr new_pats])  $
+--               return ()
+--          else return ()
 
         ; let spec_env = decreaseSpecCount env n_pats
         ; (spec_usgs, new_specs) <- mapAndUnzipM (spec_one spec_env fn arg_bndrs body)
@@ -1687,11 +1691,11 @@ specialise env bind_calls (RI { ri_fn = fn, ri_lam_bndrs = arg_bndrs
                       Just rhs_usg | boring_call -> (spec_usg `combineUsage` rhs_usg, Nothing)
                       _                          -> (spec_usg,                      mb_unspec)
 
-        ; pprTrace "specialise return }"
-             (vcat [ ppr fn
-                   , text "boring_call:" <+> ppr boring_call
-                   , text "new calls:" <+> ppr (scu_calls new_usg)]) $
-          return ()
+--        ; pprTrace "specialise return }"
+--             (vcat [ ppr fn
+--                   , text "boring_call:" <+> ppr boring_call
+--                   , text "new calls:" <+> ppr (scu_calls new_usg)]) $
+--          return ()
 
           ; return (new_usg, SI { si_specs = new_specs ++ specs
                                 , si_n_specs = spec_count + n_pats
@@ -2323,7 +2327,6 @@ callToPats env bndr_occs call@(Call _ args con_env)
   = return Nothing
   | otherwise
   = do  { let in_scope      = substInScope (sc_subst env)
-        ; pprTrace "callToPats" (ppr in_scope) (return ())
         ; (interesting, pats) <- argsToPats env in_scope con_env emptyVarSet args bndr_occs
         ; let pat_fvs       = exprsFreeVarsList pats
                 -- To get determinism we need the list of free variables in
@@ -2447,47 +2450,15 @@ argToPat env in_scope val_env bound (Cast arg co) arg_occ
 
 -- Value lambdas with corresponding call occurences
 argToPat env in_scope val_env bound arg (CallOcc nargs occ)
-  | any isId bndrs -- any leading value lambda at all?
+  | let (bndrs, body) = collectBinders arg
+  , any isId bndrs -- any leading value lambda at all?
   -- Only apply for saturated calls. This requirement could be lifted, but
   -- note that we apply the same requirement for inlining, so this seems
   -- reasonable.
   , length bndrs <= nargs
-  , Just fv_occs <- mb_fv_scrut
-  = do  -- { (_, fv_exprs') <- argsToPats env in_scope val_env fv_exprs fv_occs
-        -- float value bindings in and optimize so they can inline
-        -- TODO: Maybe just inline them directly. This seems brittle, as
-        --       simpleOptExpr will only inline bindings occuring once.
-        --       Multiple occurrences may happen as the return value of the
-        --       lambda. It's important that the rule doesn't mention any lets
-        --       as that confuses the RULE engine, I believe.
-        --{ let arg' = simpleOptExpr 
-        --           . mkCoreLams bndrs
-        --           -- . mkCoreLets (zipWith NonRec (filter isId fvs) fv_exprs')
-        --           $ body
-        -- We need to find out how the argument function uses its parameters
-        -- and free variables.
-        -- For specialisation to be beneficial, at least one argument that is
-        -- a value must have a matching `ArgOcc` OR the function returns a value
-        -- that is scrutinised after the call (e.g. occ is a `ScrutOcc`).
-        { let bound' = extendVarSetList bound bndrs
-        --; let (env2, fvs') = extendBndrsWith RecArg env fvs
+  = do  { let bound' = extendVarSetList bound bndrs
         ; (_, body') <- argToPat env in_scope val_env bound' body occ
-        ; pprTrace "argToPat" (text "body'" $$ ppr body $$ ppr body') (return ())
-        -- ; let (_, arg_arg_occs) = lookupOccs usg bndrs'
-        -- ; let (_, arg_fv_occs)  = lookupOccs usg fvs'
-        
-        --; pprTrace "argToPat:Lam" (vcat [ppr arg, ppr arg', ppr body]) (return ())
         ; return (True, simpleOptExpr (mkCoreLams bndrs body')) }
-  where
-    fvs         = exprFreeVarsList arg
-    fv_exprs    = varsToCoreExprs (filter isId fvs)
-    (bndrs, body)  = collectBinders arg
-    -- look at arg to see how and if its free variables are scrutinised
-    -- just assume we have a SPEC for now and don't worry about matching Occs.
-    -- Later on, we probably have to scExpr under the assumption of val_env here
-    -- Also then _occ might be of interest. Case-of-case should make sure this
-    -- info appropriately percolates after beta reduction in the specialised body.
-    mb_fv_scrut = Just (repeat UnkOcc)
 
   -- Check for a constructor application
   -- NB: this *precedes* the Var case, so that we catch nullary constrs
