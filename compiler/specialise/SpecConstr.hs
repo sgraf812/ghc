@@ -1160,15 +1160,13 @@ data ArgOcc
   -- ^ How the sub-components are used. See Note [ScrutOcc]
   | CallOcc Arity ArgOcc
   -- ^ Argument function call, with highest call arity and how the result is used.
-  -- E.g. @(\f x. case f x of Just -> ...; Nothing -> ...)@
+  -- E.g. @(\f x. case f x of Just y -> ...; Nothing -> ...)@
   -- should record @CallOcc 1 (ScrutOcc [Just -> ..., Nothing -> ...])@ for @f@.
   --
-  -- Whether the arguments at call sites are actually values or not is
-  -- unimportant, because we want to allow to specialise @map (\x. x + 1) xs@
-  -- and @map@ doesn't pass a value to the lambda.
-  -- We still need to make sure that the lambda can at least simplify one
-  -- 'ArgOcc' in a call with the given arity, otherwise specialisation is
-  -- useless.
+  -- Whether the arguments at call sites are actually values (in the sense of
+  -- con app/lambda) or not is unimportant, because we want to allow to
+  -- specialise @map (\x. x + 1) xs@ and @map@ doesn't pass a value to the
+  -- lambda.
 
 type DataConEnv a = UniqFM a     -- Keyed by DataCon
 
