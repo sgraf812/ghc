@@ -46,7 +46,7 @@ import Name
 import BasicTypes
 import DynFlags         ( DynFlags(..), GeneralFlag( Opt_SpecConstrKeen )
                         , gopt, hasPprDebug )
-import Maybes           ( orElse, catMaybes, isJust, isNothing )
+import Maybes           ( orElse, fromMaybe, expectJust, catMaybes, isJust, isNothing, whenIsJust )
 import Demand
 import GHC.Serialized   ( deserializeWithData )
 import Util
@@ -57,13 +57,16 @@ import FastString
 import UniqFM
 import MonadUtils
 import Control.Monad    ( zipWithM, zipWithM_, guard, mzero )
-import Control.Monad.Trans.State.Strict (execStateT, modify')
+import Control.Monad.Trans.Class ( lift )
+import Control.Monad.Trans.Maybe ( MaybeT (..), runMaybeT )
+import Control.Monad.Trans.State.Strict
 import Data.List
 import PrelNames        ( specTyConName )
 import Module
 import TyCon ( TyCon )
 import GHC.Exts( SpecConstrAnnotation(..) )
 import Data.Ord( comparing )
+import Data.Sequence ( Seq, fromList, (><), viewl, ViewL (..) )
 
 {-
 -----------------------------------------------------
@@ -1108,11 +1111,11 @@ data ScUsage
 
 type CallEnv = IdEnv [Call]
 data Call = Call
-  { _call_recv :: Id
-  -- ^ Receiver of the call. Kept mainly for debug output.
+  { call_recv :: Id
+  -- ^ Receiver of the call.
   , call_args :: [CoreArg]
   -- ^ The arguments of the call.
-  , _call_vals :: ValueEnv
+  , call_vals :: ValueEnv
   -- ^ Gives constructor bindings at the call site.
   }
 
@@ -1546,7 +1549,8 @@ data OneSpec =
   OS { os_pat  :: CallPat    -- Call pattern that generated this specialisation
      , os_rule :: CoreRule   -- Rule connecting original id with the specialisation
      , os_id   :: OutId      -- Spec id
-     , os_rhs  :: OutExpr }  -- Spec rhs
+     , os_rhs  :: OutExpr    -- Spec rhs
+     , os_usg  :: ScUsage }  -- Usage of the (specialised) RHS
 
 noSpecInfo :: SpecInfo
 noSpecInfo = SI { si_specs = [], si_n_specs = 0, si_mb_unspec = Nothing }
@@ -1562,6 +1566,137 @@ specNonRec env body_usg rhs_info
   = specialise env (scu_calls body_usg) rhs_info
                (noSpecInfo { si_mb_unspec = Just (ri_rhs_usg rhs_info) })
 
+isNewCallPat :: CallPat -> SpecInfo -> Bool
+isNewCallPat cp si = isNothing (find ((== cp) . os_pat) (si_specs si))
+
+addNewSpec :: OneSpec -> SpecInfo -> Maybe SpecInfo
+addNewSpec spec si
+  | isNewCallPat (os_pat spec) si
+  = Just si { si_specs = si_specs si ++ [spec], si_n_specs = si_n_specs si + 1 }
+  | otherwise
+  = Nothing
+
+lookupMostSpecificSpecs :: Call -> SpecInfo -> [OneSpec]
+lookupMostSpecificSpecs call (SI { si_specs = specs })
+  = upper_bounds [] specs
+  where
+    pat = callAsClosedPat call
+    upper_bounds candidates (spec:specs)
+      | Just (unifier, Just _) <- compareSpecificity (os_pat spec) pat
+      -- ordering is either LT or (unlikely) EQ. In either case we have to
+      -- look for other, more specific candidates.
+      = upper_bounds (insert_in_antichain spec candidates) specs
+      | otherwise
+      = upper_bounds candidates specs
+    upper_bounds candidates _
+      = candidates
+    -- All elements in the antichain should have a pairwise unifier (they all
+    -- generalise @pat@, after all), But we should maintain that they are all
+    -- uncomparable.
+    insert_in_antichain new [] = [new]
+    insert_in_antichain new (a:antichain) =
+      case compareSpecificity (os_pat new) (os_pat a) of
+        -- the new spec is incomparable so far
+        Just (_, Nothing) -> a : insert_in_antichain new antichain
+        -- the new spec is more specific than at least one entry. There
+        -- shouldn't be another entry in @antichain@ that's more specific, so
+        -- @new@ will really end up in the chain.
+        Just (_, Just GT) -> insert_in_antichain new antichain 
+        -- the new spec is equal to or less specific than a spec already present
+        -- in the antichain.
+        _ -> a:antichain
+
+callAsClosedPat :: Call -> CallPat
+callAsClosedPat call = CP [] (call_args call)
+
+composePats :: CallPat -> CallPat -> CallPat
+composePats inner outer = combined
+  where
+    vars     = cp_vars inner
+    subst0   = extendInScopeList emptySubst (patFreeAndMetaVars outer)
+    subst1   = extendSubstList subst0 (zip (cp_vars outer) (cp_args inner))
+    args     = map (substExpr (text "composePats") subst1) (cp_args outer)
+    combined = CP vars args
+
+origCallToSpecCall :: Call -> OneSpec -> Maybe Call
+origCallToSpecCall call spec = do
+  let pat = os_pat spec
+  -- make sure the call actually matches
+  (unifier, Just LT) <- compareSpecificity pat (callAsClosedPat call)
+  args <- mapM (lookupVarEnv (uni_fw unifier)) (patMetaVars pat)
+  return $ Call (os_id spec) args (call_vals call)
+
+relevantCalls :: [Id] -> CallEnv -> [Call]
+relevantCalls rec_group call_env =
+  concatMap (fromMaybe [] . lookupVarEnv call_env) rec_group
+
+data CollectorState
+  = CS
+  { cs_visited        :: IdSet
+  , cs_seeds          :: Seq Call
+  , cs_combined_usage :: ScUsage
+  }
+
+addUsageFrom :: [Id] -> Id -> ScUsage -> State CollectorState ()
+addUsageFrom rec_group fn usage = modify' $ \cs ->
+  if elemVarSet fn (cs_visited cs)
+    then cs
+    else cs
+      { cs_visited = extendVarSet (cs_visited cs) fn
+      , cs_seeds = cs_seeds cs >< fromList (relevantCalls rec_group (scu_calls usage))
+      , cs_combined_usage = cs_combined_usage cs `combineUsage` usage
+      }
+
+enqueueSeeds :: [Call] -> State CollectorState ()
+enqueueSeeds new_seeds = modify' $ \cs ->
+  cs { cs_seeds = cs_seeds cs >< fromList new_seeds }
+
+dequeueSeed :: State CollectorState (Maybe Call)
+dequeueSeed = state $ \cs ->
+  case viewl (cs_seeds cs) of
+    EmptyL -> (Nothing, cs)
+    seed :< seeds -> (Just seed, cs { cs_seeds = seeds })
+
+findMatchingSpec :: ScEnv -> Call -> SpecInfo -> Maybe OneSpec
+findMatchingSpec env call si = do
+  let in_scope = substInScope (sc_subst env)
+  let rules    = map os_rule (si_specs si)
+  (match, _) <- lookupRule (sc_dflags env) (in_scope, realIdUnfolding)
+                           (const True) (call_recv call) (call_args call) rules
+  find ((== ru_name match) . ru_name . os_rule) (si_specs si)
+
+findCallInfos :: Id -> [RhsInfo] -> [SpecInfo] -> Maybe (RhsInfo, SpecInfo)
+findCallInfos fn rhs_infos spec_infos = do
+  -- We should only include calls from the current group, but usages also
+  -- include other calls, so this is necessary filtering.
+  find ((== fn) . ri_fn . fst) (zip rhs_infos spec_infos)
+
+collectTransitiveUsage :: ScEnv -> [RhsInfo] -> [SpecInfo] -> ScUsage -> ScUsage
+collectTransitiveUsage env rhs_infos spec_infos init_usage
+  = cs_combined_usage (execState bfs init_state)
+  where
+    rec_group  = map ri_fn rhs_infos
+    init_seeds = fromList (relevantCalls rec_group (scu_calls init_usage))
+    init_state = CS emptyVarSet init_seeds init_usage
+
+    bfs :: State CollectorState ()
+    bfs = do
+      mb_seed <- dequeueSeed
+      whenIsJust mb_seed $ \seed -> do
+        whenIsJust (usage_from_matching_rhs seed) $ \(fn, usg) ->
+          addUsageFrom rec_group fn usg
+        bfs
+
+    usage_from_matching_rhs :: Call -> Maybe (Id, ScUsage)
+    usage_from_matching_rhs call = do
+      let fn = call_recv call
+      -- usage might contain many calls not referencing this binding group,
+      -- that's why the following lookup can return Nothing
+      (ri, si) <- findCallInfos fn rhs_infos spec_infos
+      case findMatchingSpec env call si of
+        Nothing -> return (ri_fn ri, ri_rhs_usg ri)
+        Just spec -> return (os_id spec, os_usg spec)
+
 ----------------------
 specRec :: TopLevelFlag -> ScEnv
         -> ScUsage                         -- Body usage
@@ -1569,56 +1704,144 @@ specRec :: TopLevelFlag -> ScEnv
         -> UniqSM (ScUsage, [SpecInfo])    -- Usage from all RHSs (specialised and not)
                                            --     plus details of specialisations
 
-specRec top_lvl env body_usg rhs_infos
-  = go 1 seed_calls nullUsage init_spec_infos
+specRec top_lvl env body_usg rhs_infos = do
+  spec_infos <- execStateT (go env True 0 []) [noSpecInfo | _ <- rhs_infos]
+  return (collectTransitiveUsage env rhs_infos spec_infos init_usage, spec_infos)
   where
-    (seed_calls, init_spec_infos)    -- Note [Seeding top-level recursive groups]
-       | isTopLevel top_lvl
-       , any (isExportedId . ri_fn) rhs_infos   -- Seed from body and RHSs
-       = (all_calls,     [noSpecInfo | _ <- rhs_infos])
-       | otherwise                              -- Seed from body only
-       = (calls_in_body, [noSpecInfo { si_mb_unspec = Just (ri_rhs_usg ri) }
-                         | ri <- rhs_infos])
+    -- Note [Seeding top-level recursive groups]
+    init_usage
+      | isTopLevel top_lvl
+      , any (isExportedId . ri_fn) rhs_infos -- Seed from body and RHSs
+      = combineUsages (body_usg : map ri_rhs_usg rhs_infos)
+      | otherwise                            -- Seed from body only
+      = body_usg
 
-    calls_in_body = scu_calls body_usg
-    calls_in_rhss = foldr (combineCalls . scu_calls . ri_rhs_usg) emptyVarEnv rhs_infos
-    all_calls = calls_in_rhss `combineCalls` calls_in_body
+    rec_group = map ri_fn rhs_infos
 
-    -- Loop, specialising, until you get no new specialisations
-    go :: Int   -- Which iteration of the "until no new specialisations"
-                -- loop we are on; first iteration is 1
-       -> CallEnv   -- Seed calls
-                    -- Two accumulating parameters:
-       -> ScUsage      -- Usage from earlier specialisations
-       -> [SpecInfo]   -- Details of specialisations so far
-       -> UniqSM (ScUsage, [SpecInfo])
-    go n_iter seed_calls usg_so_far spec_infos
-      | isEmptyVarEnv seed_calls
-      = pprTrace "specRec1" (vcat [ ppr (map ri_fn rhs_infos)
-                                  , ppr seed_calls
-                                  , ppr body_usg ]) $
-        return (usg_so_far, spec_infos)
-
+    go :: ScEnv -> Bool -> Int -> [Call] -> StateT [SpecInfo] UniqSM ()
+    go env _ n_iter seeds
       -- Limit recursive specialisation
       -- See Note [Limit recursive specialisation]
       | n_iter > sc_recursive env  -- Too many iterations of the 'go' loop
       , sc_force env || isNothing (sc_count env)
            -- If both of these are false, the sc_count
            -- threshold will prevent non-termination
-      , any ((> the_limit) . si_n_specs) spec_infos
-      = pprTrace "specRec2" (ppr (map (map os_pat . si_specs) spec_infos)) $
-        return (usg_so_far, spec_infos)
+      = return ()
+    go env False n_iter [] = return ()
+    go env _ n_iter [] = do
+      spec_infos <- get
+      let usage = collectTransitiveUsage env rhs_infos spec_infos init_usage
+      go env False (n_iter + 1) (relevantCalls rec_group (scu_calls usage))
+    go env any_spec n_iter (call:seeds) = do
+      any_new_spec <- isJust <$> zoom_spec_info_for (call_recv call) (work_on_call env call)
+      go env (any_spec || any_new_spec) (n_iter + 1) seeds
 
-      | otherwise
-      = pprTrace "specRec3" (vcat [ text "bndrs" <+> ppr (map ri_fn rhs_infos)
-                                  , text "iteration" <+> int n_iter
-                                  , text "spec_infos" <+> ppr (map (map os_pat . si_specs) spec_infos)
-                            ]) $
-        do  { specs_w_usg <- zipWithM (specialise env seed_calls) rhs_infos spec_infos
-            ; let (extra_usg_s, new_spec_infos) = unzip specs_w_usg
-                  extra_usg = combineUsages extra_usg_s
-                  all_usg   = usg_so_far `combineUsage` extra_usg
-            ; go (n_iter + 1) (scu_calls extra_usg) all_usg new_spec_infos }
+    zoom_spec_info_for :: Monad m => Id -> StateT SpecInfo (MaybeT m) a -> StateT [SpecInfo] m (Maybe a)
+    zoom_spec_info_for fn act = StateT $ \spec_infos ->
+      let go ((fn', si):rest)
+            | fn == fn'
+            = do  { mb_ret_si' <- runMaybeT (runStateT act si)
+                  ; case mb_ret_si' of
+                      Just (ret, si') -> return (Just ret, si':map snd rest)
+                      Nothing -> return (Nothing, si:map snd rest) }
+            | otherwise
+            = do  { (ret, sis') <- go rest
+                  ; return (ret, si:sis') }
+          -- relevantCalls made sure we will find a SpecInfo
+          go [] = panic "zoom_spec_info_for"
+      in go (zip rec_group spec_infos)
+
+    work_on_call :: ScEnv -> Call -> StateT SpecInfo (MaybeT UniqSM) ()
+    work_on_call env call = do
+      let fn = call_recv call
+      let ri = expectJust "work_on_call" (find ((== fn) . ri_fn) rhs_infos)
+      -- TODO: This should generate nullUsage
+      -- Note [Do not specialise diverging functions]
+      -- and do not generate specialisation seeds from its RHS
+      guard (not (isBottomingId (call_recv call)))
+
+      -- TODO: These should still generate rhs Usage
+      -- See Note [Transfer activation]
+      guard (not (isNeverActive (idInlineActivation fn)))
+      -- Only specialise functions
+      guard (not (null (ri_lam_bndrs ri)))
+
+      si <- get
+      let specs = lookupMostSpecificSpecs call si
+      -- We can only handle one spec at a time, because we can't
+      -- easily combine ArgOccs of differently specialised RHSs.
+      -- That is a little unfortunate, but not a deal breaker, as we will
+      -- finally arrive at the same [ArgOcc] information, we only need more
+      -- iterations to get there.
+      if length specs > 1
+        then pprTrace "Multiple specific specs" (ppr (map os_pat specs)) (return ())
+        else return ()
+      -- begin of callsToNewPats
+      pat <- lift $ case specs of
+        spec:_ -> pat_from_spec_rhs call spec
+        []     -> pat_from_orig_rhs call ri
+      
+      guard (isNewCallPat pat si)
+      -- end of callsToNewPats
+      -- begin of specialise
+      -- decreaseSpecCount env 1 -- TODO: call this in the outer loop
+      let n_specs = si_n_specs si
+      new_spec <- lift $ lift $ spec_one env fn (ri_lam_bndrs ri) (ri_lam_body ri) (pat, n_specs)
+      let Just si' = addNewSpec new_spec si
+      put si'
+      -- end of specialise
+
+    pat_from_orig_rhs :: Call -> RhsInfo -> MaybeT UniqSM CallPat
+    pat_from_orig_rhs call ri = MaybeT $ callToPats env (ri_arg_occs ri) call
+
+    pat_from_spec_rhs :: Call -> OneSpec -> MaybeT UniqSM CallPat
+    pat_from_spec_rhs call spec = do
+      spec_call <- case origCallToSpecCall call spec of
+        Nothing -> mzero
+        Just call -> return call
+      let lookup_occ_map = fromMaybe UnkOcc . lookupVarEnv (scu_occs (os_usg spec))
+      pprTrace "sblkj" (ppr (scu_occs (os_usg spec)) <+> ppr (os_pat spec)) (return ())
+      let occs = map lookup_occ_map (patMetaVars (os_pat spec))
+      spec_pat <- MaybeT $ callToPats env occs spec_call
+      -- We have to translate the pattern back to something relative to the
+      -- original RHS, so that we can specialise on that.
+      return (composePats spec_pat (os_pat spec))
+
+    -- -- Loop, specialising, until you get no new specialisations
+    -- go :: Int   -- Which iteration of the "until no new specialisations"
+    --             -- loop we are on; first iteration is 1
+    --    -> [Call]    -- Seed calls
+    --                 -- Two accumulating parameters:
+    --    -> ScUsage      -- Usage from earlier specialisations
+    --    -> [SpecInfo]   -- Details of specialisations so far
+    --    -> UniqSM (ScUsage, [SpecInfo])
+    -- go n_iter seed_calls usg_so_far spec_infos
+    --   | isEmptyVarEnv seed_calls
+    --   = pprTrace "specRec1" (vcat [ ppr (map ri_fn rhs_infos)
+    --                               , ppr seed_calls
+    --                               , ppr body_usg ]) $
+    --     return (usg_so_far, spec_infos)
+
+    --   -- Limit recursive specialisation
+    --   -- See Note [Limit recursive specialisation]
+    --   | n_iter > sc_recursive env  -- Too many iterations of the 'go' loop
+    --   , sc_force env || isNothing (sc_count env)
+    --        -- If both of these are false, the sc_count
+    --        -- threshold will prevent non-termination
+    --   , any ((> the_limit) . si_n_specs) spec_infos
+    --   = pprTrace "specRec2" (ppr (map (map os_pat . si_specs) spec_infos)) $
+    --     return (usg_so_far, spec_infos)
+
+    --   | otherwise
+    --   = pprTrace "specRec3" (vcat [ text "bndrs" <+> ppr (map ri_fn rhs_infos)
+    --                               , text "iteration" <+> int n_iter
+    --                               , text "spec_infos" <+> ppr (map (map os_pat . si_specs) spec_infos)
+    --                         ]) $
+    --     do  { specs_w_usg <- zipWithM (specialise env seed_calls) rhs_infos spec_infos
+    --         ; let (extra_usg_s, new_spec_infos) = unzip specs_w_usg
+    --               extra_usg = combineUsages extra_usg_s
+    --               all_usg   = usg_so_far `combineUsage` extra_usg
+    --         ; go (n_iter + 1) (scu_calls extra_usg) all_usg new_spec_infos }
 
     -- See Note [Limit recursive specialisation]
     the_limit = case sc_count env of
@@ -1674,11 +1897,11 @@ specialise env bind_calls (RI { ri_fn = fn, ri_lam_bndrs = arg_bndrs
 --          else return ()
 
         ; let spec_env = decreaseSpecCount env n_pats
-        ; (spec_usgs, new_specs) <- mapAndUnzipM (spec_one spec_env fn arg_bndrs body)
-                                                 (new_pats `zip` [spec_count..])
+        ; new_specs <- mapM (spec_one spec_env fn arg_bndrs body)
+                            (new_pats `zip` [spec_count..])
                 -- See Note [Specialise original body]
 
-        ; let spec_usg = combineUsages spec_usgs
+        ; let spec_usg = combineUsages (map os_usg new_specs)
 
               -- If there were any boring calls among the seeds (= all_calls), then those
               -- calls will call the un-specialised function.  So we should use the seeds
@@ -1711,7 +1934,7 @@ spec_one :: ScEnv
          -> [InVar]     -- Lambda-binders of RHS; should match patterns
          -> InExpr      -- Body of the original function
          -> (CallPat, Int)
-         -> UniqSM (ScUsage, OneSpec)   -- Rule and binding
+         -> UniqSM OneSpec
 
 -- spec_one creates a specialised copy of the function, together
 -- with a rule for using it.  I'm very proud of how short this
@@ -1755,6 +1978,8 @@ spec_one env fn arg_bndrs body (call_pat@(CP qvars pats), rule_number)
 
         -- Specialise the body
         ; (spec_usg, spec_body) <- scExpr spec_env body
+        ; let spec_body' =  simpleOptExpr spec_body
+        ; pprTrace "new spec body" (ppr call_pat $$ ppr spec_body' $$ ppr spec_usg) (return ())
 
 --      ; pprTrace "done spec_one}" (ppr fn) $
 --        return ()
@@ -1781,8 +2006,8 @@ spec_one env fn arg_bndrs body (call_pat@(CP qvars pats), rule_number)
 
 
                 -- Conditionally use result of new worker-wrapper transform
-              spec_rhs   = mkLams spec_lam_args_str spec_body
-              body_ty    = exprType spec_body
+              spec_rhs   = mkLams spec_lam_args_str spec_body'
+              body_ty    = exprType spec_body'
               rule_rhs   = mkVarApps (Var spec_id) spec_call_args
               inline_act = idInlineActivation fn
               this_mod   = sc_module spec_env
@@ -1796,9 +2021,10 @@ spec_one env fn arg_bndrs body (call_pat@(CP qvars pats), rule_number)
                           , text "rule:" <+> ppr rule
                           , text "call-pattern:" <+> ppr (Var fn `mkCoreApps` pats)])
                   )
-        ; return (spec_usg, OS { os_pat = call_pat, os_rule = rule
-                               , os_id = spec_id
-                               , os_rhs = spec_rhs }) }
+        ; return OS { os_pat = call_pat, os_rule = rule
+                    , os_id = spec_id
+                    , os_rhs = spec_rhs
+                    , os_usg = spec_usg } }
 
 
 -- See Note [Strictness information in worker binders]
@@ -1999,10 +2225,14 @@ data CallPat
   = CP 
   { cp_vars :: [Var] 
   -- ^ Pattern variables. These are meta variables when trying to match
-  -- particular call sites against 'cp_args'.
-  -- Synonym: quantified variable
+  -- particular call sites against 'cp_args'. Generated rules will quantify over
+  -- them. Type variables come first, since they may scope over the following
+  -- term variables.
+  --
+  -- Synonyms: {quantified,pattern} variable
   , cp_args :: [CoreExpr] 
-  -- ^ Argument expressions referencing pattern variables.
+  -- ^ Argument expression patterns referencing 'cp_vars'. These will occur in
+  -- the generated rule.
   }
 
 instance Eq CallPat where
@@ -2190,8 +2420,9 @@ I think.
 -- | @compareSpecificity cp1 cp2 >>= snd@ is the partial ordering of 'CallPat's
 -- by specificity. A 'CallPat' @cp1@ is more specific than @cp2@ if any call
 -- matching @cp1@ also matches @cp2@.
+-- If that was the case, @compareSpecificity cp1 cp2 >>= snd == Just GT@.
 -- For efficiency reasons, this function also returns the 'Unifier' computed by
--- 'tryUnify' if successful.
+-- 'unifyCallPats' if successful.
 compareSpecificity :: CallPat -> CallPat -> Maybe (Unifier, Maybe Ordering)
 compareSpecificity cp1 cp2 = do
   u@(Uni fw bw) <- unifyCallPat cp1 cp2
@@ -2199,24 +2430,27 @@ compareSpecificity cp1 cp2 = do
   let m_ord =
         case (allUFM is_var fw, allUFM is_var bw) of
           (False, False) -> Nothing
-          (True, False) -> Just LT
-          (False, True) -> Just GT
+          (True, False) -> Just GT
+          (False, True) -> Just LT
           (True, True) -> Just EQ
   return (u, m_ord)
 
--- | A set of 'CallPat's.
-newtype CallPatSet = CallPatSet [CallPat]
+-- | A map from 'CallPat's to @a@.
+newtype CallPatEnv a = CPE [(CallPat, a)]
 
-emptyCallPatSet :: CallPatSet
-emptyCallPatSet = CallPatSet []
+emptyCallPatEnv :: CallPatEnv a
+emptyCallPatEnv = CPE []
 
-elemCallPatSet :: CallPat -> CallPatSet -> Bool
-elemCallPatSet pat (CallPatSet pats) = pat `elem` pats
+unitCallPatEnv :: CallPat -> a -> CallPatEnv a
+unitCallPatEnv pat a = CPE [(pat, a)]
 
-insertCallPat :: CallPat -> CallPatSet -> CallPatSet
-insertCallPat pat (CallPatSet pats)
-  | pat `elem` pats = CallPatSet pats
-  | otherwise = CallPatSet (pat:pats)
+extendCallPatEnv :: CallPatEnv a -> CallPat -> a -> CallPatEnv a
+extendCallPatEnv (CPE assocs) pat a = CPE ((pat, a) : assocs)
+
+-- | Finds the most specific entries in the 'CallPatEnv' that are less specific
+-- or equally specific than the given 'CallPat'.
+lookupLECallPatEnv :: CallPatEnv a -> CallPat -> [(CallPat, a)]
+lookupLECallPatEnv (CPE assocs) cp = undefined
 
 callsToNewPats :: ScEnv -> Id
                -> SpecInfo
@@ -2316,10 +2550,6 @@ trim_pats env fn (SI { si_n_specs = done_spec_count }) pats
 
 
 callToPats :: ScEnv -> [ArgOcc] -> Call -> UniqSM (Maybe CallPat)
-        -- The [Var] is the variables to quantify over in the rule
-        --      Type variables come first, since they may scope
-        --      over the following term variables
-        -- The [CoreExpr] are the argument patterns for the rule
 callToPats env bndr_occs call@(Call _ args con_env)
   | args `ltLength` bndr_occs      -- Check saturated
   = return Nothing
