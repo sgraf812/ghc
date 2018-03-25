@@ -1385,7 +1385,7 @@ scApp env (Var fn, args)        -- Function is a variable
         ; let (arg_usgs, args') = unzip args_w_usgs
               arg_usg = combineUsages arg_usgs
         ; case scSubstId env fn of
-            fn'@(Lam {}) -> scExpr (zapScSubst env) (doBeta fn' args')
+            fn'@(Lam {}) -> scExpr (zapScSubst env) (simpleOptExpr (doBeta fn' args'))
                         -- Do beta-reduction and try again
 
             Var fn' -> return (arg_usg `combineUsage` mkVarUsage env fn' args',
@@ -1781,13 +1781,25 @@ specRec top_lvl env body_usg rhs_infos = do
         spec:_ -> pat_from_spec_rhs call spec
         []     -> pat_from_orig_rhs call ri
       
+      pprTrace "most specific spec and pat" (ppr call $$ ppr (map os_pat specs) $$ ppr pat) $ return () 
+      
       guard (isNewCallPat pat si)
       -- end of callsToNewPats
       -- begin of specialise
       -- decreaseSpecCount env 1 -- TODO: call this in the outer loop
       let n_specs = si_n_specs si
       new_spec <- lift $ lift $ spec_one env fn (ri_lam_bndrs ri) (ri_lam_body ri) (pat, n_specs)
-      let Just si' = addNewSpec new_spec si
+      si' <- lift (MaybeT (return (addNewSpec new_spec si)))
+      let pats = map os_pat (lookupMostSpecificSpecs call si')
+      let cond = pats == [os_pat new_spec]
+      MASSERT2( cond
+              , (vcat 
+                  [ text "Call pattern of new spec doesn't unify with call"
+                  , text "call pattern:" <+> ppr (os_pat new_spec)
+                  , text "call:" <+> ppr call
+                  , text "most specific call pats:" <+> ppr pats
+                  ])
+              )
       put si'
       -- end of specialise
 
@@ -1796,12 +1808,10 @@ specRec top_lvl env body_usg rhs_infos = do
 
     pat_from_spec_rhs :: Call -> OneSpec -> MaybeT UniqSM CallPat
     pat_from_spec_rhs call spec = do
-      spec_call <- case origCallToSpecCall call spec of
-        Nothing -> mzero
-        Just call -> return call
+      spec_call <- MaybeT (return (origCallToSpecCall call spec))
       let lookup_occ_map = fromMaybe UnkOcc . lookupVarEnv (scu_occs (os_usg spec))
-      pprTrace "sblkj" (ppr (scu_occs (os_usg spec)) <+> ppr (os_pat spec)) (return ())
-      let occs = map lookup_occ_map (patMetaVars (os_pat spec))
+      let (_, occs) = lookupOccs (os_usg spec) (patMetaVars (os_pat spec))
+      pprTrace "from_spec_rhs" (ppr call $$ ppr spec_call $$ ppr occs $$ ppr (os_pat spec)) (return ())
       spec_pat <- MaybeT $ callToPats env occs spec_call
       -- We have to translate the pattern back to something relative to the
       -- original RHS, so that we can specialise on that.
@@ -1977,9 +1987,8 @@ spec_one env fn arg_bndrs body (call_pat@(CP qvars pats), rule_number)
 --        return ()
 
         -- Specialise the body
-        ; (spec_usg, spec_body) <- scExpr spec_env body
-        ; let spec_body' =  simpleOptExpr spec_body
-        ; pprTrace "new spec body" (ppr call_pat $$ ppr spec_body' $$ ppr spec_usg) (return ())
+        ; (spec_usg, spec_body) <- scExpr (extendHowBound spec_env qvars RecArg) body
+        ; pprTrace "new spec body" (ppr call_pat $$ ppr spec_body $$ ppr spec_usg) (return ())
 
 --      ; pprTrace "done spec_one}" (ppr fn) $
 --        return ()
@@ -2006,8 +2015,8 @@ spec_one env fn arg_bndrs body (call_pat@(CP qvars pats), rule_number)
 
 
                 -- Conditionally use result of new worker-wrapper transform
-              spec_rhs   = mkLams spec_lam_args_str spec_body'
-              body_ty    = exprType spec_body'
+              spec_rhs   = mkLams spec_lam_args_str spec_body
+              body_ty    = exprType spec_body
               rule_rhs   = mkVarApps (Var spec_id) spec_call_args
               inline_act = idInlineActivation fn
               this_mod   = sc_module spec_env
@@ -2367,6 +2376,7 @@ unifyCallPat cp1 cp2
       | not (is_meta_var v1)
       , not (is_meta_var v2)
       , permuteFW perm v1 == v2 = return ()
+    -- TODO: Handle name capture for these cases (consider (\x y -> x) =?= (\x x -> ?A))
     expr perm (Var v1) e
       | is_meta_var v1
       = solve_fw v1 (substExprSC (text "SpecConstr.unify") (permSubstBW subst_init_bw perm) e)

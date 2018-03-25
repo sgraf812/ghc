@@ -704,6 +704,12 @@ emptyRuleSubst = RS { rs_tv_subst = emptyVarEnv, rs_id_subst = emptyVarEnv
                     , rs_binds = \e -> e, rs_bndrs = emptyVarSet
                     , rs_rhss = emptyVarEnv }
 
+hasExpandableRHS :: RuleSubst -> Id -> Maybe CoreExpr
+hasExpandableRHS subst id = do
+  rhs <- lookupVarEnv (rs_rhss subst) id
+  guard (exprIsExpandable rhs)
+  return rhs
+
 --      At one stage I tried to match even if there are more
 --      template args than real args.
 
@@ -711,12 +717,6 @@ emptyRuleSubst = RS { rs_tv_subst = emptyVarEnv, rs_id_subst = emptyVarEnv
 --      Should the template (map f xs) match (map g)?  I think not.
 --      For a start, in general eta expansion wastes work.
 --      SLPJ July 99
-
-hasExpandableRHS :: RuleSubst -> Id -> Maybe CoreExpr
-hasExpandableRHS subst id = do
-  rhs <- lookupVarEnv (rs_rhss subst) id
-  guard (exprIsExpandable rhs)
-  return rhs
 
 match :: RuleMatchEnv
       -> RuleSubst
