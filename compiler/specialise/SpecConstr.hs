@@ -50,7 +50,7 @@ import Maybes           ( orElse, fromMaybe, expectJust, catMaybes, isJust, isNo
 import Demand
 import GHC.Serialized   ( deserializeWithData )
 import Util
-import Pair
+import Pair             ( Pair (..) )
 import UniqSupply
 import Outputable
 import FastString
@@ -61,6 +61,7 @@ import Control.Monad.Trans.Class ( lift )
 import Control.Monad.Trans.Maybe ( MaybeT (..), runMaybeT )
 import Control.Monad.Trans.State.Strict
 import Data.List
+import Data.Tuple       ( swap )
 import PrelNames        ( specTyConName )
 import Module
 import TyCon ( TyCon )
@@ -2342,12 +2343,58 @@ permSubstFW subst0 perm = foldr (\(l, r) s -> extendSubstWithVar s l r) subst1 p
 permSubstBW :: Subst -> Permutation -> Subst
 permSubstBW subst (Perm fw bw) = permSubstFW subst (Perm bw fw)
 
+newtype BoundVarPairing = BVP [(Var, Var)]
+
+emptyPairing :: BoundVarPairing
+emptyPairing = BVP []
+
+extendPairing :: BoundVarPairing -> Var -> Var -> BoundVarPairing
+extendPairing (BVP pairs) l r = BVP ((l,r):pairs)
+
+extendPairingList :: BoundVarPairing -> [(Var, Var)] -> BoundVarPairing
+extendPairingList (BVP pairs) new_pairs = BVP (new_pairs ++ pairs)
+
+data PairingResult
+  = Pairing
+  | LeftShadowed
+  | RightShadowed
+  | FreeVars
+
+lookupPairing :: BoundVarPairing -> Var -> Var -> PairingResult
+lookupPairing (BVP pairs) l r = go pairs
+  where
+    go [] = FreeVars
+    go ((l',r'):rest) = case (l' == l, r' == r) of
+      (True, True) -> Pairing
+      (True, False) -> LeftShadowed
+      (False, True) -> RightShadowed
+      (False, False) -> go rest
+
+notShadowedFW :: BoundVarPairing -> Var -> Bool
+notShadowedFW (BVP pairs) v = go pairs []
+  where
+    go [] shadowing = not (v `elem` shadowing) -- v really is free
+    go ((l, r):rest) shadowing
+      | l == v = not (r `elem` shadowing)
+      | otherwise = go rest (r:shadowing)
+
+notShadowedBW :: BoundVarPairing -> Var -> Bool
+notShadowedBW (BVP pairs) = notShadowedFW (BVP (map swap pairs))
+
+pairingSubstFW :: Subst -> BoundVarPairing -> Subst
+pairingSubstFW subst0 (BVP pairs) = foldr (\(l, r) s -> extendSubstWithVar s l r) subst1 pairs
+  where
+    subst1   = extendInScopeList subst0 (map snd pairs)
+
+pairingSubstBW :: Subst -> BoundVarPairing -> Subst
+pairingSubstBW subst (BVP pairs) = pairingSubstFW subst (BVP (map swap pairs))
+
 -- | Tries to compute a most general 'Unifier' for two 'CallPat's.
 -- This algorithm crucially relies on meta-variables in 'CallPat's to occur
 -- linearly!
 unifyCallPat :: CallPat -> CallPat -> Maybe Unifier
 unifyCallPat cp1 cp2
-  = execStateT (spine emptyPermutation (patSpine cp1) (patSpine cp2)) emptyUnifier
+  = execStateT (spine emptyPairing (patSpine cp1) (patSpine cp2)) emptyUnifier
   where
     is_meta_var = (`elemVarSet` mkVarSet (patMetaVars cp1 ++ patMetaVars cp2))
 
@@ -2368,54 +2415,59 @@ unifyCallPat cp1 cp2
     solve_fw v e = modify' (\u -> extendUniFW u v e)
     solve_bw v e = modify' (\u -> extendUniBW u v e)
 
-    spine perm es1 es2 = do
+    spine bvp es1 es2 = do
       guard (es1 `equalLength` es2)
-      zipWithM_ (expr perm) es1 es2
+      zipWithM_ (expr bvp) es1 es2
 
-    expr perm (Var v1) (Var v2)
+    expr bvp (Var v1) (Var v2)
       | not (is_meta_var v1)
-      , not (is_meta_var v2)
-      , permuteFW perm v1 == v2 = return ()
+      , not (is_meta_var v2) = case lookupPairing bvp v1 v2 of 
+          Pairing -> return ()
+          FreeVars -> guard (v1 == v2)
+          _ -> mzero -- LeftShadowed or RightShadowed
+
     -- TODO: Handle name capture for these cases (consider (\x y -> x) =?= (\x x -> ?A))
-    expr perm (Var v1) e
+    expr bvp (Var v1) e
       | is_meta_var v1
-      = solve_fw v1 (substExprSC (text "SpecConstr.unify") (permSubstBW subst_init_bw perm) e)
-    expr perm e (Var v2)
+      , all (notShadowedBW bvp) (exprFreeVarsList e)
+      = solve_fw v1 (substExprSC (text "SpecConstr.unify") (pairingSubstBW subst_init_bw bvp) e)
+    expr bvp e (Var v2)
       | is_meta_var v2
-      = solve_bw v2 (substExprSC (text "SpecConstr.unify") (permSubstFW subst_init_fw perm) e)
+      , all (notShadowedFW bvp) (exprFreeVarsList e)
+      = solve_bw v2 (substExprSC (text "SpecConstr.unify") (pairingSubstFW subst_init_fw bvp) e)
 
     expr _ (Lit l1)    (Lit l2)    = guard (l1 == l2)
-    expr perm (App f1 a1) (App f2 a2) = expr perm f1 f2 >> expr perm a1 a2
+    expr bvp (App f1 a1) (App f2 a2) = expr bvp f1 f2 >> expr bvp a1 a2
 
     -- Note [Ignore type differences]
-    expr perm (Type {}) (Type {}) = return ()
-    expr perm (Coercion {}) (Coercion {}) = return ()
-    expr perm (Tick _ e1) e2 = expr perm e1 e2  -- Ignore casts and notes
-    expr perm (Cast e1 _) e2 = expr perm e1 e2
-    expr perm e1 (Tick _ e2) = expr perm e1 e2
-    expr perm e1 (Cast e2 _) = expr perm e1 e2
+    expr bvp (Type {}) (Type {}) = return ()
+    expr bvp (Coercion {}) (Coercion {}) = return ()
+    expr bvp (Tick _ e1) e2 = expr bvp e1 e2  -- Ignore casts and notes
+    expr bvp (Cast e1 _) e2 = expr bvp e1 e2
+    expr bvp e1 (Tick _ e2) = expr bvp e1 e2
+    expr bvp e1 (Cast e2 _) = expr bvp e1 e2
 
-    expr perm (Lam b1 e1) (Lam b2 e2) = expr (extendPermutation perm b1 b2) e1 e2
+    expr bvp (Lam b1 e1) (Lam b2 e2) = expr (extendPairing bvp b1 b2) e1 e2
 
-    expr perm (Case e1 b1 _ as1) (Case e2 b2 _ as2) = do
-      expr perm e1 e2
+    expr bvp (Case e1 b1 _ as1) (Case e2 b2 _ as2) = do
+      expr bvp e1 e2
       guard (as1 `equalLength` as2)
-      zipWithM_ (alt (extendPermutation perm b1 b2)) as1 as2
+      zipWithM_ (alt (extendPairing bvp b1 b2)) as1 as2
 
-    expr perm (Let bind1 e1) (Let bind2 e2) = do
+    expr bvp (Let bind1 e1) (Let bind2 e2) = do
       let (bndrs1, rhss1) = unzip (flattenBinds [bind1])
           (bndrs2, rhss2) = unzip (flattenBinds [bind2])
-          perm' = extendPermutationList perm (zip bndrs1 bndrs2)
-      zipWithM_ (expr perm') rhss1 rhss2
-      expr perm' e1 e2
+          bvp' = extendPairingList bvp (zip bndrs1 bndrs2)
+      zipWithM_ (expr bvp') rhss1 rhss2
+      expr bvp' e1 e2
 
     expr _ _ _ = mzero
 
-    alt perm (dc1, bndrs1, rhs1) (dc2, bndrs2, rhs2) = do
+    alt bvp (dc1, bndrs1, rhs1) (dc2, bndrs2, rhs2) = do
       guard (dc1 == dc2)
       guard (bndrs1 `equalLength` bndrs2)
-      let perm' = extendPermutationList perm (zip bndrs1 bndrs2)
-      expr perm' rhs1 rhs2
+      let bvp' = extendPairingList bvp (zip bndrs1 bndrs2)
+      expr bvp' rhs1 rhs2
 
 {-
 Note [Ignore type differences]
