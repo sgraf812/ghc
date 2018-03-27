@@ -1579,15 +1579,18 @@ addNewSpec spec si
 
 lookupMostSpecificSpecs :: Call -> SpecInfo -> [OneSpec]
 lookupMostSpecificSpecs call (SI { si_specs = specs })
+  | pprTrace "lookupMostSpecificSpecs" (vcat [ppr call, ppr (map os_pat specs)]) otherwise
   = upper_bounds [] specs
   where
-    pat = callAsClosedPat call
+    pat = pprTraceIt "pat" $ callAsClosedPat call
     upper_bounds candidates (spec:specs)
       | Just (unifier, Just _) <- compareSpecificity (os_pat spec) pat
       -- ordering is either LT or (unlikely) EQ. In either case we have to
       -- look for other, more specific candidates.
+      , pprTrace "upper_bounds1" (ppr (os_pat spec)) otherwise
       = upper_bounds (insert_in_antichain spec candidates) specs
       | otherwise
+      , pprTrace "upper_bounds2" (ppr (os_pat spec)) otherwise
       = upper_bounds candidates specs
     upper_bounds candidates _
       = candidates
@@ -2309,40 +2312,6 @@ extendUniFW uni v e = uni { uni_fw = extendVarEnv (uni_fw uni) v e }
 extendUniBW :: Unifier -> Var -> CoreExpr -> Unifier
 extendUniBW uni v e = uni { uni_bw = extendVarEnv (uni_bw uni) v e }
 
-data Permutation
-  = Perm
-  { perm_fw :: VarEnv Var
-  , perm_bw :: VarEnv Var
-  }
-
-emptyPermutation :: Permutation
-emptyPermutation = Perm emptyVarEnv emptyVarEnv
-
-extendPermutation :: Permutation -> Var -> Var -> Permutation
-extendPermutation (Perm fw bw) l r
-  = ASSERT( not (elemVarEnv l fw) && not (elemVarEnv r bw) )
-    Perm (extendVarEnv fw l r) (extendVarEnv bw r l)
-
-extendPermutationList :: Permutation -> [(Var, Var)] -> Permutation
-extendPermutationList = foldr (\(l, r) p -> extendPermutation p l r)
-
-permuteFW :: Permutation -> Var -> Var
-permuteFW (Perm fw _) l = lookupVarEnv fw l `orElse` l
-
-permuteBW :: Permutation -> Var -> Var
-permuteBW (Perm fw bw) = permuteFW (Perm bw fw)
-
-permSubstFW :: Subst -> Permutation -> Subst
-permSubstFW subst0 perm = foldr (\(l, r) s -> extendSubstWithVar s l r) subst1 pairings
-  where
-    subst1   = extendInScopeList subst0 (nonDetEltsUFM (perm_fw perm))
-    pairings = map (\f -> (f, permuteFW perm f)) (nonDetEltsUFM (perm_bw perm))
-      -- non-det is OK, because the variables don't overlap and as such don't
-      -- influence any substitution.
-
-permSubstBW :: Subst -> Permutation -> Subst
-permSubstBW subst (Perm fw bw) = permSubstFW subst (Perm bw fw)
-
 newtype BoundVarPairing = BVP [(Var, Var)]
 
 emptyPairing :: BoundVarPairing
@@ -2353,6 +2322,9 @@ extendPairing (BVP pairs) l r = BVP ((l,r):pairs)
 
 extendPairingList :: BoundVarPairing -> [(Var, Var)] -> BoundVarPairing
 extendPairingList (BVP pairs) new_pairs = BVP (new_pairs ++ pairs)
+
+sizePairing :: BoundVarPairing -> Int
+sizePairing (BVP pairs) = length pairs
 
 data PairingResult
   = Pairing
@@ -2381,6 +2353,13 @@ notShadowedFW (BVP pairs) v = go pairs []
 notShadowedBW :: BoundVarPairing -> Var -> Bool
 notShadowedBW (BVP pairs) = notShadowedFW (BVP (map swap pairs))
 
+notShadowedSinceL :: BoundVarPairing -> Int -> Var -> Bool
+notShadowedSinceL (BVP pairs) n v
+  = not (v `elem` map fst (reverse (drop n (reverse pairs))))
+
+notShadowedSinceR :: BoundVarPairing -> Int -> Var -> Bool
+notShadowedSinceR (BVP pairs) n v = notShadowedSinceL (BVP (map swap pairs)) n v
+
 pairingSubstFW :: Subst -> BoundVarPairing -> Subst
 pairingSubstFW subst0 (BVP pairs) = foldr (\(l, r) s -> extendSubstWithVar s l r) subst1 pairs
   where
@@ -2389,12 +2368,68 @@ pairingSubstFW subst0 (BVP pairs) = foldr (\(l, r) s -> extendSubstWithVar s l r
 pairingSubstBW :: Subst -> BoundVarPairing -> Subst
 pairingSubstBW subst (BVP pairs) = pairingSubstFW subst (BVP (map swap pairs))
 
+data UnifyEnv
+  = UE
+  { ue_bvp   :: BoundVarPairing
+  , ue_lrhss :: IdEnv (Maybe (Int, CoreExpr))
+  , ue_rrhss :: IdEnv (Maybe (Int, CoreExpr))
+  }
+
+emptyUnifyEnv :: UnifyEnv
+emptyUnifyEnv = UE emptyPairing emptyVarEnv emptyVarEnv
+
+extendUEBoundVar :: UnifyEnv -> Var -> Var -> UnifyEnv
+extendUEBoundVar env l r = env
+  { ue_bvp = extendPairing (ue_bvp env) l r
+  , ue_lrhss = delVarEnv (ue_lrhss env) l
+  , ue_rrhss = delVarEnv (ue_rrhss env) r
+  }
+
+extendUEBoundVarList :: UnifyEnv -> [(Var, Var)] -> UnifyEnv
+extendUEBoundVarList env pairs = env
+  { ue_bvp = extendPairingList (ue_bvp env) pairs
+  , ue_lrhss = delVarEnvList (ue_lrhss env) (map fst pairs)
+  , ue_rrhss = delVarEnvList (ue_lrhss env) (map snd pairs)
+  }
+
+addUEExpandableBndrL :: UnifyEnv -> Id -> CoreExpr -> UnifyEnv
+addUEExpandableBndrL env id e = env
+  { ue_lrhss = extendVarEnv (ue_lrhss env) id (Just (sizePairing (ue_bvp env), e))
+  }
+
+addUEExpandableBndrR :: UnifyEnv -> Id -> CoreExpr -> UnifyEnv
+addUEExpandableBndrR env id e = env
+  { ue_rrhss = extendVarEnv (ue_rrhss env) id (Just (sizePairing (ue_bvp env), e))
+  }
+
+addUENonExpandableBndrsR :: UnifyEnv -> [Id] -> UnifyEnv
+addUENonExpandableBndrsR env ids = env
+  { ue_rrhss = extendVarEnvList (ue_rrhss env) (zip ids (repeat Nothing))
+  }
+
+addUENonExpandableBndrsL :: UnifyEnv -> [Id] -> UnifyEnv
+addUENonExpandableBndrsL env ids = env
+  { ue_lrhss = extendVarEnvList (ue_lrhss env) (zip ids (repeat Nothing))
+  }
+
+lookupUEExpandableBndrL :: UnifyEnv -> Id -> Maybe CoreExpr
+lookupUEExpandableBndrL env id = do
+  Just (n, rhs) <- lookupVarEnv (ue_lrhss env) id
+  guard (all (notShadowedSinceL (ue_bvp env) n) (exprFreeVarsList rhs))
+  return rhs
+
+lookupUEExpandableBndrR :: UnifyEnv -> Id -> Maybe CoreExpr
+lookupUEExpandableBndrR env id = do
+  Just (n, rhs) <- lookupVarEnv (ue_rrhss env) id
+  guard (all (notShadowedSinceR (ue_bvp env) n) (exprFreeVarsList rhs))
+  return rhs
+
 -- | Tries to compute a most general 'Unifier' for two 'CallPat's.
 -- This algorithm crucially relies on meta-variables in 'CallPat's to occur
 -- linearly!
 unifyCallPat :: CallPat -> CallPat -> Maybe Unifier
 unifyCallPat cp1 cp2
-  = execStateT (spine emptyPairing (patSpine cp1) (patSpine cp2)) emptyUnifier
+  = execStateT (spine emptyUnifyEnv (patSpine cp1) (patSpine cp2)) emptyUnifier
   where
     is_meta_var = (`elemVarSet` mkVarSet (patMetaVars cp1 ++ patMetaVars cp2))
 
@@ -2415,59 +2450,83 @@ unifyCallPat cp1 cp2
     solve_fw v e = modify' (\u -> extendUniFW u v e)
     solve_bw v e = modify' (\u -> extendUniBW u v e)
 
-    spine bvp es1 es2 = do
+    spine env es1 es2 = do
       guard (es1 `equalLength` es2)
-      zipWithM_ (expr bvp) es1 es2
+      zipWithM_ (expr env) es1 es2
 
-    expr bvp (Var v1) (Var v2)
+    expr env (Var v1) e
+      | Just rhs <- lookupUEExpandableBndrL env v1
+      , pprTrace "blub1" (ppr v1 $$ ppr rhs) otherwise
+      = expr env rhs e
+    expr env e (Var v2)
+      | Just rhs <- lookupUEExpandableBndrR env v2
+      , pprTrace "blub2" (ppr v2 $$ ppr rhs) otherwise
+      = expr env e rhs
+
+    expr env (Var v1) (Var v2)
       | not (is_meta_var v1)
-      , not (is_meta_var v2) = case lookupPairing bvp v1 v2 of 
+      , not (is_meta_var v2) = case lookupPairing (ue_bvp env) v1 v2 of 
           Pairing -> return ()
           FreeVars -> guard (v1 == v2)
           _ -> mzero -- LeftShadowed or RightShadowed
 
-    -- TODO: Handle name capture for these cases (consider (\x y -> x) =?= (\x x -> ?A))
-    expr bvp (Var v1) e
+    expr env (Var v1) e
       | is_meta_var v1
-      , all (notShadowedBW bvp) (exprFreeVarsList e)
-      = solve_fw v1 (substExprSC (text "SpecConstr.unify") (pairingSubstBW subst_init_bw bvp) e)
-    expr bvp e (Var v2)
+      , all (notShadowedBW (ue_bvp env)) (exprFreeVarsList e)
+      = solve_fw v1 (substExprSC (text "SpecConstr.unify") (pairingSubstBW subst_init_bw (ue_bvp env)) e)
+    expr env e (Var v2)
       | is_meta_var v2
-      , all (notShadowedFW bvp) (exprFreeVarsList e)
-      = solve_bw v2 (substExprSC (text "SpecConstr.unify") (pairingSubstFW subst_init_fw bvp) e)
+      , all (notShadowedFW (ue_bvp env)) (exprFreeVarsList e)
+      = solve_bw v2 (substExprSC (text "SpecConstr.unify") (pairingSubstFW subst_init_fw (ue_bvp env)) e)
 
-    expr _ (Lit l1)    (Lit l2)    = guard (l1 == l2)
-    expr bvp (App f1 a1) (App f2 a2) = expr bvp f1 f2 >> expr bvp a1 a2
+    expr _   (Lit l1)    (Lit l2)    = guard (l1 == l2)
+    expr env (App f1 a1) (App f2 a2) = do
+      expr env f1 f2
+      expr env a1 a2
 
     -- Note [Ignore type differences]
-    expr bvp (Type {}) (Type {}) = return ()
-    expr bvp (Coercion {}) (Coercion {}) = return ()
-    expr bvp (Tick _ e1) e2 = expr bvp e1 e2  -- Ignore casts and notes
-    expr bvp (Cast e1 _) e2 = expr bvp e1 e2
-    expr bvp e1 (Tick _ e2) = expr bvp e1 e2
-    expr bvp e1 (Cast e2 _) = expr bvp e1 e2
+    expr _   (Type {}) (Type {}) = return ()
+    expr _   (Coercion {}) (Coercion {}) = return ()
+    expr env (Tick _ e1) e2 = expr env e1 e2  -- Ignore casts and notes
+    expr env (Cast e1 _) e2 = expr env e1 e2
+    expr env e1 (Tick _ e2) = expr env e1 e2
+    expr env e1 (Cast e2 _) = expr env e1 e2
 
-    expr bvp (Lam b1 e1) (Lam b2 e2) = expr (extendPairing bvp b1 b2) e1 e2
+    expr env (Lam b1 e1) (Lam b2 e2)
+      = expr (extendUEBoundVar env b1 b2) e1 e2
 
-    expr bvp (Case e1 b1 _ as1) (Case e2 b2 _ as2) = do
-      expr bvp e1 e2
+    expr env (Case e1 b1 _ as1) (Case e2 b2 _ as2) = do
+      expr env e1 e2
       guard (as1 `equalLength` as2)
-      zipWithM_ (alt (extendPairing bvp b1 b2)) as1 as2
+      zipWithM_ (alt (extendUEBoundVar env b1 b2)) as1 as2
 
-    expr bvp (Let bind1 e1) (Let bind2 e2) = do
+    expr env (Let (NonRec id rhs) e1) e2
+      | pprTrace "let1pre" (ppr id $$ ppr rhs) otherwise
+      , exprIsExpandable rhs
+      , pprTrace "let1" (ppr id $$ ppr rhs) otherwise
+      = expr (addUEExpandableBndrL env id rhs) e1 e2
+
+    expr env e1 (Let (NonRec id rhs) e2)
+      | pprTrace "let2pre" (ppr id $$ ppr rhs $$ ppr (exprIsExpandable rhs)) otherwise
+      , exprIsExpandable rhs
+      , pprTrace "let2" (ppr id $$ ppr rhs) otherwise
+      = expr (addUEExpandableBndrR env id rhs) e1 e2
+
+    expr env (Let bind1 e1) (Let bind2 e2) = do
       let (bndrs1, rhss1) = unzip (flattenBinds [bind1])
           (bndrs2, rhss2) = unzip (flattenBinds [bind2])
-          bvp' = extendPairingList bvp (zip bndrs1 bndrs2)
-      zipWithM_ (expr bvp') rhss1 rhss2
-      expr bvp' e1 e2
+          env' = extendUEBoundVarList env (zip bndrs1 bndrs2)
+      zipWithM_ (expr env') rhss1 rhss2
+      expr env' e1 e2
+            
 
     expr _ _ _ = mzero
 
-    alt bvp (dc1, bndrs1, rhs1) (dc2, bndrs2, rhs2) = do
+    alt env (dc1, bndrs1, rhs1) (dc2, bndrs2, rhs2) = do
       guard (dc1 == dc2)
       guard (bndrs1 `equalLength` bndrs2)
-      let bvp' = extendPairingList bvp (zip bndrs1 bndrs2)
-      expr bvp' rhs1 rhs2
+      let env' = extendUEBoundVarList env (zip bndrs1 bndrs2)
+      expr env' rhs1 rhs2
 
 {-
 Note [Ignore type differences]
@@ -2487,7 +2546,9 @@ I think.
 -- 'unifyCallPats' if successful.
 compareSpecificity :: CallPat -> CallPat -> Maybe (Unifier, Maybe Ordering)
 compareSpecificity cp1 cp2 = do
+  pprTrace "compareSpecificity0" (vcat [ppr cp1, ppr cp2]) (return ())
   u@(Uni fw bw) <- unifyCallPat cp1 cp2
+  pprTrace "compareSpecificity1" (vcat [ppr fw, ppr bw]) (return ())
   let is_var e = case e of Var _ -> True; _ -> False
   let m_ord =
         case (allUFM is_var fw, allUFM is_var bw) of
