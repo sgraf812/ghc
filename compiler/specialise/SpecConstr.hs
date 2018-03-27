@@ -48,6 +48,7 @@ import DynFlags         ( DynFlags(..), GeneralFlag( Opt_SpecConstrKeen )
                         , gopt, hasPprDebug )
 import Maybes           ( orElse, fromMaybe, expectJust, catMaybes, isJust, isNothing, whenIsJust )
 import Demand
+import Data.String      ( IsString(fromString) )
 import GHC.Serialized   ( deserializeWithData )
 import Util
 import Pair             ( Pair (..) )
@@ -1579,21 +1580,22 @@ addNewSpec spec si
 
 lookupMostSpecificSpecs :: Call -> SpecInfo -> [OneSpec]
 lookupMostSpecificSpecs call (SI { si_specs = specs })
-  | pprTrace "lookupMostSpecificSpecs" (vcat [ppr call, ppr (map os_pat specs)]) otherwise
-  = upper_bounds [] specs
+  -- | pprTrace "lookupMostSpecificSpecs" (vcat [ppr call, ppr (map os_pat result)]) otherwise
+  = result
   where
-    pat = pprTraceIt "pat" $ callAsClosedPat call
-    upper_bounds candidates (spec:specs)
-      | Just (unifier, Just _) <- compareSpecificity (os_pat spec) pat
-      -- ordering is either LT or (unlikely) EQ. In either case we have to
-      -- look for other, more specific candidates.
-      , pprTrace "upper_bounds1" (ppr (os_pat spec)) otherwise
-      = upper_bounds (insert_in_antichain spec candidates) specs
-      | otherwise
-      , pprTrace "upper_bounds2" (ppr (os_pat spec)) otherwise
-      = upper_bounds candidates specs
-    upper_bounds candidates _
+    result = upper_bounds [] specs
+    pat = callAsClosedPat call
+    upper_bounds candidates []
       = candidates
+    upper_bounds candidates (spec:specs)
+      | Incomparable <- compareSpecificity (os_pat spec) pat
+      -- , pprTrace "upper_bounds1" (ppr (os_pat spec)) otherwise
+      = upper_bounds candidates specs
+      | otherwise
+      -- specificity is either 'LessSpecific' or 'Equal'. In either case we have
+      -- to look for other, more specific candidates.
+      -- , pprTrace "upper_bounds2" (ppr (os_pat spec)) otherwise
+      = upper_bounds (insert_in_antichain spec candidates) specs
     -- All elements in the antichain should have a pairwise unifier (they all
     -- generalise @pat@, after all), But we should maintain that they are all
     -- uncomparable.
@@ -1601,11 +1603,11 @@ lookupMostSpecificSpecs call (SI { si_specs = specs })
     insert_in_antichain new (a:antichain) =
       case compareSpecificity (os_pat new) (os_pat a) of
         -- the new spec is incomparable so far
-        Just (_, Nothing) -> a : insert_in_antichain new antichain
+        Incomparable -> a : insert_in_antichain new antichain
         -- the new spec is more specific than at least one entry. There
         -- shouldn't be another entry in @antichain@ that's more specific, so
         -- @new@ will really end up in the chain.
-        Just (_, Just GT) -> insert_in_antichain new antichain 
+        MoreSpecific _ -> insert_in_antichain new antichain 
         -- the new spec is equal to or less specific than a spec already present
         -- in the antichain.
         _ -> a:antichain
@@ -1626,8 +1628,8 @@ origCallToSpecCall :: Call -> OneSpec -> Maybe Call
 origCallToSpecCall call spec = do
   let pat = os_pat spec
   -- make sure the call actually matches
-  (unifier, Just LT) <- compareSpecificity pat (callAsClosedPat call)
-  args <- mapM (lookupVarEnv (uni_fw unifier)) (patMetaVars pat)
+  LessSpecific subst <- pure (compareSpecificity pat (callAsClosedPat call))
+  args <- mapM (lookupVarEnv subst) (patMetaVars pat)
   return $ Call (os_id spec) args (call_vals call)
 
 relevantCalls :: [Id] -> CallEnv -> [Call]
@@ -1794,16 +1796,16 @@ specRec top_lvl env body_usg rhs_infos = do
       let n_specs = si_n_specs si
       new_spec <- lift $ lift $ spec_one env fn (ri_lam_bndrs ri) (ri_lam_body ri) (pat, n_specs)
       si' <- lift (MaybeT (return (addNewSpec new_spec si)))
-      let pats = map os_pat (lookupMostSpecificSpecs call si')
-      let cond = pats == [os_pat new_spec]
-      MASSERT2( cond
-              , (vcat 
-                  [ text "Call pattern of new spec doesn't unify with call"
-                  , text "call pattern:" <+> ppr (os_pat new_spec)
-                  , text "call:" <+> ppr call
-                  , text "most specific call pats:" <+> ppr pats
-                  ])
-              )
+      -- let pats = map os_pat (lookupMostSpecificSpecs call si')
+      -- let cond = pats == [os_pat new_spec]
+      -- MASSERT2( cond
+      --         , (vcat 
+      --             [ text "Call pattern of new spec doesn't unify with call"
+      --             , text "call pattern:" <+> ppr (os_pat new_spec)
+      --             , text "call:" <+> ppr call
+      --             , text "most specific call pats:" <+> ppr pats
+      --             ])
+      --         )
       put si'
       -- end of specialise
 
@@ -2250,32 +2252,8 @@ data CallPat
 
 instance Eq CallPat where
   cp1@(CP vs1 as1) == cp2@(CP vs2 as2)
-    -- | pprTrace "CallPat.(==)" (ppr new $$ ppr cp1 $$ ppr cp2) True
-    = WARN( not new && old, text "old => new hurt") new
-    where
-      new = (compareSpecificity cp1 cp2 >>= snd) == Just EQ
-      old = all2 same as1 as2
-      same (Var v1) (Var v2)
-          | v1 `elem` vs1 = v2 `elem` vs2
-          | v2 `elem` vs2 = False
-          | otherwise     = v1 == v2
-
-      same (Lit l1)    (Lit l2)    = l1==l2
-      same (App f1 a1) (App f2 a2) = same f1 f2 && same a1 a2
-
-      same (Type {}) (Type {}) = True     -- Note [Ignore type differences]
-      same (Coercion {}) (Coercion {}) = True
-      same (Tick _ e1) e2 = same e1 e2  -- Ignore casts and notes
-      same (Cast e1 _) e2 = same e1 e2
-      same e1 (Tick _ e2) = same e1 e2
-      same e1 (Cast e2 _) = same e1 e2
-
-      same e1 e2 = WARN( bad e1 || bad e2, ppr e1 $$ ppr e2)
-                  False  -- Let, lambda, case should not occur
-      bad (Case {}) = True
-      bad (Let {})  = True
-      bad (Lam {})  = True
-      bad _other    = False
+    | Equal _ _ <- compareSpecificity cp1 cp2 = True
+    | otherwise                               = False
 
 -- | Format like in the paper
 instance Outputable CallPat where
@@ -2293,6 +2271,9 @@ patSpine (CP _ spine) = spine
 
 patFreeAndMetaVars :: CallPat -> [Var]
 patFreeAndMetaVars = exprsFreeVarsList . patSpine
+
+patFreeVars :: CallPat -> [Var]
+patFreeVars cp = patFreeAndMetaVars cp \\ patMetaVars cp
 
 -- | A pair of 'VarEnv's to 'CoreExpr's that unifies two expressions @e1@ and
 -- @e2@ by substituting all 'Var's in @e1@ with 'uni_fw' and all 'Var's in @e2@
@@ -2424,110 +2405,6 @@ lookupUEExpandableBndrR env id = do
   guard (all (notShadowedSinceR (ue_bvp env) n) (exprFreeVarsList rhs))
   return rhs
 
--- | Tries to compute a most general 'Unifier' for two 'CallPat's.
--- This algorithm crucially relies on meta-variables in 'CallPat's to occur
--- linearly!
-unifyCallPat :: CallPat -> CallPat -> Maybe Unifier
-unifyCallPat cp1 cp2
-  = execStateT (spine emptyUnifyEnv (patSpine cp1) (patSpine cp2)) emptyUnifier
-  where
-    is_meta_var = (`elemVarSet` mkVarSet (patMetaVars cp1 ++ patMetaVars cp2))
-
-    -- When we apply renaming permutations for local binders, we have to be
-    -- careful not to introduce clashes. It's not enough to just add the range
-    -- of the renaming permutation, for example:
-    --
-    --   [x |-> y, y |-> x]((\x. y x z) x) = (\x'. x x' z) y
-    --
-    -- We had to rename the lambda bound x to a fresh x' here. There's nothing
-    -- preventing the substitution to choose z as the fresh name, though!
-    -- This is why we have to include the free (and meta) vars of the pattern
-    -- we substitute into.
-    subst_init_fw = extendInScopeList emptySubst (patFreeAndMetaVars cp1)
-    subst_init_bw = extendInScopeList emptySubst (patFreeAndMetaVars cp2)
-
-    -- TODO: Detect non-linear meta-var occurrences
-    solve_fw v e = modify' (\u -> extendUniFW u v e)
-    solve_bw v e = modify' (\u -> extendUniBW u v e)
-
-    spine env es1 es2 = do
-      guard (es1 `equalLength` es2)
-      zipWithM_ (expr env) es1 es2
-
-    expr env (Var v1) e
-      | Just rhs <- lookupUEExpandableBndrL env v1
-      , pprTrace "blub1" (ppr v1 $$ ppr rhs) otherwise
-      = expr env rhs e
-    expr env e (Var v2)
-      | Just rhs <- lookupUEExpandableBndrR env v2
-      , pprTrace "blub2" (ppr v2 $$ ppr rhs) otherwise
-      = expr env e rhs
-
-    expr env (Var v1) (Var v2)
-      | not (is_meta_var v1)
-      , not (is_meta_var v2) = case lookupPairing (ue_bvp env) v1 v2 of 
-          Pairing -> return ()
-          FreeVars -> guard (v1 == v2)
-          _ -> mzero -- LeftShadowed or RightShadowed
-
-    expr env (Var v1) e
-      | is_meta_var v1
-      , all (notShadowedBW (ue_bvp env)) (exprFreeVarsList e)
-      = solve_fw v1 (substExprSC (text "SpecConstr.unify") (pairingSubstBW subst_init_bw (ue_bvp env)) e)
-    expr env e (Var v2)
-      | is_meta_var v2
-      , all (notShadowedFW (ue_bvp env)) (exprFreeVarsList e)
-      = solve_bw v2 (substExprSC (text "SpecConstr.unify") (pairingSubstFW subst_init_fw (ue_bvp env)) e)
-
-    expr _   (Lit l1)    (Lit l2)    = guard (l1 == l2)
-    expr env (App f1 a1) (App f2 a2) = do
-      expr env f1 f2
-      expr env a1 a2
-
-    -- Note [Ignore type differences]
-    expr _   (Type {}) (Type {}) = return ()
-    expr _   (Coercion {}) (Coercion {}) = return ()
-    expr env (Tick _ e1) e2 = expr env e1 e2  -- Ignore casts and notes
-    expr env (Cast e1 _) e2 = expr env e1 e2
-    expr env e1 (Tick _ e2) = expr env e1 e2
-    expr env e1 (Cast e2 _) = expr env e1 e2
-
-    expr env (Lam b1 e1) (Lam b2 e2)
-      = expr (extendUEBoundVar env b1 b2) e1 e2
-
-    expr env (Case e1 b1 _ as1) (Case e2 b2 _ as2) = do
-      expr env e1 e2
-      guard (as1 `equalLength` as2)
-      zipWithM_ (alt (extendUEBoundVar env b1 b2)) as1 as2
-
-    expr env (Let (NonRec id rhs) e1) e2
-      | pprTrace "let1pre" (ppr id $$ ppr rhs) otherwise
-      , exprIsExpandable rhs
-      , pprTrace "let1" (ppr id $$ ppr rhs) otherwise
-      = expr (addUEExpandableBndrL env id rhs) e1 e2
-
-    expr env e1 (Let (NonRec id rhs) e2)
-      | pprTrace "let2pre" (ppr id $$ ppr rhs $$ ppr (exprIsExpandable rhs)) otherwise
-      , exprIsExpandable rhs
-      , pprTrace "let2" (ppr id $$ ppr rhs) otherwise
-      = expr (addUEExpandableBndrR env id rhs) e1 e2
-
-    expr env (Let bind1 e1) (Let bind2 e2) = do
-      let (bndrs1, rhss1) = unzip (flattenBinds [bind1])
-          (bndrs2, rhss2) = unzip (flattenBinds [bind2])
-          env' = extendUEBoundVarList env (zip bndrs1 bndrs2)
-      zipWithM_ (expr env') rhss1 rhss2
-      expr env' e1 e2
-            
-
-    expr _ _ _ = mzero
-
-    alt env (dc1, bndrs1, rhs1) (dc2, bndrs2, rhs2) = do
-      guard (dc1 == dc2)
-      guard (bndrs1 `equalLength` bndrs2)
-      let env' = extendUEBoundVarList env (zip bndrs1 bndrs2)
-      expr env' rhs1 rhs2
-
 {-
 Note [Ignore type differences]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2538,25 +2415,48 @@ an infinite number of specialisations. Example is Data.Sequence.adjustTree,
 I think.
 -}
 
--- | @compareSpecificity cp1 cp2 >>= snd@ is the partial ordering of 'CallPat's
+-- | Result of comparing two 'CallPat's @cp1@ and @cp2@ for specificity, for
+-- example through a call to 'compareSpecificity'.
+data CallPatSpecificity
+  = Incomparable
+  -- ^ The compared 'CallPat's were incomparable, e.g. neither was more specific
+  -- than the other.
+  | MoreSpecific (VarEnv CoreExpr)
+  -- ^ @cp1@ was more specific than @cp2@. In this case this constructor carries
+  -- a substitution for meta variables to instantiate @cp2@ to @cp1@.
+  | LessSpecific (VarEnv CoreExpr)
+  -- ^ @cp1@ was less specific than @cp2@. In this case this constructor carries
+  -- a substitution for meta variables to instantiate @cp1@ to @cp2@.
+  | Equal (VarEnv Var) (VarEnv Var)
+  -- ^ @cp1@ was equal to @cp2@. @Equal fw bw@ carries a permutation of meta
+  -- variables such that @fw@ applied to @cp1@ yields @cp2@ and @bw@ applied to
+  -- @cp2@ results in @cp1@.
+
+-- | @compareSpecificity cp1 cp2@ is the partial ordering of 'CallPat's
 -- by specificity. A 'CallPat' @cp1@ is more specific than @cp2@ if any call
 -- matching @cp1@ also matches @cp2@.
--- If that was the case, @compareSpecificity cp1 cp2 >>= snd == Just GT@.
--- For efficiency reasons, this function also returns the 'Unifier' computed by
--- 'unifyCallPats' if successful.
-compareSpecificity :: CallPat -> CallPat -> Maybe (Unifier, Maybe Ordering)
-compareSpecificity cp1 cp2 = do
-  pprTrace "compareSpecificity0" (vcat [ppr cp1, ppr cp2]) (return ())
-  u@(Uni fw bw) <- unifyCallPat cp1 cp2
-  pprTrace "compareSpecificity1" (vcat [ppr fw, ppr bw]) (return ())
-  let is_var e = case e of Var _ -> True; _ -> False
-  let m_ord =
-        case (allUFM is_var fw, allUFM is_var bw) of
-          (False, False) -> Nothing
-          (True, False) -> Just GT
-          (False, True) -> Just LT
-          (True, True) -> Just EQ
-  return (u, m_ord)
+-- If that was the case, @compareSpecificity cp1 cp2 == MoreSpecific _@.
+compareSpecificity :: CallPat -> CallPat -> CallPatSpecificity
+compareSpecificity cp1 cp2
+  -- | pprTrace "compareSpecificity" (ppr cp1 $$ ppr cp2 $$ ppr (fmap snd lr) $$ ppr (fmap snd rl)) otherwise
+  = combined
+  where
+    lr = matchN in_scope_env_lr tmp_name (patMetaVars cp1) (patSpine cp1) (patSpine cp2)
+    rl = matchN in_scope_env_rl tmp_name (patMetaVars cp2) (patSpine cp2) (patSpine cp1)
+    in_scope_env_lr = (in_scope_lr, realIdUnfolding)
+    in_scope_lr = extendInScopeSetList emptyInScopeSet (patFreeVars cp1 ++ patFreeAndMetaVars cp2)
+    in_scope_env_rl = (in_scope_rl, realIdUnfolding)
+    in_scope_rl = extendInScopeSetList emptyInScopeSet (patFreeAndMetaVars cp1 ++ patFreeVars cp2)
+    tmp_name = fromString "<compareSpecificity>" :: FastString
+    vs1 = patMetaVars cp1
+    vs2 = patMetaVars cp2
+    unVar (Var v) = v
+    unVar e = pprPanic "compareSpecificity" (text "Not a Var:" <+> ppr e)
+    combined = case (lr, rl) of
+      (Nothing, Nothing)           -> Incomparable
+      (Just (_, subst), Nothing)   -> LessSpecific (mkVarEnv (zip vs1 subst))
+      (Nothing, Just (_, subst))   -> MoreSpecific (mkVarEnv (zip vs2 subst))
+      (Just (_, fw), Just (_, bw)) -> Equal (mkVarEnv (zip vs1 (map unVar fw))) (mkVarEnv (zip vs2 (map unVar bw)))
 
 -- | A map from 'CallPat's to @a@.
 newtype CallPatEnv a = CPE [(CallPat, a)]

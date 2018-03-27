@@ -23,7 +23,7 @@ module Rules (
         -- * Misc. CoreRule helpers
         rulesOfBinds, getRules, pprRulesForUser,
 
-        lookupRule, mkRule, roughTopNames
+        matchN, lookupRule, mkRule, roughTopNames
     ) where
 
 #include "HsVersions.h"
