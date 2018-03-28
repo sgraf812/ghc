@@ -46,7 +46,7 @@ import Name
 import BasicTypes
 import DynFlags         ( DynFlags(..), GeneralFlag( Opt_SpecConstrKeen )
                         , gopt, hasPprDebug )
-import Maybes           ( orElse, fromMaybe, expectJust, catMaybes, isJust, isNothing, whenIsJust )
+import Maybes           ( orElse, fromMaybe, expectJust, catMaybes, isJust, isNothing, whenIsJust, mapMaybe )
 import Demand
 import Data.String      ( IsString(fromString) )
 import GHC.Serialized   ( deserializeWithData )
@@ -62,6 +62,7 @@ import Control.Monad.Trans.Class ( lift )
 import Control.Monad.Trans.Maybe ( MaybeT (..), runMaybeT )
 import Control.Monad.Trans.State.Strict
 import Data.List
+import Data.Function    ( on )
 import Data.Tuple       ( swap )
 import PrelNames        ( specTyConName )
 import Module
@@ -1172,6 +1173,7 @@ data ArgOcc
   -- con app/lambda) or not is unimportant, because we want to allow to
   -- specialise @map (\x. x + 1) xs@ and @map@ doesn't pass a value to the
   -- lambda.
+  deriving Eq
 
 type DataConEnv a = UniqFM a     -- Keyed by DataCon
 
@@ -1638,9 +1640,10 @@ relevantCalls rec_group call_env =
 
 data CollectorState
   = CS
-  { cs_visited        :: IdSet
-  , cs_seeds          :: Seq Call
-  , cs_combined_usage :: ScUsage
+  { cs_visited         :: IdSet
+  , cs_seeds           :: Seq Call
+  , cs_combined_usage  :: ScUsage
+  , cs_gced_spec_infos :: [SpecInfo]
   }
 
 addUsageFrom :: [Id] -> Id -> ScUsage -> State CollectorState ()
@@ -1652,6 +1655,21 @@ addUsageFrom rec_group fn usage = modify' $ \cs ->
       , cs_seeds = cs_seeds cs >< fromList (relevantCalls rec_group (scu_calls usage))
       , cs_combined_usage = cs_combined_usage cs `combineUsage` usage
       }
+
+modifyAssoc :: Eq a => (b -> b) -> a -> [(a, b)] -> [(a, b)]
+modifyAssoc f k [] = []
+modifyAssoc f k ((k',v):assoc)
+  | k == k' = (k,f v) : assoc
+  | otherwise = (k',v) : modifyAssoc f k assoc
+
+addLiveSpec :: [Id] -> Id -> OneSpec -> State CollectorState ()
+addLiveSpec rec_group fn spec = modify' $ \cs -> cs
+  { cs_gced_spec_infos = map snd (modifyAssoc add fn (zip rec_group (cs_gced_spec_infos cs)))
+  }
+  where
+    add si = case find (on (==) (ru_name . os_rule) spec) (si_specs si) of
+      Nothing -> si { si_specs = spec:si_specs si, si_n_specs = si_n_specs si + 1 }
+      _ -> si
 
 enqueueSeeds :: [Call] -> State CollectorState ()
 enqueueSeeds new_seeds = modify' $ \cs ->
@@ -1677,31 +1695,91 @@ findCallInfos fn rhs_infos spec_infos = do
   -- include other calls, so this is necessary filtering.
   find ((== fn) . ri_fn . fst) (zip rhs_infos spec_infos)
 
-collectTransitiveUsage :: ScEnv -> [RhsInfo] -> [SpecInfo] -> ScUsage -> ScUsage
+collectTransitiveUsage :: ScEnv -> [RhsInfo] -> [SpecInfo] -> ScUsage -> (ScUsage, [SpecInfo])
 collectTransitiveUsage env rhs_infos spec_infos init_usage
-  = cs_combined_usage (execState bfs init_state)
+  = (cs_combined_usage resulting_cs, cs_gced_spec_infos resulting_cs)
   where
+    resulting_cs = execState bfs init_state
     rec_group  = map ri_fn rhs_infos
     init_seeds = fromList (relevantCalls rec_group (scu_calls init_usage))
-    init_state = CS emptyVarSet init_seeds init_usage
+    init_state = CS emptyVarSet init_seeds init_usage (noSpecInfo <$ spec_infos)
 
     bfs :: State CollectorState ()
     bfs = do
       mb_seed <- dequeueSeed
       whenIsJust mb_seed $ \seed -> do
-        whenIsJust (usage_from_matching_rhs seed) $ \(fn, usg) ->
-          addUsageFrom rec_group fn usg
+        whenIsJust (spec_from_matching_rhs seed) $ \(ri, mb_spec) ->
+          case mb_spec of
+            Nothing ->
+              addUsageFrom rec_group (ri_fn ri) (ri_rhs_usg ri)
+            Just spec -> do
+              addUsageFrom rec_group (os_id spec) (os_usg spec)
+              addLiveSpec rec_group (ri_fn ri) spec
         bfs
 
-    usage_from_matching_rhs :: Call -> Maybe (Id, ScUsage)
-    usage_from_matching_rhs call = do
+    spec_from_matching_rhs :: Call -> Maybe (RhsInfo, Maybe OneSpec)
+    spec_from_matching_rhs call = do
       let fn = call_recv call
       -- usage might contain many calls not referencing this binding group,
       -- that's why the following lookup can return Nothing
       (ri, si) <- findCallInfos fn rhs_infos spec_infos
-      case findMatchingSpec env call si of
-        Nothing -> return (ri_fn ri, ri_rhs_usg ri)
-        Just spec -> return (os_id spec, os_usg spec)
+      return (ri, findMatchingSpec env call si)
+
+-- TODO: Integrate this into collectTransitiveUsage for the least amount of
+-- analysis possible
+refineArgOccs :: ScEnv -> [RhsInfo] -> [SpecInfo] -> ([RhsInfo], [SpecInfo])
+refineArgOccs env rhs_infos = unzip . iter . zip rhs_infos
+  where
+    rec_group  = map ri_fn rhs_infos
+    iter infos
+      | not (same_occs infos infos') = iter infos'
+      | otherwise = infos'
+      where infos' = step infos
+    
+    same_occs infos = and . zipWith (\(ri, si) (ri', si') -> ri_same_occs ri ri' && si_same_occs si si') infos
+    equating p x y = p x == p y
+    ri_same_occs = equating (scu_occs . ri_rhs_usg)
+    si_same_occs = equating (map (scu_occs . os_usg) . si_specs)
+
+    step infos = map step_one infos
+      where
+        step_one (ri, si) = (step_ri ri, si { si_specs = map (step_os ri) (si_specs si) })
+        step_ri ri = ri { ri_rhs_usg = refine_usg infos (ri_rhs_usg ri) }
+        step_os ri os = os { os_usg = refine_usg infos (os_usg os) }
+
+    refine_usg :: [(RhsInfo, SpecInfo)] -> ScUsage -> ScUsage
+    refine_usg infos usg 
+      = combineUsage usg
+      . combineUsages
+      . mapMaybe (unleash_occs_of_call infos)
+      . relevantCalls rec_group
+      $ scu_calls usg
+
+    unleash_occs_of_call :: [(RhsInfo, SpecInfo)] -> Call -> Maybe ScUsage
+    unleash_occs_of_call infos call = do
+      let (rhs_infos, spec_infos) = unzip infos
+      (ri, si) <- findCallInfos (call_recv call) rhs_infos spec_infos
+      let (spec_call, occs, bndrs) =
+            spec_call_occs_bndrs call si `orElse` orig_rhs_call_occs_bndrs call ri
+      return (combineUsages (zipWith (unleash_occ_on_arg bndrs) (call_args spec_call) occs))
+
+    spec_call_occs_bndrs call si = do
+      spec <- findMatchingSpec env call si
+      spec_call <- origCallToSpecCall call spec
+      let bndrs = patMetaVars (os_pat spec)
+      let (_, occs) = lookupOccs (os_usg spec) bndrs
+      return (spec_call, occs, bndrs)
+
+    orig_rhs_call_occs_bndrs call ri =
+      (call, snd (lookupOccs (ri_rhs_usg ri) (ri_lam_bndrs ri)), ri_lam_bndrs ri)
+
+    unleash_occ_on_arg bndrs (Var v) occ
+      | pprTrace "unleash_occ_on_arg_try" (ppr v $$ ppr occ) True
+      , v `elem` bndrs
+      , pprTrace "unleash_occ_on_arg" (ppr v $$ ppr occ) True
+      = nullUsage { scu_occs = unitVarEnv v occ }
+    unleash_occ_on_arg _ _ _
+      = nullUsage
 
 ----------------------
 specRec :: TopLevelFlag -> ScEnv
@@ -1712,7 +1790,7 @@ specRec :: TopLevelFlag -> ScEnv
 
 specRec top_lvl env body_usg rhs_infos = do
   spec_infos <- execStateT (go env True 0 []) [noSpecInfo | _ <- rhs_infos]
-  return (collectTransitiveUsage env rhs_infos spec_infos init_usage, spec_infos)
+  return (collectTransitiveUsage env rhs_infos spec_infos init_usage)
   where
     -- Note [Seeding top-level recursive groups]
     init_usage
@@ -1736,7 +1814,9 @@ specRec top_lvl env body_usg rhs_infos = do
     go env False n_iter [] = return ()
     go env _ n_iter [] = do
       spec_infos <- get
-      let usage = collectTransitiveUsage env rhs_infos spec_infos init_usage
+      let (usage, spec_infos1) = collectTransitiveUsage env rhs_infos spec_infos init_usage
+      let (_, spec_infos2) = refineArgOccs env rhs_infos spec_infos1 -- TODO: also integrate rhs_infos into the state
+      put spec_infos2
       go env False (n_iter + 1) (relevantCalls rec_group (scu_calls usage))
     go env any_spec n_iter (call:seeds) = do
       any_new_spec <- isJust <$> zoom_spec_info_for (call_recv call) (work_on_call env call)
@@ -1815,7 +1895,6 @@ specRec top_lvl env body_usg rhs_infos = do
     pat_from_spec_rhs :: Call -> OneSpec -> MaybeT UniqSM CallPat
     pat_from_spec_rhs call spec = do
       spec_call <- MaybeT (return (origCallToSpecCall call spec))
-      let lookup_occ_map = fromMaybe UnkOcc . lookupVarEnv (scu_occs (os_usg spec))
       let (_, occs) = lookupOccs (os_usg spec) (patMetaVars (os_pat spec))
       pprTrace "from_spec_rhs" (ppr call $$ ppr spec_call $$ ppr occs $$ ppr (os_pat spec)) (return ())
       spec_pat <- MaybeT $ callToPats env occs spec_call
@@ -2275,136 +2354,6 @@ patFreeAndMetaVars = exprsFreeVarsList . patSpine
 patFreeVars :: CallPat -> [Var]
 patFreeVars cp = patFreeAndMetaVars cp \\ patMetaVars cp
 
--- | A pair of 'VarEnv's to 'CoreExpr's that unifies two expressions @e1@ and
--- @e2@ by substituting all 'Var's in @e1@ with 'uni_fw' and all 'Var's in @e2@
--- with 'uni_bw'. The resulting expressions are \(\alpha\)-equivalent.
-data Unifier
-  = Uni
-  { uni_fw :: VarEnv CoreExpr
-  , uni_bw :: VarEnv CoreExpr
-  }
-
-emptyUnifier :: Unifier
-emptyUnifier = Uni emptyVarEnv emptyVarEnv
-
-extendUniFW :: Unifier -> Var -> CoreExpr -> Unifier
-extendUniFW uni v e = uni { uni_fw = extendVarEnv (uni_fw uni) v e }
-
-extendUniBW :: Unifier -> Var -> CoreExpr -> Unifier
-extendUniBW uni v e = uni { uni_bw = extendVarEnv (uni_bw uni) v e }
-
-newtype BoundVarPairing = BVP [(Var, Var)]
-
-emptyPairing :: BoundVarPairing
-emptyPairing = BVP []
-
-extendPairing :: BoundVarPairing -> Var -> Var -> BoundVarPairing
-extendPairing (BVP pairs) l r = BVP ((l,r):pairs)
-
-extendPairingList :: BoundVarPairing -> [(Var, Var)] -> BoundVarPairing
-extendPairingList (BVP pairs) new_pairs = BVP (new_pairs ++ pairs)
-
-sizePairing :: BoundVarPairing -> Int
-sizePairing (BVP pairs) = length pairs
-
-data PairingResult
-  = Pairing
-  | LeftShadowed
-  | RightShadowed
-  | FreeVars
-
-lookupPairing :: BoundVarPairing -> Var -> Var -> PairingResult
-lookupPairing (BVP pairs) l r = go pairs
-  where
-    go [] = FreeVars
-    go ((l',r'):rest) = case (l' == l, r' == r) of
-      (True, True) -> Pairing
-      (True, False) -> LeftShadowed
-      (False, True) -> RightShadowed
-      (False, False) -> go rest
-
-notShadowedFW :: BoundVarPairing -> Var -> Bool
-notShadowedFW (BVP pairs) v = go pairs []
-  where
-    go [] shadowing = not (v `elem` shadowing) -- v really is free
-    go ((l, r):rest) shadowing
-      | l == v = not (r `elem` shadowing)
-      | otherwise = go rest (r:shadowing)
-
-notShadowedBW :: BoundVarPairing -> Var -> Bool
-notShadowedBW (BVP pairs) = notShadowedFW (BVP (map swap pairs))
-
-notShadowedSinceL :: BoundVarPairing -> Int -> Var -> Bool
-notShadowedSinceL (BVP pairs) n v
-  = not (v `elem` map fst (reverse (drop n (reverse pairs))))
-
-notShadowedSinceR :: BoundVarPairing -> Int -> Var -> Bool
-notShadowedSinceR (BVP pairs) n v = notShadowedSinceL (BVP (map swap pairs)) n v
-
-pairingSubstFW :: Subst -> BoundVarPairing -> Subst
-pairingSubstFW subst0 (BVP pairs) = foldr (\(l, r) s -> extendSubstWithVar s l r) subst1 pairs
-  where
-    subst1   = extendInScopeList subst0 (map snd pairs)
-
-pairingSubstBW :: Subst -> BoundVarPairing -> Subst
-pairingSubstBW subst (BVP pairs) = pairingSubstFW subst (BVP (map swap pairs))
-
-data UnifyEnv
-  = UE
-  { ue_bvp   :: BoundVarPairing
-  , ue_lrhss :: IdEnv (Maybe (Int, CoreExpr))
-  , ue_rrhss :: IdEnv (Maybe (Int, CoreExpr))
-  }
-
-emptyUnifyEnv :: UnifyEnv
-emptyUnifyEnv = UE emptyPairing emptyVarEnv emptyVarEnv
-
-extendUEBoundVar :: UnifyEnv -> Var -> Var -> UnifyEnv
-extendUEBoundVar env l r = env
-  { ue_bvp = extendPairing (ue_bvp env) l r
-  , ue_lrhss = delVarEnv (ue_lrhss env) l
-  , ue_rrhss = delVarEnv (ue_rrhss env) r
-  }
-
-extendUEBoundVarList :: UnifyEnv -> [(Var, Var)] -> UnifyEnv
-extendUEBoundVarList env pairs = env
-  { ue_bvp = extendPairingList (ue_bvp env) pairs
-  , ue_lrhss = delVarEnvList (ue_lrhss env) (map fst pairs)
-  , ue_rrhss = delVarEnvList (ue_lrhss env) (map snd pairs)
-  }
-
-addUEExpandableBndrL :: UnifyEnv -> Id -> CoreExpr -> UnifyEnv
-addUEExpandableBndrL env id e = env
-  { ue_lrhss = extendVarEnv (ue_lrhss env) id (Just (sizePairing (ue_bvp env), e))
-  }
-
-addUEExpandableBndrR :: UnifyEnv -> Id -> CoreExpr -> UnifyEnv
-addUEExpandableBndrR env id e = env
-  { ue_rrhss = extendVarEnv (ue_rrhss env) id (Just (sizePairing (ue_bvp env), e))
-  }
-
-addUENonExpandableBndrsR :: UnifyEnv -> [Id] -> UnifyEnv
-addUENonExpandableBndrsR env ids = env
-  { ue_rrhss = extendVarEnvList (ue_rrhss env) (zip ids (repeat Nothing))
-  }
-
-addUENonExpandableBndrsL :: UnifyEnv -> [Id] -> UnifyEnv
-addUENonExpandableBndrsL env ids = env
-  { ue_lrhss = extendVarEnvList (ue_lrhss env) (zip ids (repeat Nothing))
-  }
-
-lookupUEExpandableBndrL :: UnifyEnv -> Id -> Maybe CoreExpr
-lookupUEExpandableBndrL env id = do
-  Just (n, rhs) <- lookupVarEnv (ue_lrhss env) id
-  guard (all (notShadowedSinceL (ue_bvp env) n) (exprFreeVarsList rhs))
-  return rhs
-
-lookupUEExpandableBndrR :: UnifyEnv -> Id -> Maybe CoreExpr
-lookupUEExpandableBndrR env id = do
-  Just (n, rhs) <- lookupVarEnv (ue_rrhss env) id
-  guard (all (notShadowedSinceR (ue_bvp env) n) (exprFreeVarsList rhs))
-  return rhs
-
 {-
 Note [Ignore type differences]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2441,22 +2390,24 @@ compareSpecificity cp1 cp2
   -- | pprTrace "compareSpecificity" (ppr cp1 $$ ppr cp2 $$ ppr (fmap snd lr) $$ ppr (fmap snd rl)) otherwise
   = combined
   where
-    lr = matchN in_scope_env_lr tmp_name (patMetaVars cp1) (patSpine cp1) (patSpine cp2)
-    rl = matchN in_scope_env_rl tmp_name (patMetaVars cp2) (patSpine cp2) (patSpine cp1)
-    in_scope_env_lr = (in_scope_lr, realIdUnfolding)
-    in_scope_lr = extendInScopeSetList emptyInScopeSet (patFreeVars cp1 ++ patFreeAndMetaVars cp2)
-    in_scope_env_rl = (in_scope_rl, realIdUnfolding)
-    in_scope_rl = extendInScopeSetList emptyInScopeSet (patFreeAndMetaVars cp1 ++ patFreeVars cp2)
-    tmp_name = fromString "<compareSpecificity>" :: FastString
+    lr = matchCallPat cp1 (patSpine cp2)
+    rl = matchCallPat cp2 (patSpine cp1)
     vs1 = patMetaVars cp1
     vs2 = patMetaVars cp2
     unVar (Var v) = v
     unVar e = pprPanic "compareSpecificity" (text "Not a Var:" <+> ppr e)
     combined = case (lr, rl) of
-      (Nothing, Nothing)           -> Incomparable
-      (Just (_, subst), Nothing)   -> LessSpecific (mkVarEnv (zip vs1 subst))
-      (Nothing, Just (_, subst))   -> MoreSpecific (mkVarEnv (zip vs2 subst))
-      (Just (_, fw), Just (_, bw)) -> Equal (mkVarEnv (zip vs1 (map unVar fw))) (mkVarEnv (zip vs2 (map unVar bw)))
+      (Nothing, Nothing)    -> Incomparable
+      (Just subst, Nothing) -> LessSpecific (mkVarEnv (zip vs1 subst))
+      (Nothing, Just subst) -> MoreSpecific (mkVarEnv (zip vs2 subst))
+      (Just fw, Just bw)    -> Equal (mkVarEnv (zip vs1 (map unVar fw))) (mkVarEnv (zip vs2 (map unVar bw)))
+
+matchCallPat :: CallPat -> [CoreExpr] -> Maybe [CoreExpr]
+matchCallPat cp args = snd <$> matchN in_scope_env tmp_name (patMetaVars cp) (patSpine cp) args
+  where
+    in_scope_env = (in_scope, realIdUnfolding)
+    in_scope = extendInScopeSetList emptyInScopeSet (patFreeVars cp ++ exprsFreeVarsList args)
+    tmp_name = fromString "<matchCallPat>" :: FastString
 
 -- | A map from 'CallPat's to @a@.
 newtype CallPatEnv a = CPE [(CallPat, a)]
