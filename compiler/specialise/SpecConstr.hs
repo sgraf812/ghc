@@ -1640,10 +1640,9 @@ relevantCalls rec_group call_env =
 
 data CollectorState
   = CS
-  { cs_visited         :: IdSet
-  , cs_seeds           :: Seq Call
-  , cs_combined_usage  :: ScUsage
-  , cs_gced_spec_infos :: [SpecInfo]
+  { cs_visited        :: IdSet
+  , cs_seeds          :: Seq Call
+  , cs_combined_usage :: ScUsage
   }
 
 addUsageFrom :: [Id] -> Id -> ScUsage -> State CollectorState ()
@@ -1655,21 +1654,6 @@ addUsageFrom rec_group fn usage = modify' $ \cs ->
       , cs_seeds = cs_seeds cs >< fromList (relevantCalls rec_group (scu_calls usage))
       , cs_combined_usage = cs_combined_usage cs `combineUsage` usage
       }
-
-modifyAssoc :: Eq a => (b -> b) -> a -> [(a, b)] -> [(a, b)]
-modifyAssoc f k [] = []
-modifyAssoc f k ((k',v):assoc)
-  | k == k' = (k,f v) : assoc
-  | otherwise = (k',v) : modifyAssoc f k assoc
-
-addLiveSpec :: [Id] -> Id -> OneSpec -> State CollectorState ()
-addLiveSpec rec_group fn spec = modify' $ \cs -> cs
-  { cs_gced_spec_infos = map snd (modifyAssoc add fn (zip rec_group (cs_gced_spec_infos cs)))
-  }
-  where
-    add si = case find (on (==) (ru_name . os_rule) spec) (si_specs si) of
-      Nothing -> si { si_specs = spec:si_specs si, si_n_specs = si_n_specs si + 1 }
-      _ -> si
 
 enqueueSeeds :: [Call] -> State CollectorState ()
 enqueueSeeds new_seeds = modify' $ \cs ->
@@ -1695,87 +1679,86 @@ findCallInfos fn rhs_infos spec_infos = do
   -- include other calls, so this is necessary filtering.
   find ((== fn) . ri_fn . fst) (zip rhs_infos spec_infos)
 
-collectTransitiveUsage :: ScEnv -> [RhsInfo] -> [SpecInfo] -> ScUsage -> (ScUsage, [SpecInfo])
+collectTransitiveUsage :: ScEnv -> [RhsInfo] -> [SpecInfo] -> ScUsage -> ScUsage
 collectTransitiveUsage env rhs_infos spec_infos init_usage
-  = (cs_combined_usage resulting_cs, cs_gced_spec_infos resulting_cs)
+  = cs_combined_usage (execState bfs init_state)
   where
-    resulting_cs = execState bfs init_state
     rec_group  = map ri_fn rhs_infos
     init_seeds = fromList (relevantCalls rec_group (scu_calls init_usage))
-    init_state = CS emptyVarSet init_seeds init_usage (noSpecInfo <$ spec_infos)
+    init_state = CS emptyVarSet init_seeds init_usage
 
     bfs :: State CollectorState ()
     bfs = do
       mb_seed <- dequeueSeed
       whenIsJust mb_seed $ \seed -> do
-        whenIsJust (spec_from_matching_rhs seed) $ \(ri, mb_spec) ->
-          case mb_spec of
-            Nothing ->
-              addUsageFrom rec_group (ri_fn ri) (ri_rhs_usg ri)
-            Just spec -> do
-              addUsageFrom rec_group (os_id spec) (os_usg spec)
-              addLiveSpec rec_group (ri_fn ri) spec
+        whenIsJust (usg_from_matching_rhs seed) $ \(fn, usg) ->
+          addUsageFrom rec_group fn usg
         bfs
 
-    spec_from_matching_rhs :: Call -> Maybe (RhsInfo, Maybe OneSpec)
-    spec_from_matching_rhs call = do
+    usg_from_matching_rhs :: Call -> Maybe (Id, ScUsage)
+    usg_from_matching_rhs call = do
       let fn = call_recv call
       -- usage might contain many calls not referencing this binding group,
       -- that's why the following lookup can return Nothing
       (ri, si) <- findCallInfos fn rhs_infos spec_infos
-      return (ri, findMatchingSpec env call si)
+      case findMatchingSpec env call si of
+        Nothing -> return (ri_fn ri, ri_rhs_usg ri)
+        Just spec -> return (os_id spec, os_usg spec)
 
 -- TODO: Integrate this into collectTransitiveUsage for the least amount of
 -- analysis possible
 refineArgOccs :: ScEnv -> [RhsInfo] -> [SpecInfo] -> ([RhsInfo], [SpecInfo])
-refineArgOccs env rhs_infos = unzip . iter . zip rhs_infos
+refineArgOccs env rhs_infos = pprTrace "refine end" empty . unzip . iter 0 . zip rhs_infos
   where
     rec_group  = map ri_fn rhs_infos
-    iter infos
-      | not (same_occs infos infos') = iter infos'
-      | otherwise = infos'
+    iter n infos
+      | same_occs infos infos' || n == 2 = infos'
+      | otherwise = iter (n + 1) infos'
       where infos' = step infos
     
     same_occs infos = and . zipWith (\(ri, si) (ri', si') -> ri_same_occs ri ri' && si_same_occs si si') infos
-    equating p x y = p x == p y
-    ri_same_occs = equating (scu_occs . ri_rhs_usg)
-    si_same_occs = equating (map (scu_occs . os_usg) . si_specs)
+    ri_same_occs = (==) `on` scu_occs . ri_rhs_usg
+    si_same_occs = (==) `on` map (scu_occs . os_usg) . si_specs
 
     step infos = map step_one infos
       where
         step_one (ri, si) = (step_ri ri, si { si_specs = map (step_os ri) (si_specs si) })
-        step_ri ri = ri { ri_rhs_usg = refine_usg infos (ri_rhs_usg ri) }
-        step_os ri os = os { os_usg = refine_usg infos (os_usg os) }
+        step_ri ri = ri { ri_rhs_usg = refine_usg infos (ri_lam_bndrs ri) (ri_rhs_usg ri) }
+        step_os ri os = os { os_usg = refine_usg infos (patMetaVars (os_pat os)) (os_usg os) }
 
-    refine_usg :: [(RhsInfo, SpecInfo)] -> ScUsage -> ScUsage
-    refine_usg infos usg 
+    refine_usg :: [(RhsInfo, SpecInfo)] -> [Var] -> ScUsage -> ScUsage
+    refine_usg infos vars usg 
       = combineUsage usg
       . combineUsages
-      . mapMaybe (unleash_occs_of_call infos)
+      . mapMaybe (unleash_occs_of_call vars infos)
       . relevantCalls rec_group
       $ scu_calls usg
 
-    unleash_occs_of_call :: [(RhsInfo, SpecInfo)] -> Call -> Maybe ScUsage
-    unleash_occs_of_call infos call = do
+    unleash_occs_of_call :: [Var] -> [(RhsInfo, SpecInfo)] -> Call -> Maybe ScUsage
+    unleash_occs_of_call vars infos call = do
       let (rhs_infos, spec_infos) = unzip infos
       (ri, si) <- findCallInfos (call_recv call) rhs_infos spec_infos
-      let (spec_call, occs, bndrs) =
-            spec_call_occs_bndrs call si `orElse` orig_rhs_call_occs_bndrs call ri
-      return (combineUsages (zipWith (unleash_occ_on_arg bndrs) (call_args spec_call) occs))
+      let (spec_call, occs) =
+            spec_call_occs call si `orElse` orig_rhs_call_occs call ri
+      pprTrace "unleash_occs_of_call" (vcat
+        [ text "call:" <+> ppr call
+        , text "spec_call:" <+> ppr spec_call
+        , text "occs:" <+> ppr occs]) 
+        (return ())
+      return (combineUsages (zipWith (unleash_occ_on_arg vars) (call_args spec_call) occs))
 
-    spec_call_occs_bndrs call si = do
+    spec_call_occs call si = do
       spec <- findMatchingSpec env call si
       spec_call <- origCallToSpecCall call spec
-      let bndrs = patMetaVars (os_pat spec)
-      let (_, occs) = lookupOccs (os_usg spec) bndrs
-      return (spec_call, occs, bndrs)
+      let (_, occs) = lookupOccs (os_usg spec) (patMetaVars (os_pat spec))
+      return (spec_call, occs)
 
-    orig_rhs_call_occs_bndrs call ri =
-      (call, snd (lookupOccs (ri_rhs_usg ri) (ri_lam_bndrs ri)), ri_lam_bndrs ri)
+    orig_rhs_call_occs call ri =
+      (call, snd (lookupOccs (ri_rhs_usg ri) (ri_lam_bndrs ri)))
 
-    unleash_occ_on_arg bndrs (Var v) occ
-      | pprTrace "unleash_occ_on_arg_try" (ppr v $$ ppr occ) True
-      , v `elem` bndrs
+    unleash_occ_on_arg vars (Var v) occ
+      | pprTrace "unleash_occ_on_arg_try" (ppr v $$ ppr occ $$ ppr vars) True
+      , v `elem` vars
       , pprTrace "unleash_occ_on_arg" (ppr v $$ ppr occ) True
       = nullUsage { scu_occs = unitVarEnv v occ }
     unleash_occ_on_arg _ _ _
@@ -1790,7 +1773,7 @@ specRec :: TopLevelFlag -> ScEnv
 
 specRec top_lvl env body_usg rhs_infos = do
   spec_infos <- execStateT (go env True 0 []) [noSpecInfo | _ <- rhs_infos]
-  return (collectTransitiveUsage env rhs_infos spec_infos init_usage)
+  return (collectTransitiveUsage env rhs_infos spec_infos init_usage, spec_infos)
   where
     -- Note [Seeding top-level recursive groups]
     init_usage
@@ -1814,9 +1797,9 @@ specRec top_lvl env body_usg rhs_infos = do
     go env False n_iter [] = return ()
     go env _ n_iter [] = do
       spec_infos <- get
-      let (usage, spec_infos1) = collectTransitiveUsage env rhs_infos spec_infos init_usage
-      let (_, spec_infos2) = refineArgOccs env rhs_infos spec_infos1 -- TODO: also integrate rhs_infos into the state
-      put spec_infos2
+      let usage = collectTransitiveUsage env rhs_infos spec_infos init_usage
+      let (_, spec_infos') = refineArgOccs env rhs_infos spec_infos -- TODO: also integrate rhs_infos into the state
+      put spec_infos'
       go env False (n_iter + 1) (relevantCalls rec_group (scu_calls usage))
     go env any_spec n_iter (call:seeds) = do
       any_new_spec <- isJust <$> zoom_spec_info_for (call_recv call) (work_on_call env call)
