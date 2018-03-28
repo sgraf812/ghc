@@ -1164,7 +1164,7 @@ data ArgOcc
   -- ^ Used in some unknown way
   | ScrutOcc (DataConEnv [ArgOcc])
   -- ^ How the sub-components are used. See Note [ScrutOcc]
-  | CallOcc Arity ArgOcc
+  | CallOcc Arity ArgOcc -- TODO: Maybe save args in a call occ, so that we can unleash it later on? Could save an iteration
   -- ^ Argument function call, with highest call arity and how the result is used.
   -- E.g. @(\f x. case f x of Just y -> ...; Nothing -> ...)@
   -- should record @CallOcc 1 (ScrutOcc [Just -> ..., Nothing -> ...])@ for @f@.
@@ -1740,11 +1740,11 @@ refineArgOccs env rhs_infos = pprTrace "refine end" empty . unzip . iter 0 . zip
       (ri, si) <- findCallInfos (call_recv call) rhs_infos spec_infos
       let (spec_call, occs) =
             spec_call_occs call si `orElse` orig_rhs_call_occs call ri
-      pprTrace "unleash_occs_of_call" (vcat
-        [ text "call:" <+> ppr call
-        , text "spec_call:" <+> ppr spec_call
-        , text "occs:" <+> ppr occs]) 
-        (return ())
+      -- pprTrace "unleash_occs_of_call" (vcat
+      --   [ text "call:" <+> ppr call
+      --   , text "spec_call:" <+> ppr spec_call
+      --   , text "occs:" <+> ppr occs]) 
+      --   (return ())
       return (combineUsages (zipWith (unleash_occ_on_arg vars) (call_args spec_call) occs))
 
     spec_call_occs call si = do
@@ -1757,9 +1757,8 @@ refineArgOccs env rhs_infos = pprTrace "refine end" empty . unzip . iter 0 . zip
       (call, snd (lookupOccs (ri_rhs_usg ri) (ri_lam_bndrs ri)))
 
     unleash_occ_on_arg vars (Var v) occ
-      | pprTrace "unleash_occ_on_arg_try" (ppr v $$ ppr occ $$ ppr vars) True
-      , v `elem` vars
-      , pprTrace "unleash_occ_on_arg" (ppr v $$ ppr occ) True
+      | v `elem` vars
+      -- , pprTrace "unleash_occ_on_arg" (ppr v $$ ppr occ) True
       = nullUsage { scu_occs = unitVarEnv v occ }
     unleash_occ_on_arg _ _ _
       = nullUsage
@@ -1859,8 +1858,8 @@ specRec top_lvl env body_usg rhs_infos = do
       let n_specs = si_n_specs si
       new_spec <- lift $ lift $ spec_one env fn (ri_lam_bndrs ri) (ri_lam_body ri) (pat, n_specs)
       si' <- lift (MaybeT (return (addNewSpec new_spec si)))
-      -- let pats = map os_pat (lookupMostSpecificSpecs call si')
-      -- let cond = pats == [os_pat new_spec]
+      let pats = map os_pat (lookupMostSpecificSpecs call si')
+      let cond = pats == [os_pat new_spec]
       -- MASSERT2( cond
       --         , (vcat 
       --             [ text "Call pattern of new spec doesn't unify with call"
@@ -1873,7 +1872,9 @@ specRec top_lvl env body_usg rhs_infos = do
       -- end of specialise
 
     pat_from_orig_rhs :: Call -> RhsInfo -> MaybeT UniqSM CallPat
-    pat_from_orig_rhs call ri = MaybeT $ callToPats env (ri_arg_occs ri) call
+    pat_from_orig_rhs call ri
+      | pprTrace "from orig rhs" (text "call:" <+> ppr call $$ text "occs:" <+> ppr (ri_arg_occs ri)) True
+      = MaybeT $ callToPats env (ri_arg_occs ri) call
 
     pat_from_spec_rhs :: Call -> OneSpec -> MaybeT UniqSM CallPat
     pat_from_spec_rhs call spec = do
@@ -2716,6 +2717,11 @@ argToPat env in_scope val_env _bound (Var v) arg_occ
 argToPat env in_scope val_env bound (Var v) _occ
   | v `elemVarSet` bound
   = return (False, Var v)
+
+argToPat env in_scope val_env bound e _occ
+  | any (`elemVarSet` bound) (exprFreeVarsList e)
+  , pprTrace "force no wildcard argToPat" (ppr e) True
+  = return (False, e) -- force specialisation
 
   -- The default case: make a wild-card
   -- We use this for coercions too
