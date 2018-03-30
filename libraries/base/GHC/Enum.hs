@@ -524,7 +524,7 @@ eftIntFB c n x0 y | isTrue# (x0 ># y) = n
                                    else go (x +# 1#)
                         -- Watch out for y=maxBound; hence ==, not >
         -- Be very careful not to have more than one "c"
-        -- so that when eftInfFB is inlined we can inline
+        -- so that when eftIntFB is inlined we can inline
         -- whatever is bound to "c"
 
 
@@ -577,17 +577,25 @@ efdtIntUp x1 x2 y    -- Be careful about overflow!
 {-# INLINE [0] efdtIntUpFB #-} -- See Note [Inline FB functions] in GHC.List
 efdtIntUpFB :: (Int -> r -> r) -> r -> Int# -> Int# -> Int# -> r
 efdtIntUpFB c n x1 x2 y    -- Be careful about overflow!
- | isTrue# (y <# x2) = if isTrue# (y <# x1) then n else I# x1 `c` n
- | otherwise = -- Common case: x1 <= x2 <= y
-               let !delta = x2 -# x1 -- >= 0
-                   !y' = y -# delta  -- x1 <= y' <= y; hence y' is representable
+  | isTrue# (y <# x1)
+  = n
+  | otherwise
+  = go_up x1    -- Common case: x1 <= y
+  where
+    !single = isTrue# (y <# x2) -- protect against underflow in y'
+    !delta = x2 -# x1   -- >= 0
+    !y' = y -# delta    -- not single => x1 <= y' <= y
+                        -- hence y' is representable
 
-                   -- Invariant: x <= y
-                   -- Note that: z <= y' => z + delta won't overflow
-                   -- so we are guaranteed not to overflow if/when we recurse
-                   go_up x | isTrue# (x ># y') = I# x `c` n
-                           | otherwise         = I# x `c` go_up (x +# delta)
-               in I# x1 `c` go_up x2
+        -- Invariant: x <= y
+        -- Note that: not single && x <= y' => x + delta won't overflow
+        -- so we are guaranteed not to overflow if/when we recurse
+    go_up x = I# x `c` if single || isTrue# (x ># y')
+                       then n
+                       else go_up (x +# delta)
+        -- Be very careful not to have more than one "c"
+        -- so that when efdtIntFB is inlined we can inline
+        -- whatever is bound to "c" (#8763)
 
 -- Requires x2 <= x1
 efdtIntDn :: Int# -> Int# -> Int# -> [Int]
@@ -608,17 +616,25 @@ efdtIntDn x1 x2 y    -- Be careful about underflow!
 {-# INLINE [0] efdtIntDnFB #-} -- See Note [Inline FB functions] in GHC.List
 efdtIntDnFB :: (Int -> r -> r) -> r -> Int# -> Int# -> Int# -> r
 efdtIntDnFB c n x1 x2 y    -- Be careful about underflow!
- | isTrue# (y ># x2) = if isTrue# (y ># x1) then n else I# x1 `c` n
- | otherwise = -- Common case: x1 >= x2 >= y
-               let !delta = x2 -# x1 -- <= 0
-                   !y' = y -# delta  -- y <= y' <= x1; hence y' is representable
+  | isTrue# (y ># x1)
+  = n
+  | otherwise
+  = go_dn x1    -- Common case: x1 >= y
+  where
+    !single = isTrue# (y ># x2) -- protect against overflow in y'
+    !delta = x2 -# x1   -- <= 0
+    !y' = y -# delta    -- not single => y <= y' <= x1
+                        -- hence y' is representable
 
-                   -- Invariant: x >= y
-                   -- Note that: z >= y' => z + delta won't underflow
-                   -- so we are guaranteed not to underflow if/when we recurse
-                   go_dn x | isTrue# (x <# y') = I# x `c` n
-                           | otherwise         = I# x `c` go_dn (x +# delta)
-               in I# x1 `c` go_dn x2
+        -- Invariant: x >= y
+        -- Note that: not single && x >= y' => x + delta won't underflow
+        -- so we are guaranteed not to underflow if/when we recurse
+    go_dn x = I# x `c` if single || isTrue# (x <# y')
+                       then n
+                       else go_dn (x +# delta)
+        -- Be very careful not to have more than one "c"
+        -- so that when efdtIntFB is inlined we can inline
+        -- whatever is bound to "c" (#8763)
 
 
 ------------------------------------------------------------------------
@@ -705,7 +721,7 @@ eftWordFB c n x0 y | isTrue# (x0 `gtWord#` y) = n
                                     else go (x `plusWord#` 1##)
                         -- Watch out for y=maxBound; hence ==, not >
         -- Be very careful not to have more than one "c"
-        -- so that when eftInfFB is inlined we can inline
+        -- so that when eftWordFB is inlined we can inline
         -- whatever is bound to "c"
 
 
@@ -758,17 +774,25 @@ efdtWordUp x1 x2 y    -- Be careful about overflow!
 {-# INLINE [0] efdtWordUpFB #-} -- See Note [Inline FB functions] in GHC.List
 efdtWordUpFB :: (Word -> r -> r) -> r -> Word# -> Word# -> Word# -> r
 efdtWordUpFB c n x1 x2 y    -- Be careful about overflow!
- | isTrue# (y `ltWord#` x2) = if isTrue# (y `ltWord#` x1) then n else W# x1 `c` n
- | otherwise = -- Common case: x1 <= x2 <= y
-               let !delta = x2 `minusWord#` x1 -- >= 0
-                   !y' = y `minusWord#` delta  -- x1 <= y' <= y; hence y' is representable
+  | isTrue# (y `ltWord#` x1)
+  = n
+  | otherwise
+  = go_up x1    -- Common case: x1 <= y
+  where
+    !single = isTrue# (y `ltWord#` x2) -- protect against underflow in y'
+    !delta = x2 `minusWord#` x1 -- >= 0
+    !y' = y `minusWord#` delta  -- not single => x1 <= y' <= y
+                                -- hence y' is representable
 
-                   -- Invariant: x <= y
-                   -- Note that: z <= y' => z + delta won't overflow
-                   -- so we are guaranteed not to overflow if/when we recurse
-                   go_up x | isTrue# (x `gtWord#` y') = W# x `c` n
-                           | otherwise                = W# x `c` go_up (x `plusWord#` delta)
-               in W# x1 `c` go_up x2
+        -- Invariant: x <= y
+        -- Note that: not single && x <= y' => x + delta won't overflow
+        -- so we are guaranteed not to overflow if/when we recurse
+    go_up x = W# x `c` if single || isTrue# (x `gtWord#` y')
+                       then n
+                       else go_up (x `plusWord#` delta)
+        -- Be very careful not to have more than one "c"
+        -- so that when efdtWordFB is inlined we can inline
+        -- whatever is bound to "c" (#8763)
 
 -- Requires x2 <= x1
 efdtWordDn :: Word# -> Word# -> Word# -> [Word]
@@ -789,17 +813,25 @@ efdtWordDn x1 x2 y    -- Be careful about underflow!
 {-# INLINE [0] efdtWordDnFB #-} -- See Note [Inline FB functions] in GHC.List
 efdtWordDnFB :: (Word -> r -> r) -> r -> Word# -> Word# -> Word# -> r
 efdtWordDnFB c n x1 x2 y    -- Be careful about underflow!
- | isTrue# (y `gtWord#` x2) = if isTrue# (y `gtWord#` x1) then n else W# x1 `c` n
- | otherwise = -- Common case: x1 >= x2 >= y
-               let !delta = x2 `minusWord#` x1 -- <= 0
-                   !y' = y `minusWord#` delta  -- y <= y' <= x1; hence y' is representable
+  | isTrue# (y `gtWord#` x1)
+  = n
+  | otherwise
+  = go_dn x1    -- Common case: x1 >= y
+  where
+    !single = isTrue# (y `gtWord#` x2) -- protect against overflow in y'
+    !delta = x2 `minusWord#` x1 -- <= 0
+    !y' = y `minusWord#` delta  -- not single => y <= y' <= x1
+                                -- hence y' is representable
 
-                   -- Invariant: x >= y
-                   -- Note that: z >= y' => z + delta won't underflow
-                   -- so we are guaranteed not to underflow if/when we recurse
-                   go_dn x | isTrue# (x `ltWord#` y') = W# x `c` n
-                           | otherwise                = W# x `c` go_dn (x `plusWord#` delta)
-               in W# x1 `c` go_dn x2
+        -- Invariant: x >= y
+        -- Note that: not single && x >= y' => x + delta won't underflow
+        -- so we are guaranteed not to underflow if/when we recurse
+    go_dn x = W# x `c` if single || isTrue# (x `ltWord#` y')
+                       then n
+                       else go_dn (x `plusWord#` delta)
+        -- Be very careful not to have more than one "c"
+        -- so that when efdtIntFB is inlined we can inline
+        -- whatever is bound to "c" (#8763)
 
 ------------------------------------------------------------------------
 -- Integer
