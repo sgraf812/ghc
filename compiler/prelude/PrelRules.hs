@@ -788,13 +788,15 @@ leftIdentityDynFlags id_lit = do
   guard $ l1 == id_lit dflags
   return e2
 
+-- | Left identity rule for PrimOps like 'IntAddC' and 'WordAddC', where, in
+-- addition to the result, we have to indicate that no carry/overflow occured.
 leftIdentityCDynFlags :: (DynFlags -> Literal) -> RuleM CoreExpr
 leftIdentityCDynFlags id_lit = do
   dflags <- getDynFlags
   [Lit l1, e2] <- getArgs
   guard $ l1 == id_lit dflags
-  let ty = literalType l1
-  return (mkCoreUbxTup [ty, intPrimTy] [e2, Lit (zeroi dflags)])
+  let no_c = Lit (zeroi dflags)
+  return (mkCoreUbxTup [exprType e2, intPrimTy] [e2, no_c])
 
 rightIdentityDynFlags :: (DynFlags -> Literal) -> RuleM CoreExpr
 rightIdentityDynFlags id_lit = do
@@ -803,19 +805,25 @@ rightIdentityDynFlags id_lit = do
   guard $ l2 == id_lit dflags
   return e1
 
+-- | Right identity rule for PrimOps like 'IntSubC' and 'WordSubC', where, in
+-- addition to the result, we have to indicate that no carry/overflow occured.
 rightIdentityCDynFlags :: (DynFlags -> Literal) -> RuleM CoreExpr
 rightIdentityCDynFlags id_lit = do
   dflags <- getDynFlags
   [e1, Lit l2] <- getArgs
   guard $ l2 == id_lit dflags
-  let ty = literalType l2
-  return (mkCoreUbxTup [ty, intPrimTy] [e1, Lit (zeroi dflags)])
+  let no_c = Lit (zeroi dflags)
+  return (mkCoreUbxTup [exprType e1, intPrimTy] [e1, no_c])
 
 identityDynFlags :: (DynFlags -> Literal) -> RuleM CoreExpr
-identityDynFlags lit = leftIdentityDynFlags lit `mplus` rightIdentityDynFlags lit
+identityDynFlags lit =
+  leftIdentityDynFlags lit `mplus` rightIdentityDynFlags lit
 
+-- | Identity rule for PrimOps like 'IntAddC' and 'WordAddC', where, in addition
+-- to the result, we have to indicate that no carry/overflow occured.
 identityCDynFlags :: (DynFlags -> Literal) -> RuleM CoreExpr
-identityCDynFlags lit = leftIdentityCDynFlags lit `mplus` rightIdentityCDynFlags lit
+identityCDynFlags lit =
+  leftIdentityCDynFlags lit `mplus` rightIdentityCDynFlags lit
 
 leftZero :: (DynFlags -> Literal) -> RuleM CoreExpr
 leftZero zero = do
