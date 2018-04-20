@@ -406,14 +406,14 @@ intOp2' :: (Integral a, Integral b)
 intOp2' op dflags (MachInt i1) (MachInt i2) =
   let o = op dflags
   in  intResult dflags (fromInteger i1 `o` fromInteger i2)
-intOp2' _  _      _            _            = Nothing  -- Could find LitLit
+intOp2' _  _      _            _            = Nothing
 
 intOpC2 :: (Integral a, Integral b)
         => (a -> b -> Integer)
         -> DynFlags -> Literal -> Literal -> Maybe CoreExpr
 intOpC2 op dflags (MachInt i1) (MachInt i2) = do
   intCResult dflags (fromInteger i1 `op` fromInteger i2)
-intOpC2 _  _      _            _            = Nothing  -- Could find LitLit
+intOpC2 _  _      _            _            = Nothing
 
 shiftRightLogical :: DynFlags -> Integer -> Int -> Integer
 -- Shift right, putting zeros in rather than sign-propagating as Bits.shiftR would do
@@ -440,14 +440,14 @@ wordOp2 :: (Integral a, Integral b)
         -> DynFlags -> Literal -> Literal -> Maybe CoreExpr
 wordOp2 op dflags (MachWord w1) (MachWord w2)
     = wordResult dflags (fromInteger w1 `op` fromInteger w2)
-wordOp2 _ _ _ _ = Nothing  -- Could find LitLit
+wordOp2 _ _ _ _ = Nothing
 
 wordOpC2 :: (Integral a, Integral b)
         => (a -> b -> Integer)
         -> DynFlags -> Literal -> Literal -> Maybe CoreExpr
 wordOpC2 op dflags (MachWord w1) (MachWord w2) =
   wordCResult dflags (fromInteger w1 `op` fromInteger w2)
-wordOpC2 _ _ _ _ = Nothing  -- Could find LitLit
+wordOpC2 _ _ _ _ = Nothing
 
 shiftRule :: (DynFlags -> Integer -> Int -> Integer) -> RuleM CoreExpr
                  -- Shifts take an Int; hence third arg of op is Int
