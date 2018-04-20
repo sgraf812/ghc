@@ -1,5 +1,3 @@
-{-# LANGUAGE CPP #-}
-
 -----------------------------------------------------------------------------
 --
 -- Stg to C-- code generation: bindings
@@ -15,14 +13,14 @@ module StgCmmBind (
         pushUpdateFrame, emitUpdateFrame
   ) where
 
-#include "HsVersions.h"
+import GhcPrelude hiding ((<*>))
 
 import StgCmmExpr
 import StgCmmMonad
 import StgCmmEnv
 import StgCmmCon
 import StgCmmHeap
-import StgCmmProf (curCCS, ldvEnterClosure, enterCostCentreFun, enterCostCentreThunk,
+import StgCmmProf (ldvEnterClosure, enterCostCentreFun, enterCostCentreThunk,
                    initUpdFrameProf)
 import StgCmmTicky
 import StgCmmLayout
@@ -31,7 +29,8 @@ import StgCmmClosure
 import StgCmmForeign    (emitPrimCall)
 
 import MkGraph
-import CoreSyn          ( AltCon(..) )
+import CoreSyn          ( AltCon(..), tickishIsCode )
+import BlockId
 import SMRep
 import Cmm
 import CmmInfo
@@ -50,7 +49,6 @@ import Outputable
 import FastString
 import DynFlags
 
-import Data.Maybe
 import Control.Monad
 
 ------------------------------------------------------------------------
@@ -110,9 +108,9 @@ cgTopRhsClosure dflags rec id ccs _ upd_flag args body =
 
                  -- BUILD THE OBJECT, AND GENERATE INFO TABLE (IF NECESSARY)
         ; emitDataLits closure_label closure_rep
-        ; let fv_details :: [(NonVoid Id, VirtualHpOffset)]
-              (_, _, fv_details) = mkVirtHeapOffsets dflags (isLFThunk lf_info)
-                                               (addIdReps [])
+        ; let fv_details :: [(NonVoid Id, ByteOff)]
+              header = if isLFThunk lf_info then ThunkHeader else StdHeader
+              (_, _, fv_details) = mkVirtHeapOffsets dflags header []
         -- Don't drop the non-void args until the closure info has been made
         ; forkClosureBody (closureCodeBody True id closure_info ccs
                                 (nonVoidIds args) (length args) body fv_details)
@@ -205,13 +203,15 @@ cgRhs :: Id
                )
 
 cgRhs id (StgRhsCon cc con args)
-  = withNewTickyCounterThunk False (idName id) $ -- False for "not static"
-    buildDynCon id True cc con args
+  = withNewTickyCounterCon (idName id) $
+    buildDynCon id True cc con (assertNonVoidStgArgs args)
+      -- con args are always non-void,
+      -- see Note [Post-unarisation invariants] in UnariseStg
 
 {- See Note [GC recovery] in compiler/codeGen/StgCmmClosure.hs -}
-cgRhs name (StgRhsClosure cc bi fvs upd_flag _srt args body)
+cgRhs id (StgRhsClosure cc bi fvs upd_flag args body)
   = do dflags <- getDynFlags
-       mkRhsClosure dflags name cc bi (nonVoidIds fvs) upd_flag args body
+       mkRhsClosure dflags id cc bi (nonVoidIds fvs) upd_flag args body
 
 ------------------------------------------------------------------------
 --              Non-constructor right hand sides
@@ -264,14 +264,23 @@ mkRhsClosure    dflags bndr _cc _bi
                 [NonVoid the_fv]                -- Just one free var
                 upd_flag                -- Updatable thunk
                 []                      -- A thunk
-                (StgCase (StgApp scrutinee [{-no args-}])
-                      _ _ _ _   -- ignore uniq, etc.
-                      (AlgAlt _)
-                      [(DataAlt _, params, _use_mask,
-                            (StgApp selectee [{-no args-}]))])
-  |  the_fv == scrutinee                -- Scrutinee is the only free variable
-  && isJust maybe_offset                -- Selectee is a component of the tuple
-  && offset_into_int <= mAX_SPEC_SELECTEE_SIZE dflags -- Offset is small enough
+                expr
+  | let strip = snd . stripStgTicksTop (not . tickishIsCode)
+  , StgCase (StgApp scrutinee [{-no args-}])
+         _   -- ignore bndr
+         (AlgAlt _)
+         [(DataAlt _, params, sel_expr)] <- strip expr
+  , StgApp selectee [{-no args-}] <- strip sel_expr
+  , the_fv == scrutinee                -- Scrutinee is the only free variable
+
+  , let (_, _, params_w_offsets) = mkVirtConstrOffsets dflags (addIdReps (assertNonVoidIds params))
+                                   -- pattern binders are always non-void,
+                                   -- see Note [Post-unarisation invariants] in UnariseStg
+  , Just the_offset <- assocMaybe params_w_offsets (NonVoid selectee)
+
+  , let offset_into_int = bytesToWordsRoundUp dflags the_offset
+                          - fixedHdrSizeW dflags
+  , offset_into_int <= mAX_SPEC_SELECTEE_SIZE dflags -- Offset is small enough
   = -- NOT TRUE: ASSERT(is_single_constructor)
     -- The simplifier may have statically determined that the single alternative
     -- is the only possible case and eliminated the others, even if there are
@@ -280,16 +289,8 @@ mkRhsClosure    dflags bndr _cc _bi
     -- will evaluate to.
     --
     -- srt is discarded; it must be empty
-    cgRhsStdThunk bndr lf_info [StgVarArg the_fv]
-  where
-    lf_info               = mkSelectorLFInfo bndr offset_into_int
-                                 (isUpdatable upd_flag)
-    (_, _, params_w_offsets) = mkVirtConstrOffsets dflags (addIdReps params)
-                               -- Just want the layout
-    maybe_offset          = assocMaybe params_w_offsets (NonVoid selectee)
-    Just the_offset       = maybe_offset
-    offset_into_int       = bytesToWordsRoundUp dflags the_offset
-                             - fixedHdrSizeW dflags
+    let lf_info = mkSelectorLFInfo bndr offset_into_int (isUpdatable upd_flag)
+    in cgRhsStdThunk bndr lf_info [StgVarArg the_fv]
 
 ---------- Note [Ap thunks] ------------------
 mkRhsClosure    dflags bndr _cc _bi
@@ -298,24 +299,30 @@ mkRhsClosure    dflags bndr _cc _bi
                 []                      -- No args; a thunk
                 (StgApp fun_id args)
 
-  | args `lengthIs` (arity-1)
-        && all (isGcPtrRep . idPrimRep . unsafe_stripNV) fvs
-        && isUpdatable upd_flag
-        && arity <= mAX_SPEC_AP_SIZE dflags
-        && not (gopt Opt_SccProfilingOn dflags)
-                                  -- not when profiling: we don't want to
-                                  -- lose information about this particular
-                                  -- thunk (e.g. its type) (#949)
+  -- We are looking for an "ApThunk"; see data con ApThunk in StgCmmClosure
+  -- of form (x1 x2 .... xn), where all the xi are locals (not top-level)
+  -- So the xi will all be free variables
+  | args `lengthIs` (n_fvs-1)  -- This happens only if the fun_id and
+                               -- args are all distinct local variables
+                               -- The "-1" is for fun_id
+    -- Missed opportunity:   (f x x) is not detected
+  , all (isGcPtrRep . idPrimRep . fromNonVoid) fvs
+  , isUpdatable upd_flag
+  , n_fvs <= mAX_SPEC_AP_SIZE dflags
+  , not (gopt Opt_SccProfilingOn dflags)
+                         -- not when profiling: we don't want to
+                         -- lose information about this particular
+                         -- thunk (e.g. its type) (#949)
 
-                   -- Ha! an Ap thunk
+          -- Ha! an Ap thunk
   = cgRhsStdThunk bndr lf_info payload
 
   where
-        lf_info = mkApLFInfo bndr upd_flag arity
-        -- the payload has to be in the correct order, hence we can't
-        -- just use the fvs.
-        payload = StgVarArg fun_id : args
-        arity   = length fvs
+    n_fvs   = length fvs
+    lf_info = mkApLFInfo bndr upd_flag n_fvs
+    -- the payload has to be in the correct order, hence we can't
+    -- just use the fvs.
+    payload = StgVarArg fun_id : args
 
 ---------- Default case ------------------
 mkRhsClosure dflags bndr cc _ fvs upd_flag args body
@@ -332,12 +339,7 @@ mkRhsClosure dflags bndr cc _ fvs upd_flag args body
         -- _was_ a free var of its RHS, mkClosureLFInfo thinks it *is*
         -- stored in the closure itself, so it will make sure that
         -- Node points to it...
-        ; let
-                is_elem      = isIn "cgRhsClosure"
-                bndr_is_a_fv = (NonVoid bndr) `is_elem` fvs
-                reduced_fvs | bndr_is_a_fv = fvs `minusList` [NonVoid bndr]
-                            | otherwise    = fvs
-
+        ; let   reduced_fvs = filter (NonVoid bndr /=) fvs
 
         -- MAKE CLOSURE INFO FOR THIS CLOSURE
         ; mod_name <- getModuleName
@@ -345,9 +347,9 @@ mkRhsClosure dflags bndr cc _ fvs upd_flag args body
         ; let   name  = idName bndr
                 descr = closureDescription dflags mod_name name
                 fv_details :: [(NonVoid Id, ByteOff)]
+                header = if isLFThunk lf_info then ThunkHeader else StdHeader
                 (tot_wds, ptr_wds, fv_details)
-                   = mkVirtHeapOffsets dflags (isLFThunk lf_info)
-                                       (addIdReps (map unsafe_stripNV reduced_fvs))
+                   = mkVirtHeapOffsets dflags header (addIdReps reduced_fvs)
                 closure_info = mkClosureInfo dflags False       -- Not static
                                              bndr lf_info tot_wds ptr_wds
                                              descr
@@ -362,7 +364,7 @@ mkRhsClosure dflags bndr cc _ fvs upd_flag args body
 
         -- BUILD THE OBJECT
 --      ; (use_cc, blame_cc) <- chooseDynCostCentres cc args body
-        ; let use_cc = curCCS; blame_cc = curCCS
+        ; let use_cc = cccsExpr; blame_cc = cccsExpr
         ; emit (mkComment $ mkFastString "calling allocDynClosure")
         ; let toVarArg (NonVoid a, off) = (NonVoid (StgVarArg a), off)
         ; let info_tbl = mkCmmInfo closure_info
@@ -385,13 +387,15 @@ cgRhsStdThunk bndr lf_info payload
        }
  where
  gen_code reg  -- AHA!  A STANDARD-FORM THUNK
-  = withNewTickyCounterStdThunk False (idName bndr) $ -- False for "not static"
+  = withNewTickyCounterStdThunk (lfUpdatable lf_info) (idName bndr) $
     do
   {     -- LAY OUT THE OBJECT
     mod_name <- getModuleName
   ; dflags <- getDynFlags
-  ; let (tot_wds, ptr_wds, payload_w_offsets)
-            = mkVirtHeapOffsets dflags (isLFThunk lf_info) (addArgReps payload)
+  ; let header = if isLFThunk lf_info then ThunkHeader else StdHeader
+        (tot_wds, ptr_wds, payload_w_offsets)
+            = mkVirtHeapOffsets dflags header
+                (addArgReps (nonVoidStgArgs payload))
 
         descr = closureDescription dflags mod_name (idName bndr)
         closure_info = mkClosureInfo dflags False       -- Not static
@@ -399,9 +403,8 @@ cgRhsStdThunk bndr lf_info payload
                                      descr
 
 --  ; (use_cc, blame_cc) <- chooseDynCostCentres cc [{- no args-}] body
-  ; let use_cc = curCCS; blame_cc = curCCS
+  ; let use_cc = cccsExpr; blame_cc = cccsExpr
 
-  ; tickyEnterStdThunk closure_info
 
         -- BUILD THE OBJECT
   ; let info_tbl = mkCmmInfo closure_info
@@ -421,9 +424,9 @@ mkClosureLFInfo :: DynFlags
                 -> LambdaFormInfo
 mkClosureLFInfo dflags bndr top fvs upd_flag args
   | null args =
-        mkLFThunk (idType bndr) top (map unsafe_stripNV fvs) upd_flag
+        mkLFThunk (idType bndr) top (map fromNonVoid fvs) upd_flag
   | otherwise =
-        mkLFReEntrant top (map unsafe_stripNV fvs) args (mkArgDescr dflags args)
+        mkLFReEntrant top (map fromNonVoid fvs) args (mkArgDescr dflags args)
 
 
 ------------------------------------------------------------------------
@@ -448,14 +451,14 @@ closureCodeBody :: Bool            -- whether this is a top-level binding
 
 * If there is *at least one* argument, then this closure is in
   normal form, so there is no need to set up an update frame.
-
-  The Macros for GrAnSim are produced at the beginning of the
-  argSatisfactionCheck (by calling fetchAndReschedule).
-  There info if Node points to closure is available. -- HWL -}
+-}
 
 closureCodeBody top_lvl bndr cl_info cc _args arity body fv_details
   | arity == 0 -- No args i.e. thunk
-  = withNewTickyCounterThunk (isStaticClosure cl_info) (closureName cl_info) $
+  = withNewTickyCounterThunk
+        (isStaticClosure cl_info)
+        (closureUpdReqd cl_info)
+        (closureName cl_info) $
     emitClosureProcAndInfoTable top_lvl bndr lf_info info_tbl [] $
       \(_, node, _) -> thunkCode cl_info fv_details cc node arity body
    where
@@ -464,7 +467,10 @@ closureCodeBody top_lvl bndr cl_info cc _args arity body fv_details
 
 closureCodeBody top_lvl bndr cl_info cc args arity body fv_details
   = -- Note: args may be [], if all args are Void
-    withNewTickyCounterFun (closureName cl_info) args $ do {
+    withNewTickyCounterFun
+        (closureSingleEntry cl_info)
+        (closureName cl_info)
+        args $ do {
 
         ; let
              lf_info  = closureLFInfo cl_info
@@ -478,7 +484,7 @@ closureCodeBody top_lvl bndr cl_info cc args arity body fv_details
                 ; dflags <- getDynFlags
                 ; let node_points = nodeMustPointToIt dflags lf_info
                       node' = if node_points then Just node else Nothing
-                ; loop_header_id <- newLabelC
+                ; loop_header_id <- newBlockId
                 -- Extend reader monad with information that
                 -- self-recursive tail calls can be optimized into local
                 -- jumps. See Note [Self-recursive tail calls] in StgCmmExpr.
@@ -550,7 +556,9 @@ mkSlowEntryCode bndr cl_info arg_regs -- function closure is already in `Node'
                                 (mkLblExpr fast_lbl)
                                 (map (CmmReg . CmmLocal) (node : arg_regs))
                                 (initUpdFrameOff dflags)
-       emitProcWithConvention Slow Nothing slow_lbl (node : arg_regs) jump
+       tscope <- getTickScope
+       emitProcWithConvention Slow Nothing slow_lbl
+         (node : arg_regs) (jump, tscope)
   | otherwise = return ()
 
 -----------------------------------------
@@ -576,8 +584,7 @@ thunkCode cl_info fv_details _cc node arity body
             -- that cc of enclosing scope will be recorded
             -- in update frame CAF/DICT functions will be
             -- subsumed by this enclosing cc
-            do { tickyEnterThunk cl_info
-               ; enterCostCentreThunk (CmmReg nodeReg)
+            do { enterCostCentreThunk (CmmReg nodeReg)
                ; let lf_info = closureLFInfo cl_info
                ; fv_bindings <- mapM bind_fv fv_details
                ; load_fvs node lf_info fv_bindings
@@ -623,8 +630,7 @@ emitBlackHoleCode node = do
              -- work with profiling.
 
   when eager_blackholing $ do
-    emitStore (cmmOffsetW dflags node (fixedHdrSizeW dflags))
-                  (CmmReg (CmmGlobal CurrentTSO))
+    emitStore (cmmOffsetW dflags node (fixedHdrSizeW dflags)) currentTSOExpr
     emitPrimCall [] MO_WriteBarrier []
     emitStore node (CmmReg (CmmGlobal EagerBlackholeInfo))
 
@@ -709,7 +715,7 @@ link_caf node _is_upd = do
                                     ForeignLabelInExternalPackage IsFunction
   ; bh <- newTemp (bWord dflags)
   ; emitRtsCallGen [(bh,AddrHint)] newCAF_lbl
-      [ (CmmReg (CmmGlobal BaseReg),  AddrHint),
+      [ (baseExpr,  AddrHint),
         (CmmReg (CmmLocal node), AddrHint) ]
       False
 
@@ -736,7 +742,7 @@ closureDescription :: DynFlags
                    -> Name              -- Id of closure binding
                    -> String
         -- Not called for StgRhsCon which have global info tables built in
-        -- CgConTbls.lhs with a description generated from the data constructor
+        -- CgConTbls.hs with a description generated from the data constructor
 closureDescription dflags mod_name name
   = showSDocDump dflags (char '<' <>
                     (if isExternalName name

@@ -1,4 +1,4 @@
 
-ds058.hs:5:7:
-    Warning: Pattern match(es) are overlapped
-	     In a case alternative: Just _ -> ...
+ds058.hs:7:9: warning: [-Woverlapping-patterns (in -Wdefault)]
+    Pattern match is redundant
+    In a case alternative: Just _ -> ...

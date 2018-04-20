@@ -1,4 +1,4 @@
-{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE Trustworthy, BangPatterns #-}
 {-# LANGUAGE CPP, NoImplicitPrelude #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 
@@ -7,7 +7,7 @@
 -- Module      :  GHC.IO.Buffer
 -- Copyright   :  (c) The University of Glasgow 2008
 -- License     :  see libraries/base/LICENSE
--- 
+--
 -- Maintainer  :  cvs-ghc@haskell.org
 -- Stability   :  internal
 -- Portability :  non-portable (GHC Extensions)
@@ -101,7 +101,7 @@ readWord8Buf arr ix = withForeignPtr arr $ \p -> peekByteOff p ix
 writeWord8Buf :: RawBuffer Word8 -> Int -> Word8 -> IO ()
 writeWord8Buf arr ix w = withForeignPtr arr $ \p -> pokeByteOff p ix w
 
-#ifdef CHARBUF_UTF16
+#if defined(CHARBUF_UTF16)
 type CharBufElem = Word16
 #else
 type CharBufElem = Char
@@ -124,7 +124,7 @@ writeCharBuf arr ix c = withForeignPtr arr $ \p -> writeCharBufPtr p ix c
 
 {-# INLINE readCharBufPtr #-}
 readCharBufPtr :: Ptr CharBufElem -> Int -> IO (Char, Int)
-#ifdef CHARBUF_UTF16
+#if defined(CHARBUF_UTF16)
 readCharBufPtr p ix = do
   c1 <- peekElemOff p ix
   if (c1 < 0xd800 || c1 > 0xdbff)
@@ -138,7 +138,7 @@ readCharBufPtr p ix = do c <- peekElemOff (castPtr p) ix; return (c, ix+1)
 
 {-# INLINE writeCharBufPtr #-}
 writeCharBufPtr :: Ptr CharBufElem -> Int -> Char -> IO Int
-#ifdef CHARBUF_UTF16
+#if defined(CHARBUF_UTF16)
 writeCharBufPtr p ix ch
   | c < 0x10000 = do pokeElemOff p ix (fromIntegral c)
                      return (ix+1)
@@ -153,7 +153,7 @@ writeCharBufPtr p ix ch = do pokeElemOff (castPtr p) ix ch; return (ix+1)
 #endif
 
 charSize :: Int
-#ifdef CHARBUF_UTF16
+#if defined(CHARBUF_UTF16)
 charSize = 2
 #else
 charSize = 4
@@ -173,26 +173,27 @@ charSize = 4
 --
 -- The "live" elements of the buffer are those between the 'bufL' and
 -- 'bufR' offsets.  In an empty buffer, 'bufL' is equal to 'bufR', but
--- they might not be zero: for exmaple, the buffer might correspond to
+-- they might not be zero: for example, the buffer might correspond to
 -- a memory-mapped file and in which case 'bufL' will point to the
 -- next location to be written, which is not necessarily the beginning
 -- of the file.
 data Buffer e
   = Buffer {
-	bufRaw   :: !(RawBuffer e),
+        bufRaw   :: !(RawBuffer e),
         bufState :: BufferState,
-	bufSize  :: !Int,          -- in elements, not bytes
-	bufL     :: !Int,          -- offset of first item in the buffer
-	bufR     :: !Int           -- offset of last item + 1
+        bufSize  :: !Int,          -- in elements, not bytes
+        bufL     :: !Int,          -- offset of first item in the buffer
+        bufR     :: !Int           -- offset of last item + 1
   }
 
-#ifdef CHARBUF_UTF16
+#if defined(CHARBUF_UTF16)
 type CharBuffer = Buffer Word16
 #else
 type CharBuffer = Buffer Char
 #endif
 
-data BufferState = ReadBuffer | WriteBuffer deriving (Eq)
+data BufferState = ReadBuffer | WriteBuffer
+  deriving Eq -- ^ @since 4.2.0.0
 
 withBuffer :: Buffer e -> (Ptr e -> IO a) -> IO a
 withBuffer Buffer{ bufRaw=raw } f = withForeignPtr (castForeignPtr raw) f
@@ -208,7 +209,7 @@ isFullBuffer Buffer{ bufR=w, bufSize=s } = s == w
 
 -- if a Char buffer does not have room for a surrogate pair, it is "full"
 isFullCharBuffer :: Buffer e -> Bool
-#ifdef CHARBUF_UTF16
+#if defined(CHARBUF_UTF16)
 isFullCharBuffer buf = bufferAvailable buf < 2
 #else
 isFullCharBuffer = isFullBuffer
@@ -237,7 +238,7 @@ bufferAdd :: Int -> Buffer e -> Buffer e
 bufferAdd i buf@Buffer{ bufR=w } = buf{ bufR=w+i }
 
 emptyBuffer :: RawBuffer e -> Int -> BufferState -> Buffer e
-emptyBuffer raw sz state = 
+emptyBuffer raw sz state =
   Buffer{ bufRaw=raw, bufState=state, bufR=0, bufL=0, bufSize=sz }
 
 newByteBuffer :: Int -> BufferState -> IO (Buffer Word8)
@@ -264,13 +265,14 @@ foreign import ccall unsafe "memmove"
    memmove :: Ptr a -> Ptr a -> CSize -> IO (Ptr a)
 
 summaryBuffer :: Buffer a -> String
-summaryBuffer buf = "buf" ++ show (bufSize buf) ++ "(" ++ show (bufL buf) ++ "-" ++ show (bufR buf) ++ ")"
+summaryBuffer !buf  -- Strict => slightly better code
+   = "buf" ++ show (bufSize buf) ++ "(" ++ show (bufL buf) ++ "-" ++ show (bufR buf) ++ ")"
 
 -- INVARIANTS on Buffers:
 --   * r <= w
 --   * if r == w, and the buffer is for reading, then r == 0 && w == 0
 --   * a write buffer is never full.  If an operation
---     fills up the buffer, it will always flush it before 
+--     fills up the buffer, it will always flush it before
 --     returning.
 --   * a read buffer may be full as a result of hLookAhead.  In normal
 --     operation, a read buffer always has at least one character of space.
@@ -278,14 +280,14 @@ summaryBuffer buf = "buf" ++ show (bufSize buf) ++ "(" ++ show (bufL buf) ++ "-"
 checkBuffer :: Buffer a -> IO ()
 checkBuffer buf@Buffer{ bufState = state, bufL=r, bufR=w, bufSize=size } = do
      check buf (
-      	size > 0
-      	&& r <= w
-      	&& w <= size
-      	&& ( r /= w || state == WriteBuffer || (r == 0 && w == 0) )
+        size > 0
+        && r <= w
+        && w <= size
+        && ( r /= w || state == WriteBuffer || (r == 0 && w == 0) )
         && ( state /= WriteBuffer || w < size ) -- write buffer is never full
       )
 
 check :: Buffer a -> Bool -> IO ()
 check _   True  = return ()
-check buf False = error ("buffer invariant violation: " ++ summaryBuffer buf)
+check buf False = errorWithoutStackTrace ("buffer invariant violation: " ++ summaryBuffer buf)
 

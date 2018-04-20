@@ -11,30 +11,16 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef SM_SCAV_H
-#define SM_SCAV_H
+#pragma once
 
 #include "BeginPrivate.h"
 
 void    scavenge_loop (void);
-void    scavenge_mutable_list (bdescr *bd, generation *gen);
 void    scavenge_capability_mut_lists (Capability *cap);
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
 void    scavenge_loop1 (void);
-void    scavenge_mutable_list1 (bdescr *bd, generation *gen);
 void    scavenge_capability_mut_Lists1 (Capability *cap);
 #endif
 
 #include "EndPrivate.h"
-
-#endif /* SM_SCAV_H */
-
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

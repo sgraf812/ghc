@@ -15,6 +15,8 @@ module StgCmmArgRep (
 
         ) where
 
+import GhcPrelude
+
 import StgCmmClosure    ( idPrimRep )
 
 import SMRep            ( WordOff )
@@ -65,7 +67,8 @@ argRepString V64 = "V64"
 
 toArgRep :: PrimRep -> ArgRep
 toArgRep VoidRep           = V
-toArgRep PtrRep            = P
+toArgRep LiftedRep         = P
+toArgRep UnliftedRep       = P
 toArgRep IntRep            = N
 toArgRep WordRep           = N
 toArgRep AddrRep           = N

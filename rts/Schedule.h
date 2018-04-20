@@ -2,13 +2,12 @@
  *
  * (c) The GHC Team 1998-2005
  *
- * Prototypes for functions in Schedule.c 
+ * Prototypes for functions in Schedule.c
  * (RTS internal scheduler interface)
  *
  * -------------------------------------------------------------------------*/
 
-#ifndef SCHEDULE_H
-#define SCHEDULE_H
+#pragma once
 
 #include "rts/OSThreads.h"
 #include "Capability.h"
@@ -21,7 +20,7 @@
  * Locks assumed   :  none
  */
 void initScheduler (void);
-void exitScheduler (rtsBool wait_foreign);
+void exitScheduler (bool wait_foreign);
 void freeScheduler (void);
 void markScheduler (evac_fn evac, void *user);
 
@@ -34,7 +33,7 @@ void scheduleThread (Capability *cap, StgTSO *tso);
 void scheduleThreadOn(Capability *cap, StgWord cpu, StgTSO *tso);
 
 /* wakeUpRts()
- * 
+ *
  * Causes an OS thread to wake up and run the scheduler, if necessary.
  */
 #if defined(THREADED_RTS)
@@ -51,23 +50,22 @@ StgWord findRetryFrameHelper (Capability *cap, StgTSO *tso);
 void scheduleWorker (Capability *cap, Task *task);
 
 /* The state of the scheduler.  This is used to control the sequence
- * of events during shutdown, and when the runtime is interrupted
- * using ^C.
+ * of events during shutdown.  See Note [shutdown] in Schedule.c.
  */
 #define SCHED_RUNNING       0  /* running as normal */
-#define SCHED_INTERRUPTING  1  /* ^C detected, before threads are deleted */
+#define SCHED_INTERRUPTING  1  /* before threads are deleted */
 #define SCHED_SHUTTING_DOWN 2  /* final shutdown */
 
 extern volatile StgWord sched_state;
 
-/* 
+/*
  * flag that tracks whether we have done any execution in this time
  * slice, and controls the disabling of the interval timer.
  *
  * The timer interrupt transitions ACTIVITY_YES into
  * ACTIVITY_MAYBE_NO, waits for RtsFlags.GcFlags.idleGCDelayTime,
  * and then:
- *   - if idle GC is no, set ACTIVITY_INACTIVE and wakeUpRts()
+ *   - if idle GC is on, set ACTIVITY_INACTIVE and wakeUpRts()
  *   - if idle GC is off, set ACTIVITY_DONE_GC and stopTimer()
  *
  * If the scheduler finds ACTIVITY_INACTIVE, then it sets
@@ -96,16 +94,13 @@ extern volatile StgWord recent_activity;
 
 /* Thread queues.
  * Locks required  : sched_mutex
- *
- * In GranSim we have one run/blocked_queue per PE.
  */
-extern  StgTSO *blackhole_queue;
 #if !defined(THREADED_RTS)
 extern  StgTSO *blocked_queue_hd, *blocked_queue_tl;
 extern  StgTSO *sleeping_queue;
 #endif
 
-extern rtsBool heap_overflow;
+extern bool heap_overflow;
 
 #if defined(THREADED_RTS)
 extern Mutex sched_mutex;
@@ -136,13 +131,14 @@ appendToRunQueue (Capability *cap, StgTSO *tso)
 {
     ASSERT(tso->_link == END_TSO_QUEUE);
     if (cap->run_queue_hd == END_TSO_QUEUE) {
-	cap->run_queue_hd = tso;
+        cap->run_queue_hd = tso;
         tso->block_info.prev = END_TSO_QUEUE;
     } else {
-	setTSOLink(cap, cap->run_queue_tl, tso);
+        setTSOLink(cap, cap->run_queue_tl, tso);
         setTSOPrev(cap, tso, cap->run_queue_tl);
     }
     cap->run_queue_tl = tso;
+    cap->n_run_queue++;
 }
 
 /* Push a thread on the beginning of the run queue.
@@ -161,15 +157,16 @@ pushOnRunQueue (Capability *cap, StgTSO *tso)
     }
     cap->run_queue_hd = tso;
     if (cap->run_queue_tl == END_TSO_QUEUE) {
-	cap->run_queue_tl = tso;
+        cap->run_queue_tl = tso;
     }
+    cap->n_run_queue++;
 }
 
 /* Pop the first thread off the runnable queue.
  */
 INLINE_HEADER StgTSO *
 popRunQueue (Capability *cap)
-{ 
+{
     StgTSO *t = cap->run_queue_hd;
     ASSERT(t != END_TSO_QUEUE);
     cap->run_queue_hd = t->_link;
@@ -178,8 +175,9 @@ popRunQueue (Capability *cap)
     }
     t->_link = END_TSO_QUEUE; // no write barrier req'd
     if (cap->run_queue_hd == END_TSO_QUEUE) {
-	cap->run_queue_tl = END_TSO_QUEUE;
+        cap->run_queue_tl = END_TSO_QUEUE;
     }
+    cap->n_run_queue--;
     return t;
 }
 
@@ -189,8 +187,7 @@ peekRunQueue (Capability *cap)
     return cap->run_queue_hd;
 }
 
-void removeFromRunQueue (Capability *cap, StgTSO *tso);
-extern void promoteInRunQueue (Capability *cap, StgTSO *tso);
+void promoteInRunQueue (Capability *cap, StgTSO *tso);
 
 /* Add a thread to the end of the blocked queue.
  */
@@ -200,9 +197,9 @@ appendToBlockedQueue(StgTSO *tso)
 {
     ASSERT(tso->_link == END_TSO_QUEUE);
     if (blocked_queue_hd == END_TSO_QUEUE) {
-	blocked_queue_hd = tso;
+        blocked_queue_hd = tso;
     } else {
-	setTSOLink(&MainCapability, blocked_queue_tl, tso);
+        setTSOLink(&MainCapability, blocked_queue_tl, tso);
     }
     blocked_queue_tl = tso;
 }
@@ -210,25 +207,16 @@ appendToBlockedQueue(StgTSO *tso)
 
 /* Check whether various thread queues are empty
  */
-INLINE_HEADER rtsBool
+INLINE_HEADER bool
 emptyQueue (StgTSO *q)
 {
     return (q == END_TSO_QUEUE);
 }
 
-INLINE_HEADER rtsBool
+INLINE_HEADER bool
 emptyRunQueue(Capability *cap)
 {
-    return emptyQueue(cap->run_queue_hd);
-}
-
-/* assumes that the queue is not empty; so combine this with
- * an emptyRunQueue check! */
-INLINE_HEADER rtsBool
-singletonRunQueue(Capability *cap)
-{
-    ASSERT(!emptyRunQueue(cap));
-    return cap->run_queue_hd->_link == END_TSO_QUEUE;
+    return cap->n_run_queue == 0;
 }
 
 INLINE_HEADER void
@@ -236,6 +224,7 @@ truncateRunQueue(Capability *cap)
 {
     cap->run_queue_hd = END_TSO_QUEUE;
     cap->run_queue_tl = END_TSO_QUEUE;
+    cap->n_run_queue = 0;
 }
 
 #if !defined(THREADED_RTS)
@@ -243,12 +232,12 @@ truncateRunQueue(Capability *cap)
 #define EMPTY_SLEEPING_QUEUE() (emptyQueue(sleeping_queue))
 #endif
 
-INLINE_HEADER rtsBool
+INLINE_HEADER bool
 emptyThreadQueues(Capability *cap)
 {
     return emptyRunQueue(cap)
 #if !defined(THREADED_RTS)
-	&& EMPTY_BLOCKED_QUEUE() && EMPTY_SLEEPING_QUEUE()
+        && EMPTY_BLOCKED_QUEUE() && EMPTY_SLEEPING_QUEUE()
 #endif
     ;
 }
@@ -256,14 +245,3 @@ emptyThreadQueues(Capability *cap)
 #endif /* !IN_STG_CODE */
 
 #include "EndPrivate.h"
-
-#endif /* SCHEDULE_H */
-
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

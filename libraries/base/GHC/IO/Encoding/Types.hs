@@ -67,7 +67,7 @@ data BufferCodec from to state = BufferCodec {
    -- Currently, some implementations of @recover@ may mutate the input buffer.
    -- In particular, this feature is used to implement transliteration.
    --
-   -- /Since: 4.4.0.0/
+   -- @since 4.4.0.0
   
   close  :: IO (),
    -- ^ Resources associated with the encoding may now be released.
@@ -117,16 +117,19 @@ data TextEncoding
                    -- be shared between several character sequences or simultaneously across threads
   }
 
+-- | @since 4.3.0.0
 instance Show TextEncoding where
   -- | Returns the value of 'textEncodingName'
   show te = textEncodingName te
 
--- | /Since: 4.4.0.0/
+-- | @since 4.4.0.0
 data CodingProgress = InputUnderflow  -- ^ Stopped because the input contains insufficient available elements,
-                                      -- or all of the input sequence has been sucessfully translated.
+                                      -- or all of the input sequence has been successfully translated.
                     | OutputUnderflow -- ^ Stopped because the output contains insufficient free elements
                     | InvalidSequence -- ^ Stopped because there are sufficient free elements in the output
                                       -- to output at least one encoded ASCII character, but the input contains
                                       -- an invalid or unrepresentable sequence
-                    deriving (Eq, Show)
+                    deriving ( Eq   -- ^ @since 4.4.0.0
+                             , Show -- ^ @since 4.4.0.0
+                             )
 

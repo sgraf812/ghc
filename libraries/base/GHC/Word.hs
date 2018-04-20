@@ -21,11 +21,23 @@
 
 module GHC.Word (
     Word(..), Word8(..), Word16(..), Word32(..), Word64(..),
+
+    -- * Shifts
     uncheckedShiftL64#,
     uncheckedShiftRL64#,
+
+    -- * Byte swapping
     byteSwap16,
     byteSwap32,
-    byteSwap64
+    byteSwap64,
+
+    -- * Equality operators
+    -- | See GHC.Classes#matching_overloaded_methods_in_rules
+    eqWord, neWord, gtWord, geWord, ltWord, leWord,
+    eqWord8, neWord8, gtWord8, geWord8, ltWord8, leWord8,
+    eqWord16, neWord16, gtWord16, geWord16, ltWord16, leWord16,
+    eqWord32, neWord32, gtWord32, geWord32, ltWord32, leWord32,
+    eqWord64, neWord64, gtWord64, geWord64, ltWord64, leWord64
     ) where
 
 import Data.Bits
@@ -35,15 +47,12 @@ import Data.Maybe
 import GHC.IntWord64
 #endif
 
--- import {-# SOURCE #-} GHC.Exception
 import GHC.Base
 import GHC.Enum
 import GHC.Num
 import GHC.Real
-import GHC.Read
 import GHC.Arr
 import GHC.Show
-import GHC.Float ()     -- for RealFrac methods
 
 ------------------------------------------------------------------------
 -- type Word8
@@ -52,12 +61,43 @@ import GHC.Float ()     -- for RealFrac methods
 -- Word8 is represented in the same way as Word. Operations may assume
 -- and must ensure that it holds only values from its logical range.
 
-data {-# CTYPE "HsWord8" #-} Word8 = W8# Word# deriving (Eq, Ord)
+data {-# CTYPE "HsWord8" #-} Word8 = W8# Word#
 -- ^ 8-bit unsigned integer type
 
+-- See GHC.Classes#matching_overloaded_methods_in_rules
+-- | @since 2.01
+instance Eq Word8 where
+    (==) = eqWord8
+    (/=) = neWord8
+
+eqWord8, neWord8 :: Word8 -> Word8 -> Bool
+eqWord8 (W8# x) (W8# y) = isTrue# (x `eqWord#` y)
+neWord8 (W8# x) (W8# y) = isTrue# (x `neWord#` y)
+{-# INLINE [1] eqWord8 #-}
+{-# INLINE [1] neWord8 #-}
+
+-- | @since 2.01
+instance Ord Word8 where
+    (<)  = ltWord8
+    (<=) = leWord8
+    (>=) = geWord8
+    (>)  = gtWord8
+
+{-# INLINE [1] gtWord8 #-}
+{-# INLINE [1] geWord8 #-}
+{-# INLINE [1] ltWord8 #-}
+{-# INLINE [1] leWord8 #-}
+gtWord8, geWord8, ltWord8, leWord8 :: Word8 -> Word8 -> Bool
+(W8# x) `gtWord8` (W8# y) = isTrue# (x `gtWord#` y)
+(W8# x) `geWord8` (W8# y) = isTrue# (x `geWord#` y)
+(W8# x) `ltWord8` (W8# y) = isTrue# (x `ltWord#` y)
+(W8# x) `leWord8` (W8# y) = isTrue# (x `leWord#` y)
+
+-- | @since 2.01
 instance Show Word8 where
     showsPrec p x = showsPrec p (fromIntegral x :: Int)
 
+-- | @since 2.01
 instance Num Word8 where
     (W8# x#) + (W8# y#)    = W8# (narrow8Word# (x# `plusWord#` y#))
     (W8# x#) - (W8# y#)    = W8# (narrow8Word# (x# `minusWord#` y#))
@@ -68,9 +108,11 @@ instance Num Word8 where
     signum _               = 1
     fromInteger i          = W8# (narrow8Word# (integerToWord i))
 
+-- | @since 2.01
 instance Real Word8 where
     toRational x = toInteger x % 1
 
+-- | @since 2.01
 instance Enum Word8 where
     succ x
         | x /= maxBound = x + 1
@@ -86,6 +128,7 @@ instance Enum Word8 where
     enumFrom            = boundedEnumFrom
     enumFromThen        = boundedEnumFromThen
 
+-- | @since 2.01
 instance Integral Word8 where
     quot    (W8# x#) y@(W8# y#)
         | y /= 0                  = W8# (x# `quotWord#` y#)
@@ -109,18 +152,18 @@ instance Integral Word8 where
         | otherwise               = divZeroError
     toInteger (W8# x#)            = smallInteger (word2Int# x#)
 
+-- | @since 2.01
 instance Bounded Word8 where
     minBound = 0
     maxBound = 0xFF
 
+-- | @since 2.01
 instance Ix Word8 where
     range (m,n)         = [m..n]
     unsafeIndex (m,_) i = fromIntegral (i - m)
     inRange (m,n) i     = m <= i && i <= n
 
-instance Read Word8 where
-    readsPrec p s = [(fromIntegral (x::Int), r) | (x, r) <- readsPrec p s]
-
+-- | @since 2.01
 instance Bits Word8 where
     {-# INLINE shift #-}
     {-# INLINE bit #-}
@@ -152,8 +195,11 @@ instance Bits Word8 where
     bit                       = bitDefault
     testBit                   = testBitDefault
 
+-- | @since 4.6.0.0
 instance FiniteBits Word8 where
     finiteBitSize _ = 8
+    countLeadingZeros  (W8# x#) = I# (word2Int# (clz8# x#))
+    countTrailingZeros (W8# x#) = I# (word2Int# (ctz8# x#))
 
 {-# RULES
 "fromIntegral/Word8->Word8"   fromIntegral = id :: Word8 -> Word8
@@ -199,12 +245,43 @@ instance FiniteBits Word8 where
 -- Word16 is represented in the same way as Word. Operations may assume
 -- and must ensure that it holds only values from its logical range.
 
-data {-# CTYPE "HsWord16" #-} Word16 = W16# Word# deriving (Eq, Ord)
+data {-# CTYPE "HsWord16" #-} Word16 = W16# Word#
 -- ^ 16-bit unsigned integer type
 
+-- See GHC.Classes#matching_overloaded_methods_in_rules
+-- | @since 2.01
+instance Eq Word16 where
+    (==) = eqWord16
+    (/=) = neWord16
+
+eqWord16, neWord16 :: Word16 -> Word16 -> Bool
+eqWord16 (W16# x) (W16# y) = isTrue# (x `eqWord#` y)
+neWord16 (W16# x) (W16# y) = isTrue# (x `neWord#` y)
+{-# INLINE [1] eqWord16 #-}
+{-# INLINE [1] neWord16 #-}
+
+-- | @since 2.01
+instance Ord Word16 where
+    (<)  = ltWord16
+    (<=) = leWord16
+    (>=) = geWord16
+    (>)  = gtWord16
+
+{-# INLINE [1] gtWord16 #-}
+{-# INLINE [1] geWord16 #-}
+{-# INLINE [1] ltWord16 #-}
+{-# INLINE [1] leWord16 #-}
+gtWord16, geWord16, ltWord16, leWord16 :: Word16 -> Word16 -> Bool
+(W16# x) `gtWord16` (W16# y) = isTrue# (x `gtWord#` y)
+(W16# x) `geWord16` (W16# y) = isTrue# (x `geWord#` y)
+(W16# x) `ltWord16` (W16# y) = isTrue# (x `ltWord#` y)
+(W16# x) `leWord16` (W16# y) = isTrue# (x `leWord#` y)
+
+-- | @since 2.01
 instance Show Word16 where
     showsPrec p x = showsPrec p (fromIntegral x :: Int)
 
+-- | @since 2.01
 instance Num Word16 where
     (W16# x#) + (W16# y#)  = W16# (narrow16Word# (x# `plusWord#` y#))
     (W16# x#) - (W16# y#)  = W16# (narrow16Word# (x# `minusWord#` y#))
@@ -215,9 +292,11 @@ instance Num Word16 where
     signum _               = 1
     fromInteger i          = W16# (narrow16Word# (integerToWord i))
 
+-- | @since 2.01
 instance Real Word16 where
     toRational x = toInteger x % 1
 
+-- | @since 2.01
 instance Enum Word16 where
     succ x
         | x /= maxBound = x + 1
@@ -233,6 +312,7 @@ instance Enum Word16 where
     enumFrom            = boundedEnumFrom
     enumFromThen        = boundedEnumFromThen
 
+-- | @since 2.01
 instance Integral Word16 where
     quot    (W16# x#) y@(W16# y#)
         | y /= 0                    = W16# (x# `quotWord#` y#)
@@ -256,18 +336,18 @@ instance Integral Word16 where
         | otherwise                 = divZeroError
     toInteger (W16# x#)             = smallInteger (word2Int# x#)
 
+-- | @since 2.01
 instance Bounded Word16 where
     minBound = 0
     maxBound = 0xFFFF
 
+-- | @since 2.01
 instance Ix Word16 where
     range (m,n)         = [m..n]
     unsafeIndex (m,_) i = fromIntegral (i - m)
     inRange (m,n) i     = m <= i && i <= n
 
-instance Read Word16 where
-    readsPrec p s = [(fromIntegral (x::Int), r) | (x, r) <- readsPrec p s]
-
+-- | @since 2.01
 instance Bits Word16 where
     {-# INLINE shift #-}
     {-# INLINE bit #-}
@@ -299,12 +379,15 @@ instance Bits Word16 where
     bit                       = bitDefault
     testBit                   = testBitDefault
 
+-- | @since 4.6.0.0
 instance FiniteBits Word16 where
     finiteBitSize _ = 16
+    countLeadingZeros  (W16# x#) = I# (word2Int# (clz16# x#))
+    countTrailingZeros (W16# x#) = I# (word2Int# (ctz16# x#))
 
 -- | Swap bytes in 'Word16'.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 byteSwap16 :: Word16 -> Word16
 byteSwap16 (W16# w#) = W16# (narrow16Word# (byteSwap16# w#))
 
@@ -389,9 +472,39 @@ byteSwap16 (W16# w#) = W16# (narrow16Word# (byteSwap16# w#))
 
 #endif
 
-data {-# CTYPE "HsWord32" #-} Word32 = W32# Word# deriving (Eq, Ord)
+data {-# CTYPE "HsWord32" #-} Word32 = W32# Word#
 -- ^ 32-bit unsigned integer type
 
+-- See GHC.Classes#matching_overloaded_methods_in_rules
+-- | @since 2.01
+instance Eq Word32 where
+    (==) = eqWord32
+    (/=) = neWord32
+
+eqWord32, neWord32 :: Word32 -> Word32 -> Bool
+eqWord32 (W32# x) (W32# y) = isTrue# (x `eqWord#` y)
+neWord32 (W32# x) (W32# y) = isTrue# (x `neWord#` y)
+{-# INLINE [1] eqWord32 #-}
+{-# INLINE [1] neWord32 #-}
+
+-- | @since 2.01
+instance Ord Word32 where
+    (<)  = ltWord32
+    (<=) = leWord32
+    (>=) = geWord32
+    (>)  = gtWord32
+
+{-# INLINE [1] gtWord32 #-}
+{-# INLINE [1] geWord32 #-}
+{-# INLINE [1] ltWord32 #-}
+{-# INLINE [1] leWord32 #-}
+gtWord32, geWord32, ltWord32, leWord32 :: Word32 -> Word32 -> Bool
+(W32# x) `gtWord32` (W32# y) = isTrue# (x `gtWord#` y)
+(W32# x) `geWord32` (W32# y) = isTrue# (x `geWord#` y)
+(W32# x) `ltWord32` (W32# y) = isTrue# (x `ltWord#` y)
+(W32# x) `leWord32` (W32# y) = isTrue# (x `leWord#` y)
+
+-- | @since 2.01
 instance Num Word32 where
     (W32# x#) + (W32# y#)  = W32# (narrow32Word# (x# `plusWord#` y#))
     (W32# x#) - (W32# y#)  = W32# (narrow32Word# (x# `minusWord#` y#))
@@ -402,6 +515,7 @@ instance Num Word32 where
     signum _               = 1
     fromInteger i          = W32# (narrow32Word# (integerToWord i))
 
+-- | @since 2.01
 instance Enum Word32 where
     succ x
         | x /= maxBound = x + 1
@@ -431,6 +545,7 @@ instance Enum Word32 where
     enumFromThen        = boundedEnumFromThen
 #endif
 
+-- | @since 2.01
 instance Integral Word32 where
     quot    (W32# x#) y@(W32# y#)
         | y /= 0                    = W32# (x# `quotWord#` y#)
@@ -462,6 +577,7 @@ instance Integral Word32 where
                                     = smallInteger (word2Int# x#)
 #endif
 
+-- | @since 2.01
 instance Bits Word32 where
     {-# INLINE shift #-}
     {-# INLINE bit #-}
@@ -493,8 +609,11 @@ instance Bits Word32 where
     bit                       = bitDefault
     testBit                   = testBitDefault
 
+-- | @since 4.6.0.0
 instance FiniteBits Word32 where
     finiteBitSize _ = 32
+    countLeadingZeros  (W32# x#) = I# (word2Int# (clz32# x#))
+    countTrailingZeros (W32# x#) = I# (word2Int# (ctz32# x#))
 
 {-# RULES
 "fromIntegral/Word8->Word32"   fromIntegral = \(W8# x#) -> W32# x#
@@ -505,6 +624,7 @@ instance FiniteBits Word32 where
 "fromIntegral/Word32->a"       fromIntegral = \(W32# x#) -> fromIntegral (W# x#)
   #-}
 
+-- | @since 2.01
 instance Show Word32 where
 #if WORD_SIZE_IN_BITS < 33
     showsPrec p x = showsPrec p (toInteger x)
@@ -513,28 +633,24 @@ instance Show Word32 where
 #endif
 
 
+-- | @since 2.01
 instance Real Word32 where
     toRational x = toInteger x % 1
 
+-- | @since 2.01
 instance Bounded Word32 where
     minBound = 0
     maxBound = 0xFFFFFFFF
 
+-- | @since 2.01
 instance Ix Word32 where
     range (m,n)         = [m..n]
     unsafeIndex (m,_) i = fromIntegral (i - m)
     inRange (m,n) i     = m <= i && i <= n
 
-instance Read Word32 where
-#if WORD_SIZE_IN_BITS < 33
-    readsPrec p s = [(fromInteger x, r) | (x, r) <- readsPrec p s]
-#else
-    readsPrec p s = [(fromIntegral (x::Int), r) | (x, r) <- readsPrec p s]
-#endif
-
 -- | Reverse order of bytes in 'Word32'.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 byteSwap32 :: Word32 -> Word32
 byteSwap32 (W32# w#) = W32# (narrow32Word# (byteSwap32# w#))
 
@@ -547,16 +663,36 @@ byteSwap32 (W32# w#) = W32# (narrow32Word# (byteSwap32# w#))
 data {-# CTYPE "HsWord64" #-} Word64 = W64# Word64#
 -- ^ 64-bit unsigned integer type
 
+-- See GHC.Classes#matching_overloaded_methods_in_rules
+-- | @since 2.01
 instance Eq Word64 where
-    (W64# x#) == (W64# y#) = isTrue# (x# `eqWord64#` y#)
-    (W64# x#) /= (W64# y#) = isTrue# (x# `neWord64#` y#)
+    (==) = eqWord64
+    (/=) = neWord64
 
+eqWord64, neWord64 :: Word64 -> Word64 -> Bool
+eqWord64 (W64# x) (W64# y) = isTrue# (x `eqWord64#` y)
+neWord64 (W64# x) (W64# y) = isTrue# (x `neWord64#` y)
+{-# INLINE [1] eqWord64 #-}
+{-# INLINE [1] neWord64 #-}
+
+-- | @since 2.01
 instance Ord Word64 where
-    (W64# x#) <  (W64# y#) = isTrue# (x# `ltWord64#` y#)
-    (W64# x#) <= (W64# y#) = isTrue# (x# `leWord64#` y#)
-    (W64# x#) >  (W64# y#) = isTrue# (x# `gtWord64#` y#)
-    (W64# x#) >= (W64# y#) = isTrue# (x# `geWord64#` y#)
+    (<)  = ltWord64
+    (<=) = leWord64
+    (>=) = geWord64
+    (>)  = gtWord64
 
+{-# INLINE [1] gtWord64 #-}
+{-# INLINE [1] geWord64 #-}
+{-# INLINE [1] ltWord64 #-}
+{-# INLINE [1] leWord64 #-}
+gtWord64, geWord64, ltWord64, leWord64 :: Word64 -> Word64 -> Bool
+(W64# x) `gtWord64` (W64# y) = isTrue# (x `gtWord64#` y)
+(W64# x) `geWord64` (W64# y) = isTrue# (x `geWord64#` y)
+(W64# x) `ltWord64` (W64# y) = isTrue# (x `ltWord64#` y)
+(W64# x) `leWord64` (W64# y) = isTrue# (x `leWord64#` y)
+
+-- | @since 2.01
 instance Num Word64 where
     (W64# x#) + (W64# y#)  = W64# (int64ToWord64# (word64ToInt64# x# `plusInt64#` word64ToInt64# y#))
     (W64# x#) - (W64# y#)  = W64# (int64ToWord64# (word64ToInt64# x# `minusInt64#` word64ToInt64# y#))
@@ -567,6 +703,7 @@ instance Num Word64 where
     signum _               = 1
     fromInteger i          = W64# (integerToWord64 i)
 
+-- | @since 2.01
 instance Enum Word64 where
     succ x
         | x /= maxBound = x + 1
@@ -586,6 +723,7 @@ instance Enum Word64 where
     enumFromTo          = integralEnumFromTo
     enumFromThenTo      = integralEnumFromThenTo
 
+-- | @since 2.01
 instance Integral Word64 where
     quot    (W64# x#) y@(W64# y#)
         | y /= 0                    = W64# (x# `quotWord64#` y#)
@@ -607,6 +745,7 @@ instance Integral Word64 where
         | otherwise                 = divZeroError
     toInteger (W64# x#)             = word64ToInteger x#
 
+-- | @since 2.01
 instance Bits Word64 where
     {-# INLINE shift #-}
     {-# INLINE bit #-}
@@ -663,9 +802,39 @@ a `shiftRL64#` b | isTrue# (b >=# 64#) = wordToWord64# 0##
 -- Operations may assume and must ensure that it holds only values
 -- from its logical range.
 
-data {-# CTYPE "HsWord64" #-} Word64 = W64# Word# deriving (Eq, Ord)
+data {-# CTYPE "HsWord64" #-} Word64 = W64# Word#
 -- ^ 64-bit unsigned integer type
 
+-- See GHC.Classes#matching_overloaded_methods_in_rules
+-- | @since 2.01
+instance Eq Word64 where
+    (==) = eqWord64
+    (/=) = neWord64
+
+eqWord64, neWord64 :: Word64 -> Word64 -> Bool
+eqWord64 (W64# x) (W64# y) = isTrue# (x `eqWord#` y)
+neWord64 (W64# x) (W64# y) = isTrue# (x `neWord#` y)
+{-# INLINE [1] eqWord64 #-}
+{-# INLINE [1] neWord64 #-}
+
+-- | @since 2.01
+instance Ord Word64 where
+    (<)  = ltWord64
+    (<=) = leWord64
+    (>=) = geWord64
+    (>)  = gtWord64
+
+{-# INLINE [1] gtWord64 #-}
+{-# INLINE [1] geWord64 #-}
+{-# INLINE [1] ltWord64 #-}
+{-# INLINE [1] leWord64 #-}
+gtWord64, geWord64, ltWord64, leWord64 :: Word64 -> Word64 -> Bool
+(W64# x) `gtWord64` (W64# y) = isTrue# (x `gtWord#` y)
+(W64# x) `geWord64` (W64# y) = isTrue# (x `geWord#` y)
+(W64# x) `ltWord64` (W64# y) = isTrue# (x `ltWord#` y)
+(W64# x) `leWord64` (W64# y) = isTrue# (x `leWord#` y)
+
+-- | @since 2.01
 instance Num Word64 where
     (W64# x#) + (W64# y#)  = W64# (x# `plusWord#` y#)
     (W64# x#) - (W64# y#)  = W64# (x# `minusWord#` y#)
@@ -676,6 +845,7 @@ instance Num Word64 where
     signum _               = 1
     fromInteger i          = W64# (integerToWord i)
 
+-- | @since 2.01
 instance Enum Word64 where
     succ x
         | x /= maxBound = x + 1
@@ -695,6 +865,7 @@ instance Enum Word64 where
     enumFromTo          = integralEnumFromTo
     enumFromThenTo      = integralEnumFromThenTo
 
+-- | @since 2.01
 instance Integral Word64 where
     quot    (W64# x#) y@(W64# y#)
         | y /= 0                    = W64# (x# `quotWord#` y#)
@@ -722,6 +893,7 @@ instance Integral Word64 where
         where
         !i# = word2Int# x#
 
+-- | @since 2.01
 instance Bits Word64 where
     {-# INLINE shift #-}
     {-# INLINE bit #-}
@@ -765,30 +937,34 @@ uncheckedShiftRL64# = uncheckedShiftRL#
 
 #endif
 
+-- | @since 4.6.0.0
 instance FiniteBits Word64 where
     finiteBitSize _ = 64
+    countLeadingZeros  (W64# x#) = I# (word2Int# (clz64# x#))
+    countTrailingZeros (W64# x#) = I# (word2Int# (ctz64# x#))
 
+-- | @since 2.01
 instance Show Word64 where
     showsPrec p x = showsPrec p (toInteger x)
 
+-- | @since 2.01
 instance Real Word64 where
     toRational x = toInteger x % 1
 
+-- | @since 2.01
 instance Bounded Word64 where
     minBound = 0
     maxBound = 0xFFFFFFFFFFFFFFFF
 
+-- | @since 2.01
 instance Ix Word64 where
     range (m,n)         = [m..n]
     unsafeIndex (m,_) i = fromIntegral (i - m)
     inRange (m,n) i     = m <= i && i <= n
 
-instance Read Word64 where
-    readsPrec p s = [(fromInteger x, r) | (x, r) <- readsPrec p s]
-
 -- | Reverse order of bytes in 'Word64'.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 #if WORD_SIZE_IN_BITS < 64
 byteSwap64 :: Word64 -> Word64
 byteSwap64 (W64# w#) = W64# (byteSwap64# w#)

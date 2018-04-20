@@ -4,8 +4,7 @@
 --
 -- | Command-line parser
 --
--- This is an abstract command-line parser used by both StaticFlags and
--- DynFlags.
+-- This is an abstract command-line parser used by DynFlags.
 --
 -- (c) The University of Glasgow 2005
 --
@@ -13,37 +12,61 @@
 
 module CmdLineParser
     (
-      processArgs, OptKind(..),
+      processArgs, OptKind(..), GhcFlagMode(..),
       CmdLineP(..), getCmdLineState, putCmdLineState,
-      Flag(..),
+      Flag(..), defFlag, defGhcFlag, defGhciFlag, defHiddenFlag,
       errorsToGhcException,
 
-      EwM, addErr, addWarn, getArg, getCurLoc, liftEwM, deprecate
+      Err(..), Warn(..), WarnReason(..),
+
+      EwM, runEwM, addErr, addWarn, addFlagWarn, getArg, getCurLoc, liftEwM,
+      deprecate
     ) where
 
 #include "HsVersions.h"
+
+import GhcPrelude
 
 import Util
 import Outputable
 import Panic
 import Bag
 import SrcLoc
+import Json
 
 import Data.Function
 import Data.List
 
 import Control.Monad (liftM, ap)
-import Control.Applicative (Applicative(..))
-
 
 --------------------------------------------------------
 --         The Flag and OptKind types
 --------------------------------------------------------
 
 data Flag m = Flag
-    {   flagName    :: String,   -- Flag, without the leading "-"
-        flagOptKind :: OptKind m -- What to do if we see it
+    {   flagName    :: String,     -- Flag, without the leading "-"
+        flagOptKind :: OptKind m,  -- What to do if we see it
+        flagGhcMode :: GhcFlagMode    -- Which modes this flag affects
     }
+
+defFlag :: String -> OptKind m -> Flag m
+defFlag name optKind = Flag name optKind AllModes
+
+defGhcFlag :: String -> OptKind m -> Flag m
+defGhcFlag name optKind = Flag name optKind OnlyGhc
+
+defGhciFlag :: String -> OptKind m -> Flag m
+defGhciFlag name optKind = Flag name optKind OnlyGhci
+
+defHiddenFlag :: String -> OptKind m -> Flag m
+defHiddenFlag name optKind = Flag name optKind HiddenFlag
+
+-- | GHC flag modes describing when a flag has an effect.
+data GhcFlagMode
+    = OnlyGhc  -- ^ The flag only affects the non-interactive GHC
+    | OnlyGhci -- ^ The flag only affects the interactive GHC
+    | AllModes -- ^ The flag affects multiple ghc modes
+    | HiddenFlag -- ^ This flag should not be seen in cli completion
 
 data OptKind m                             -- Suppose the flag is -f
     = NoArg     (EwM m ())                 -- -f all by itself
@@ -58,16 +81,36 @@ data OptKind m                             -- Suppose the flag is -f
     | AnySuffix (String -> EwM m ())       -- -f or -farg; pass entire "-farg" to fn
     | PrefixPred    (String -> Bool) (String -> EwM m ())
     | AnySuffixPred (String -> Bool) (String -> EwM m ())
-    | VersionSuffix (Int -> Int -> EwM m ())
-      -- -f or -f=maj.min; pass major and minor version to fn
 
 
 --------------------------------------------------------
 --         The EwM monad
 --------------------------------------------------------
 
-type Err   = Located String
-type Warn  = Located String
+-- | Used when filtering warnings: if a reason is given
+-- it can be filtered out when displaying.
+data WarnReason
+  = NoReason
+  | ReasonDeprecatedFlag
+  | ReasonUnrecognisedFlag
+  deriving (Eq, Show)
+
+instance Outputable WarnReason where
+  ppr = text . show
+
+instance ToJson WarnReason where
+  json NoReason = JSNull
+  json reason   = JSString $ show reason
+
+-- | A command-line error message
+newtype Err  = Err { errMsg :: Located String }
+
+-- | A command-line warning message and the reason it arose
+data Warn = Warn
+  {   warnReason :: WarnReason,
+      warnMsg    :: Located String
+  }
+
 type Errs  = Bag Err
 type Warns = Bag Warn
 
@@ -81,27 +124,33 @@ instance Monad m => Functor (EwM m) where
     fmap = liftM
 
 instance Monad m => Applicative (EwM m) where
-    pure = return
+    pure v = EwM (\_ e w -> return (e, w, v))
     (<*>) = ap
 
 instance Monad m => Monad (EwM m) where
     (EwM f) >>= k = EwM (\l e w -> do (e', w', r) <- f l e w
                                       unEwM (k r) l e' w')
-    return v = EwM (\_ e w -> return (e, w, v))
 
-setArg :: Monad m => Located String -> EwM m () -> EwM m ()
+runEwM :: EwM m a -> m (Errs, Warns, a)
+runEwM action = unEwM action (panic "processArgs: no arg yet") emptyBag emptyBag
+
+setArg :: Located String -> EwM m () -> EwM m ()
 setArg l (EwM f) = EwM (\_ es ws -> f l es ws)
 
 addErr :: Monad m => String -> EwM m ()
-addErr e = EwM (\(L loc _) es ws -> return (es `snocBag` L loc e, ws, ()))
+addErr e = EwM (\(L loc _) es ws -> return (es `snocBag` Err (L loc e), ws, ()))
 
 addWarn :: Monad m => String -> EwM m ()
-addWarn msg = EwM (\(L loc _) es ws -> return (es, ws `snocBag` L loc msg, ()))
+addWarn = addFlagWarn NoReason
+
+addFlagWarn :: Monad m => WarnReason -> String -> EwM m ()
+addFlagWarn reason msg = EwM $
+  (\(L loc _) es ws -> return (es, ws `snocBag` Warn reason (L loc msg), ()))
 
 deprecate :: Monad m => String -> EwM m ()
 deprecate s = do
     arg <- getArg
-    addWarn (arg ++ " is deprecated: " ++ s)
+    addFlagWarn ReasonDeprecatedFlag (arg ++ " is deprecated: " ++ s)
 
 getArg :: Monad m => EwM m String
 getArg = EwM (\(L _ arg) es ws -> return (es, ws, arg))
@@ -124,7 +173,7 @@ instance Functor (CmdLineP s) where
     fmap = liftM
 
 instance Applicative (CmdLineP s) where
-    pure = return
+    pure a = CmdLineP $ \s -> (a, s)
     (<*>) = ap
 
 instance Monad (CmdLineP s) where
@@ -132,7 +181,6 @@ instance Monad (CmdLineP s) where
                   let (a, s') = runCmdLine m s
                   in runCmdLine (k a) s'
 
-    return a = CmdLineP $ \s -> (a, s)
 
 getCmdLineState :: CmdLineP s s
 getCmdLineState   = CmdLineP $ \s -> (s,s)
@@ -148,11 +196,10 @@ processArgs :: Monad m
             => [Flag m]               -- cmdline parser spec
             -> [Located String]       -- args
             -> m ( [Located String],  -- spare args
-                   [Located String],  -- errors
-                   [Located String] ) -- warnings
+                   [Err],  -- errors
+                   [Warn] ) -- warnings
 processArgs spec args = do
-    (errs, warns, spare) <- unEwM action (panic "processArgs: no arg yet")
-                                  emptyBag emptyBag
+    (errs, warns, spare) <- runEwM action
     return (spare, bagToList errs, bagToList warns)
   where
     action = process args []
@@ -190,8 +237,9 @@ processOneArg opt_kind rest arg args
                                     []               -> missingArgErr dash_arg
                                     (L _ arg1:args1) -> Right (f arg1, args1)
 
+        -- See Trac #9776
         SepArg f -> case args of
-                        []               -> unknownFlagErr dash_arg
+                        []               -> missingArgErr dash_arg
                         (L _ arg1:args1) -> Right (f arg1, args1)
 
         Prefix f | notNull rest_no_eq -> Right (f rest_no_eq, args)
@@ -216,15 +264,6 @@ processOneArg opt_kind rest arg args
         OptPrefix f       -> Right (f rest_no_eq, args)
         AnySuffix f       -> Right (f dash_arg, args)
         AnySuffixPred _ f -> Right (f dash_arg, args)
-
-        VersionSuffix f | [maj_s, min_s] <- split '.' rest_no_eq,
-                          Just maj <- parseInt maj_s,
-                          Just min <- parseInt min_s -> Right (f maj min, args)
-                        | [maj_s] <- split '.' rest_no_eq,
-                          Just maj <- parseInt maj_s -> Right (f maj 0, args)
-                        | null rest_no_eq -> Right (f 1 0, args)
-                        | otherwise -> Left ("malformed version argument in " ++ dash_arg)
-
 
 findArg :: [Flag m] -> String -> Maybe (String, OptKind m)
 findArg spec arg =
@@ -251,7 +290,6 @@ arg_ok (OptPrefix       _)  _    _   = True
 arg_ok (PassFlag        _)  rest _   = null rest
 arg_ok (AnySuffix       _)  _    _   = True
 arg_ok (AnySuffixPred p _)  _    arg = p arg
-arg_ok (VersionSuffix   _)  _    _   = True
 
 -- | Parse an Int
 --
@@ -283,8 +321,26 @@ missingArgErr f = Left ("missing argument for flag: " ++ f)
 -- Utils
 --------------------------------------------------------
 
-errorsToGhcException :: [Located String] -> GhcException
-errorsToGhcException errs =
-    UsageError $
-        intercalate "\n" [ showUserSpan True l ++ ": " ++ e | L l e <- errs ]
 
+-- See Note [Handling errors when parsing flags]
+errorsToGhcException :: [(String,    -- Location
+                          String)]   -- Error
+                     -> GhcException
+errorsToGhcException errs =
+    UsageError $ intercalate "\n" $ [ l ++ ": " ++ e | (l, e) <- errs ]
+
+{- Note [Handling errors when parsing commandline flags]
+
+Parsing of static and mode flags happens before any session is started, i.e.,
+before the first call to 'GHC.withGhc'. Therefore, to report errors for
+invalid usage of these two types of flags, we can not call any function that
+needs DynFlags, as there are no DynFlags available yet (unsafeGlobalDynFlags
+is not set either). So we always print "on the commandline" as the location,
+which is true except for Api users, which is probably ok.
+
+When reporting errors for invalid usage of dynamic flags we /can/ make use of
+DynFlags, and we do so explicitly in DynFlags.parseDynamicFlagsFull.
+
+Before, we called unsafeGlobalDynFlags when an invalid (combination of)
+flag(s) was given on the commandline, resulting in panics (#9963).
+-}

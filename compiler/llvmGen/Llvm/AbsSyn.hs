@@ -4,6 +4,8 @@
 
 module Llvm.AbsSyn where
 
+import GhcPrelude
+
 import Llvm.MetaData
 import Llvm.Types
 
@@ -48,19 +50,22 @@ data LlvmModule = LlvmModule  {
 -- | An LLVM Function
 data LlvmFunction = LlvmFunction {
     -- | The signature of this declared function.
-    funcDecl  :: LlvmFunctionDecl,
+    funcDecl      :: LlvmFunctionDecl,
 
     -- | The functions arguments
-    funcArgs  :: [LMString],
+    funcArgs      :: [LMString],
 
     -- | The function attributes.
-    funcAttrs :: [LlvmFuncAttr],
+    funcAttrs     :: [LlvmFuncAttr],
 
     -- | The section to put the function into,
-    funcSect  :: LMSection,
+    funcSect      :: LMSection,
+
+    -- | Prefix data
+    funcPrefix    :: Maybe LlvmStatic,
 
     -- | The body of the functions.
-    funcBody  :: LlvmBlocks
+    funcBody      :: LlvmBlocks
   }
 
 type LlvmFunctions = [LlvmFunction]
@@ -84,10 +89,26 @@ data LlvmSyncOrdering
   | SyncSeqCst
   deriving (Show, Eq)
 
+-- | LLVM atomic operations. Please see the @atomicrmw@ instruction in
+-- the LLVM documentation for a complete description.
+data LlvmAtomicOp
+  = LAO_Xchg
+  | LAO_Add
+  | LAO_Sub
+  | LAO_And
+  | LAO_Nand
+  | LAO_Or
+  | LAO_Xor
+  | LAO_Max
+  | LAO_Min
+  | LAO_Umax
+  | LAO_Umin
+  deriving (Show, Eq)
+
 -- | Llvm Statements
 data LlvmStatement
   {- |
-    Assign an expression to an variable:
+    Assign an expression to a variable:
       * dest:   Variable to assign to
       * source: Source expression
   -}
@@ -132,7 +153,7 @@ data LlvmStatement
   | Store LlvmVar LlvmVar
 
   {- |
-    Mutliway branch
+    Multiway branch
       * scrutinee: Variable or constant which must be of integer type that is
                    determines which arm is chosen.
       * def:       The default label if there is no match in target.
@@ -206,6 +227,14 @@ data LlvmExpression
   | Extract LlvmVar LlvmVar
 
   {- |
+    Extract a scalar element from a structure
+      * val: The structure
+      * idx: The index of the scalar within the structure
+    Corresponds to "extractvalue" instruction.
+  -}
+  | ExtractV LlvmVar Int
+
+  {- |
     Insert a scalar element into a vector
       * val:   The source vector
       * elt:   The scalar to insert
@@ -231,7 +260,7 @@ data LlvmExpression
   | ALoad LlvmSyncOrdering SingleThreaded LlvmVar
 
   {- |
-    Navigate in an structure, selecting elements
+    Navigate in a structure, selecting elements
       * inbound: Is the pointer inbounds? (computed pointer doesn't overflow)
       * ptr:     Location of the structure
       * indexes: A list of indexes to select the correct value.
@@ -239,13 +268,35 @@ data LlvmExpression
   | GetElemPtr Bool LlvmVar [LlvmVar]
 
   {- |
-     Cast the variable from to the to type. This is an abstraction of three
-     cast operators in Llvm, inttoptr, prttoint and bitcast.
+    Cast the variable from to the to type. This is an abstraction of three
+    cast operators in Llvm, inttoptr, ptrtoint and bitcast.
        * cast: Cast type
        * from: Variable to cast
        * to:   type to cast to
   -}
   | Cast LlvmCastOp LlvmVar LlvmType
+
+  {- |
+    Atomic read-modify-write operation
+       * op:       Atomic operation
+       * addr:     Address to modify
+       * operand:  Operand to operation
+       * ordering: Ordering requirement
+  -}
+  | AtomicRMW LlvmAtomicOp LlvmVar LlvmVar LlvmSyncOrdering
+
+  {- |
+    Compare-and-exchange operation
+       * addr:     Address to modify
+       * old:      Expected value
+       * new:      New value
+       * suc_ord:  Ordering required in success case
+       * fail_ord: Ordering required in failure case, can be no stronger than
+                   suc_ord
+
+    Result is an @i1@, true if store was successful.
+  -}
+  | CmpXChg LlvmVar LlvmVar LlvmVar LlvmSyncOrdering LlvmSyncOrdering
 
   {- |
     Call a function. The result is the value of the expression.
@@ -274,8 +325,8 @@ data LlvmExpression
     basic block in a new variable of type tp.
       * tp:         type of the merged variable, must match the types of the
                     predecessor variables.
-      * precessors: A list of variables and the basic block that they originate
-                    from.
+      * predecessors: A list of variables and the basic block that they originate
+                      from.
   -}
   | Phi LlvmType [(LlvmVar,LlvmVar)]
 

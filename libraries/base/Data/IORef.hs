@@ -1,5 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude, MagicHash, UnboxedTuples #-}
+{-# LANGUAGE NoImplicitPrelude, MagicHash, UnboxedTuples #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -27,10 +27,7 @@ module Data.IORef
         atomicModifyIORef,
         atomicModifyIORef',
         atomicWriteIORef,
-
-#if !defined(__PARALLEL_HASKELL__)
         mkWeakIORef,
-#endif
         -- ** Memory Model
 
         -- $memmodel
@@ -41,17 +38,13 @@ import GHC.Base
 import GHC.STRef
 import GHC.IORef hiding (atomicModifyIORef)
 import qualified GHC.IORef
-#if !defined(__PARALLEL_HASKELL__)
 import GHC.Weak
-#endif
 
-#if !defined(__PARALLEL_HASKELL__)
 -- |Make a 'Weak' pointer to an 'IORef', using the second argument as a finalizer
 -- to run when 'IORef' is garbage-collected
 mkWeakIORef :: IORef a -> IO () -> IO (Weak (IORef a))
-mkWeakIORef r@(IORef (STRef r#)) f = IO $ \s ->
-  case mkWeak# r# r f s of (# s1, w #) -> (# s1, Weak w #)
-#endif
+mkWeakIORef r@(IORef (STRef r#)) (IO finalizer) = IO $ \s ->
+    case mkWeak# r# r finalizer s of (# s1, w #) -> (# s1, Weak w #)
 
 -- |Mutate the contents of an 'IORef'.
 --
@@ -71,7 +64,7 @@ modifyIORef ref f = readIORef ref >>= writeIORef ref . f
 
 -- |Strict version of 'modifyIORef'
 --
--- /Since: 4.6.0.0/
+-- @since 4.6.0.0
 modifyIORef' :: IORef a -> (a -> a) -> IO ()
 modifyIORef' ref f = do
     x <- readIORef ref
@@ -103,18 +96,18 @@ atomicModifyIORef = GHC.IORef.atomicModifyIORef
 -- | Strict version of 'atomicModifyIORef'.  This forces both the value stored
 -- in the 'IORef' as well as the value returned.
 --
--- /Since: 4.6.0.0/
+-- @since 4.6.0.0
 atomicModifyIORef' :: IORef a -> (a -> (a,b)) -> IO b
 atomicModifyIORef' ref f = do
-    b <- atomicModifyIORef ref
-            (\x -> let (a, b) = f x
-                    in (a, a `seq` b))
+    b <- atomicModifyIORef ref $ \a ->
+            case f a of
+                v@(a',_) -> a' `seq` v
     b `seq` return b
 
 -- | Variant of 'writeIORef' with the \"barrier to reordering\" property that
 -- 'atomicModifyIORef' has.
 --
--- /Since: 4.6.0.0/
+-- @since 4.6.0.0
 atomicWriteIORef :: IORef a -> a -> IO ()
 atomicWriteIORef ref a = do
     x <- atomicModifyIORef ref (\_ -> (a, ()))

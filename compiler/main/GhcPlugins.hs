@@ -4,26 +4,26 @@
 -- the functions and types you are likely to need when writing a
 -- plugin for GHC. So authors of plugins can probably get away simply
 -- with saying "import GhcPlugins".
--- 
+--
 -- Particularly interesting modules for plugin writers include
 -- "CoreSyn" and "CoreMonad".
 module GhcPlugins(
-        module CoreMonad,
+        module Plugins,
         module RdrName, module OccName, module Name, module Var, module Id, module IdInfo,
-        module CoreSyn, module Literal, module DataCon, 
+        module CoreMonad, module CoreSyn, module Literal, module DataCon,
         module CoreUtils, module MkCore, module CoreFVs, module CoreSubst,
         module Rules, module Annotations,
         module DynFlags, module Packages,
-        module Module, module Type, module TyCon, module Coercion, 
+        module Module, module Type, module TyCon, module Coercion,
         module TysWiredIn, module HscTypes, module BasicTypes,
-        module VarSet, module VarEnv, module NameSet, module NameEnv, 
+        module VarSet, module VarEnv, module NameSet, module NameEnv,
         module UniqSet, module UniqFM, module FiniteMap,
-        module Util, module Serialized, module SrcLoc, module Outputable, 
-        module UniqSupply, module Unique, module FastString, module FastTypes
+        module Util, module GHC.Serialized, module SrcLoc, module Outputable,
+        module UniqSupply, module Unique, module FastString
     ) where
 
 -- Plugin stuff itself
-import CoreMonad
+import Plugins
 
 -- Variable naming
 import RdrName
@@ -34,13 +34,15 @@ import Id       hiding  ( lazySetIdInfo, setIdExported, setIdNotExported {- all 
 import IdInfo
 
 -- Core
+import CoreMonad
 import CoreSyn
 import Literal
 import DataCon
 import CoreUtils
 import MkCore
 import CoreFVs
-import CoreSubst
+import CoreSubst hiding( substTyVarBndr, substCoVarBndr, extendCvSubst )
+       -- These names are also exported by Type
 
 -- Core "extras"
 import Rules
@@ -55,7 +57,7 @@ import Module
 import Type     hiding {- conflict with CoreSubst -}
                 ( substTy, extendTvSubst, extendTvSubstList, isInScope )
 import Coercion hiding {- conflict with CoreSubst -}
-                ( substTy, extendTvSubst, substCo, substTyVarBndr, lookupTyVar )
+                ( substCo )
 import TyCon
 import TysWiredIn
 import HscTypes
@@ -74,10 +76,9 @@ import FiniteMap
 
 -- Common utilities
 import Util
-import Serialized
+import GHC.Serialized
 import SrcLoc
 import Outputable
 import UniqSupply
 import Unique           ( Unique, Uniquable(..) )
 import FastString
-import FastTypes

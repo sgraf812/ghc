@@ -12,37 +12,19 @@
 // internal headers
 #include "Trace.h"
 
-#ifdef TRACING
+#if defined(TRACING)
 
 #include "GetTime.h"
 #include "GetEnv.h"
 #include "Stats.h"
 #include "eventlog/EventLog.h"
+#include "rts/EventLogWriter.h"
 #include "Threads.h"
 #include "Printer.h"
+#include "RtsFlags.h"
 
-#ifdef HAVE_UNISTD_H
+#if defined(HAVE_UNISTD_H)
 #include <unistd.h>
-#endif
-
-#ifdef DEBUG
-// debugging flags, set with +RTS -D<something>
-int DEBUG_sched;
-int DEBUG_interp;
-int DEBUG_weak;
-int DEBUG_gccafs;
-int DEBUG_gc;
-int DEBUG_block_alloc;
-int DEBUG_sanity;
-int DEBUG_stable;
-int DEBUG_stm;
-int DEBUG_prof;
-int DEBUG_gran;
-int DEBUG_par;
-int DEBUG_linker;
-int DEBUG_squeeze;
-int DEBUG_hpc;
-int DEBUG_sparks;
 #endif
 
 // events
@@ -51,42 +33,29 @@ int TRACE_gc;
 int TRACE_spark_sampled;
 int TRACE_spark_full;
 int TRACE_user;
+int TRACE_cap;
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
 static Mutex trace_utx;
 #endif
 
-static rtsBool eventlog_enabled;
+static bool eventlog_enabled;
 
 /* ---------------------------------------------------------------------------
-   Starting up / shuttting down the tracing facilities
+   Starting up / shutting down the tracing facilities
  --------------------------------------------------------------------------- */
+
+static const EventLogWriter *getEventLogWriter(void)
+{
+    return rtsConfig.eventlog_writer;
+}
 
 void initTracing (void)
 {
-#ifdef THREADED_RTS
+    const EventLogWriter *eventlog_writer = getEventLogWriter();
+
+#if defined(THREADED_RTS)
     initMutex(&trace_utx);
-#endif
-
-#ifdef DEBUG
-#define DEBUG_FLAG(name, class) \
-    class = RtsFlags.DebugFlags.name ? 1 : 0;
-
-    DEBUG_FLAG(scheduler,    DEBUG_sched);
-
-    DEBUG_FLAG(interpreter,  DEBUG_interp);
-    DEBUG_FLAG(weak,         DEBUG_weak);
-    DEBUG_FLAG(gccafs,       DEBUG_gccafs);
-    DEBUG_FLAG(gc,           DEBUG_gc);
-    DEBUG_FLAG(block_alloc,  DEBUG_block_alloc);
-    DEBUG_FLAG(sanity,       DEBUG_sanity);
-    DEBUG_FLAG(stable,       DEBUG_stable);
-    DEBUG_FLAG(stm,          DEBUG_stm);
-    DEBUG_FLAG(prof,         DEBUG_prof);
-    DEBUG_FLAG(linker,       DEBUG_linker);
-    DEBUG_FLAG(squeeze,      DEBUG_squeeze);
-    DEBUG_FLAG(hpc,          DEBUG_hpc);
-    DEBUG_FLAG(sparks,       DEBUG_sparks);
 #endif
 
     // -Ds turns on scheduler tracing too
@@ -114,14 +83,23 @@ void initTracing (void)
     TRACE_user =
         RtsFlags.TraceFlags.user;
 
-    eventlog_enabled = RtsFlags.TraceFlags.tracing == TRACE_EVENTLOG;
+    // We trace cap events if we're tracing anything else
+    TRACE_cap =
+        TRACE_sched ||
+        TRACE_gc ||
+        TRACE_spark_sampled ||
+        TRACE_spark_full ||
+        TRACE_user;
+
+    eventlog_enabled = RtsFlags.TraceFlags.tracing == TRACE_EVENTLOG &&
+                        eventlog_writer != NULL;
 
     /* Note: we can have any of the TRACE_* flags turned on even when
        eventlog_enabled is off. In the DEBUG way we may be tracing to stderr.
      */
 
     if (eventlog_enabled) {
-        initEventLogging();
+        initEventLogging(eventlog_writer);
     }
 }
 
@@ -141,13 +119,18 @@ void freeTracing (void)
 
 void resetTracing (void)
 {
+    const EventLogWriter *eventlog_writer;
+    eventlog_writer = getEventLogWriter();
+
     if (eventlog_enabled) {
         abortEventLogging(); // abort eventlog inherited from parent
-        initEventLogging(); // child starts its own eventlog
+        if (eventlog_writer != NULL) {
+            initEventLogging(eventlog_writer); // child starts its own eventlog
+        }
     }
 }
 
-void tracingAddCapapilities (nat from, nat to)
+void tracingAddCapapilities (uint32_t from, uint32_t to)
 {
     if (eventlog_enabled) {
         moreCapEventBufs(from,to);
@@ -158,19 +141,19 @@ void tracingAddCapapilities (nat from, nat to)
    Emitting trace messages/events
  --------------------------------------------------------------------------- */
 
-#ifdef DEBUG
+#if defined(DEBUG)
 static void tracePreface (void)
 {
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     debugBelch("%12lx: ", (unsigned long)osThreadId());
 #endif
     if (RtsFlags.TraceFlags.timestamp) {
-	debugBelch("%9" FMT_Word64 ": ", stat_getElapsedTime());
+        debugBelch("%9" FMT_Word64 ": ", stat_getElapsedTime());
     }
 }
 #endif
 
-#ifdef DEBUG
+#if defined(DEBUG)
 static char *thread_stop_reasons[] = {
     [HeapOverflow] = "heap overflow",
     [StackOverflow] = "stack overflow",
@@ -193,9 +176,9 @@ static char *thread_stop_reasons[] = {
 };
 #endif
 
-#ifdef DEBUG
-static void traceSchedEvent_stderr (Capability *cap, EventTypeNum tag, 
-                                    StgTSO *tso, 
+#if defined(DEBUG)
+static void traceSchedEvent_stderr (Capability *cap, EventTypeNum tag,
+                                    StgTSO *tso,
                                     StgWord info1 STG_UNUSED,
                                     StgWord info2 STG_UNUSED)
 {
@@ -204,26 +187,26 @@ static void traceSchedEvent_stderr (Capability *cap, EventTypeNum tag,
     tracePreface();
     switch (tag) {
     case EVENT_CREATE_THREAD:   // (cap, thread)
-        debugBelch("cap %d: created thread %" FMT_Word "\n", 
+        debugBelch("cap %d: created thread %" FMT_Word "\n",
                    cap->no, (W_)tso->id);
         break;
     case EVENT_RUN_THREAD:      //  (cap, thread)
-        debugBelch("cap %d: running thread %" FMT_Word " (%s)\n", 
+        debugBelch("cap %d: running thread %" FMT_Word " (%s)\n",
                    cap->no, (W_)tso->id, what_next_strs[tso->what_next]);
         break;
     case EVENT_THREAD_RUNNABLE: // (cap, thread)
-        debugBelch("cap %d: thread %" FMT_Word " appended to run queue\n", 
+        debugBelch("cap %d: thread %" FMT_Word " appended to run queue\n",
                    cap->no, (W_)tso->id);
         break;
     case EVENT_MIGRATE_THREAD:  // (cap, thread, new_cap)
-        debugBelch("cap %d: thread %" FMT_Word " migrating to cap %d\n", 
+        debugBelch("cap %d: thread %" FMT_Word " migrating to cap %d\n",
                    cap->no, (W_)tso->id, (int)info1);
         break;
     case EVENT_THREAD_WAKEUP:   // (cap, thread, info1_cap)
-        debugBelch("cap %d: waking up thread %" FMT_Word " on cap %d\n", 
+        debugBelch("cap %d: waking up thread %" FMT_Word " on cap %d\n",
                    cap->no, (W_)tso->id, (int)info1);
         break;
-        
+
     case EVENT_STOP_THREAD:     // (cap, thread, status)
         if (info1 == 6 + BlockedOnBlackHole) {
             debugBelch("cap %d: thread %" FMT_Word " stopped (blocked on black hole owned by thread %lu)\n",
@@ -234,7 +217,7 @@ static void traceSchedEvent_stderr (Capability *cap, EventTypeNum tag,
         }
         break;
     default:
-        debugBelch("cap %d: thread %" FMT_Word ": event %d\n\n", 
+        debugBelch("cap %d: thread %" FMT_Word ": event %d\n\n",
                    cap->no, (W_)tso->id, tag);
         break;
     }
@@ -243,10 +226,10 @@ static void traceSchedEvent_stderr (Capability *cap, EventTypeNum tag,
 }
 #endif
 
-void traceSchedEvent_ (Capability *cap, EventTypeNum tag, 
+void traceSchedEvent_ (Capability *cap, EventTypeNum tag,
                        StgTSO *tso, StgWord info1, StgWord info2)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         traceSchedEvent_stderr(cap, tag, tso, info1, info2);
     } else
@@ -256,7 +239,7 @@ void traceSchedEvent_ (Capability *cap, EventTypeNum tag,
     }
 }
 
-#ifdef DEBUG
+#if defined(DEBUG)
 static void traceGcEvent_stderr (Capability *cap, EventTypeNum tag)
 {
     ACQUIRE_LOCK(&trace_utx);
@@ -298,7 +281,7 @@ static void traceGcEvent_stderr (Capability *cap, EventTypeNum tag)
 
 void traceGcEvent_ (Capability *cap, EventTypeNum tag)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         traceGcEvent_stderr(cap, tag);
     } else
@@ -311,7 +294,7 @@ void traceGcEvent_ (Capability *cap, EventTypeNum tag)
 
 void traceGcEventAtT_ (Capability *cap, StgWord64 ts, EventTypeNum tag)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         traceGcEvent_stderr(cap, tag);
     } else
@@ -327,7 +310,7 @@ void traceHeapEvent_ (Capability   *cap,
                       CapsetID      heap_capset,
                       W_          info1)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         /* no stderr equivalent for these ones */
     } else
@@ -338,13 +321,13 @@ void traceHeapEvent_ (Capability   *cap,
 }
 
 void traceEventHeapInfo_ (CapsetID    heap_capset,
-                          nat         gens,
+                          uint32_t  gens,
                           W_        maxHeapSize,
                           W_        allocAreaSize,
                           W_        mblockSize,
                           W_        blockSize)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         /* no stderr equivalent for these ones */
     } else
@@ -358,15 +341,16 @@ void traceEventHeapInfo_ (CapsetID    heap_capset,
 
 void traceEventGcStats_  (Capability *cap,
                           CapsetID    heap_capset,
-                          nat         gen,
+                          uint32_t  gen,
                           W_        copied,
                           W_        slop,
                           W_        fragmentation,
-                          nat         par_n_threads,
+                          uint32_t  par_n_threads,
                           W_        par_max_copied,
-                          W_        par_tot_copied)
+                          W_        par_tot_copied,
+                          W_        par_balanced_copied)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         /* no stderr equivalent for these ones */
     } else
@@ -374,14 +358,15 @@ void traceEventGcStats_  (Capability *cap,
     {
         postEventGcStats(cap, heap_capset, gen,
                          copied, slop, fragmentation,
-                         par_n_threads, par_max_copied, par_tot_copied);
+                         par_n_threads, par_max_copied,
+                         par_tot_copied, par_balanced_copied);
     }
 }
 
-void traceCapEvent (Capability   *cap,
-                    EventTypeNum  tag)
+void traceCapEvent_ (Capability   *cap,
+                     EventTypeNum  tag)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         ACQUIRE_LOCK(&trace_utx);
 
@@ -410,11 +395,11 @@ void traceCapEvent (Capability   *cap,
     }
 }
 
-void traceCapsetEvent (EventTypeNum tag,
-                       CapsetID     capset,
-                       StgWord      info)
+void traceCapsetEvent_ (EventTypeNum tag,
+                        CapsetID     capset,
+                        StgWord      info)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR && TRACE_sched)
         // When events go to stderr, it is annoying to see the capset
         // events every time, so we only emit them with -Ds.
@@ -424,18 +409,19 @@ void traceCapsetEvent (EventTypeNum tag,
         tracePreface();
         switch (tag) {
         case EVENT_CAPSET_CREATE:   // (capset, capset_type)
-            debugBelch("created capset %" FMT_Word " of type %d\n", (W_)capset, (int)info);
+            debugBelch("created capset %" FMT_Word32 " of type %d\n", capset,
+                       (int)info);
             break;
         case EVENT_CAPSET_DELETE:   // (capset)
-            debugBelch("deleted capset %" FMT_Word "\n", (W_)capset);
+            debugBelch("deleted capset %" FMT_Word32 "\n", capset);
             break;
         case EVENT_CAPSET_ASSIGN_CAP:  // (capset, capno)
-            debugBelch("assigned cap %" FMT_Word " to capset %" FMT_Word "\n",
-                       (W_)info, (W_)capset);
+            debugBelch("assigned cap %" FMT_Word " to capset %" FMT_Word32 "\n",
+                       info, capset);
             break;
         case EVENT_CAPSET_REMOVE_CAP:  // (capset, capno)
-            debugBelch("removed cap %" FMT_Word " from capset %" FMT_Word "\n",
-                       (W_)info, (W_)capset);
+            debugBelch("removed cap %" FMT_Word " from capset %" FMT_Word32
+                       "\n", info, capset);
             break;
         }
         RELEASE_LOCK(&trace_utx);
@@ -460,8 +446,8 @@ void traceOSProcessInfo_(void) {
                         CAPSET_OSPROCESS_DEFAULT,
                         getpid());
 
-#if !defined(cygwin32_HOST_OS) && !defined (mingw32_HOST_OS)
-/* Windows has no strong concept of process heirarchy, so no getppid().
+#if !defined (mingw32_HOST_OS)
+/* Windows has no strong concept of process hierarchy, so no getppid().
  * In any case, this trace event is mainly useful for tracing programs
  * that use 'forkProcess' which Windows doesn't support anyway.
  */
@@ -498,8 +484,8 @@ void traceOSProcessInfo_(void) {
     }
 }
 
-#ifdef DEBUG
-static void traceSparkEvent_stderr (Capability *cap, EventTypeNum tag, 
+#if defined(DEBUG)
+static void traceSparkEvent_stderr (Capability *cap, EventTypeNum tag,
                                     StgWord info1)
 {
     ACQUIRE_LOCK(&trace_utx);
@@ -508,7 +494,7 @@ static void traceSparkEvent_stderr (Capability *cap, EventTypeNum tag,
     switch (tag) {
 
     case EVENT_CREATE_SPARK_THREAD: // (cap, spark_thread)
-        debugBelch("cap %d: creating spark thread %lu\n", 
+        debugBelch("cap %d: creating spark thread %lu\n",
                    cap->no, (long)info1);
         break;
     case EVENT_SPARK_CREATE:        // (cap)
@@ -516,27 +502,27 @@ static void traceSparkEvent_stderr (Capability *cap, EventTypeNum tag,
                    cap->no);
         break;
     case EVENT_SPARK_DUD:           //  (cap)
-        debugBelch("cap %d: discarded dud spark\n", 
+        debugBelch("cap %d: discarded dud spark\n",
                    cap->no);
         break;
     case EVENT_SPARK_OVERFLOW:      // (cap)
-        debugBelch("cap %d: discarded overflowed spark\n", 
+        debugBelch("cap %d: discarded overflowed spark\n",
                    cap->no);
         break;
     case EVENT_SPARK_RUN:           // (cap)
-        debugBelch("cap %d: running a spark\n", 
+        debugBelch("cap %d: running a spark\n",
                    cap->no);
         break;
     case EVENT_SPARK_STEAL:         // (cap, victim_cap)
-        debugBelch("cap %d: stealing a spark from cap %d\n", 
+        debugBelch("cap %d: stealing a spark from cap %d\n",
                    cap->no, (int)info1);
         break;
     case EVENT_SPARK_FIZZLE:        // (cap)
-        debugBelch("cap %d: fizzled spark removed from pool\n", 
+        debugBelch("cap %d: fizzled spark removed from pool\n",
                    cap->no);
         break;
     case EVENT_SPARK_GC:            // (cap)
-        debugBelch("cap %d: GCd spark removed from pool\n", 
+        debugBelch("cap %d: GCd spark removed from pool\n",
                    cap->no);
         break;
     default:
@@ -550,7 +536,7 @@ static void traceSparkEvent_stderr (Capability *cap, EventTypeNum tag,
 
 void traceSparkEvent_ (Capability *cap, EventTypeNum tag, StgWord info1)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         traceSparkEvent_stderr(cap, tag, info1);
     } else
@@ -564,7 +550,7 @@ void traceSparkCounters_ (Capability *cap,
                           SparkCounters counters,
                           StgWord remaining)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         /* we currently don't do debug tracing of spark stats but we must
            test for TRACE_STDERR because of the !eventlog_enabled case. */
@@ -578,7 +564,7 @@ void traceSparkCounters_ (Capability *cap,
 void traceTaskCreate_ (Task       *task,
                        Capability *cap)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         /* We currently don't do debug tracing of tasks but we must
            test for TRACE_STDERR because of the !eventlog_enabled case. */
@@ -595,7 +581,7 @@ void traceTaskMigrate_ (Task       *task,
                         Capability *cap,
                         Capability *new_cap)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         /* We currently don't do debug tracing of tasks but we must
            test for TRACE_STDERR because of the !eventlog_enabled case. */
@@ -609,7 +595,7 @@ void traceTaskMigrate_ (Task       *task,
 
 void traceTaskDelete_ (Task *task)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         /* We currently don't do debug tracing of tasks but we must
            test for TRACE_STDERR because of the !eventlog_enabled case. */
@@ -621,8 +607,51 @@ void traceTaskDelete_ (Task *task)
     }
 }
 
-#ifdef DEBUG
-static void traceCap_stderr(Capability *cap, char *msg, va_list ap)
+void traceHeapProfBegin(StgWord8 profile_id)
+{
+    if (eventlog_enabled) {
+        postHeapProfBegin(profile_id);
+    }
+}
+
+void traceHeapProfSampleBegin(StgInt era)
+{
+    if (eventlog_enabled) {
+        postHeapProfSampleBegin(era);
+    }
+}
+
+void traceHeapProfSampleString(StgWord8 profile_id,
+                               const char *label, StgWord residency)
+{
+    if (eventlog_enabled) {
+        postHeapProfSampleString(profile_id, label, residency);
+    }
+}
+
+#if defined(PROFILING)
+void traceHeapProfCostCentre(StgWord32 ccID,
+                             const char *label,
+                             const char *module,
+                             const char *srcloc,
+                             StgBool is_caf)
+{
+    if (eventlog_enabled) {
+        postHeapProfCostCentre(ccID, label, module, srcloc, is_caf);
+    }
+}
+
+void traceHeapProfSampleCostCentre(StgWord8 profile_id,
+                                   CostCentreStack *stack, StgWord residency)
+{
+    if (eventlog_enabled) {
+        postHeapProfSampleCostCentre(profile_id, stack, residency);
+    }
+}
+#endif
+
+#if defined(DEBUG)
+static void vtraceCap_stderr(Capability *cap, char *msg, va_list ap)
 {
     ACQUIRE_LOCK(&trace_utx);
 
@@ -633,16 +662,24 @@ static void traceCap_stderr(Capability *cap, char *msg, va_list ap)
 
     RELEASE_LOCK(&trace_utx);
 }
+
+static void traceCap_stderr(Capability *cap, char *msg, ...)
+{
+  va_list ap;
+  va_start(ap,msg);
+  vtraceCap_stderr(cap, msg, ap);
+  va_end(ap);
+}
 #endif
 
 void traceCap_(Capability *cap, char *msg, ...)
 {
     va_list ap;
     va_start(ap,msg);
-    
-#ifdef DEBUG
+
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
-        traceCap_stderr(cap, msg, ap);
+        vtraceCap_stderr(cap, msg, ap);
     } else
 #endif
     {
@@ -652,8 +689,8 @@ void traceCap_(Capability *cap, char *msg, ...)
     va_end(ap);
 }
 
-#ifdef DEBUG
-static void trace_stderr(char *msg, va_list ap)
+#if defined(DEBUG)
+static void vtrace_stderr(char *msg, va_list ap)
 {
     ACQUIRE_LOCK(&trace_utx);
 
@@ -670,9 +707,9 @@ void trace_(char *msg, ...)
     va_list ap;
     va_start(ap,msg);
 
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
-        trace_stderr(msg, ap);
+        vtrace_stderr(msg, ap);
     } else
 #endif
     {
@@ -682,31 +719,24 @@ void trace_(char *msg, ...)
     va_end(ap);
 }
 
-static void traceFormatUserMsg(Capability *cap, char *msg, ...)
+void traceUserMsg(Capability *cap, char *msg)
 {
-    va_list ap;
-    va_start(ap,msg);
-
     /* Note: normally we don't check the TRACE_* flags here as they're checked
        by the wrappers in Trace.h. But traceUserMsg is special since it has no
        wrapper (it's called from cmm code), so we check TRACE_user here
      */
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR && TRACE_user) {
-        traceCap_stderr(cap, msg, ap);
+        // Use "%s" as format string to ignore format specifiers in msg (#3874).
+        traceCap_stderr(cap, "%s", msg);
     } else
 #endif
     {
         if (eventlog_enabled && TRACE_user) {
-            postUserMsg(cap, msg, ap);
+            postUserEvent(cap, EVENT_USER_MSG, msg);
         }
     }
     dtraceUserMsg(cap->no, msg);
-}
-
-void traceUserMsg(Capability *cap, char *msg)
-{
-    traceFormatUserMsg(cap, "%s", msg);
 }
 
 void traceUserMarker(Capability *cap, char *markername)
@@ -714,17 +744,14 @@ void traceUserMarker(Capability *cap, char *markername)
     /* Note: traceUserMarker is special since it has no wrapper (it's called
        from cmm code), so we check eventlog_enabled and TRACE_user here.
      */
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR && TRACE_user) {
-        ACQUIRE_LOCK(&trace_utx);
-        tracePreface();
-        debugBelch("cap %d: User marker: %s\n", cap->no, markername);
-        RELEASE_LOCK(&trace_utx);
+        traceCap_stderr(cap, "User marker: %s", markername);
     } else
 #endif
     {
         if (eventlog_enabled && TRACE_user) {
-            postUserMarker(cap, markername);
+            postUserEvent(cap, EVENT_USER_MARKER, markername);
         }
     }
     dtraceUserMarker(cap->no, markername);
@@ -735,7 +762,7 @@ void traceThreadLabel_(Capability *cap,
                        StgTSO     *tso,
                        char       *label)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         ACQUIRE_LOCK(&trace_utx);
         tracePreface();
@@ -751,7 +778,7 @@ void traceThreadLabel_(Capability *cap,
 
 void traceThreadStatus_ (StgTSO *tso USED_IF_DEBUG)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         printThreadStatus(tso);
     } else
@@ -761,14 +788,7 @@ void traceThreadStatus_ (StgTSO *tso USED_IF_DEBUG)
     }
 }
 
-void traceEventStartup_(int nocaps)
-{
-    if (eventlog_enabled) {
-        postEventStartup(nocaps);
-    }
-}
-
-#ifdef DEBUG
+#if defined(DEBUG)
 void traceBegin (const char *str, ...)
 {
     va_list ap;
@@ -778,6 +798,7 @@ void traceBegin (const char *str, ...)
 
     tracePreface();
     vdebugBelch(str,ap);
+    va_end(ap);
 }
 
 void traceEnd (void)
@@ -805,11 +826,3 @@ void dtraceUserMarkerWrapper(Capability *cap, char *msg)
 }
 
 #endif /* !defined(DEBUG) && !defined(TRACING) && defined(DTRACE) */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

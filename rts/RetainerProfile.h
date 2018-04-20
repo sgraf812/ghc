@@ -7,10 +7,9 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef RETAINERPROFILE_H
-#define RETAINERPROFILE_H
+#pragma once
 
-#ifdef PROFILING
+#if defined(PROFILING)
 
 #include "RetainerSet.h"
 
@@ -33,7 +32,7 @@ extern StgWord flip;
   ((((StgWord)(c)->header.prof.hp.rs & 1) ^ flip) == 0)
 
 static inline RetainerSet *
-retainerSetOf( StgClosure *c )
+retainerSetOf( const StgClosure *c )
 {
     ASSERT( isRetainerSetFieldValid(c) );
     // StgWord has the same size as pointers, so the following type
@@ -42,20 +41,8 @@ retainerSetOf( StgClosure *c )
 }
 
 // Used by Storage.c:memInventory()
-#ifdef DEBUG
 extern W_ retainerStackBlocks ( void );
-#endif
 
 #include "EndPrivate.h"
 
 #endif /* PROFILING */
-
-#endif /* RETAINERPROFILE_H */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

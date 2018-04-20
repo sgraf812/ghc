@@ -309,7 +309,7 @@ Functions can take multiple arguments as easily as they can take one
 argument: there's no cost for adding another argument.  But functions
 can only return one result: the cost of adding a second ``result'' is
 that the function must construct a tuple of ``results'' on the heap.
-The assymetry is rather galling and can make certain programming
+The asymmetry is rather galling and can make certain programming
 styles quite expensive.  For example, consider a simple state transformer
 monad:
 \begin{verbatim}
@@ -1786,8 +1786,6 @@ SRT pointer.
 
 \begin{itemize}
 
-\item @isSTATIC@ is true for any statically allocated closure.
-
 \item @isMUTABLE@ is true for objects with mutable pointer fields:
   @MUT_ARR@s, @MUTVAR@s, @MVAR@s and @IVAR@s.
 
@@ -2051,7 +2049,7 @@ The only label associated with a thunk is its info table:
 
 \Subsubsection{Byte-code objects}{BCO}
 
-A Byte-Code Object (BCO) is a container for a a chunk of byte-code,
+A Byte-Code Object (BCO) is a container for a chunk of byte-code,
 which can be executed by Hugs.  The byte-code represents a
 supercombinator in the program: when Hugs compiles a module, it
 performs lambda lifting and each resulting supercombinator becomes a
@@ -4428,7 +4426,7 @@ while (threads_exist) {
   do {
     // enter object on top of stack
     // if the top object is a BCO, we must enter it
-    // otherwise appply any heuristic we wish.
+    // otherwise apply any heuristic we wish.
     if (thread->stack[thread->sp]->info.type == BCO) {
 	status = runHugs(thread,&smInfo);
     } else {

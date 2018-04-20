@@ -1,5 +1,11 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE UnboxedTuples #-}
+{-# LANGUAGE TypeInType #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.Magic
@@ -17,7 +23,15 @@
 --
 -----------------------------------------------------------------------------
 
-module GHC.Magic ( inline, lazy ) where
+module GHC.Magic ( inline, noinline, lazy, oneShot, runRW# ) where
+
+--------------------------------------------------
+--        See Note [magicIds] in MkId.hs
+--------------------------------------------------
+
+import GHC.Prim
+import GHC.CString ()
+import GHC.Types (RuntimeRep, TYPE)
 
 -- | The call @inline f@ arranges that 'f' is inlined, regardless of
 -- its size. More precisely, the call @inline f@ rewrites to the
@@ -37,6 +51,13 @@ module GHC.Magic ( inline, lazy ) where
 {-# NOINLINE[0] inline #-}
 inline :: a -> a
 inline x = x
+
+-- | The call @noinline f@ arranges that 'f' will not be inlined.
+-- It is removed during CorePrep so that its use imposes no overhead
+-- (besides the fact that it blocks inlining.)
+{-# NOINLINE noinline #-}
+noinline :: a -> a
+noinline x = x
 
 -- | The 'lazy' function restrains strictness analysis a little. The
 -- call @lazy e@ means the same as 'e', but 'lazy' has a magical
@@ -59,8 +80,44 @@ inline x = x
 lazy :: a -> a
 lazy x = x
 -- Implementation note: its strictness and unfolding are over-ridden
--- by the definition in MkId.lhs; in both cases to nothing at all.
+-- by the definition in MkId.hs; in both cases to nothing at all.
 -- That way, 'lazy' does not get inlined, and the strictness analyser
 -- sees it as lazy.  Then the worker/wrapper phase inlines it.
 -- Result: happiness
 
+
+-- | The 'oneShot' function can be used to give a hint to the compiler that its
+-- argument will be called at most once, which may (or may not) enable certain
+-- optimizations. It can be useful to improve the performance of code in continuation
+-- passing style.
+--
+-- If 'oneShot' is used wrongly, then it may be that computations whose result
+-- that would otherwise be shared are re-evaluated every time they are used. Otherwise,
+-- the use of `oneShot` is safe.
+--
+-- 'oneShot' is representation polymorphic: the type variables may refer to lifted
+-- or unlifted types.
+oneShot :: forall (q :: RuntimeRep) (r :: RuntimeRep)
+                  (a :: TYPE q) (b :: TYPE r).
+           (a -> b) -> a -> b
+oneShot f = f
+-- Implementation note: This is wired in in MkId.hs, so the code here is
+-- mostly there to have a place for the documentation.
+
+-- | Apply a function to a 'State# RealWorld' token. When manually applying
+-- a function to `realWorld#`, it is necessary to use `NOINLINE` to prevent
+-- semantically undesirable floating. `runRW#` is inlined, but only very late
+-- in compilation after all floating is complete.
+
+-- 'runRW#' is representation polymorphic: the result may have a lifted or
+-- unlifted type.
+
+runRW# :: forall (r :: RuntimeRep) (o :: TYPE r).
+          (State# RealWorld -> o) -> o
+-- See Note [runRW magic] in CorePrep
+{-# NOINLINE runRW# #-}  -- runRW# is inlined manually in CorePrep
+#if !defined(__HADDOCK_VERSION__)
+runRW# m = m realWorld#
+#else
+runRW# = runRW#   -- The realWorld# is too much for haddock
+#endif

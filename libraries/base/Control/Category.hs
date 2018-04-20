@@ -1,9 +1,10 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP #-}
-
-#if defined(__GLASGOW_HASKELL__) && __GLASGOW_HASKELL__ >= 706
-{-# LANGUAGE PolyKinds, GADTs #-}
-#endif
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE PolyKinds #-}
+{-# OPTIONS_GHC -Wno-inline-rule-shadowing #-}
+    -- The RULES for the methods of class Category may never fire
+    -- e.g. identity/left, identity/right, association;  see Trac #10528
 
 -----------------------------------------------------------------------------
 -- |
@@ -19,7 +20,7 @@
 
 module Control.Category where
 
-import qualified Prelude
+import qualified GHC.Base (id,(.))
 import Data.Type.Coercion
 import Data.Type.Equality
 import GHC.Prim (coerce)
@@ -27,8 +28,13 @@ import GHC.Prim (coerce)
 infixr 9 .
 infixr 1 >>>, <<<
 
--- | A class for categories.
---   id and (.) must form a monoid.
+-- | A class for categories. Instances should satisfy the laws
+--
+-- @
+-- f '.' 'id'  =  f  -- (right identity)
+-- 'id' '.' f  =  f  -- (left identity)
+-- f '.' (g '.' h)  =  (f '.' g) '.' h  -- (associativity)
+-- @
 class Category cat where
     -- | the identity morphism
     id :: cat a a
@@ -45,14 +51,22 @@ class Category cat where
                 (p . q) . r = p . (q . r)
  #-}
 
+-- | @since 3.0
 instance Category (->) where
-    id = Prelude.id
-    (.) = (Prelude..)
+    id = GHC.Base.id
+    (.) = (GHC.Base..)
 
+-- | @since 4.7.0.0
 instance Category (:~:) where
   id          = Refl
   Refl . Refl = Refl
 
+-- | @since 4.10.0.0
+instance Category (:~~:) where
+  id            = HRefl
+  HRefl . HRefl = HRefl
+
+-- | @since 4.7.0.0
 instance Category Coercion where
   id = Coercion
   (.) Coercion = coerce

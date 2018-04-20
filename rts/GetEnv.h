@@ -6,8 +6,7 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef GETENV_H
-#define GETENV_H
+#pragma once
 
 #include "BeginPrivate.h"
 
@@ -19,13 +18,3 @@ void freeProgEnvv (int envc, char *envv[]);
 /* calls to getProgEnvv must have a corresponding freeProgEnvv */
 
 #include "EndPrivate.h"
-
-#endif /* GETENV_H */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

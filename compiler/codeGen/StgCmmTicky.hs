@@ -1,4 +1,4 @@
-{-# LANGUAGE BangPatterns, CPP #-}
+{-# LANGUAGE BangPatterns #-}
 
 -----------------------------------------------------------------------------
 --
@@ -70,6 +70,7 @@ module StgCmmTicky (
   withNewTickyCounterLNE,
   withNewTickyCounterThunk,
   withNewTickyCounterStdThunk,
+  withNewTickyCounterCon,
 
   tickyDynAlloc,
   tickyAllocHeap,
@@ -96,17 +97,16 @@ module StgCmmTicky (
 
   tickyUpdateBhCaf,
   tickyBlackHole,
-  tickyUnboxedTupleReturn, tickyVectoredReturn,
+  tickyUnboxedTupleReturn,
   tickyReturnOldCon, tickyReturnNewCon,
 
   tickyKnownCallTooFewArgs, tickyKnownCallExact, tickyKnownCallExtraArgs,
   tickySlowCall, tickySlowCallPat,
   ) where
 
-#include "HsVersions.h"
+import GhcPrelude
 
 import StgCmmArgRep    ( slowCallPattern , toArgRep , argRepString )
-import StgCmmEnv       ( NonVoid, unsafe_stripNV )
 import StgCmmClosure
 import StgCmmUtils
 import StgCmmMonad
@@ -124,6 +124,7 @@ import Id
 import BasicTypes
 import FastString
 import Outputable
+import Util
 
 import DynFlags
 
@@ -143,24 +144,55 @@ import Control.Monad ( unless, when )
 --
 -----------------------------------------------------------------------------
 
-data TickyClosureType = TickyFun | TickyThunk | TickyLNE
+data TickyClosureType
+    = TickyFun
+        Bool -- True <-> single entry
+    | TickyCon
+    | TickyThunk
+        Bool -- True <-> updateable
+        Bool -- True <-> standard thunk (AP or selector), has no entry counter
+    | TickyLNE
 
-withNewTickyCounterFun, withNewTickyCounterLNE :: Name -> [NonVoid Id] -> FCode a -> FCode a
-withNewTickyCounterFun = withNewTickyCounter TickyFun
+withNewTickyCounterFun :: Bool -> Name  -> [NonVoid Id] -> FCode a -> FCode a
+withNewTickyCounterFun single_entry = withNewTickyCounter (TickyFun single_entry)
 
+withNewTickyCounterLNE :: Name  -> [NonVoid Id] -> FCode a -> FCode a
 withNewTickyCounterLNE nm args code = do
   b <- tickyLNEIsOn
   if not b then code else withNewTickyCounter TickyLNE nm args code
 
-withNewTickyCounterThunk,withNewTickyCounterStdThunk ::
-  Bool -> Name -> FCode a -> FCode a
-withNewTickyCounterThunk isStatic name code = do
+withNewTickyCounterThunk
+  :: Bool -- ^ static
+  -> Bool -- ^ updateable
+  -> Name
+  -> FCode a
+  -> FCode a
+withNewTickyCounterThunk isStatic isUpdatable name code = do
     b <- tickyDynThunkIsOn
     if isStatic || not b -- ignore static thunks
       then code
-      else withNewTickyCounter TickyThunk name [] code
+      else withNewTickyCounter (TickyThunk isUpdatable False) name [] code
 
-withNewTickyCounterStdThunk = withNewTickyCounterThunk
+withNewTickyCounterStdThunk
+  :: Bool -- ^ updateable
+  -> Name
+  -> FCode a
+  -> FCode a
+withNewTickyCounterStdThunk isUpdatable name code = do
+    b <- tickyDynThunkIsOn
+    if not b
+      then code
+      else withNewTickyCounter (TickyThunk isUpdatable True) name [] code
+
+withNewTickyCounterCon
+  :: Name
+  -> FCode a
+  -> FCode a
+withNewTickyCounterCon name code = do
+    b <- tickyDynThunkIsOn
+    if not b
+      then code
+      else withNewTickyCounter TickyCon name [] code
 
 -- args does not include the void arguments
 withNewTickyCounter :: TickyClosureType -> Name -> [NonVoid Id] -> FCode a -> FCode a
@@ -184,24 +216,25 @@ emitTickyCounter cloType name args
         ; let ppr_for_ticky_name :: SDoc
               ppr_for_ticky_name =
                 let n = ppr name
+                    ext = case cloType of
+                              TickyFun single_entry -> parens $ hcat $ punctuate comma $
+                                  [text "fun"] ++ [text "se"|single_entry]
+                              TickyCon -> parens (text "con")
+                              TickyThunk upd std -> parens $ hcat $ punctuate comma $
+                                  [text "thk"] ++ [text "se"|not upd] ++ [text "std"|std]
+                              TickyLNE | isInternalName name -> parens (text "LNE")
+                                       | otherwise -> panic "emitTickyCounter: how is this an external LNE?"
                     p = case hasHaskellName parent of
                             -- NB the default "top" ticky ctr does not
                             -- have a Haskell name
                           Just pname -> text "in" <+> ppr (nameUnique pname)
                           _ -> empty
-                in (<+> p) $ if isInternalName name
-                   then let s = n <+> (parens (ppr mod_name))
-                        in case cloType of
-                          TickyFun -> s
-                          TickyThunk -> s <+> parens (text "thk")
-                          TickyLNE -> s <+> parens (text "LNE")
-                  else case cloType of
-                         TickyFun -> n
-                         TickyThunk -> n <+> parens (text "thk")
-                         TickyLNE -> panic "emitTickyCounter: how is this an external LNE?"
+                in if isInternalName name
+                   then n <+> parens (ppr mod_name) <+> ext <+> p
+                   else n <+> ext <+> p
 
         ; fun_descr_lit <- newStringCLit $ showSDocDebug dflags ppr_for_ticky_name
-        ; arg_descr_lit <- newStringCLit $ map (showTypeCategory . idType . unsafe_stripNV) args
+        ; arg_descr_lit <- newStringCLit $ map (showTypeCategory . idType . fromNonVoid) args
         ; emitDataLits ctr_lbl
         -- Must match layout of includes/rts/Ticky.h's StgEntCounter
         --
@@ -327,7 +360,7 @@ registerTickyCtr ctr_lbl = do
         , mkStore (CmmLit (cmmLabelOffB ctr_lbl
                                 (oFFSET_StgEntCounter_registeredp dflags)))
                    (mkIntExpr dflags 1) ]
-    ticky_entry_ctrs = mkLblExpr (mkCmmDataLabel rtsPackageKey (fsLit "ticky_entry_ctrs"))
+    ticky_entry_ctrs = mkLblExpr (mkCmmDataLabel rtsUnitId (fsLit "ticky_entry_ctrs"))
   emit =<< mkCmmIfThen test (catAGraphs register_stmts)
 
 tickyReturnOldCon, tickyReturnNewCon :: RepArity -> FCode ()
@@ -343,18 +376,13 @@ tickyUnboxedTupleReturn arity
   = ifTicky $ do { bumpTickyCounter (fsLit "RET_UNBOXED_TUP_ctr")
                  ; bumpHistogram    (fsLit "RET_UNBOXED_TUP_hst") arity }
 
-tickyVectoredReturn :: Int -> FCode ()
-tickyVectoredReturn family_size
-  = ifTicky $ do { bumpTickyCounter (fsLit "VEC_RETURN_ctr")
-                 ; bumpHistogram    (fsLit "RET_VEC_RETURN_hst") family_size }
-
 -- -----------------------------------------------------------------------------
 -- Ticky calls
 
 -- Ticks at a *call site*:
 tickyDirectCall :: RepArity -> [StgArg] -> FCode ()
 tickyDirectCall arity args
-  | arity == length args = tickyKnownCallExact
+  | args `lengthIs` arity = tickyKnownCallExact
   | otherwise = do tickyKnownCallExtraArgs
                    tickySlowCallPat (map argPrimRep (drop arity args))
 
@@ -385,7 +413,7 @@ tickySlowCallPat :: [PrimRep] -> FCode ()
 tickySlowCallPat args = ifTicky $
   let argReps = map toArgRep args
       (_, n_matched) = slowCallPattern argReps
-  in if n_matched > 0 && n_matched == length args
+  in if n_matched > 0 && args `lengthIs` n_matched
      then bumpTickyLbl $ mkRtsSlowFastTickyCtrLabel $ concatMap (map Data.Char.toLower . argRepString) argReps
      else bumpTickyCounter $ fsLit "VERY_SLOW_CALL_ctr"
 
@@ -471,13 +499,13 @@ tickyAllocHeap genuine hp
                      (CmmLit (cmmLabelOffB ticky_ctr (oFFSET_StgEntCounter_allocs dflags)))
                      bytes,
             -- Bump the global allocation total ALLOC_HEAP_tot
-            addToMemLbl (cLong dflags)
-                        (mkCmmDataLabel rtsPackageKey (fsLit "ALLOC_HEAP_tot"))
+            addToMemLbl (bWord dflags)
+                        (mkCmmDataLabel rtsUnitId (fsLit "ALLOC_HEAP_tot"))
                         bytes,
             -- Bump the global allocation counter ALLOC_HEAP_ctr
             if not genuine then mkNop
-            else addToMemLbl (cLong dflags)
-                             (mkCmmDataLabel rtsPackageKey (fsLit "ALLOC_HEAP_ctr"))
+            else addToMemLbl (bWord dflags)
+                             (mkCmmDataLabel rtsUnitId (fsLit "ALLOC_HEAP_ctr"))
                              1
             ]}
 
@@ -541,13 +569,13 @@ ifTickyDynThunk :: FCode () -> FCode ()
 ifTickyDynThunk code = tickyDynThunkIsOn >>= \b -> when b code
 
 bumpTickyCounter :: FastString -> FCode ()
-bumpTickyCounter lbl = bumpTickyLbl (mkCmmDataLabel rtsPackageKey lbl)
+bumpTickyCounter lbl = bumpTickyLbl (mkCmmDataLabel rtsUnitId lbl)
 
 bumpTickyCounterBy :: FastString -> Int -> FCode ()
-bumpTickyCounterBy lbl = bumpTickyLblBy (mkCmmDataLabel rtsPackageKey lbl)
+bumpTickyCounterBy lbl = bumpTickyLblBy (mkCmmDataLabel rtsUnitId lbl)
 
 bumpTickyCounterByE :: FastString -> CmmExpr -> FCode ()
-bumpTickyCounterByE lbl = bumpTickyLblByE (mkCmmDataLabel rtsPackageKey lbl)
+bumpTickyCounterByE lbl = bumpTickyLblByE (mkCmmDataLabel rtsUnitId lbl)
 
 bumpTickyEntryCount :: CLabel -> FCode ()
 bumpTickyEntryCount lbl = do
@@ -582,26 +610,15 @@ bumpTickyLitByE lhs e = do
   emit (addToMemE (bWord dflags) (CmmLit lhs) e)
 
 bumpHistogram :: FastString -> Int -> FCode ()
-bumpHistogram _lbl _n
---  = bumpHistogramE lbl (CmmLit (CmmInt (fromIntegral n) cLongWidth))
-    = return ()    -- TEMP SPJ Apr 07
-                   -- six years passed - still temp? JS Aug 2013
-
-{-
-bumpHistogramE :: LitString -> CmmExpr -> FCode ()
-bumpHistogramE lbl n
-  = do  t <- newTemp cLong
-        emitAssign (CmmLocal t) n
-        emit (mkCmmIfThen (CmmMachOp (MO_U_Le cLongWidth) [CmmReg (CmmLocal t), eight])
-                          (mkAssign (CmmLocal t) eight))
-        emit (addToMem cLong
-                       (cmmIndexExpr cLongWidth
-                                (CmmLit (CmmLabel (mkRtsDataLabel lbl)))
-                                (CmmReg (CmmLocal t)))
-                       1)
-  where
-   eight = CmmLit (CmmInt 8 cLongWidth)
--}
+bumpHistogram lbl n = do
+    dflags <- getDynFlags
+    let offset = n `min` (tICKY_BIN_COUNT dflags - 1)
+    emit (addToMem (bWord dflags)
+           (cmmIndexExpr dflags
+                (wordWidth dflags)
+                (CmmLit (CmmLabel (mkCmmDataLabel rtsUnitId lbl)))
+                (CmmLit (CmmInt (fromIntegral offset) (wordWidth dflags))))
+           1)
 
 ------------------------------------------------------------------
 -- Showing the "type category" for ticky-ticky profiling
@@ -638,7 +655,7 @@ showTypeCategory ty
   | otherwise = case tcSplitTyConApp_maybe ty of
   Nothing -> '.'
   Just (tycon, _) ->
-    (if isUnLiftedTyCon tycon then Data.Char.toLower else \x -> x) $
+    (if isUnliftedTyCon tycon then Data.Char.toLower else id) $
     let anyOf us = getUnique tycon `elem` us in
     case () of
       _ | anyOf [funTyConKey] -> '>'

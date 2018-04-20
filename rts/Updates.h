@@ -6,10 +6,9 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef UPDATES_H
-#define UPDATES_H
+#pragma once
 
-#ifndef CMINUSMINUS
+#if !defined(CMINUSMINUS)
 #include "BeginPrivate.h"
 #endif
 
@@ -33,7 +32,7 @@
  * instructions off the common case in the update code, which is
  * worthwhile (the update code is often part of the inner loop).
  */
-#ifdef CMINUSMINUS
+#if defined(CMINUSMINUS)
 
 #define UPDATE_FRAME_FIELDS(w_,p_,info_ptr,ccs,p2,updatee)      \
                  w_ info_ptr,                           \
@@ -42,31 +41,31 @@
 
 
 #define updateWithIndirection(p1, p2, and_then) \
-    W_ bd;							\
-								\
+    W_ bd;                                                      \
+                                                                \
     OVERWRITING_CLOSURE(p1);                                    \
     StgInd_indirectee(p1) = p2;                                 \
     prim_write_barrier;                                         \
     SET_INFO(p1, stg_BLACKHOLE_info);                           \
     LDV_RECORD_CREATE(p1);                                      \
-    bd = Bdescr(p1);						\
-    if (bdescr_gen_no(bd) != 0 :: bits16) {			\
+    bd = Bdescr(p1);                                            \
+    if (bdescr_gen_no(bd) != 0 :: bits16) {                     \
       recordMutableCap(p1, TO_W_(bdescr_gen_no(bd)));           \
-      TICK_UPD_OLD_IND();					\
-      and_then;							\
-    } else {							\
-      TICK_UPD_NEW_IND();					\
-      and_then;							\
+      TICK_UPD_OLD_IND();                                       \
+      and_then;                                                 \
+    } else {                                                    \
+      TICK_UPD_NEW_IND();                                       \
+      and_then;                                                 \
   }
 
 #else /* !CMINUSMINUS */
 
-INLINE_HEADER void updateWithIndirection (Capability *cap, 
-                                          StgClosure *p1, 
+INLINE_HEADER void updateWithIndirection (Capability *cap,
+                                          StgClosure *p1,
                                           StgClosure *p2)
 {
     bdescr *bd;
-    
+
     ASSERT( (P_)p1 != (P_)p2 );
     /* not necessarily true: ASSERT( !closure_IND(p1) ); */
     /* occurs in RaiseAsync.c:raiseAsync() */
@@ -86,16 +85,6 @@ INLINE_HEADER void updateWithIndirection (Capability *cap,
 
 #endif /* CMINUSMINUS */
 
-#ifndef CMINUSMINUS
+#if !defined(CMINUSMINUS)
 #include "EndPrivate.h"
 #endif
-
-#endif /* UPDATES_H */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

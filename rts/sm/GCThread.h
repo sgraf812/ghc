@@ -6,13 +6,12 @@
  *
  * Documentation on the architecture of the Garbage Collector can be
  * found in the online commentary:
- * 
+ *
  *   http://ghc.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/GC
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef SM_GCTHREAD_H
-#define SM_GCTHREAD_H
+#pragma once
 
 #include "WSDeque.h"
 #include "GetTime.h" // for Ticks
@@ -21,7 +20,7 @@
 
 /* -----------------------------------------------------------------------------
    General scheme
-   
+
    ToDo: move this to the wiki when the implementation is done.
 
    We're only going to try to parallelise the copying GC for now.  The
@@ -67,13 +66,13 @@
 
 /* -----------------------------------------------------------------------------
    Generation Workspace
-  
+
    A generation workspace exists for each generation for each GC
    thread. The GC thread takes a block from the todos list of the
    generation into the scanbd and then scans it.  Objects referred to
    by those in the scan block are copied into the todo or scavd blocks
    of the relevant generation.
-  
+
    ------------------------------------------------------------------------- */
 
 typedef struct gen_workspace_ {
@@ -87,20 +86,22 @@ typedef struct gen_workspace_ {
 
     WSDeque *    todo_q;
     bdescr *     todo_overflow;
-    nat          n_todo_overflow;
+    uint32_t     n_todo_overflow;
 
     // where large objects to be scavenged go
     bdescr *     todo_large_objects;
 
     // Objects that have already been scavenged.
     bdescr *     scavd_list;
-    nat          n_scavd_blocks;     // count of blocks in this list
+    StgWord      n_scavd_blocks;     // count of blocks in this list
+    StgWord      n_scavd_words;
 
     // Partially-full, scavenged, blocks
     bdescr *     part_list;
-    unsigned int n_part_blocks;      // count of above
+    StgWord      n_part_blocks;      // count of above
+    StgWord      n_part_words;
 
-    StgWord pad[3];
+    StgWord pad[1];
 
 } gen_workspace ATTRIBUTE_ALIGNED(64);
 // align so that computing gct->gens[n] is a shift, not a multiply
@@ -115,26 +116,34 @@ typedef struct gen_workspace_ {
    of the GC threads
    ------------------------------------------------------------------------- */
 
+/* values for the wakeup field */
+#define GC_THREAD_INACTIVE             0
+#define GC_THREAD_STANDING_BY          1
+#define GC_THREAD_RUNNING              2
+#define GC_THREAD_WAITING_TO_CONTINUE  3
+
 typedef struct gc_thread_ {
     Capability *cap;
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     OSThreadId id;                 // The OS thread that this struct belongs to
     SpinLock   gc_spin;
     SpinLock   mut_spin;
     volatile StgWord wakeup;       // NB not StgWord8; only StgWord is guaranteed atomic
 #endif
-    nat thread_index;              // a zero based index identifying the thread
-    rtsBool idle;                  // sitting out of this GC cycle
+    uint32_t thread_index;         // a zero based index identifying the thread
 
     bdescr * free_blocks;          // a buffer of free blocks for this thread
                                    //  during GC without accessing the block
-                                   //   allocators spin lock. 
+                                   //   allocators spin lock.
 
-    StgClosure* static_objects;      // live static objects
-    StgClosure* scavenged_static_objects;   // static objects scavenged so far
+    // These two lists are chained through the STATIC_LINK() fields of static
+    // objects.  Pointers are tagged with the current static_flag, so before
+    // following a pointer, untag it with UNTAG_STATIC_LIST_PTR().
+    StgClosure* static_objects;            // live static objects
+    StgClosure* scavenged_static_objects;  // static objects scavenged so far
 
-    W_ gc_count;                 // number of GCs this thread has done
+    W_ gc_count;                   // number of GCs this thread has done
 
     // block that is currently being scanned
     bdescr *     scan_bd;
@@ -150,7 +159,7 @@ typedef struct gc_thread_ {
     // --------------------
     // evacuate flags
 
-    nat evac_gen_no;               // Youngest generation that objects
+    uint32_t evac_gen_no;          // Youngest generation that objects
                                    // should be evacuated to in
                                    // evacuate().  (Logically an
                                    // argument to evacuate, but it's
@@ -158,20 +167,16 @@ typedef struct gc_thread_ {
                                    // optimise it into a per-thread
                                    // variable).
 
-    rtsBool failed_to_evac;        // failure to evacuate an object typically 
-                                   // Causes it to be recorded in the mutable 
+    bool failed_to_evac;           // failure to evacuate an object typically
+                                   // Causes it to be recorded in the mutable
                                    // object list
 
-    rtsBool eager_promotion;       // forces promotion to the evac gen
+    bool eager_promotion;          // forces promotion to the evac gen
                                    // instead of the to-space
                                    // corresponding to the object
 
-    W_ thunk_selector_depth;     // used to avoid unbounded recursion in 
+    W_ thunk_selector_depth;       // used to avoid unbounded recursion in
                                    // evacuate() for THUNK_SELECTOR
-
-#ifdef USE_PAPI
-    int papi_events;
-#endif
 
     // -------------------
     // stats
@@ -183,6 +188,7 @@ typedef struct gc_thread_ {
     W_ scav_find_work;
 
     Time gc_start_cpu;   // process CPU time
+    Time gc_sync_start_elapsed;  // start of GC sync
     Time gc_start_elapsed;  // process elapsed time
     W_ gc_start_faults;
 
@@ -198,7 +204,7 @@ typedef struct gc_thread_ {
 } gc_thread;
 
 
-extern nat n_gc_threads;
+extern uint32_t n_gc_threads;
 
 extern gc_thread **gc_threads;
 
@@ -207,14 +213,3 @@ extern ThreadLocalKey gctKey;
 #endif
 
 #include "EndPrivate.h"
-
-#endif // SM_GCTHREAD_H
-
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

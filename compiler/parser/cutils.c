@@ -9,7 +9,7 @@ places in the GHC library.
 
 #include <string.h>
 
-#ifdef HAVE_UNISTD_H
+#if defined(HAVE_UNISTD_H)
 #include <unistd.h>
 #endif
 
@@ -28,12 +28,6 @@ HsInt
 ghc_memcmp( HsPtr a1, HsPtr a2, HsInt len )
 {
     return (memcmp((char *)a1, a2, len));
-}
-
-HsInt
-ghc_memcmp_off( HsPtr a1, HsInt i, HsPtr a2, HsInt len )
-{
-    return (memcmp((char *)a1 + i, a2, len));
 }
 
 void

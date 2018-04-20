@@ -63,8 +63,12 @@
 #define r31 31
 #endif
 
-
+#if defined(aix_HOST_OS)
+/* IBM's assembler needs a different pseudo-op to declare a .text section */
+.csect .text[PR]
+#else
 .text
+#endif
 #if LEADING_UNDERSCORE
     .globl _adjustorCode
 _adjustorCode:
@@ -84,7 +88,7 @@ adjustorCode:
     
         /* set up stack frame */
     LOAD    r12, FRAMESIZE_OFF(r2)
-#ifdef powerpc64_HOST_ARCH
+#if defined(powerpc64_HOST_ARCH)
     stdux   r1, r1, r12
 #else   
     stwux   r1, r1, r12
@@ -101,14 +105,14 @@ adjustorCode:
 
     LOAD    r12, EXTRA_WORDS_OFF(r2)
     mtctr   r12
-    b       2f
-1:
+    b       L2
+L1:
     LOAD    r0, LINKAGE_AREA_SIZE +  8*WS(r30)
     STORE   r0, LINKAGE_AREA_SIZE + 10*WS(r31)
     addi    r30, r30, WS
     addi    r31, r31, WS
-2:
-    bdnz    1b
+L2:
+    bdnz    L1
 
         /* Restore r30 and r31 now.
         */
@@ -158,7 +162,7 @@ adjustorCode:
 #define FRAMESIZE_OFF   (HEADER_BYTES + 2*WS)
 #define ARGWORDS_OFF    (HEADER_BYTES + 3*WS)
 
-#ifdef LEADING_UNDERSCORE
+#if defined(LEADING_UNDERSCORE)
     .globl _adjustorCode
 _adjustorCode:
 #else

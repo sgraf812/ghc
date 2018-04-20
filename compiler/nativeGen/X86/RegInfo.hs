@@ -9,7 +9,9 @@ where
 #include "nativeGen/NCG.h"
 #include "HsVersions.h"
 
-import Size
+import GhcPrelude
+
+import Format
 import Reg
 
 import Outputable
@@ -20,9 +22,9 @@ import UniqFM
 import X86.Regs
 
 
-mkVirtualReg :: Unique -> Size -> VirtualReg
-mkVirtualReg u size
-   = case size of
+mkVirtualReg :: Unique -> Format -> VirtualReg
+mkVirtualReg u format
+   = case format of
         FF32    -> VirtualRegSSE u
         FF64    -> VirtualRegSSE u
         FF80    -> VirtualRegD   u

@@ -67,7 +67,7 @@ $$\showboard$$
 6 & N*e4?&\\
 \end{tabular}}|
 \end{center}
-Taking this knight looses a pawn
+Taking this knight loses a pawn
 \begin{center}|
 {\bf\begin{tabular}{rp{50pt}p{50pt}}
 6 & \ldots & d*e4\\
@@ -762,7 +762,7 @@ and black has a clear lead.
 \end{tabular}}|
 \end{center}
 |35\ldots~h2; 36.~B*h2, R*h2; 37.~Kf4, Rh4+; 38.~Ke5, R*a4; 39.~d6, Rc4|
-totaly won for black.
+totally won for black.
 \begin{center}|
 {\bf\begin{tabular}{rp{50pt}p{50pt}}
 36 & f*g6+ & K*g6\\
@@ -951,7 +951,7 @@ strange move.
 \end{tabular}}|
 \end{center}
 |15.~N*e5|
-but black can easly win back the pawn.
+but black can easily win back the pawn.
 \begin{center}|
 {\bf\begin{tabular}{rp{50pt}p{50pt}}
 15 & \ldots & Rac8?\\
@@ -974,7 +974,7 @@ his advantage.
 18 & B*d6&\\
 \end{tabular}}|
 \end{center}
-this is to early, leaving myself underdeveloped.
+this is too early, leaving myself underdeveloped.
 |18.~Re1, f6; 19.~B*d6, N*d6; 20.~Qd3|
 \wupperhand{}
 \begin{center}|
@@ -4764,7 +4764,7 @@ Edinburgh Congress
 25 & h3&\\
 \end{tabular}}|
 \end{center}
-At this point the score sheet goes wrong. Black eventually looses on
+At this point the score sheet goes wrong. Black eventually loses on
 time!
 
 \board
@@ -7076,7 +7076,7 @@ white scored a decisive victory.
 \end{tabular}}|
 \end{center}
 |13.~h3, Bh5; 14.~Nbd2, Rfd8; 15.~Nb3, Qd6; 16.~Qe2, Rab8; 17.~Red1|
-Fritz is deperate to put h3, but I dont see why.
+Fritz is desperate to put h3, but I don't see why.
 \begin{center}|
 {\bf\begin{tabular}{rp{50pt}p{50pt}}
 13 & \ldots & Nh5\\
@@ -7153,7 +7153,7 @@ $$\showboard$$
 18 & \ldots & N*g2??\\
 \end{tabular}}|
 \end{center}
-Throws away a piece for a very temp. inititive.
+Throws away a piece for a very temp. initiative.
 |18\ldots~Rb8; 19.~d4, e*d4; 20.~c*d4, Ne6; 21.~N*e6, Q*e6|
 and white is starting to push home his advantage.
 \begin{center}|
@@ -7196,7 +7196,7 @@ $$\showboard$$
 25 & Qf3&\\
 \end{tabular}}|
 \end{center}
-Crude plan of exchanging queens to avoid `acidents`.
+Crude plan of exchanging queens to avoid `accidents`.
 |25.~Bb3|
 \begin{center}|
 {\bf\begin{tabular}{rp{50pt}p{50pt}}

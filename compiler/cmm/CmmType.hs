@@ -1,16 +1,14 @@
-{-# LANGUAGE CPP #-}
-
 module CmmType
     ( CmmType   -- Abstract
     , b8, b16, b32, b64, b128, b256, b512, f32, f64, bWord, bHalfWord, gcWord
-    , cInt, cLong
+    , cInt
     , cmmBits, cmmFloat
     , typeWidth, cmmEqType, cmmEqType_ignoring_ptrhood
     , isFloatType, isGcPtrType, isWord32, isWord64, isFloat64, isFloat32
 
     , Width(..)
     , widthInBits, widthInBytes, widthInLog, widthFromBytes
-    , wordWidth, halfWordWidth, cIntWidth, cLongWidth
+    , wordWidth, halfWordWidth, cIntWidth
     , halfWordMask
     , narrowU, narrowS
     , rEP_CostCentreStack_mem_alloc
@@ -29,7 +27,8 @@ module CmmType
    )
 where
 
-#include "HsVersions.h"
+
+import GhcPrelude
 
 import DynFlags
 import FastString
@@ -63,9 +62,9 @@ instance Outputable CmmType where
   ppr (CmmType cat wid) = ppr cat <> ppr (widthInBits wid)
 
 instance Outputable CmmCat where
-  ppr FloatCat       = ptext $ sLit("F")
-  ppr GcPtrCat       = ptext $ sLit("P")
-  ppr BitsCat        = ptext $ sLit("I")
+  ppr FloatCat       = text "F"
+  ppr GcPtrCat       = text "P"
+  ppr BitsCat        = text "I"
   ppr (VecCat n cat) = ppr cat <> text "x" <> ppr n <> text "V"
 
 -- Why is CmmType stratified?  For native code generation,
@@ -129,10 +128,8 @@ bHalfWord dflags = cmmBits (halfWordWidth dflags)
 gcWord :: DynFlags -> CmmType
 gcWord dflags = CmmType GcPtrCat (wordWidth dflags)
 
-cInt, cLong :: DynFlags -> CmmType
-cInt  dflags = cmmBits (cIntWidth  dflags)
-cLong dflags = cmmBits (cLongWidth dflags)
-
+cInt :: DynFlags -> CmmType
+cInt dflags = cmmBits (cIntWidth  dflags)
 
 ------------ Predicates ----------------
 isFloatType, isGcPtrType :: CmmType -> Bool
@@ -207,15 +204,11 @@ halfWordMask dflags
  | otherwise             = panic "MachOp.halfWordMask: Unknown word size"
 
 -- cIntRep is the Width for a C-language 'int'
-cIntWidth, cLongWidth :: DynFlags -> Width
+cIntWidth :: DynFlags -> Width
 cIntWidth dflags = case cINT_SIZE dflags of
                    4 -> W32
                    8 -> W64
                    s -> panic ("cIntWidth: Unknown cINT_SIZE: " ++ show s)
-cLongWidth dflags = case cLONG_SIZE dflags of
-                    4 -> W32
-                    8 -> W64
-                    s -> panic ("cIntWidth: Unknown cLONG_SIZE: " ++ show s)
 
 widthInBits :: Width -> Int
 widthInBits W8   = 8
@@ -436,7 +429,7 @@ Cons:
 
 Currently for GHC, the foreign call point is moot, because we do our
 own promotion of sub-word-sized values to word-sized values.  The Int8
-type is represnted by an Int# which is kept sign-extended at all times
+type is represented by an Int# which is kept sign-extended at all times
 (this is slightly naughty, because we're making assumptions about the
 C calling convention rather early on in the compiler).  However, given
 this, the cons outweigh the pros.

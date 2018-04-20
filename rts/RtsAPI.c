@@ -16,13 +16,14 @@
 #include "Schedule.h"
 #include "Capability.h"
 #include "Stable.h"
+#include "Threads.h"
 #include "Weak.h"
 
 /* ----------------------------------------------------------------------------
    Building Haskell objects from C datatypes.
 
    TODO: Currently this code does not tag created pointers,
-         however it is not unsafe (the contructor code will do it)
+         however it is not unsafe (the constructor code will do it)
          just inefficient.
    ------------------------------------------------------------------------- */
 HaskellObj
@@ -363,13 +364,13 @@ rts_getFunPtr (HaskellObj p)
 HsBool
 rts_getBool (HaskellObj p)
 {
-    StgInfoTable *info;
+    const StgInfoTable *info;
 
-    info = get_itbl((StgClosure *)UNTAG_CLOSURE(p));
+    info = get_itbl((const StgClosure *)UNTAG_CONST_CLOSURE(p));
     if (info->srt_bitmap == 0) { // srt_bitmap is the constructor tag
-	return 0;
+        return 0;
     } else {
-	return 1;
+        return 1;
     }
 }
 
@@ -429,7 +430,7 @@ void rts_eval (/* inout */ Capability **cap,
                /* out */   HaskellObj *ret)
 {
     StgTSO *tso;
-    
+
     tso = createGenThread(*cap, RtsFlags.GcFlags.initialStkSize, p);
     scheduleWaitThread(tso,ret,cap);
 }
@@ -453,10 +454,39 @@ void rts_evalIO (/* inout */ Capability **cap,
                  /* in    */ HaskellObj p,
                  /* out */   HaskellObj *ret)
 {
-    StgTSO* tso; 
-    
+    StgTSO* tso;
+
     tso = createStrictIOThread(*cap, RtsFlags.GcFlags.initialStkSize, p);
     scheduleWaitThread(tso,ret,cap);
+}
+
+/*
+ * rts_evalStableIOMain() is suitable for calling main Haskell thread
+ * stored in (StablePtr (IO a)) it calls rts_evalStableIO but wraps
+ * function in GHC.TopHandler.runMainIO that installs top_handlers.
+ * See Trac #12903.
+ */
+void rts_evalStableIOMain(/* inout */ Capability **cap,
+                          /* in    */ HsStablePtr s,
+                          /* out   */ HsStablePtr *ret)
+{
+    StgTSO* tso;
+    StgClosure *p, *r, *w;
+    SchedulerStatus stat;
+
+    p = (StgClosure *)deRefStablePtr(s);
+    w = rts_apply(*cap, &base_GHCziTopHandler_runMainIO_closure, p);
+    tso = createStrictIOThread(*cap, RtsFlags.GcFlags.initialStkSize, w);
+    // async exceptions are always blocked by default in the created
+    // thread.  See #1048.
+    tso->flags |= TSO_BLOCKEX | TSO_INTERRUPTIBLE;
+    scheduleWaitThread(tso,&r,cap);
+    stat = rts_getSchedStatus(*cap);
+
+    if (stat == Success && ret != NULL) {
+        ASSERT(r != NULL);
+        *ret = getStablePtr((StgPtr)r);
+    }
 }
 
 /*
@@ -482,8 +512,8 @@ void rts_evalStableIO (/* inout */ Capability **cap,
     stat = rts_getSchedStatus(*cap);
 
     if (stat == Success && ret != NULL) {
-	ASSERT(r != NULL);
-	*ret = getStablePtr((StgPtr)r);
+        ASSERT(r != NULL);
+        *ret = getStablePtr((StgPtr)r);
     }
 }
 
@@ -516,16 +546,16 @@ void rts_evalLazyIO_ (/* inout */ Capability **cap,
 void
 rts_checkSchedStatus (char* site, Capability *cap)
 {
-    SchedulerStatus rc = cap->running_task->incall->stat;
+    SchedulerStatus rc = cap->running_task->incall->rstat;
     switch (rc) {
     case Success:
-	return;
+        return;
     case Killed:
-	errorBelch("%s: uncaught exception",site);
-	stg_exit(EXIT_FAILURE);
+        errorBelch("%s: uncaught exception",site);
+        stg_exit(EXIT_FAILURE);
     case Interrupted:
-	errorBelch("%s: interrupted", site);
-#ifdef THREADED_RTS
+        errorBelch("%s: interrupted", site);
+#if defined(THREADED_RTS)
         // The RTS is shutting down, and the process will probably
         // soon exit.  We don't want to preempt the shutdown
         // by exiting the whole process here, so we just terminate the
@@ -536,15 +566,15 @@ rts_checkSchedStatus (char* site, Capability *cap)
         stg_exit(EXIT_FAILURE);
 #endif
     default:
-	errorBelch("%s: Return code (%d) not ok",(site),(rc));	
-	stg_exit(EXIT_FAILURE);
+        errorBelch("%s: Return code (%d) not ok",(site),(rc));
+        stg_exit(EXIT_FAILURE);
     }
 }
 
 SchedulerStatus
 rts_getSchedStatus (Capability *cap)
 {
-    return cap->running_task->incall->stat;
+    return cap->running_task->incall->rstat;
 }
 
 Capability *
@@ -564,7 +594,7 @@ rts_lock (void)
     }
 
     cap = NULL;
-    waitForReturnCapability(&cap, task);
+    waitForCapability(&cap, task);
 
     if (task->incall->prev_stack == NULL) {
       // This is a new outermost call from C into Haskell land.
@@ -601,7 +631,7 @@ rts_unlock (Capability *cap)
     // random point in the future, which causes problems for
     // freeTaskManager().
     ACQUIRE_LOCK(&cap->lock);
-    releaseCapability_(cap,rtsFalse);
+    releaseCapability_(cap,false);
 
     // Finally, we can release the Task to the free list.
     boundTaskExiting(task);
@@ -620,11 +650,77 @@ void rts_done (void)
     freeMyTask();
 }
 
+/* -----------------------------------------------------------------------------
+   tryPutMVar from outside Haskell
 
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:
+   The C call
+
+      hs_try_putmvar(cap, mvar)
+
+   is equivalent to the Haskell call
+
+      tryPutMVar mvar ()
+
+   but it is
+
+     * non-blocking: takes a bounded, short, amount of time
+     * asynchronous: the actual putMVar may be performed after the
+       call returns.  That's why hs_try_putmvar() doesn't return a
+       result to say whether the put succeeded.
+
+   NOTE: this call transfers ownership of the StablePtr to the RTS, which will
+   free it after the tryPutMVar has taken place.  The reason is that otherwise,
+   it would be very difficult for the caller to arrange to free the StablePtr
+   in all circumstances.
+
+   For more details, see the section "Waking up Haskell threads from C" in the
+   User's Guide.
+   -------------------------------------------------------------------------- */
+
+void hs_try_putmvar (/* in */ int capability,
+                     /* in */ HsStablePtr mvar)
+{
+    Task *task = getTask();
+    Capability *cap;
+
+    if (capability < 0) {
+        capability = task->preferred_capability;
+        if (capability < 0) {
+            capability = 0;
+        }
+    }
+    cap = capabilities[capability % enabled_capabilities];
+
+#if !defined(THREADED_RTS)
+
+    performTryPutMVar(cap, (StgMVar*)deRefStablePtr(mvar), Unit_closure);
+    freeStablePtr(mvar);
+
+#else
+
+    ACQUIRE_LOCK(&cap->lock);
+    // If the capability is free, we can perform the tryPutMVar immediately
+    if (cap->running_task == NULL) {
+        cap->running_task = task;
+        task->cap = cap;
+        RELEASE_LOCK(&cap->lock);
+
+        performTryPutMVar(cap, (StgMVar*)deRefStablePtr(mvar), Unit_closure);
+
+        freeStablePtr(mvar);
+
+        // Wake up the capability, which will start running the thread that we
+        // just awoke (if there was one).
+        releaseCapability(cap);
+    } else {
+        PutMVar *p = stgMallocBytes(sizeof(PutMVar),"hs_try_putmvar");
+        // We cannot deref the StablePtr if we don't have a capability,
+        // so we have to store it and deref it later.
+        p->mvar = mvar;
+        p->link = cap->putMVars;
+        cap->putMVars = p;
+        RELEASE_LOCK(&cap->lock);
+    }
+
+#endif
+}

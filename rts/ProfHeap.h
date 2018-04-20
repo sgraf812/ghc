@@ -6,24 +6,18 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef PROFHEAP_H
-#define PROFHEAP_H
+#pragma once
 
 #include "BeginPrivate.h"
 
-void    heapCensus         (Time t);
-nat     initHeapProfiling  (void);
-void    endHeapProfiling   (void);
-rtsBool strMatchesSelector (char* str, char* sel);
+void        heapCensus         (Time t);
+uint32_t    initHeapProfiling  (void);
+void        endHeapProfiling   (void);
+bool        strMatchesSelector (const char* str, const char* sel);
+
+#if defined(PROFILING)
+// doingRetainerProfiling: `-hr` or `-hr<cc> -h<x>`
+bool doingRetainerProfiling(void);
+#endif
 
 #include "EndPrivate.h"
-
-#endif /* PROFHEAP_H */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

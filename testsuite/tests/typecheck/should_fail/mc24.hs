@@ -2,10 +2,10 @@
 -- the group when a by clause is present
 
 {-# OPTIONS_GHC -XMonadComprehensions -XTransformListComp #-}
-
 module ShouldFail where
+import GHC.List
 
-foo = [ length x
+foo = [ GHC.List.length x
       | x <- [1..10]
       , then group by x using take 2
       ]

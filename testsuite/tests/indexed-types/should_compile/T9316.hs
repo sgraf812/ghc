@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -fno-warn-redundant-constraints #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE DataKinds #-}
@@ -53,7 +54,7 @@ withSomeSing :: SingKind ('KProxy :: KProxy k)
              => DemoteRep ('KProxy :: KProxy k)
              -> (forall (a :: k). Sing a -> r)
              -> r
-withSomeSing = error "urk"
+withSomeSing _ _ = error "urk"
 
 -----------------------------------
 
@@ -84,4 +85,3 @@ forAllSubscriptionChannels f =
   withSomeSing BookingsChannel $ \(sChannel) ->
     case witnessC sChannel of
       Dict -> f sChannel
-

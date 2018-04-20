@@ -1,18 +1,19 @@
+cabal-version:  2.1
 name:           base
-version:        4.7.1.0
--- GHC 7.6.1 released with 4.6.0.0
-license:        BSD3
+version:        4.12.0.0
+-- NOTE: Don't forget to update ./changelog.md
+
+license:        BSD-3-Clause
 license-file:   LICENSE
 maintainer:     libraries@haskell.org
 bug-reports:    http://ghc.haskell.org/trac/ghc/newticket?component=libraries/base
 synopsis:       Basic libraries
 category:       Prelude
+build-type:     Configure
 description:
-    This package contains the "Prelude" and its support libraries,
+    This package contains the Standard Haskell "Prelude" and its support libraries,
     and a large collection of useful libraries ranging from data
     structures to parsing combinators and debugging utilities.
-cabal-version:  >=1.10
-build-type:     Configure
 
 extra-tmp-files:
     autom4te.cache
@@ -35,6 +36,7 @@ extra-source-files:
     include/HsBaseConfig.h.in
     include/ieee-flpt.h
     include/md5.h
+    include/fs.h
     install-sh
 
 source-repository head
@@ -44,11 +46,17 @@ source-repository head
 
 Flag integer-simple
     Description: Use integer-simple
+    Manual: True
+    Default: False
+
+Flag integer-gmp
+    Description: Use integer-gmp
+    Manual: True
+    Default: False
 
 Library
     default-language: Haskell2010
     other-extensions:
-        AutoDeriveTypeable
         BangPatterns
         CApiFFI
         CPP
@@ -69,7 +77,6 @@ Library
         NegativeLiterals
         NoImplicitPrelude
         NondecreasingIndentation
-        OverlappingInstances
         OverloadedStrings
         ParallelArrays
         PolyKinds
@@ -88,11 +95,17 @@ Library
         UnliftedFFITypes
         Unsafe
 
-    build-depends: rts == 1.0.*, ghc-prim >= 0.3.1 && < 0.4
+    build-depends: rts == 1.0, ghc-prim ^>= 0.5.1.0
+
+    -- sanity-check to ensure exactly one flag is set
+    if !((flag(integer-gmp) && !flag(integer-simple)) || (!flag(integer-gmp) && flag(integer-simple)))
+        build-depends: invalid-cabal-flag-settings<0
+
     if flag(integer-simple)
-        build-depends: integer-simple >= 0.1.1 && < 0.2
-    else
-        build-depends: integer-gmp >= 0.5.1 && < 0.6
+        build-depends: integer-simple ^>= 0.1.1
+
+    if flag(integer-gmp)
+        build-depends: integer-gmp ^>= 1.0.1
         cpp-options: -DOPTIMISE_INTEGER_GCD_LCM
 
     exposed-modules:
@@ -107,8 +120,10 @@ Library
         Control.Exception
         Control.Exception.Base
         Control.Monad
+        Control.Monad.Fail
         Control.Monad.Fix
         Control.Monad.Instances
+        Control.Monad.IO.Class
         Control.Monad.ST
         Control.Monad.ST.Lazy
         Control.Monad.ST.Lazy.Safe
@@ -117,6 +132,9 @@ Library
         Control.Monad.ST.Strict
         Control.Monad.ST.Unsafe
         Control.Monad.Zip
+        Data.Bifoldable
+        Data.Bifunctor
+        Data.Bitraversable
         Data.Bits
         Data.Bool
         Data.Char
@@ -130,17 +148,25 @@ Library
         Data.Foldable
         Data.Function
         Data.Functor
+        Data.Functor.Classes
+        Data.Functor.Contravariant
+        Data.Functor.Compose
+        Data.Functor.Const
+        Data.Functor.Identity
+        Data.Functor.Product
+        Data.Functor.Sum
         Data.IORef
         Data.Int
         Data.Ix
+        Data.Kind
         Data.List
+        Data.List.NonEmpty
         Data.Maybe
         Data.Monoid
-        Data.OldTypeable
-        Data.OldTypeable.Internal
         Data.Ord
         Data.Proxy
         Data.Ratio
+        Data.Semigroup
         Data.STRef
         Data.STRef.Lazy
         Data.STRef.Strict
@@ -151,9 +177,9 @@ Library
         Data.Type.Coercion
         Data.Type.Equality
         Data.Typeable
-        Data.Typeable.Internal
         Data.Unique
         Data.Version
+        Data.Void
         Data.Word
         Debug.Trace
         Foreign
@@ -179,7 +205,9 @@ Library
         Foreign.Storable
         GHC.Arr
         GHC.Base
+        GHC.ByteOrder
         GHC.Char
+        GHC.Clock
         GHC.Conc
         GHC.Conc.IO
         GHC.Conc.Signal
@@ -191,6 +219,8 @@ Library
         GHC.Environment
         GHC.Err
         GHC.Exception
+        GHC.ExecutionStack
+        GHC.ExecutionStack.Internal
         GHC.Exts
         GHC.Fingerprint
         GHC.Fingerprint.Type
@@ -219,39 +249,51 @@ Library
         GHC.IO.Handle
         GHC.IO.Handle.FD
         GHC.IO.Handle.Internals
+        GHC.IO.Handle.Lock
         GHC.IO.Handle.Text
         GHC.IO.Handle.Types
         GHC.IO.IOMode
+        GHC.IO.Unsafe
         GHC.IOArray
         GHC.IORef
-        GHC.IP
         GHC.Int
         GHC.List
         GHC.MVar
+        GHC.Natural
         GHC.Num
+        GHC.OldList
+        GHC.OverloadedLabels
         GHC.PArr
         GHC.Pack
         GHC.Profiling
         GHC.Ptr
         GHC.Read
         GHC.Real
+        GHC.Records
+        GHC.RTS.Flags
         GHC.ST
+        GHC.StaticPtr
         GHC.STRef
         GHC.Show
         GHC.Stable
         GHC.Stack
+        GHC.Stack.CCS
+        GHC.Stack.Types
         GHC.Stats
         GHC.Storable
         GHC.TopHandler
         GHC.TypeLits
+        GHC.TypeNats
         GHC.Unicode
         GHC.Weak
         GHC.Word
         Numeric
+        Numeric.Natural
         Prelude
         System.CPUTime
         System.Console.GetOpt
         System.Environment
+        System.Environment.Blank
         System.Exit
         System.IO
         System.IO.Error
@@ -270,13 +312,21 @@ Library
         Text.Read.Lex
         Text.Show
         Text.Show.Functions
+        Type.Reflection
+        Type.Reflection.Unsafe
         Unsafe.Coerce
 
     other-modules:
         Control.Monad.ST.Imp
         Control.Monad.ST.Lazy.Imp
+        Data.Functor.Utils
+        Data.OldList
+        Data.Semigroup.Internal
+        Data.Typeable.Internal
         Foreign.ForeignPtr.Imp
+        GHC.StaticPtr.Internal
         System.Environment.ExecutablePath
+        System.CPUTime.Utils
 
     c-sources:
         cbits/DarwinUtils.c
@@ -290,6 +340,10 @@ Library
         cbits/md5.c
         cbits/primFloat.c
         cbits/sysconf.c
+        cbits/fs.c
+
+    cmm-sources:
+        cbits/CastFloatWord.cmm
 
     include-dirs: include
     includes:
@@ -298,24 +352,31 @@ Library
         HsBase.h
         WCsubst.h
         consUtils.h
-        Typeable.h
-        OldTypeable.h
 
     -- OS Specific
     if os(windows)
-        extra-libraries: wsock32, user32, shell32
+        -- Windows requires some extra libraries for linking because the RTS
+        -- is no longer re-exporting them.
+        -- msvcrt: standard C library. The RTS will automatically include this,
+        --         but is added for completeness.
+        -- mingwex: provides C99 compatibility. libm is a stub on MingW.
+        -- mingw32: Unfortunately required because of a resource leak between
+        --          mingwex and mingw32. the __math_err symbol is defined in
+        --          mingw32 which is required by mingwex.
+        extra-libraries: wsock32, user32, shell32, msvcrt, mingw32, mingwex
         exposed-modules:
             GHC.IO.Encoding.CodePage.API
             GHC.IO.Encoding.CodePage.Table
             GHC.Conc.Windows
             GHC.Windows
+        other-modules:
+            System.CPUTime.Windows
     else
         exposed-modules:
             GHC.Event
         other-modules:
             GHC.Event.Arr
             GHC.Event.Array
-            GHC.Event.Clock
             GHC.Event.Control
             GHC.Event.EPoll
             GHC.Event.IntTable
@@ -328,6 +389,11 @@ Library
             GHC.Event.TimerManager
             GHC.Event.Unique
 
-    -- We need to set the package key to base (without a version number)
+            System.CPUTime.Posix.ClockGetTime
+            System.CPUTime.Posix.Times
+            System.CPUTime.Posix.RUsage
+            System.CPUTime.Unsupported
+
+    -- We need to set the unit id to base (without a version number)
     -- as it's magic.
-    ghc-options: -this-package-key base
+    ghc-options: -this-unit-id base

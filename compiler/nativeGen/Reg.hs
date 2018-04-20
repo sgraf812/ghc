@@ -26,6 +26,8 @@ module Reg (
 
 where
 
+import GhcPrelude
+
 import Outputable
 import Unique
 import RegClass
@@ -55,7 +57,28 @@ data VirtualReg
         | VirtualRegF  {-# UNPACK #-} !Unique
         | VirtualRegD  {-# UNPACK #-} !Unique
         | VirtualRegSSE {-# UNPACK #-} !Unique
-        deriving (Eq, Show, Ord)
+        deriving (Eq, Show)
+
+-- This is laborious, but necessary. We can't derive Ord because
+-- Unique doesn't have an Ord instance. Note nonDetCmpUnique in the
+-- implementation. See Note [No Ord for Unique]
+-- This is non-deterministic but we do not currently support deterministic
+-- code-generation. See Note [Unique Determinism and code generation]
+instance Ord VirtualReg where
+  compare (VirtualRegI a) (VirtualRegI b) = nonDetCmpUnique a b
+  compare (VirtualRegHi a) (VirtualRegHi b) = nonDetCmpUnique a b
+  compare (VirtualRegF a) (VirtualRegF b) = nonDetCmpUnique a b
+  compare (VirtualRegD a) (VirtualRegD b) = nonDetCmpUnique a b
+  compare (VirtualRegSSE a) (VirtualRegSSE b) = nonDetCmpUnique a b
+  compare VirtualRegI{} _ = LT
+  compare _ VirtualRegI{} = GT
+  compare VirtualRegHi{} _ = LT
+  compare _ VirtualRegHi{} = GT
+  compare VirtualRegF{} _ = LT
+  compare _ VirtualRegF{} = GT
+  compare VirtualRegD{} _ = LT
+  compare _ VirtualRegD{} = GT
+
 
 instance Uniquable VirtualReg where
         getUnique reg
@@ -69,11 +92,11 @@ instance Uniquable VirtualReg where
 instance Outputable VirtualReg where
         ppr reg
          = case reg of
-                VirtualRegI  u  -> text "%vI_"  <> pprUnique u
-                VirtualRegHi u  -> text "%vHi_" <> pprUnique u
-                VirtualRegF  u  -> text "%vF_"  <> pprUnique u
-                VirtualRegD  u  -> text "%vD_"  <> pprUnique u
-                VirtualRegSSE u -> text "%vSSE_" <> pprUnique u
+                VirtualRegI  u  -> text "%vI_"   <> pprUniqueAlways u
+                VirtualRegHi u  -> text "%vHi_"  <> pprUniqueAlways u
+                VirtualRegF  u  -> text "%vF_"   <> pprUniqueAlways u
+                VirtualRegD  u  -> text "%vD_"   <> pprUniqueAlways u
+                VirtualRegSSE u -> text "%vSSE_" <> pprUniqueAlways u
 
 
 renameVirtualReg :: Unique -> VirtualReg -> VirtualReg
@@ -135,8 +158,9 @@ instance Uniquable RealReg where
 instance Outputable RealReg where
         ppr reg
          = case reg of
-                RealRegSingle i         -> text "%r"    <> int i
-                RealRegPair r1 r2       -> text "%r(" <> int r1 <> text "|" <> int r2 <> text ")"
+                RealRegSingle i         -> text "%r"  <> int i
+                RealRegPair r1 r2       -> text "%r(" <> int r1
+                                           <> vbar <> int r2 <> text ")"
 
 regNosOfRealReg :: RealReg -> [RegNo]
 regNosOfRealReg rr

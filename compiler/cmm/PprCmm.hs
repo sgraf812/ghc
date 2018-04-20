@@ -15,8 +15,8 @@
 --
 -- As such, this should be a well-defined syntax: we want it to look nice.
 -- Thus, we try wherever possible to use syntax defined in [1],
--- "The C-- Reference Manual", http://www.cminusminus.org/. We differ
--- slightly, in some cases. For one, we use I8 .. I64 for types, rather
+-- "The C-- Reference Manual", http://www.cs.tufts.edu/~nr/c--/index.html. We
+-- differ slightly, in some cases. For one, we use I8 .. I64 for types, rather
 -- than C--'s bits8 .. bits64.
 --
 -- We try to ensure that all information available in the abstract
@@ -39,20 +39,24 @@ module PprCmm
   )
 where
 
+import GhcPrelude hiding (succ)
+
 import BlockId ()
 import CLabel
 import Cmm
 import CmmUtils
+import CmmSwitch
+import DynFlags
 import FastString
 import Outputable
 import PprCmmDecl
 import PprCmmExpr
 import Util
+import PprCore ()
 
 import BasicTypes
-import Compiler.Hoopl
-import Data.List
-import Prelude hiding (succ)
+import Hoopl.Block
+import Hoopl.Graph
 
 -------------------------------------------------
 -- Outputable instances
@@ -99,13 +103,13 @@ instance Outputable CmmGraph where
 
 pprStackInfo :: CmmStackInfo -> SDoc
 pprStackInfo (StackInfo {arg_space=arg_space, updfr_space=updfr_space}) =
-  ptext (sLit "arg_space: ") <> ppr arg_space <+>
-  ptext (sLit "updfr_space: ") <> ppr updfr_space
+  text "arg_space: " <> ppr arg_space <+>
+  text "updfr_space: " <> ppr updfr_space
 
 pprTopInfo :: CmmTopInfo -> SDoc
 pprTopInfo (TopInfo {info_tbls=info_tbl, stack_info=stack_info}) =
-  vcat [ptext (sLit "info_tbl: ") <> ppr info_tbl,
-        ptext (sLit "stack_info: ") <> ppr stack_info]
+  vcat [text "info_tbl: " <> ppr info_tbl,
+        text "stack_info: " <> ppr stack_info]
 
 ----------------------------------------------------------
 -- Outputting blocks and graphs
@@ -137,8 +141,8 @@ pprCmmGraph g
    = text "{" <> text "offset"
   $$ nest 2 (vcat $ map ppr blocks)
   $$ text "}"
-  where blocks = postorderDfs g
-    -- postorderDfs has the side-effect of discarding unreachable code,
+  where blocks = revPostorder g
+    -- revPostorder has the side-effect of discarding unreachable code,
     -- so pretty-printed Cmm will omit any unreachable blocks.  This can
     -- sometimes be confusing.
 
@@ -158,7 +162,7 @@ pprForeignConvention (ForeignConvention c args res ret) =
 
 pprReturnInfo :: CmmReturnInfo -> SDoc
 pprReturnInfo CmmMayReturn = empty
-pprReturnInfo CmmNeverReturns = ptext (sLit "never returns")
+pprReturnInfo CmmNeverReturns = text "never returns"
 
 pprForeignTarget :: ForeignTarget -> SDoc
 pprForeignTarget (ForeignTarget fn c) = ppr c <+> ppr_target fn
@@ -179,12 +183,23 @@ pprNode :: CmmNode e x -> SDoc
 pprNode node = pp_node <+> pp_debug
   where
     pp_node :: SDoc
-    pp_node = case node of
+    pp_node = sdocWithDynFlags $ \dflags -> case node of
       -- label:
-      CmmEntry id -> ppr id <> colon
+      CmmEntry id tscope -> ppr id <> colon <+>
+         (sdocWithDynFlags $ \dflags ->
+           ppUnless (gopt Opt_SuppressTicks dflags) (text "//" <+> ppr tscope))
 
       -- // text
       CmmComment s -> text "//" <+> ftext s
+
+      -- //tick bla<...>
+      CmmTick t -> ppUnless (gopt Opt_SuppressTicks dflags) $
+                   text "//tick" <+> ppr t
+
+      -- unwind reg = expr;
+      CmmUnwind regs ->
+          text "unwind "
+          <> commafy (map (\(r,e) -> ppr r <+> char '=' <+> ppr e) regs) <> semi
 
       -- reg = expr;
       CmmAssign reg expr -> ppr reg <+> equals <+> ppr expr <> semi
@@ -200,66 +215,75 @@ pprNode node = pp_node <+> pp_debug
       CmmUnsafeForeignCall target results args ->
           hsep [ ppUnless (null results) $
                     parens (commafy $ map ppr results) <+> equals,
-                 ptext $ sLit "call",
+                 text "call",
                  ppr target <> parens (commafy $ map ppr args) <> semi]
 
       -- goto label;
-      CmmBranch ident -> ptext (sLit "goto") <+> ppr ident <> semi
+      CmmBranch ident -> text "goto" <+> ppr ident <> semi
 
       -- if (expr) goto t; else goto f;
-      CmmCondBranch expr t f ->
-          hsep [ ptext (sLit "if")
+      CmmCondBranch expr t f l ->
+          hsep [ text "if"
                , parens(ppr expr)
-               , ptext (sLit "goto")
+               , case l of
+                   Nothing -> empty
+                   Just b -> parens (text "likely:" <+> ppr b)
+               , text "goto"
                , ppr t <> semi
-               , ptext (sLit "else goto")
+               , text "else goto"
                , ppr f <> semi
                ]
 
-      CmmSwitch expr maybe_ids ->
-          hang (hcat [ ptext (sLit "switch [0 .. ")
-                     , int (length maybe_ids - 1)
-                     , ptext (sLit "] ")
+      CmmSwitch expr ids ->
+          hang (hsep [ text "switch"
+                     , range
                      , if isTrivialCmmExpr expr
                        then ppr expr
                        else parens (ppr expr)
-                     , ptext (sLit " {")
+                     , text "{"
                      ])
-             4 (vcat ( map caseify pairs )) $$ rbrace
-          where pairs = groupBy snds (zip [0 .. ] maybe_ids )
-                snds a b = (snd a) == (snd b)
-                caseify ixs@((_,Nothing):_) = ptext (sLit "/* impossible: ")
-                                              <> hcat (intersperse comma (map (int.fst) ixs)) <> ptext (sLit " */")
-                caseify as = let (is,ids) = unzip as
-                             in hsep [ ptext (sLit "case")
-                                     , hcat (punctuate comma (map int is))
-                                     , ptext (sLit ": goto")
-                                     , ppr (head [ id | Just id <- ids]) <> semi ]
+             4 (vcat (map ppCase cases) $$ def) $$ rbrace
+          where
+            (cases, mbdef) = switchTargetsFallThrough ids
+            ppCase (is,l) = hsep
+                            [ text "case"
+                            , commafy $ map integer is
+                            , text ": goto"
+                            , ppr l <> semi
+                            ]
+            def | Just l <- mbdef = hsep
+                            [ text "default:"
+                            , braces (text "goto" <+> ppr l <> semi)
+                            ]
+                | otherwise = empty
+
+            range = brackets $ hsep [integer lo, text "..", integer hi]
+              where (lo,hi) = switchTargetsRange ids
 
       CmmCall tgt k regs out res updfr_off ->
-          hcat [ ptext (sLit "call"), space
+          hcat [ text "call", space
                , pprFun tgt, parens (interpp'SP regs), space
                , returns <+>
-                 ptext (sLit "args: ") <> ppr out <> comma <+>
-                 ptext (sLit "res: ") <> ppr res <> comma <+>
-                 ptext (sLit "upd: ") <> ppr updfr_off
+                 text "args: " <> ppr out <> comma <+>
+                 text "res: " <> ppr res <> comma <+>
+                 text "upd: " <> ppr updfr_off
                , semi ]
           where pprFun f@(CmmLit _) = ppr f
                 pprFun f = parens (ppr f)
 
                 returns
-                  | Just r <- k = ptext (sLit "returns to") <+> ppr r <> comma
+                  | Just r <- k = text "returns to" <+> ppr r <> comma
                   | otherwise   = empty
 
       CmmForeignCall {tgt=t, res=rs, args=as, succ=s, ret_args=a, ret_off=u, intrbl=i} ->
-          hcat $ if i then [ptext (sLit "interruptible"), space] else [] ++
-               [ ptext (sLit "foreign call"), space
-               , ppr t, ptext (sLit "(...)"), space
-               , ptext (sLit "returns to") <+> ppr s
-                    <+> ptext (sLit "args:") <+> parens (ppr as)
-                    <+> ptext (sLit "ress:") <+> parens (ppr rs)
-               , ptext (sLit "ret_args:") <+> ppr a
-               , ptext (sLit "ret_off:") <+> ppr u
+          hcat $ if i then [text "interruptible", space] else [] ++
+               [ text "foreign call", space
+               , ppr t, text "(...)", space
+               , text "returns to" <+> ppr s
+                    <+> text "args:" <+> parens (ppr as)
+                    <+> text "ress:" <+> parens (ppr rs)
+               , text "ret_args:" <+> ppr a
+               , text "ret_off:" <+> ppr u
                , semi ]
 
     pp_debug :: SDoc
@@ -268,6 +292,8 @@ pprNode node = pp_node <+> pp_debug
       else case node of
              CmmEntry {}             -> empty -- Looks terrible with text "  // CmmEntry"
              CmmComment {}           -> empty -- Looks also terrible with text "  // CmmComment"
+             CmmTick {}              -> empty
+             CmmUnwind {}            -> text "  // CmmUnwind"
              CmmAssign {}            -> text "  // CmmAssign"
              CmmStore {}             -> text "  // CmmStore"
              CmmUnsafeForeignCall {} -> text "  // CmmUnsafeForeignCall"

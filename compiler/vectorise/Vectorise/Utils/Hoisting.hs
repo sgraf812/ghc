@@ -2,7 +2,7 @@ module Vectorise.Utils.Hoisting
   ( Inline(..)
   , addInlineArity
   , inlineMe
-  
+
   , hoistBinding
   , hoistExpr
   , hoistVExpr
@@ -10,6 +10,8 @@ module Vectorise.Utils.Hoisting
   , takeHoisted
   )
 where
+
+import GhcPrelude
 
 import Vectorise.Monad
 import Vectorise.Env
@@ -24,14 +26,12 @@ import Id
 import BasicTypes  (Arity)
 import FastString
 import Control.Monad
-import Control.Applicative
-
 
 -- Inline ---------------------------------------------------------------------
 
 -- |Records whether we should inline a particular binding.
 --
-data Inline 
+data Inline
         = Inline Arity
         | DontInline
 
@@ -62,7 +62,7 @@ hoistExpr fs expr inl
   where
     mk_inline var = case inl of
                       Inline arity -> var `setIdUnfolding`
-                                      mkInlineUnfolding (Just arity) expr
+                                      mkInlineUnfoldingWithArity arity expr
                       DontInline   -> var
 
 hoistVExpr :: VExpr -> Inline -> VM VVar

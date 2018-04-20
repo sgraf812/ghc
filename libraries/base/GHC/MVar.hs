@@ -1,4 +1,4 @@
-{-# LANGUAGE Unsafe, AutoDeriveTypeable #-}
+{-# LANGUAGE Unsafe #-}
 {-# LANGUAGE NoImplicitPrelude, MagicHash, UnboxedTuples #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 {-# OPTIONS_HADDOCK hide #-}
@@ -33,17 +33,16 @@ module GHC.MVar (
     ) where
 
 import GHC.Base
-import Data.Maybe
-import Data.Typeable
 
-data MVar a = MVar (MVar# RealWorld a) deriving( Typeable )
+data MVar a = MVar (MVar# RealWorld a)
 {- ^
 An 'MVar' (pronounced \"em-var\") is a synchronising variable, used
 for communication between concurrent threads.  It can be thought of
-as a a box, which may be empty or full.
+as a box, which may be empty or full.
 -}
 
 -- pull in Eq (Mvar a) too, to avoid GHC.Conc being an orphan-instance module
+-- | @since 4.1.0.0
 instance Eq (MVar a) where
         (MVar mvar1#) == (MVar mvar2#) = isTrue# (sameMVar# mvar1# mvar2#)
 
@@ -91,7 +90,7 @@ takeMVar :: MVar a -> IO a
 takeMVar (MVar mvar#) = IO $ \ s# -> takeMVar# mvar# s#
 
 -- |Atomically read the contents of an 'MVar'.  If the 'MVar' is
--- currently empty, 'readMVar' will wait until its full.
+-- currently empty, 'readMVar' will wait until it is full.
 -- 'readMVar' is guaranteed to receive the next 'putMVar'.
 --
 -- 'readMVar' is multiple-wakeup, so when multiple readers are
@@ -157,7 +156,7 @@ tryPutMVar (MVar mvar#) x = IO $ \ s# ->
 -- returns immediately, with 'Nothing' if the 'MVar' was empty, or
 -- @'Just' a@ if the 'MVar' was full with contents @a@.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 tryReadMVar :: MVar a -> IO (Maybe a)
 tryReadMVar (MVar m) = IO $ \ s ->
     case tryReadMVar# m s of
@@ -178,6 +177,6 @@ isEmptyMVar (MVar mv#) = IO $ \ s# ->
 -- |Add a finalizer to an 'MVar' (GHC only).  See "Foreign.ForeignPtr" and
 -- "System.Mem.Weak" for more about finalizers.
 addMVarFinalizer :: MVar a -> IO () -> IO ()
-addMVarFinalizer (MVar m) finalizer =
-  IO $ \s -> case mkWeak# m () finalizer s of { (# s1, _ #) -> (# s1, () #) }
+addMVarFinalizer (MVar m) (IO finalizer) =
+    IO $ \s -> case mkWeak# m () finalizer s of { (# s1, _ #) -> (# s1, () #) }
 

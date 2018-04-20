@@ -1,7 +1,3 @@
-setTestOpts(only_compiler_types(['ghc']))
-# Keep optimised tests, so we test coercion optimisation
-setTestOpts(omit_ways(['optasm', 'optllvm', 'hpc']))
-
 test('Simple1', normal, compile, [''])
 test('Simple2', normal, compile, [''])
 test('Simple3', normal, compile, [''])
@@ -31,19 +27,10 @@ test('RelaxedExamples', normal, compile, [''])
 test('NonLinearLHS', normal, compile, [''])
 
 test('ind1', normal, compile, [''])
-test('ind2',
-     extra_clean(['Ind2_help.hi', 'Ind2_help.o']),
-     multimod_compile,
-     ['ind2', '-v0'])
-test('impexp',
-     extra_clean(['Exp.hi', 'Exp.o', 'Imp.hi', 'Imp.o']),
-     multimod_compile, 
-     ['Imp', '-w -no-hs-main -c'])
+test('ind2', [extra_files(['Ind2_help.hs'])], multimod_compile, ['ind2', '-v0'])
+test('impexp', [extra_files(['Exp.hs', 'Imp.hs'])], multimod_compile, ['Imp', '-w -no-hs-main -c'])
 
-test('ATLoop',
-     extra_clean(['ATLoop_help.o','ATLoop_help.hi']),
-     multimod_compile,
-     ['ATLoop.hs','-v0'])
+test('ATLoop', [], multimod_compile, ['ATLoop.hs', '-v0'])
 
 test('Deriving', normal, compile, [''])
 test('DerivingNewType', normal, compile, [''])
@@ -52,10 +39,7 @@ test('Records', normal, compile, [''])
 # The point about this test is that it compiles NewTyCo1 and NewTyCo2
 # *separately*
 #
-test('NewTyCo',
-     extra_clean(['NewTyCo1.o', 'NewTyCo1.hi', 'NewTyCo2.o', 'NewTyCo2.hi']),
-     run_command,
-     ['$MAKE -s --no-print-directory NewTyCo'])
+test('NewTyCo', [], run_command, ['$MAKE -s --no-print-directory NewTyCo'])
 
 test('Infix', normal, compile, [''])
 test('Kind', normal, compile, [''])
@@ -147,7 +131,7 @@ test('IndTypesPerf',
      ['$MAKE -s --no-print-directory IndTypesPerf'])
 
 test('T4120', normal, compile, [''])
-test('T3787', reqlib('mtl'), compile, [''])
+test('T3787', normal, compile, [''])
 test('T3826', normal, compile, [''])
 test('T4200', normal, compile, [''])
 test('T3851', normal, compile, [''])
@@ -159,7 +143,7 @@ test('T4484', normal, compile, [''])
 test('T4492', normal, compile, [''])
 test('T4494', normal, compile, [''])
 test('DataFamDeriv', normal, compile, [''])
-test('T1769', when(compiler_lt('ghc', '7.1'), expect_fail), compile, [''])
+test('T1769', normal, compile, [''])
 test('T4497', normal, compile, [''])
 test('T3484', normal, compile, [''])
 test('T3460', normal, compile, [''])
@@ -170,7 +154,7 @@ test('T4981-V2', normal, compile, [''])
 test('T4981-V3', normal, compile, [''])
 
 test('T5002', normal, compile, [''])
-test('PushedInAsGivens', normal, compile, [''])
+test('PushedInAsGivens', normal, compile_fail, [''])
 
 # Superclass equalities
 test('T4338', normal, compile, [''])
@@ -184,17 +168,13 @@ test('HO', normal, compile, [''])
 
 # The point about this test is that it compiles the two T5955
 # modules *separately*
-test('T5955',
-     extra_clean(['T5955.o', 'T5955.hi', 'T5955a.o', 'T5955a.hi']),
-     run_command,
-     ['$MAKE -s --no-print-directory T5955'])
+test('T5955', [], run_command, ['$MAKE -s --no-print-directory T5955'])
 
 test('T6152',
      normal,
      run_command,
      ['$MAKE -s --no-print-directory T6152'])
 
-test('T6088', normal, compile, [''])
 test('T7082', normal, compile, [''])
 
 test('Overlap1', normal, compile, [''])
@@ -205,13 +185,15 @@ test('Overlap14', normal, compile, [''])
 test('T7156', normal, compile, [''])
 test('T5591a', normal, compile, [''])
 test('T5591b', normal, compile, [''])
+test('T6088', normal, compile, [''])
 test('T7280', normal, compile, [''])
 test('T7474', normal, compile, [''])
 test('T7489', normal, compile, [''])
 test('T7585', normal, compile, [''])
 test('T7282', normal, compile, [''])
 test('T7804', normal, compile, [''])
-test('T7837', normal, compile, ['-O -ddump-rule-firings'])
+test('T7837', expect_broken_for(9406, prof_ways), compile,
+     ['-O -ddump-rule-firings'])
 test('T4185', normal, compile, [''])
 
 # Caused infinite loop in the compiler
@@ -234,10 +216,8 @@ test('T8500',
 
 test('T8018', normal, compile, [''])
 test('T8020', normal, compile, [''])
-test('ClosedFam1', extra_clean(['ClosedFam1.o-boot', 'ClosedFam1.hi-boot']),
-     multimod_compile, ['ClosedFam1', '-v0'])
-test('ClosedFam2', extra_clean(['ClosedFam2.o-boot', 'ClosedFam2.hi-boot']),
-     multimod_compile, ['ClosedFam2', '-v0'])
+test('ClosedFam1', [], multimod_compile, ['ClosedFam1', '-v0'])
+test('ClosedFam2', [], multimod_compile, ['ClosedFam2', '-v0'])
 test('T8651', normal, compile, [''])
 test('T8889', normal, compile, [''])
 test('T8913', normal, compile, [''])
@@ -245,3 +225,52 @@ test('T8978', normal, compile, [''])
 test('T8979', normal, compile, [''])
 test('T9085', normal, compile, [''])
 test('T9316', normal, compile, [''])
+test('red-black-delete', normal, compile, [''])
+test('Sock', normal, compile, [''])
+test('T9211', normal, compile, [''])
+test('T9747', normal, compile, [''])
+test('T9582', normal, compile, [''])
+test('T9840', [], multimod_compile, ['T9840', '-v0'])
+test('T9090', normal, compile, [''])
+test('T10020', normal, compile, [''])
+test('T10079', normal, compile, [''])
+test('T10139', normal, compile, [''])
+test('T10340', normal, compile, [''])
+test('T10226', normal, compile, [''])
+test('T10507', normal, compile, [''])
+test('T10634', normal, compile, [''])
+test('T10713', normal, compile, [''])
+test('T10753', normal, compile, [''])
+test('T10806', normal, compile_fail, [''])
+test('T10815', normal, compile, [''])
+test('T10931', normal, compile, [''])
+test('T11187', normal, compile, [''])
+test('T11067', normal, compile, [''])
+test('T10318', normal, compile, [''])
+test('UnusedTyVarWarnings', normal, compile, ['-Wunused-type-patterns'])
+test('UnusedTyVarWarningsNamedWCs', normal, compile, ['-Wunused-type-patterns'])
+test('T11408', normal, compile, [''])
+test('T11361', normal, compile, ['-dunique-increment=-1'])
+  # -dunique-increment=-1 doesn't work inside the file
+test('T11361a', normal, compile_fail, [''])
+test('T11581', normal, compile, [''])
+test('T12175', normal, compile, [''])
+test('T12522', normal, compile, [''])
+test('T12522b', normal, compile, [''])
+test('T12676', normal, compile, [''])
+test('T12526', normal, compile, [''])
+test('T12538', normal, compile_fail, [''])
+test('T13244', normal, compile, [''])
+test('T13398a', normal, compile, [''])
+test('T13398b', normal, compile, [''])
+test('T13662', normal, compile, [''])
+test('T13705', normal, compile, [''])
+test('T12369', normal, compile, [''])
+test('T14045', normal, compile, [''])
+test('T12938', normal, compile, [''])
+test('T14131', normal, compile, [''])
+test('T14162', normal, compile, [''])
+test('T14237', normal, compile, [''])
+test('T14554', normal, compile, [''])
+test('T14680', normal, compile, [''])
+test('T15057', normal, compile, [''])

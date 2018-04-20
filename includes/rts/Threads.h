@@ -12,14 +12,13 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef RTS_THREADS_H
-#define RTS_THREADS_H
+#pragma once
 
-#ifdef HAVE_SYS_TYPES_H
+#if defined(HAVE_SYS_TYPES_H)
 #include <sys/types.h>
 #endif
 
-// 
+//
 // Creating threads
 //
 StgTSO *createThread (Capability *cap, W_ stack_size);
@@ -29,21 +28,23 @@ void scheduleWaitThread (/* in    */ StgTSO *tso,
                          /* inout */ Capability **cap);
 
 StgTSO *createGenThread       (Capability *cap, W_ stack_size,
-			       StgClosure *closure);
+                               StgClosure *closure);
 StgTSO *createIOThread        (Capability *cap, W_ stack_size,
-			       StgClosure *closure);
+                               StgClosure *closure);
 StgTSO *createStrictIOThread  (Capability *cap, W_ stack_size,
-			       StgClosure *closure);
+                               StgClosure *closure);
 
 // Suspending/resuming threads around foreign calls
-void *        suspendThread (StgRegTable *, rtsBool interruptible);
+void *        suspendThread (StgRegTable *, bool interruptible);
 StgRegTable * resumeThread  (void *);
 
 //
 // Thread operations from Threads.c
 //
-int    cmp_thread      (StgPtr tso1, StgPtr tso2);
-int    rts_getThreadId (StgPtr tso);
+int     cmp_thread                       (StgPtr tso1, StgPtr tso2);
+int     rts_getThreadId                  (StgPtr tso);
+void    rts_enableThreadAllocationLimit  (StgPtr tso);
+void    rts_disableThreadAllocationLimit (StgPtr tso);
 
 #if !defined(mingw32_HOST_OS)
 pid_t  forkProcess     (HsStablePtr *entry);
@@ -54,11 +55,13 @@ pid_t  forkProcess     (HsStablePtr *entry)
 
 HsBool rtsSupportsBoundThreads (void);
 
-// The number of Capabilities
+// The number of Capabilities.
+// ToDo: I would like this to be private to the RTS and instead expose a
+// function getNumCapabilities(), but it is used in compiler/cbits/genSym.c
 extern unsigned int n_capabilities;
 
 // The number of Capabilities that are not disabled
-extern nat enabled_capabilities;
+extern uint32_t enabled_capabilities;
 
 #if !IN_STG_CODE
 extern Capability MainCapability;
@@ -68,6 +71,4 @@ extern Capability MainCapability;
 // Change the number of capabilities (only supports increasing the
 // current value at the moment).
 //
-extern void setNumCapabilities (nat new_);
-
-#endif /* RTS_THREADS_H */
+extern void setNumCapabilities (uint32_t new_);

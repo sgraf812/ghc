@@ -12,6 +12,7 @@
 
 ghc_USES_CABAL = YES
 ghc_PACKAGE = ghc-bin
+ghc_EXECUTABLE = ghc
 
 ghc_stage1_CONFIGURE_OPTS += --flags=stage1
 ghc_stage2_CONFIGURE_OPTS += --flags=stage2
@@ -20,15 +21,6 @@ ghc_stage3_CONFIGURE_OPTS += --flags=stage3
 ifeq "$(GhcWithInterpreter)" "YES"
 ghc_stage2_CONFIGURE_OPTS += --flags=ghci
 ghc_stage3_CONFIGURE_OPTS += --flags=ghci
-endif
-
-ifeq "$(compiler_stage1_VERSION_MUNGED)" "YES"
-# If we munge the stage1 version, and we're using a devel snapshot for
-# stage0, then stage1 may actually have an earlier version than stage0
-# (e.g. boot with ghc-7.5.20120316, building ghc-7.5). We therefore
-# need to tell Cabal to use version 7.5 of the ghc package when building
-# in ghc/stage1
-ghc_stage1_CONFIGURE_OPTS += --constraint "ghc == $(compiler_stage1_MUNGED_VERSION)"
 endif
 
 # This package doesn't pass the Cabal checks because data-dir
@@ -51,15 +43,18 @@ ghc_stage1_C_FILES_NODEPS = ghc/hschooks.c
 ghc_stage2_MKDEPENDC_OPTS = -DMAKING_GHC_BUILD_SYSTEM_DEPENDENCIES
 ghc_stage3_MKDEPENDC_OPTS = -DMAKING_GHC_BUILD_SYSTEM_DEPENDENCIES
 
+ghc_stage1_MORE_HC_OPTS += -no-hs-main
+ghc_stage2_MORE_HC_OPTS += -no-hs-main
+ghc_stage3_MORE_HC_OPTS += -no-hs-main
+
 ifeq "$(GhcDebugged)" "YES"
 ghc_stage1_MORE_HC_OPTS += -debug
 ghc_stage2_MORE_HC_OPTS += -debug
 ghc_stage3_MORE_HC_OPTS += -debug
 endif
 
-ifeq "$(GhcDynamic)" "YES"
-ghc_stage2_MORE_HC_OPTS += -dynamic
-ghc_stage3_MORE_HC_OPTS += -dynamic
+ifneq "$(GhcDynamic)" ""
+$(error GhcDynamic is no longer supported, use DYNAMIC_GHC_PROGRAMS instead)
 endif
 
 ifeq "$(GhcThreaded)" "YES"
@@ -96,6 +91,7 @@ echo 'executablename="$$exedir/ghc"' >> "$(WRAPPER)"
 endef
 
 # if stage is set to something other than "1" or "", disable stage 1
+# See Note [Stage1Only vs stage=1] in mk/config.mk.in.
 ifneq "$(filter-out 1,$(stage))" ""
 ghc_stage1_NOT_NEEDED = YES
 endif
@@ -104,6 +100,7 @@ ifneq "$(filter-out 2,$(stage))" ""
 ghc_stage2_NOT_NEEDED = YES
 endif
 # When cross-compiling, the stage 1 compiler is our release compiler, so omit stage 2
+# See Note [Stage1Only vs stage=1] in mk/config.mk.in.
 ifeq "$(Stage1Only)" "YES"
 ghc_stage2_NOT_NEEDED = YES
 endif
@@ -135,6 +132,9 @@ all_ghc_stage3 : $(GHC_STAGE3)
 $(INPLACE_LIB)/settings : settings
 	"$(CP)" $< $@
 
+$(INPLACE_LIB)/llvm-targets : llvm-targets
+	"$(CP)" $< $@
+
 $(INPLACE_LIB)/platformConstants: $(includes_GHCCONSTANTS_HASKELL_VALUE)
 	"$(CP)" $< $@
 
@@ -143,6 +143,7 @@ $(INPLACE_LIB)/platformConstants: $(includes_GHCCONSTANTS_HASKELL_VALUE)
 
 GHC_DEPENDENCIES += $$(unlit_INPLACE)
 GHC_DEPENDENCIES += $(INPLACE_LIB)/settings
+GHC_DEPENDENCIES += $(INPLACE_LIB)/llvm-targets
 GHC_DEPENDENCIES += $(INPLACE_LIB)/platformConstants
 
 $(GHC_STAGE1) : | $(GHC_DEPENDENCIES)
@@ -170,6 +171,7 @@ $(GHC_STAGE2) : $(foreach w,$(GhcLibWays),libraries/base/dist-install/build/GHC/
 endif
 
 INSTALL_LIBS += settings
+INSTALL_LIBS += llvm-targets
 
 ifeq "$(Windows_Host)" "NO"
 install: install_ghc_link

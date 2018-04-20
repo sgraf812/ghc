@@ -7,6 +7,8 @@ module CallArity
     , callArityRHS -- for testing
     ) where
 
+import GhcPrelude
+
 import VarSet
 import VarEnv
 import DynFlags ( DynFlags )
@@ -15,25 +17,26 @@ import BasicTypes
 import CoreSyn
 import Id
 import CoreArity ( typeArity )
-import CoreUtils ( exprIsHNF )
---import Outputable
+import CoreUtils ( exprIsCheap, exprIsTrivial )
 import UnVarGraph
+import Demand
+import Util
 
 import Control.Arrow ( first, second )
 
 
 {-
 %************************************************************************
-%*									*
-              Call Arity Analyis
-%*									*
+%*                                                                      *
+              Call Arity Analysis
+%*                                                                      *
 %************************************************************************
 
 Note [Call Arity: The goal]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The goal of this analysis is to find out if we can eta-expand a local function,
-based on how it is being called. The motivating example is code this this,
+based on how it is being called. The motivating example is this code,
 which comes up when we implement foldl using foldr, and do list fusion:
 
     let go = \x -> let d = case ... of
@@ -46,7 +49,7 @@ If we do not eta-expand `go` to have arity 2, we are going to allocate a lot of
 partial function applications, which would be bad.
 
 The function `go` has a type of arity two, but only one lambda is manifest.
-Further more, an analysis that only looks at the RHS of go cannot be sufficient
+Furthermore, an analysis that only looks at the RHS of go cannot be sufficient
 to eta-expand go: If `go` is ever called with one argument (and the result used
 multiple times), we would be doing the work in `...` multiple times.
 
@@ -75,7 +78,7 @@ correct.
 What we want to know from an expression
 ---------------------------------------
 
-In order to obtain that information for variables, we analyize expression and
+In order to obtain that information for variables, we analyze expression and
 obtain bits of information:
 
  I.  The arity analysis:
@@ -94,7 +97,7 @@ For efficiency reasons, we gather this information only for a set of
 The two analysis are not completely independent, as a higher arity can improve
 the information about what variables are being called once or multiple times.
 
-Note [Analysis I: The arity analyis]
+Note [Analysis I: The arity analysis]
 ------------------------------------
 
 The arity analysis is quite straight forward: The information about an
@@ -103,7 +106,7 @@ expression is an
 where absent variables are bound to Nothing and otherwise to a lower bound to
 their arity.
 
-When we analyize an expression, we analyize it with a given context arity.
+When we analyze an expression, we analyze it with a given context arity.
 Lambdas decrease and applications increase the incoming arity. Analysizing a
 variable will put that arity in the environment. In lets or cases all the
 results from the various subexpressions are lubed, which takes the point-wise
@@ -114,7 +117,7 @@ Note [Analysis II: The Co-Called analysis]
 ------------------------------------------
 
 The second part is more sophisticated. For reasons explained below, it is not
-sufficient to simply know how often an expression evalutes a variable. Instead
+sufficient to simply know how often an expression evaluates a variable. Instead
 we need to know which variables are possibly called together.
 
 The data structure here is an undirected graph of variables, which is provided
@@ -148,10 +151,15 @@ The interesting cases of the analysis:
  * Case alternatives alt₁,alt₂,...:
    Only one can be execuded, so
    Return (alt₁ ∪ alt₂ ∪...)
- * App e₁ e₂ (and analogously Case scrut alts):
-   We get the results from both sides. Additionally, anything called by e₁ can
-   possibly called with anything from e₂.
+ * App e₁ e₂ (and analogously Case scrut alts), with non-trivial e₂:
+   We get the results from both sides, with the argument evaluated at most once.
+   Additionally, anything called by e₁ can possibly be called with anything
+   from e₂.
    Return: C(e₁) ∪ C(e₂) ∪ (fv e₁) × (fv e₂)
+ * App e₁ x:
+   As this is already in A-normal form, CorePrep will not separately lambda
+   bind (and hence share) x. So we conservatively assume multiple calls to x here
+   Return: C(e₁) ∪ (fv e₁) × {x} ∪ {(x,x)}
  * Let v = rhs in body:
    In addition to the results from the subexpressions, add all co-calls from
    everything that the body calls together with v to everthing that is called
@@ -186,7 +194,7 @@ Using the result: Eta-Expansion
 We use the result of these two analyses to decide whether we can eta-expand the
 rhs of a let-bound variable.
 
-If the variable is already a function (exprIsHNF), and all calls to the
+If the variable is already a function (exprIsCheap), and all calls to the
 variables have a higher arity than the current manifest arity (i.e. the number
 of lambdas), expand.
 
@@ -304,18 +312,25 @@ called, i.e. variables bound in a pattern match. So interesting are variables th
  * top-level or let bound
  * and possibly functions (typeArity > 0)
 
-Note [Information about boring variables]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [Taking boring variables into account]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 If we decide that the variable bound in `let x = e1 in e2` is not interesting,
 the analysis of `e2` will not report anything about `x`. To ensure that
-`callArityBind` does still do the right thing we have to extend the result from
-`e2` with a safe approximation.
+`callArityBind` does still do the right thing we have to take that into account
+everytime we would be lookup up `x` in the analysis result of `e2`.
+  * Instead of calling lookupCallArityRes, we return (0, True), indicating
+    that this variable might be called many times with no arguments.
+  * Instead of checking `calledWith x`, we assume that everything can be called
+    with it.
+  * In the recursive case, when calclulating the `cross_calls`, if there is
+    any boring variable in the recursive group, we ignore all co-call-results
+    and directly go to a very conservative assumption.
 
-This is done using `fakeBoringCalls` and has the effect of analysing
-   x `seq` x `seq` e2
-instead, i.e. with `both` the result from `e2` with the most conservative
-result about the uninteresting value.
+The last point has the nice side effect that the relatively expensive
+integration of co-call results in a recursive groups is often skipped. This
+helped to avoid the compile time blowup in some real-world code with large
+recursive groups (#10293).
 
 Note [Recursion and fixpointing]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -327,9 +342,9 @@ For a mutually recursive let, we begin by
  3. We combine the analysis result from the body and the memoized results for
     the arguments (if already present).
  4. For each variable, we find out the incoming arity and whether it is called
-    once, based on the the current analysis result. If this differs from the
+    once, based on the current analysis result. If this differs from the
     memoized results, we re-analyse the rhs and update the memoized table.
- 5. If nothing had to be reanalized, we are done.
+ 5. If nothing had to be reanalyzed, we are done.
     Otherwise, repeat from step 3.
 
 
@@ -337,17 +352,17 @@ Note [Thunks in recursive groups]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 We never eta-expand a thunk in a recursive group, on the grounds that if it is
-part of a recursive group, then it will be called multipe times.
+part of a recursive group, then it will be called multiple times.
 
 This is not necessarily true, e.g.  it would be safe to eta-expand t2 (but not
-t1) in the follwing code:
+t1) in the following code:
 
   let go x = t1
       t1 = if ... then t2 else ...
       t2 = if ... then go 1 else ...
   in go 0
 
-Detecting this would reqiure finding out what variables are only ever called
+Detecting this would require finding out what variables are only ever called
 from thunks. While this is certainly possible, we yet have to see this to be
 relevant in the wild.
 
@@ -360,6 +375,59 @@ to them. The plan is as follows: Treat the top-level binds as nested lets around
 a body representing “all external calls”, which returns a pessimistic
 CallArityRes (the co-call graph is the complete graph, all arityies 0).
 
+Note [Trimming arity]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In the Call Arity papers, we are working on an untyped lambda calculus with no
+other id annotations, where eta-expansion is always possible. But this is not
+the case for Core!
+ 1. We need to ensure the invariant
+      callArity e <= typeArity (exprType e)
+    for the same reasons that exprArity needs this invariant (see Note
+    [exprArity invariant] in CoreArity).
+
+    If we are not doing that, a too-high arity annotation will be stored with
+    the id, confusing the simplifier later on.
+
+ 2. Eta-expanding a right hand side might invalidate existing annotations. In
+    particular, if an id has a strictness annotation of <...><...>b, then
+    passing two arguments to it will definitely bottom out, so the simplifier
+    will throw away additional parameters. This conflicts with Call Arity! So
+    we ensure that we never eta-expand such a value beyond the number of
+    arguments mentioned in the strictness signature.
+    See #10176 for a real-world-example.
+
+Note [What is a thunk]
+~~~~~~~~~~~~~~~~~~~~~~
+
+Originally, everything that is not in WHNF (`exprIsWHNF`) is considered a
+thunk, not eta-expanded, to avoid losing any sharing. This is also how the
+published papers on Call Arity describe it.
+
+In practice, there are thunks that do a just little work, such as
+pattern-matching on a variable, and the benefits of eta-expansion likely
+outweigh the cost of doing that repeatedly. Therefore, this implementation of
+Call Arity considers everything that is not cheap (`exprIsCheap`) as a thunk.
+
+Note [Call Arity and Join Points]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The Call Arity analysis does not care about join points, and treats them just
+like normal functions. This is ok.
+
+The analysis *could* make use of the fact that join points are always evaluated
+in the same context as the join-binding they are defined in and are always
+one-shot, and handle join points separately, as suggested in
+https://ghc.haskell.org/trac/ghc/ticket/13479#comment:10.
+This *might* be more efficient (for example, join points would not have to be
+considered interesting variables), but it would also add redundant code. So for
+now we do not do that.
+
+The simplifier never eta-expands join points (it instead pushes extra arguments from
+an eta-expanded context into the join point’s RHS), so the call arity
+annotation on join points is not actually used. As it would be equally valid
+(though less efficient) to eta-expand join points, this is the simplifier's
+choice, and hence Call Arity sets the call arity for join points as well.
 -}
 
 -- Main entry point
@@ -381,8 +449,7 @@ callArityTopLvl exported int1 (b:bs)
     exported' = filter isExportedId int2 ++ exported
     int' = int1 `addInterestingBinds` b
     (ae1, bs') = callArityTopLvl exported' int' bs
-    ae1' = fakeBoringCalls int' b ae1 -- See Note [Information about boring variables]
-    (ae2, b')  = callArityBind ae1' int1 b
+    (ae2, b')  = callArityBind (boringBinds b) ae1 int1 b
 
 
 callArityRHS :: CoreExpr -> CoreExpr
@@ -434,7 +501,7 @@ callArityAnal arity int (Lam v e)
   where
     (ae, e') = callArityAnal (arity - 1) (int `delVarSet` v) e
 
--- Application. Increase arity for the called expresion, nothing to know about
+-- Application. Increase arity for the called expression, nothing to know about
 -- the second
 callArityAnal arity int (App e (Type t))
     = second (\e -> App e (Type t)) $ callArityAnal arity int e
@@ -443,8 +510,12 @@ callArityAnal arity int (App e1 e2)
   where
     (ae1, e1') = callArityAnal (arity + 1) int e1
     (ae2, e2') = callArityAnal 0           int e2
-    -- See Note [Case and App: Which side to take?]
-    final_ae = ae1 `both` ae2
+    -- If the argument is trivial (e.g. a variable), then it will _not_ be
+    -- let-bound in the Core to STG transformation (CorePrep actually),
+    -- so no sharing will happen here, and we have to assume many calls.
+    ae2' | exprIsTrivial e2 = calledMultipleTimes ae2
+         | otherwise        = ae2
+    final_ae = ae1 `both` ae2'
 
 -- Case expression.
 callArityAnal arity int (Case scrut bndr ty alts)
@@ -457,7 +528,6 @@ callArityAnal arity int (Case scrut bndr ty alts)
                         in  (ae, (dc, bndrs, e'))
     alt_ae = lubRess alt_aes
     (scrut_ae, scrut') = callArityAnal 0 int scrut
-    -- See Note [Case and App: Which side to take?]
     final_ae = scrut_ae `both` alt_ae
 
 -- For lets, use callArityBind
@@ -468,63 +538,74 @@ callArityAnal arity int (Let bind e)
   where
     int_body = int `addInterestingBinds` bind
     (ae_body, e') = callArityAnal arity int_body e
-    ae_body' = fakeBoringCalls int_body bind ae_body -- See Note [Information about boring variables]
-    (final_ae, bind') = callArityBind ae_body' int bind
+    (final_ae, bind') = callArityBind (boringBinds bind) ae_body int bind
 
 -- Which bindings should we look at?
 -- See Note [Which variables are interesting]
+isInteresting :: Var -> Bool
+isInteresting v = not $ null (typeArity (idType v))
+
 interestingBinds :: CoreBind -> [Var]
-interestingBinds = filter go . bindersOf
-  where go v = 0 < length (typeArity (idType v))
+interestingBinds = filter isInteresting . bindersOf
+
+boringBinds :: CoreBind -> VarSet
+boringBinds = mkVarSet . filter (not . isInteresting) . bindersOf
 
 addInterestingBinds :: VarSet -> CoreBind -> VarSet
 addInterestingBinds int bind
     = int `delVarSetList`    bindersOf bind -- Possible shadowing
           `extendVarSetList` interestingBinds bind
 
--- For every boring variable in the binder, add a safe approximation
--- See Note [Information about boring variables]
-fakeBoringCalls :: VarSet -> CoreBind -> CallArityRes -> CallArityRes
-fakeBoringCalls int bind res = boring `both` res
-  where
-    boring = calledMultipleTimes $
-        ( emptyUnVarGraph
-        ,  mkVarEnv [ (v, 0) | v <- bindersOf bind, not (v `elemVarSet` int)])
-
-
 -- Used for both local and top-level binds
--- First argument is the demand from the body
-callArityBind :: CallArityRes -> VarSet -> CoreBind -> (CallArityRes, CoreBind)
+-- Second argument is the demand from the body
+callArityBind :: VarSet -> CallArityRes -> VarSet -> CoreBind -> (CallArityRes, CoreBind)
 -- Non-recursive let
-callArityBind ae_body int (NonRec v rhs)
+callArityBind boring_vars ae_body int (NonRec v rhs)
   | otherwise
   = -- pprTrace "callArityBind:NonRec"
     --          (vcat [ppr v, ppr ae_body, ppr int, ppr ae_rhs, ppr safe_arity])
     (final_ae, NonRec v' rhs')
   where
-    is_thunk = not (exprIsHNF rhs)
+    is_thunk = not (exprIsCheap rhs) -- see note [What is a thunk]
+    -- If v is boring, we will not find it in ae_body, but always assume (0, False)
+    boring = v `elemVarSet` boring_vars
 
-    (arity, called_once)  = lookupCallArityRes ae_body v
+    (arity, called_once)
+        | boring    = (0, False) -- See Note [Taking boring variables into account]
+        | otherwise = lookupCallArityRes ae_body v
     safe_arity | called_once = arity
                | is_thunk    = 0      -- A thunk! Do not eta-expand
                | otherwise   = arity
-    (ae_rhs, rhs') = callArityAnal safe_arity int rhs
+
+    -- See Note [Trimming arity]
+    trimmed_arity = trimArity v safe_arity
+
+    (ae_rhs, rhs') = callArityAnal trimmed_arity int rhs
+
 
     ae_rhs'| called_once     = ae_rhs
            | safe_arity == 0 = ae_rhs -- If it is not a function, its body is evaluated only once
            | otherwise       = calledMultipleTimes ae_rhs
 
-    final_ae = callArityNonRecEnv v ae_rhs' ae_body
-    v' = v `setIdCallArity` safe_arity
+    called_by_v = domRes ae_rhs'
+    called_with_v
+        | boring    = domRes ae_body
+        | otherwise = calledWith ae_body v `delUnVarSet` v
+    final_ae = addCrossCoCalls called_by_v called_with_v $ ae_rhs' `lubRes` resDel v ae_body
 
+    v' = v `setIdCallArity` trimmed_arity
 
 
 -- Recursive let. See Note [Recursion and fixpointing]
-callArityBind ae_body int b@(Rec binds)
-  = -- pprTrace "callArityBind:Rec"
-    --           (vcat [ppr (Rec binds'), ppr ae_body, ppr int, ppr ae_rhs]) $
+callArityBind boring_vars ae_body int b@(Rec binds)
+  = -- (if length binds > 300 then
+    -- pprTrace "callArityBind:Rec"
+    --           (vcat [ppr (Rec binds'), ppr ae_body, ppr int, ppr ae_rhs]) else id) $
     (final_ae, Rec binds')
   where
+    -- See Note [Taking boring variables into account]
+    any_boring = any (`elemVarSet` boring_vars) [ i | (i, _) <- binds]
+
     int_body = int `addInterestingBinds` b
     (ae_rhs, binds') = fix initial_binds
     final_ae = bindersOf b `resDelList` ae_rhs
@@ -540,7 +621,7 @@ callArityBind ae_body int b@(Rec binds)
         = (ae, map (\(i, _, e) -> (i, e)) ann_binds')
       where
         aes_old = [ (i,ae) | (i, Just (_,_,ae), _) <- ann_binds ]
-        ae = callArityRecEnv aes_old ae_body
+        ae = callArityRecEnv any_boring aes_old ae_body
 
         rerun (i, mbLastRun, rhs)
             | i `elemVarSet` int_body && not (i `elemUnVarSet` domRes ae)
@@ -550,50 +631,54 @@ callArityBind ae_body int b@(Rec binds)
             | Just (old_called_once, old_arity, _) <- mbLastRun
             , called_once == old_called_once
             , new_arity == old_arity
-            -- No change, no need to re-analize
+            -- No change, no need to re-analyze
             = (False, (i, mbLastRun, rhs))
 
             | otherwise
-            -- We previously analized this with a different arity (or not at all)
-            = let is_thunk = not (exprIsHNF rhs)
+            -- We previously analyzed this with a different arity (or not at all)
+            = let is_thunk = not (exprIsCheap rhs) -- see note [What is a thunk]
 
                   safe_arity | is_thunk    = 0  -- See Note [Thunks in recursive groups]
                              | otherwise   = new_arity
 
-                  (ae_rhs, rhs') = callArityAnal safe_arity int_body rhs
+                  -- See Note [Trimming arity]
+                  trimmed_arity = trimArity i safe_arity
+
+                  (ae_rhs, rhs') = callArityAnal trimmed_arity int_body rhs
 
                   ae_rhs' | called_once     = ae_rhs
                           | safe_arity == 0 = ae_rhs -- If it is not a function, its body is evaluated only once
                           | otherwise       = calledMultipleTimes ae_rhs
 
-              in (True, (i `setIdCallArity` safe_arity, Just (called_once, new_arity, ae_rhs'), rhs'))
+                  i' = i `setIdCallArity` trimmed_arity
+
+              in (True, (i', Just (called_once, new_arity, ae_rhs'), rhs'))
           where
-            (new_arity, called_once)  = lookupCallArityRes ae i
+            -- See Note [Taking boring variables into account]
+            (new_arity, called_once) | i `elemVarSet` boring_vars = (0, False)
+                                     | otherwise                  = lookupCallArityRes ae i
 
         (changes, ann_binds') = unzip $ map rerun ann_binds
         any_change = or changes
 
--- Combining the results from body and rhs, non-recursive case
--- See Note [Analysis II: The Co-Called analysis]
-callArityNonRecEnv :: Var -> CallArityRes -> CallArityRes -> CallArityRes
-callArityNonRecEnv v ae_rhs ae_body
-    = addCrossCoCalls called_by_v called_with_v $ ae_rhs `lubRes` resDel v ae_body
-  where
-    called_by_v = domRes ae_rhs
-    called_with_v = calledWith ae_body v `delUnVarSet` v
-
 -- Combining the results from body and rhs, (mutually) recursive case
 -- See Note [Analysis II: The Co-Called analysis]
-callArityRecEnv :: [(Var, CallArityRes)] -> CallArityRes -> CallArityRes
-callArityRecEnv ae_rhss ae_body
-    = -- pprTrace "callArityRecEnv" (vcat [ppr ae_rhss, ppr ae_body, ppr ae_new])
+callArityRecEnv :: Bool -> [(Var, CallArityRes)] -> CallArityRes -> CallArityRes
+callArityRecEnv any_boring ae_rhss ae_body
+    = -- (if length ae_rhss > 300 then pprTrace "callArityRecEnv" (vcat [ppr ae_rhss, ppr ae_body, ppr ae_new]) else id) $
       ae_new
   where
     vars = map fst ae_rhss
 
     ae_combined = lubRess (map snd ae_rhss) `lubRes` ae_body
 
-    cross_calls = unionUnVarGraphs $ map cross_call ae_rhss
+    cross_calls
+        -- See Note [Taking boring variables into account]
+        | any_boring               = completeGraph (domRes ae_combined)
+        -- Also, calculating cross_calls is expensive. Simply be conservative
+        -- if the mutually recursive group becomes too large.
+        | lengthExceeds ae_rhss 25 = completeGraph (domRes ae_combined)
+        | otherwise                = unionUnVarGraphs $ map cross_call ae_rhss
     cross_call (v, ae_rhs) = completeBipartiteGraph called_by_v called_with_v
       where
         is_thunk = idCallArity v == 0
@@ -610,12 +695,23 @@ callArityRecEnv ae_rhss ae_body
 
     ae_new = first (cross_calls `unionUnVarGraph`) ae_combined
 
+-- See Note [Trimming arity]
+trimArity :: Id -> Arity -> Arity
+trimArity v a = minimum [a, max_arity_by_type, max_arity_by_strsig]
+  where
+    max_arity_by_type = length (typeArity (idType v))
+    max_arity_by_strsig
+        | isBotRes result_info = length demands
+        | otherwise = a
+
+    (demands, result_info) = splitStrictSig (idStrictness v)
+
 ---------------------------------------
 -- Functions related to CallArityRes --
 ---------------------------------------
 
 -- Result type for the two analyses.
--- See Note [Analysis I: The arity analyis]
+-- See Note [Analysis I: The arity analysis]
 -- and Note [Analysis II: The Co-Called analysis]
 type CallArityRes = (UnVarGraph, VarEnv Arity)
 

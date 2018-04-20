@@ -1,4 +1,4 @@
-{-# LANGUAGE Unsafe #-}
+{-# LANGUAGE Trustworthy #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -16,7 +16,7 @@
 --
 -- References (variables) that can be used within the @ST@ monad are
 -- provided by "Data.STRef", and arrays are provided by
--- "Data.Array.ST".
+-- [Data.Array.ST](https://hackage.haskell.org/package/array/docs/Data-Array-ST.html).
 
 -----------------------------------------------------------------------------
 
@@ -31,5 +31,5 @@ module Control.Monad.ST (
         stToIO,
     ) where
 
-import Control.Monad.ST.Safe
+import Control.Monad.ST.Imp
 

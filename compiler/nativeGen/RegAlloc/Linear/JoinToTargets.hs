@@ -9,6 +9,8 @@
 --
 module RegAlloc.Linear.JoinToTargets (joinToTargets) where
 
+import GhcPrelude
+
 import RegAlloc.Linear.State
 import RegAlloc.Linear.Base
 import RegAlloc.Linear.FreeRegs
@@ -17,6 +19,7 @@ import Instruction
 import Reg
 
 import BlockId
+import Hoopl.Collections
 import Digraph
 import DynFlags
 import Outputable
@@ -24,6 +27,7 @@ import Unique
 import UniqFM
 import UniqSet
 
+import Data.Foldable (foldl')
 
 -- | For a jump instruction at the end of a block, generate fixup code so its
 --      vregs are in the correct regs for its destination.
@@ -87,7 +91,10 @@ joinToTargets' block_live new_blocks block_id instr (dest:dests)
 
         -- and free up those registers which are now free.
         let to_free =
-                [ r     | (reg, loc) <- ufmToList assig
+                [ r     | (reg, loc) <- nonDetUFMToList assig
+                        -- This is non-deterministic but we do not
+                        -- currently support deterministic code-generation.
+                        -- See Note [Unique Determinism and code generation]
                         , not (elemUniqSet_Directly reg live_set)
                         , r          <- regsOfLoc loc ]
 
@@ -124,7 +131,7 @@ joinToTargets_first block_live new_blocks block_id instr dest dests
 
         -- free up the regs that are not live on entry to this block.
         freeregs        <- getFreeRegsR
-        let freeregs' = foldr (frReleaseReg platform) freeregs to_free
+        let freeregs' = foldl' (flip $ frReleaseReg platform) freeregs to_free
 
         -- remember the current assignment on entry to this block.
         setBlockAssigR (mapInsert dest (freeregs', src_assig) block_assig)
@@ -148,7 +155,10 @@ joinToTargets_again
     src_assig dest_assig
 
         -- the assignments already match, no problem.
-        | ufmToList dest_assig == ufmToList src_assig
+        | nonDetUFMToList dest_assig == nonDetUFMToList src_assig
+        -- This is non-deterministic but we do not
+        -- currently support deterministic code-generation.
+        -- See Note [Unique Determinism and code generation]
         = joinToTargets' block_live new_blocks block_id instr dests
 
         -- assignments don't match, need fixup code
@@ -169,7 +179,7 @@ joinToTargets_again
                 --
                 -- We need to do the R2 -> R3 move before R1 -> R2.
                 --
-                let sccs  = stronglyConnCompFromEdgedVerticesR graph
+                let sccs  = stronglyConnCompFromEdgedVerticesOrdR graph
 
 {-              -- debugging
                 pprTrace
@@ -221,9 +231,12 @@ joinToTargets_again
 --      We cut some corners by not handling memory-to-memory moves.
 --      This shouldn't happen because every temporary gets its own stack slot.
 --
-makeRegMovementGraph :: RegMap Loc -> RegMap Loc -> [(Unique, Loc, [Loc])]
+makeRegMovementGraph :: RegMap Loc -> RegMap Loc -> [Node Loc Unique]
 makeRegMovementGraph adjusted_assig dest_assig
- = [ node       | (vreg, src) <- ufmToList adjusted_assig
+ = [ node       | (vreg, src) <- nonDetUFMToList adjusted_assig
+                    -- This is non-deterministic but we do not
+                    -- currently support deterministic code-generation.
+                    -- See Note [Unique Determinism and code generation]
                     -- source reg might not be needed at the dest:
                 , Just loc <- [lookupUFM_Directly dest_assig vreg]
                 , node <- expandNode vreg src loc ]
@@ -244,15 +257,15 @@ expandNode
         :: a
         -> Loc                  -- ^ source of move
         -> Loc                  -- ^ destination of move
-        -> [(a, Loc, [Loc])]
+        -> [Node Loc a ]
 
 expandNode vreg loc@(InReg src) (InBoth dst mem)
-        | src == dst = [(vreg, loc, [InMem mem])]
-        | otherwise  = [(vreg, loc, [InReg dst, InMem mem])]
+        | src == dst = [DigraphNode vreg loc [InMem mem]]
+        | otherwise  = [DigraphNode vreg loc [InReg dst, InMem mem]]
 
 expandNode vreg loc@(InMem src) (InBoth dst mem)
-        | src == mem = [(vreg, loc, [InReg dst])]
-        | otherwise  = [(vreg, loc, [InReg dst, InMem mem])]
+        | src == mem = [DigraphNode vreg loc [InReg dst]]
+        | otherwise  = [DigraphNode vreg loc [InReg dst, InMem mem]]
 
 expandNode _        (InBoth _ src) (InMem dst)
         | src == dst = [] -- guaranteed to be true
@@ -265,7 +278,7 @@ expandNode vreg     (InBoth src _) dst
 
 expandNode vreg src dst
         | src == dst = []
-        | otherwise  = [(vreg, src, [dst])]
+        | otherwise  = [DigraphNode vreg src [dst]]
 
 
 -- | Generate fixup code for a particular component in the move graph
@@ -275,14 +288,14 @@ expandNode vreg src dst
 --
 handleComponent
         :: Instruction instr
-        => Int -> instr -> SCC (Unique, Loc, [Loc])
+        => Int -> instr -> SCC (Node Loc Unique)
         -> RegM freeRegs [instr]
 
 -- If the graph is acyclic then we won't get the swapping problem below.
 --      In this case we can just do the moves directly, and avoid having to
 --      go via a spill slot.
 --
-handleComponent delta _  (AcyclicSCC (vreg, src, dsts))
+handleComponent delta _  (AcyclicSCC (DigraphNode vreg src dsts))
         = mapM (makeMove delta vreg src) dsts
 
 
@@ -302,7 +315,7 @@ handleComponent delta _  (AcyclicSCC (vreg, src, dsts))
 --      require a fixup.
 --
 handleComponent delta instr
-        (CyclicSCC ((vreg, InReg sreg, (InReg dreg: _)) : rest))
+        (CyclicSCC ((DigraphNode vreg (InReg sreg) ((InReg dreg: _))) : rest))
         -- dest list may have more than one element, if the reg is also InMem.
  = do
         -- spill the source into its slot
@@ -313,7 +326,7 @@ handleComponent delta instr
         instrLoad       <- loadR (RegReal dreg) slot
 
         remainingFixUps <- mapM (handleComponent delta instr)
-                                (stronglyConnCompFromEdgedVerticesR rest)
+                                (stronglyConnCompFromEdgedVerticesOrdR rest)
 
         -- make sure to do all the reloads after all the spills,
         --      so we don't end up clobbering the source values.

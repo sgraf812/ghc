@@ -2,9 +2,9 @@
 -- ./configure.  Make sure you are editing ghc.cabal.in, not ghc.cabal.
 
 Name: ghc
-Version: @ProjectVersion@
+Version: @ProjectVersionMunged@
 License: BSD3
-License-File: ../LICENSE
+License-File: LICENSE
 Author: The GHC Team
 Maintainer: glasgow-haskell-users@haskell.org
 Homepage: http://www.haskell.org/ghc/
@@ -40,36 +40,46 @@ Flag stage3
     Default: False
     Manual: True
 
+Flag terminfo
+    Description: Build GHC with terminfo support on non-Windows platforms.
+    Default: True
+    Manual: True
+
 Library
     Default-Language: Haskell2010
     Exposed: False
 
-    Build-Depends: base       >= 4   && < 5,
-                   directory  >= 1   && < 1.3,
-                   process    >= 1   && < 1.3,
+    Build-Depends: base       >= 4.9 && < 5,
+                   deepseq    >= 1.4 && < 1.5,
+                   directory  >= 1   && < 1.4,
+                   process    >= 1   && < 1.7,
                    bytestring >= 0.9 && < 0.11,
-                   time                 < 1.5,
-                   containers >= 0.1 && < 0.6,
+                   binary     == 0.8.*,
+                   time       >= 1.4 && < 1.9,
+                   containers >= 0.5 && < 0.6,
                    array      >= 0.1 && < 0.6,
-                   filepath   >= 1   && < 1.4,
-                   Cabal,
-                   hpc,
-                   transformers,
-                   bin-package-db,
-                   hoopl
-
-    if flag(stage1) && impl(ghc < 7.5)
-        Build-Depends: old-time   >= 1   && < 1.2
+                   filepath   >= 1   && < 1.5,
+                   template-haskell == 2.14.*,
+                   hpc        == 0.6.*,
+                   transformers == 0.5.*,
+                   ghc-boot   == @ProjectVersionMunged@,
+                   ghc-boot-th == @ProjectVersionMunged@,
+                   ghci == @ProjectVersionMunged@
 
     if os(windows)
-        Build-Depends: Win32
+        Build-Depends: Win32  >= 2.3 && < 2.7
     else
-        Build-Depends: unix
+        if flag(terminfo)
+            Build-Depends: terminfo == 0.4.*
+        Build-Depends: unix   >= 2.7 && < 2.9
 
-    GHC-Options: -Wall -fno-warn-name-shadowing
+    GHC-Options: -Wall
+                 -Wno-name-shadowing
+                 -Wnoncanonical-monad-instances
+                 -Wnoncanonical-monadfail-instances
+                 -Wnoncanonical-monoid-instances
 
     if flag(ghci)
-        Build-Depends: template-haskell
         CPP-Options: -DGHCI
         Include-Dirs: ../rts/dist/build @FFIIncludeDir@
 
@@ -104,12 +114,9 @@ Library
 
     Include-Dirs: . parser utils
 
-    if impl( ghc >= 7.9 )
-        -- We need to set the package key to ghc (without a version number)
-        -- as it's magic.  But we can't set it for old versions of GHC (e.g.
-        -- when bootstrapping) because those versions of GHC don't understand
-        -- that GHC is wired-in.
-        GHC-Options: -this-package-key ghc
+    -- We need to set the unit id to ghc (without a version number)
+    -- as it's magic.
+    GHC-Options: -this-unit-id ghc
 
     if flag(stage1)
         Include-Dirs: stage1
@@ -128,6 +135,7 @@ Library
         cbits/genSym.c
 
     hs-source-dirs:
+        backpack
         basicTypes
         cmm
         codeGen
@@ -153,18 +161,35 @@ Library
         utils
         vectorise
 
+    -- we use an explicit Prelude
+    Default-Extensions:
+        NoImplicitPrelude
+
+    Other-Modules:
+        GhcPrelude
+
     Exposed-Modules:
+        Ar
+        FileCleanup
+        DriverBkp
+        BkpSyn
+        NameShape
+        RnModIface
         Avail
+        AsmUtils
         BasicTypes
         ConLike
         DataCon
         PatSyn
         Demand
+        Debug
         Exception
+        FieldLabel
         GhcMonad
         Hooks
         Id
         IdInfo
+        Lexeme
         Literal
         Llvm
         Llvm.AbsSyn
@@ -185,6 +210,7 @@ Library
         NameSet
         OccName
         RdrName
+        NameCache
         SrcLoc
         UniqSupply
         Unique
@@ -199,6 +225,7 @@ Library
         CmmPipeline
         CmmCallConv
         CmmCommonBlockElim
+        CmmImplementSwitchPlans
         CmmContFlowOpt
         CmmExpr
         CmmInfo
@@ -206,6 +233,8 @@ Library
         CmmLint
         CmmLive
         CmmMachOp
+        CmmMonad
+        CmmSwitch
         CmmNode
         CmmOpt
         CmmParse
@@ -214,6 +243,7 @@ Library
         CmmType
         CmmUtils
         CmmLayoutStack
+        EnumSet
         MkGraph
         PprBase
         PprC
@@ -223,6 +253,7 @@ Library
         Bitmap
         CodeGen.Platform
         CodeGen.Platform.ARM
+        CodeGen.Platform.ARM64
         CodeGen.Platform.NoRegs
         CodeGen.Platform.PPC
         CodeGen.Platform.PPC_Darwin
@@ -253,13 +284,18 @@ Library
         CoreLint
         CorePrep
         CoreSubst
+        CoreOpt
         CoreSyn
         TrieMap
         CoreTidy
         CoreUnfold
         CoreUtils
+        CoreSeq
+        CoreStats
         MkCore
         PprCore
+        PmExpr
+        TmOracle
         Check
         Coverage
         Desugar
@@ -271,6 +307,7 @@ Library
         DsGRHSs
         DsListComp
         DsMonad
+        DsUsage
         DsUtils
         Match
         MatchCon
@@ -281,21 +318,26 @@ Library
         HsExpr
         HsImpExp
         HsLit
+        PlaceHolder
+        HsExtension
+        HsInstances
         HsPat
         HsSyn
         HsTypes
         HsUtils
+        HsDumpAst
         BinIface
+        BinFingerprint
         BuildTyCl
         IfaceEnv
         IfaceSyn
         IfaceType
+        ToIface
         LoadIface
         MkIface
         TcIface
         FlagChecker
         Annotations
-        BreakArray
         CmdLineParser
         CodeOutput
         Config
@@ -320,9 +362,18 @@ Library
         PackageConfig
         Packages
         PlatformConstants
+        Plugins
+        TcPluginM
         PprTyThing
-        StaticFlags
+        StaticPtrTable
         SysTools
+        SysTools.BaseDir
+        SysTools.Terminal
+        SysTools.ExtraObj
+        SysTools.Info
+        SysTools.Process
+        SysTools.Tasks
+        Elf
         TidyPgm
         Ctype
         HaddockUtils
@@ -330,7 +381,9 @@ Library
         OptCoercion
         Parser
         RdrHsSyn
+        ApiAnnotation
         ForeignCall
+        KnownUniques
         PrelInfo
         PrelNames
         PrelRules
@@ -338,8 +391,8 @@ Library
         TysPrim
         TysWiredIn
         CostCentre
+        CostCentreState
         ProfInit
-        SCCfinal
         RnBinds
         RnEnv
         RnExpr
@@ -349,6 +402,9 @@ Library
         RnSource
         RnSplice
         RnTypes
+        RnFixity
+        RnUtils
+        RnUnbound
         CoreMonad
         CSE
         FloatIn
@@ -364,7 +420,9 @@ Library
         Simplify
         SimplStg
         StgStats
+        StgCse
         UnariseStg
+        RepType
         Rules
         SpecConstr
         Specialise
@@ -373,6 +431,7 @@ Library
         StgSyn
         CallArity
         DmdAnal
+        Exitify
         WorkWrap
         WwLib
         FamInst
@@ -380,13 +439,17 @@ Library
         TcAnnotations
         TcArrows
         TcBinds
+        TcSigs
         TcClassDcl
         TcDefaults
         TcDeriv
+        TcDerivInfer
+        TcDerivUtils
         TcEnv
         TcExpr
         TcForeign
         TcGenDeriv
+        TcGenFunctor
         TcGenGenerics
         TcHsSyn
         TcHsType
@@ -397,6 +460,8 @@ Library
         TcPat
         TcPatSyn
         TcRnDriver
+        TcBackpack
+        TcRnExports
         TcRnMonad
         TcRnTypes
         TcRules
@@ -404,16 +469,21 @@ Library
         TcErrors
         TcTyClsDecls
         TcTyDecls
+        TcTypeable
         TcType
         TcEvidence
+        TcEvTerm
         TcUnify
         TcInteract
         TcCanonical
+        TcFlatten
         TcSMonad
         TcTypeNats
         TcSplice
         Class
         Coercion
+        DsMeta
+        THNames
         FamInstEnv
         FunDeps
         InstEnv
@@ -421,7 +491,7 @@ Library
         CoAxiom
         Kind
         Type
-        TypeRep
+        TyCoRep
         Unify
         Bag
         Binary
@@ -429,35 +499,38 @@ Library
         BufWrite
         Digraph
         Encoding
-        FastBool
         FastFunctions
         FastMutInt
         FastString
-        FastTypes
+        FastStringEnv
         Fingerprint
         FiniteMap
+        FV
         GraphBase
         GraphColor
         GraphOps
         GraphPpr
         IOEnv
+        Json
         ListSetOps
+        ListT
         Maybes
         MonadUtils
         OrdList
         Outputable
         Pair
         Panic
+        PprColour
         Pretty
-        Serialized
         State
         Stream
         StringBuffer
+        UniqDFM
+        UniqDSet
         UniqFM
+        UniqMap
         UniqSet
         Util
-        ExtsCompat46
---      ^^^  a temporary module necessary to bootstrap with GHC <= 7.6
         Vectorise.Builtins.Base
         Vectorise.Builtins.Initialise
         Vectorise.Builtins
@@ -487,8 +560,11 @@ Library
         Vectorise.Env
         Vectorise.Exp
         Vectorise
+        Hoopl.Block
+        Hoopl.Collections
         Hoopl.Dataflow
-        Hoopl
+        Hoopl.Graph
+        Hoopl.Label
 --        CgInfoTbls used in ghci/DebuggerUtils
 --        CgHeapery  mkVirtHeapOffsets used in ghci
 
@@ -497,7 +573,7 @@ Library
             TargetReg
             NCGMonad
             Instruction
-            Size
+            Format
             Reg
             RegClass
             PIC
@@ -553,19 +629,18 @@ Library
             RegAlloc.Linear.X86_64.FreeRegs
             RegAlloc.Linear.PPC.FreeRegs
             RegAlloc.Linear.SPARC.FreeRegs
-
-    if flag(ghci)
-        Exposed-Modules:
-            DsMeta
+            Dwarf
+            Dwarf.Types
+            Dwarf.Constants
             Convert
+            ByteCodeTypes
             ByteCodeAsm
             ByteCodeGen
             ByteCodeInstr
             ByteCodeItbls
             ByteCodeLink
             Debugger
-            LibFFI
             Linker
-            ObjLink
             RtClosureInspect
             DebuggerUtils
+            GHCi

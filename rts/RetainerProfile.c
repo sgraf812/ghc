@@ -7,10 +7,10 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifdef PROFILING
+#if defined(PROFILING)
 
 // Turn off inlining when debugging - it obfuscates things
-#ifdef DEBUG
+#if defined(DEBUG)
 #define INLINE
 #else
 #define INLINE inline
@@ -33,6 +33,18 @@
 #include "Stable.h" /* markStableTables */
 #include "sm/Storage.h" // for END_OF_STATIC_LIST
 
+/* Note [What is a retainer?]
+   ~~~~~~~~~~~~~~~~~~~~~~~~~~
+The definition of what sorts of things are counted as retainers is a bit hard to
+pin down. Intuitively, we want to identify closures which will help the user
+identify memory leaks due to thunks. In practice we also end up lumping mutable
+objects in this group for reasons that have been lost to time.
+
+The definition of retainer is implemented in isRetainer(), defined later in this
+file.
+*/
+
+
 /*
   Note: what to change in order to plug-in a new retainer profiling scheme?
     (1) type retainer in ../includes/StgRetainerProf.h
@@ -46,10 +58,11 @@
  * Declarations...
  * -------------------------------------------------------------------------- */
 
-static nat retainerGeneration;	// generation
+static uint32_t retainerGeneration;  // generation
 
-static nat numObjectVisited;	// total number of objects visited
-static nat timesAnyObjectVisited; // number of times any objects are visited
+static uint32_t numObjectVisited;    // total number of objects visited
+static uint32_t timesAnyObjectVisited;  // number of times any objects are
+                                        // visited
 
 /*
   The rs field in the profile header of any object points to its retainer
@@ -67,11 +80,11 @@ StgWord flip = 0;     // flip bit
 
 static void retainStack(StgClosure *, retainer, StgPtr, StgPtr);
 static void retainClosure(StgClosure *, StgClosure *, retainer);
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
 static void belongToHeap(StgPtr p);
 #endif
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
 /*
   cStackSize records how many times retainStack() has been invoked recursively,
   that is, the number of activation records for retainStack() on the C stack.
@@ -79,18 +92,18 @@ static void belongToHeap(StgPtr p);
   Invariants:
     cStackSize <= maxCStackSize
  */
-static nat cStackSize, maxCStackSize;
+static uint32_t cStackSize, maxCStackSize;
 
-static nat sumOfNewCost;	// sum of the cost of each object, computed
-				// when the object is first visited
-static nat sumOfNewCostExtra;   // for those objects not visited during
+static uint32_t sumOfNewCost;        // sum of the cost of each object, computed
+                                // when the object is first visited
+static uint32_t sumOfNewCostExtra;   // for those objects not visited during
                                 // retainer profiling, e.g., MUT_VAR
-static nat costArray[N_CLOSURE_TYPES];
+static uint32_t costArray[N_CLOSURE_TYPES];
 
-nat sumOfCostLinear;		// sum of the costs of all object, computed
-				// when linearly traversing the heap after
-				// retainer profiling
-nat costArrayLinear[N_CLOSURE_TYPES];
+uint32_t sumOfCostLinear;            // sum of the costs of all object, computed
+                                // when linearly traversing the heap after
+                                // retainer profiling
+uint32_t costArrayLinear[N_CLOSURE_TYPES];
 #endif
 
 /* -----------------------------------------------------------------------------
@@ -116,29 +129,24 @@ typedef union {
 
     // layout.payload
     struct {
-    // See StgClosureInfo in InfoTables.h
-#if SIZEOF_VOID_P == 8
-	StgWord32 pos;
-	StgWord32 ptrs;
-#else
-	StgWord16 pos;
-	StgWord16 ptrs;
-#endif
-	StgPtr payload;
+        // See StgClosureInfo in InfoTables.h
+        StgHalfWord pos;
+        StgHalfWord ptrs;
+        StgPtr payload;
     } ptrs;
 
     // SRT
     struct {
-	StgClosure **srt;
-	StgWord    srt_bitmap;
+        StgClosure **srt;
+        StgWord    srt_bitmap;
     } srt;
 
     // Large SRT
     struct {
-	StgLargeSRT *srt;
-	StgWord offset;
+        StgLargeSRT *srt;
+        StgWord offset;
     } large_srt;
-	
+
 } nextPos;
 
 typedef struct {
@@ -193,7 +201,7 @@ static stackElement *currentStackBoundary;
     retainer profiling, maxStackSize + maxCStackSize is some value no greater
     than the actual depth of the graph.
  */
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
 static int stackSize, maxStackSize;
 #endif
 
@@ -237,7 +245,7 @@ static void
 initializeTraverseStack( void )
 {
     if (firstStack != NULL) {
-	freeChain(firstStack);
+        freeChain(firstStack);
     }
 
     firstStack = allocGroup(BLOCKS_IN_STACK);
@@ -260,9 +268,9 @@ closeTraverseStack( void )
 }
 
 /* -----------------------------------------------------------------------------
- * Returns rtsTrue if the whole stack is empty.
+ * Returns true if the whole stack is empty.
  * -------------------------------------------------------------------------- */
-static INLINE rtsBool
+static INLINE bool
 isEmptyRetainerStack( void )
 {
     return (firstStack == currentStack) && stackTop == stackLimit;
@@ -271,25 +279,23 @@ isEmptyRetainerStack( void )
 /* -----------------------------------------------------------------------------
  * Returns size of stack
  * -------------------------------------------------------------------------- */
-#ifdef DEBUG
 W_
 retainerStackBlocks( void )
 {
     bdescr* bd;
     W_ res = 0;
 
-    for (bd = firstStack; bd != NULL; bd = bd->link) 
+    for (bd = firstStack; bd != NULL; bd = bd->link)
       res += bd->blocks;
 
     return res;
 }
-#endif
 
 /* -----------------------------------------------------------------------------
- * Returns rtsTrue if stackTop is at the stack boundary of the current stack,
+ * Returns true if stackTop is at the stack boundary of the current stack,
  * i.e., if the current stack chunk is empty.
  * -------------------------------------------------------------------------- */
-static INLINE rtsBool
+static INLINE bool
 isOnBoundary( void )
 {
     return stackTop == currentStackBoundary;
@@ -301,7 +307,7 @@ isOnBoundary( void )
  *   payload[] begins with ptrs pointers followed by non-pointers.
  * -------------------------------------------------------------------------- */
 static INLINE void
-init_ptrs( stackPos *info, nat ptrs, StgPtr payload )
+init_ptrs( stackPos *info, uint32_t ptrs, StgPtr payload )
 {
     info->type              = posTypePtrs;
     info->next.ptrs.pos     = 0;
@@ -316,9 +322,9 @@ static INLINE StgClosure *
 find_ptrs( stackPos *info )
 {
     if (info->next.ptrs.pos < info->next.ptrs.ptrs) {
-	return (StgClosure *)info->next.ptrs.payload[info->next.ptrs.pos++];
+        return (StgClosure *)info->next.ptrs.payload[info->next.ptrs.pos++];
     } else {
-	return NULL;
+        return NULL;
     }
 }
 
@@ -326,30 +332,30 @@ find_ptrs( stackPos *info )
  *  Initializes *info from SRT information stored in *infoTable.
  * -------------------------------------------------------------------------- */
 static INLINE void
-init_srt_fun( stackPos *info, StgFunInfoTable *infoTable )
+init_srt_fun( stackPos *info, const StgFunInfoTable *infoTable )
 {
     if (infoTable->i.srt_bitmap == (StgHalfWord)(-1)) {
-	info->type = posTypeLargeSRT;
-	info->next.large_srt.srt = (StgLargeSRT *)GET_FUN_SRT(infoTable);
-	info->next.large_srt.offset = 0;
+        info->type = posTypeLargeSRT;
+        info->next.large_srt.srt = (StgLargeSRT *)GET_FUN_SRT(infoTable);
+        info->next.large_srt.offset = 0;
     } else {
-	info->type = posTypeSRT;
-	info->next.srt.srt = (StgClosure **)GET_FUN_SRT(infoTable);
-	info->next.srt.srt_bitmap = infoTable->i.srt_bitmap;
+        info->type = posTypeSRT;
+        info->next.srt.srt = (StgClosure **)GET_FUN_SRT(infoTable);
+        info->next.srt.srt_bitmap = infoTable->i.srt_bitmap;
     }
 }
 
 static INLINE void
-init_srt_thunk( stackPos *info, StgThunkInfoTable *infoTable )
+init_srt_thunk( stackPos *info, const StgThunkInfoTable *infoTable )
 {
     if (infoTable->i.srt_bitmap == (StgHalfWord)(-1)) {
-	info->type = posTypeLargeSRT;
-	info->next.large_srt.srt = (StgLargeSRT *)GET_SRT(infoTable);
-	info->next.large_srt.offset = 0;
+        info->type = posTypeLargeSRT;
+        info->next.large_srt.srt = (StgLargeSRT *)GET_SRT(infoTable);
+        info->next.large_srt.offset = 0;
     } else {
-	info->type = posTypeSRT;
-	info->next.srt.srt = (StgClosure **)GET_SRT(infoTable);
-	info->next.srt.srt_bitmap = infoTable->i.srt_bitmap;
+        info->type = posTypeSRT;
+        info->next.srt.srt = (StgClosure **)GET_SRT(infoTable);
+        info->next.srt.srt_bitmap = infoTable->i.srt_bitmap;
     }
 }
 
@@ -363,54 +369,54 @@ find_srt( stackPos *info )
     StgWord bitmap;
 
     if (info->type == posTypeSRT) {
-	// Small SRT bitmap
-	bitmap = info->next.srt.srt_bitmap;
-	while (bitmap != 0) {
-	    if ((bitmap & 1) != 0) {
+        // Small SRT bitmap
+        bitmap = info->next.srt.srt_bitmap;
+        while (bitmap != 0) {
+            if ((bitmap & 1) != 0) {
 #if defined(COMPILING_WINDOWS_DLL)
-		if ((unsigned long)(*(info->next.srt.srt)) & 0x1)
-		    c = (* (StgClosure **)((unsigned long)*(info->next.srt.srt)) & ~0x1);
-		else
-		    c = *(info->next.srt.srt);
+                if ((unsigned long)(*(info->next.srt.srt)) & 0x1)
+                    c = (* (StgClosure **)((unsigned long)*(info->next.srt.srt)) & ~0x1);
+                else
+                    c = *(info->next.srt.srt);
 #else
-		c = *(info->next.srt.srt);
+                c = *(info->next.srt.srt);
 #endif
-		bitmap = bitmap >> 1;
-		info->next.srt.srt++;
-		info->next.srt.srt_bitmap = bitmap;
-		return c;
-	    }
-	    bitmap = bitmap >> 1;
-	    info->next.srt.srt++;
-	}
-	// bitmap is now zero...
-	return NULL;
+                bitmap = bitmap >> 1;
+                info->next.srt.srt++;
+                info->next.srt.srt_bitmap = bitmap;
+                return c;
+            }
+            bitmap = bitmap >> 1;
+            info->next.srt.srt++;
+        }
+        // bitmap is now zero...
+        return NULL;
     }
     else {
-	// Large SRT bitmap
-	nat i = info->next.large_srt.offset;
-	StgWord bitmap;
+        // Large SRT bitmap
+        uint32_t i = info->next.large_srt.offset;
+        StgWord bitmap;
 
-	// Follow the pattern from GC.c:scavenge_large_srt_bitmap().
-	bitmap = info->next.large_srt.srt->l.bitmap[i / BITS_IN(W_)];
-	bitmap = bitmap >> (i % BITS_IN(StgWord));
-	while (i < info->next.large_srt.srt->l.size) {
-	    if ((bitmap & 1) != 0) {
-		c = ((StgClosure **)info->next.large_srt.srt->srt)[i];
-		i++;
-		info->next.large_srt.offset = i;
-		return c;
-	    }
-	    i++;
-	    if (i % BITS_IN(W_) == 0) {
-		bitmap = info->next.large_srt.srt->l.bitmap[i / BITS_IN(W_)];
-	    } else {
-		bitmap = bitmap >> 1;
-	    }
-	}
-	// reached the end of this bitmap.
-	info->next.large_srt.offset = i;
-	return NULL;
+        // Follow the pattern from GC.c:scavenge_large_srt_bitmap().
+        bitmap = info->next.large_srt.srt->l.bitmap[i / BITS_IN(W_)];
+        bitmap = bitmap >> (i % BITS_IN(StgWord));
+        while (i < info->next.large_srt.srt->l.size) {
+            if ((bitmap & 1) != 0) {
+                c = ((StgClosure **)info->next.large_srt.srt->srt)[i];
+                i++;
+                info->next.large_srt.offset = i;
+                return c;
+            }
+            i++;
+            if (i % BITS_IN(W_) == 0) {
+                bitmap = info->next.large_srt.srt->l.bitmap[i / BITS_IN(W_)];
+            } else {
+                bitmap = bitmap >> 1;
+            }
+        }
+        // reached the end of this bitmap.
+        info->next.large_srt.offset = i;
+        return NULL;
     }
 }
 
@@ -418,7 +424,7 @@ find_srt( stackPos *info )
  *  push() pushes a stackElement representing the next child of *c
  *  onto the traverse stack. If *c has no child, *first_child is set
  *  to NULL and nothing is pushed onto the stack. If *c has only one
- *  child, *c_chlid is set to that child and nothing is pushed onto
+ *  child, *c_child is set to that child and nothing is pushed onto
  *  the stack.  If *c has more than two children, *first_child is set
  *  to the first child and a stackElement representing the second
  *  child is pushed onto the stack.
@@ -435,7 +441,7 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
     stackElement se;
     bdescr *nbd;      // Next Block Descriptor
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     // debugBelch("push(): stackTop = 0x%x, currentStackBoundary = 0x%x\n", stackTop, currentStackBoundary);
 #endif
 
@@ -451,170 +457,169 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
 
     // fill in se.info
     switch (get_itbl(c)->type) {
-	// no child, no SRT
+        // no child, no SRT
     case CONSTR_0_1:
     case CONSTR_0_2:
     case ARR_WORDS:
-	*first_child = NULL;
-	return;
+    case COMPACT_NFDATA:
+        *first_child = NULL;
+        return;
 
-	// one child (fixed), no SRT
+        // one child (fixed), no SRT
     case MUT_VAR_CLEAN:
     case MUT_VAR_DIRTY:
-	*first_child = ((StgMutVar *)c)->var;
-	return;
+        *first_child = ((StgMutVar *)c)->var;
+        return;
     case THUNK_SELECTOR:
-	*first_child = ((StgSelector *)c)->selectee;
-	return;
-    case IND_PERM:
+        *first_child = ((StgSelector *)c)->selectee;
+        return;
     case BLACKHOLE:
-	*first_child = ((StgInd *)c)->indirectee;
-	return;
+        *first_child = ((StgInd *)c)->indirectee;
+        return;
     case CONSTR_1_0:
     case CONSTR_1_1:
-	*first_child = c->payload[0];
-	return;
+        *first_child = c->payload[0];
+        return;
 
-	// For CONSTR_2_0 and MVAR, we use se.info.step to record the position
-	// of the next child. We do not write a separate initialization code.
-	// Also we do not have to initialize info.type;
+        // For CONSTR_2_0 and MVAR, we use se.info.step to record the position
+        // of the next child. We do not write a separate initialization code.
+        // Also we do not have to initialize info.type;
 
-	// two children (fixed), no SRT
-	// need to push a stackElement, but nothing to store in se.info
+        // two children (fixed), no SRT
+        // need to push a stackElement, but nothing to store in se.info
     case CONSTR_2_0:
-	*first_child = c->payload[0];         // return the first pointer
-	// se.info.type = posTypeStep;
-	// se.info.next.step = 2;            // 2 = second
-	break;
+        *first_child = c->payload[0];         // return the first pointer
+        // se.info.type = posTypeStep;
+        // se.info.next.step = 2;            // 2 = second
+        break;
 
-	// three children (fixed), no SRT
-	// need to push a stackElement
+        // three children (fixed), no SRT
+        // need to push a stackElement
     case MVAR_CLEAN:
     case MVAR_DIRTY:
-	// head must be TSO and the head of a linked list of TSOs.
-	// Shoule it be a child? Seems to be yes.
-	*first_child = (StgClosure *)((StgMVar *)c)->head;
-	// se.info.type = posTypeStep;
-	se.info.next.step = 2;            // 2 = second
-	break;
+        // head must be TSO and the head of a linked list of TSOs.
+        // Shoule it be a child? Seems to be yes.
+        *first_child = (StgClosure *)((StgMVar *)c)->head;
+        // se.info.type = posTypeStep;
+        se.info.next.step = 2;            // 2 = second
+        break;
 
-	// three children (fixed), no SRT
+        // three children (fixed), no SRT
     case WEAK:
-	*first_child = ((StgWeak *)c)->key;
-	// se.info.type = posTypeStep;
-	se.info.next.step = 2;
-	break;
+        *first_child = ((StgWeak *)c)->key;
+        // se.info.type = posTypeStep;
+        se.info.next.step = 2;
+        break;
 
-	// layout.payload.ptrs, no SRT
+        // layout.payload.ptrs, no SRT
     case TVAR:
     case CONSTR:
+    case CONSTR_NOCAF:
     case PRIM:
     case MUT_PRIM:
     case BCO:
-    case CONSTR_STATIC:
-	init_ptrs(&se.info, get_itbl(c)->layout.payload.ptrs,
-		  (StgPtr)c->payload);
-	*first_child = find_ptrs(&se.info);
-	if (*first_child == NULL)
-	    return;   // no child
-	break;
+        init_ptrs(&se.info, get_itbl(c)->layout.payload.ptrs,
+                  (StgPtr)c->payload);
+        *first_child = find_ptrs(&se.info);
+        if (*first_child == NULL)
+            return;   // no child
+        break;
 
-	// StgMutArrPtr.ptrs, no SRT
+        // StgMutArrPtr.ptrs, no SRT
     case MUT_ARR_PTRS_CLEAN:
     case MUT_ARR_PTRS_DIRTY:
     case MUT_ARR_PTRS_FROZEN:
     case MUT_ARR_PTRS_FROZEN0:
-	init_ptrs(&se.info, ((StgMutArrPtrs *)c)->ptrs,
-		  (StgPtr)(((StgMutArrPtrs *)c)->payload));
-	*first_child = find_ptrs(&se.info);
-	if (*first_child == NULL)
-	    return;
-	break;
+        init_ptrs(&se.info, ((StgMutArrPtrs *)c)->ptrs,
+                  (StgPtr)(((StgMutArrPtrs *)c)->payload));
+        *first_child = find_ptrs(&se.info);
+        if (*first_child == NULL)
+            return;
+        break;
 
-	// StgMutArrPtr.ptrs, no SRT
+        // StgMutArrPtr.ptrs, no SRT
     case SMALL_MUT_ARR_PTRS_CLEAN:
     case SMALL_MUT_ARR_PTRS_DIRTY:
     case SMALL_MUT_ARR_PTRS_FROZEN:
     case SMALL_MUT_ARR_PTRS_FROZEN0:
-	init_ptrs(&se.info, ((StgSmallMutArrPtrs *)c)->ptrs,
-		  (StgPtr)(((StgSmallMutArrPtrs *)c)->payload));
-	*first_child = find_ptrs(&se.info);
-	if (*first_child == NULL)
-	    return;
-	break;
+        init_ptrs(&se.info, ((StgSmallMutArrPtrs *)c)->ptrs,
+                  (StgPtr)(((StgSmallMutArrPtrs *)c)->payload));
+        *first_child = find_ptrs(&se.info);
+        if (*first_child == NULL)
+            return;
+        break;
 
     // layout.payload.ptrs, SRT
     case FUN:           // *c is a heap object.
     case FUN_2_0:
-	init_ptrs(&se.info, get_itbl(c)->layout.payload.ptrs, (StgPtr)c->payload);
-	*first_child = find_ptrs(&se.info);
-	if (*first_child == NULL)
-	    // no child from ptrs, so check SRT
-	    goto fun_srt_only;
-	break;
+        init_ptrs(&se.info, get_itbl(c)->layout.payload.ptrs, (StgPtr)c->payload);
+        *first_child = find_ptrs(&se.info);
+        if (*first_child == NULL)
+            // no child from ptrs, so check SRT
+            goto fun_srt_only;
+        break;
 
     case THUNK:
     case THUNK_2_0:
-	init_ptrs(&se.info, get_itbl(c)->layout.payload.ptrs, 
-		  (StgPtr)((StgThunk *)c)->payload);
-	*first_child = find_ptrs(&se.info);
-	if (*first_child == NULL)
-	    // no child from ptrs, so check SRT
-	    goto thunk_srt_only;
-	break;
+        init_ptrs(&se.info, get_itbl(c)->layout.payload.ptrs,
+                  (StgPtr)((StgThunk *)c)->payload);
+        *first_child = find_ptrs(&se.info);
+        if (*first_child == NULL)
+            // no child from ptrs, so check SRT
+            goto thunk_srt_only;
+        break;
 
-	// 1 fixed child, SRT
+        // 1 fixed child, SRT
     case FUN_1_0:
     case FUN_1_1:
-	*first_child = c->payload[0];
-	ASSERT(*first_child != NULL);
-	init_srt_fun(&se.info, get_fun_itbl(c));
-	break;
+        *first_child = c->payload[0];
+        ASSERT(*first_child != NULL);
+        init_srt_fun(&se.info, get_fun_itbl(c));
+        break;
 
     case THUNK_1_0:
     case THUNK_1_1:
-	*first_child = ((StgThunk *)c)->payload[0];
-	ASSERT(*first_child != NULL);
-	init_srt_thunk(&se.info, get_thunk_itbl(c));
-	break;
+        *first_child = ((StgThunk *)c)->payload[0];
+        ASSERT(*first_child != NULL);
+        init_srt_thunk(&se.info, get_thunk_itbl(c));
+        break;
 
     case FUN_STATIC:      // *c is a heap object.
-	ASSERT(get_itbl(c)->srt_bitmap != 0);
+        ASSERT(get_itbl(c)->srt_bitmap != 0);
     case FUN_0_1:
     case FUN_0_2:
     fun_srt_only:
         init_srt_fun(&se.info, get_fun_itbl(c));
-	*first_child = find_srt(&se.info);
-	if (*first_child == NULL)
-	    return;     // no child
-	break;
+        *first_child = find_srt(&se.info);
+        if (*first_child == NULL)
+            return;     // no child
+        break;
 
     // SRT only
     case THUNK_STATIC:
-	ASSERT(get_itbl(c)->srt_bitmap != 0);
+        ASSERT(get_itbl(c)->srt_bitmap != 0);
     case THUNK_0_1:
     case THUNK_0_2:
     thunk_srt_only:
         init_srt_thunk(&se.info, get_thunk_itbl(c));
-	*first_child = find_srt(&se.info);
-	if (*first_child == NULL)
-	    return;     // no child
-	break;
-	
-    case TREC_CHUNK:
-	*first_child = (StgClosure *)((StgTRecChunk *)c)->prev_chunk;
-	se.info.next.step = 0;  // entry no.
-	break;
+        *first_child = find_srt(&se.info);
+        if (*first_child == NULL)
+            return;     // no child
+        break;
 
-	// cannot appear
+    case TREC_CHUNK:
+        *first_child = (StgClosure *)((StgTRecChunk *)c)->prev_chunk;
+        se.info.next.step = 0;  // entry no.
+        break;
+
+        // cannot appear
     case PAP:
     case AP:
     case AP_STACK:
     case TSO:
     case STACK:
     case IND_STATIC:
-    case CONSTR_NOCAF_STATIC:
-	// stack objects
+        // stack objects
     case UPDATE_FRAME:
     case CATCH_FRAME:
     case UNDERFLOW_FRAME:
@@ -622,31 +627,31 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
     case RET_BCO:
     case RET_SMALL:
     case RET_BIG:
-	// invalid objects
+        // invalid objects
     case IND:
     case INVALID_OBJECT:
     default:
-	barf("Invalid object *c in push()");
-	return;
+        barf("Invalid object *c in push(): %d", get_itbl(c)->type);
+        return;
     }
 
     if (stackTop - 1 < stackBottom) {
-#ifdef DEBUG_RETAINER
-	// debugBelch("push() to the next stack.\n");
+#if defined(DEBUG_RETAINER)
+        // debugBelch("push() to the next stack.\n");
 #endif
-	// currentStack->free is updated when the active stack is switched
-	// to the next stack.
-	currentStack->free = (StgPtr)stackTop;
+        // currentStack->free is updated when the active stack is switched
+        // to the next stack.
+        currentStack->free = (StgPtr)stackTop;
 
-	if (currentStack->link == NULL) {
-	    nbd = allocGroup(BLOCKS_IN_STACK);
-	    nbd->link = NULL;
-	    nbd->u.back = currentStack;
-	    currentStack->link = nbd;
-	} else
-	    nbd = currentStack->link;
+        if (currentStack->link == NULL) {
+            nbd = allocGroup(BLOCKS_IN_STACK);
+            nbd->link = NULL;
+            nbd->u.back = currentStack;
+            currentStack->link = nbd;
+        } else
+            nbd = currentStack->link;
 
-	newStackBlock(nbd);
+        newStackBlock(nbd);
     }
 
     // adjust stackTop (acutal push)
@@ -663,7 +668,7 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
     // field. Is this really harmless? Can we avoid the warning?
     *stackTop = se;
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     stackSize++;
     if (stackSize > maxStackSize) maxStackSize = stackSize;
     // ASSERT(stackSize >= 0);
@@ -689,7 +694,7 @@ popOffReal(void)
 {
     bdescr *pbd;    // Previous Block Descriptor
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     // debugBelch("pop() to the previous stack.\n");
 #endif
 
@@ -697,18 +702,18 @@ popOffReal(void)
     ASSERT(stackBottom == (stackElement *)currentStack->start);
 
     if (firstStack == currentStack) {
-	// The stack is completely empty.
-	stackTop++;
-	ASSERT(stackTop == stackLimit);
-#ifdef DEBUG_RETAINER
-	stackSize--;
-	if (stackSize > maxStackSize) maxStackSize = stackSize;
-	/*
-	  ASSERT(stackSize >= 0);
-	  debugBelch("stackSize = %d\n", stackSize);
-	*/
+        // The stack is completely empty.
+        stackTop++;
+        ASSERT(stackTop == stackLimit);
+#if defined(DEBUG_RETAINER)
+        stackSize--;
+        if (stackSize > maxStackSize) maxStackSize = stackSize;
+        /*
+          ASSERT(stackSize >= 0);
+          debugBelch("stackSize = %d\n", stackSize);
+        */
 #endif
-	return;
+        return;
     }
 
     // currentStack->free is updated when the active stack is switched back
@@ -721,7 +726,7 @@ popOffReal(void)
 
     returnToOldStack(pbd);
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     stackSize--;
     if (stackSize > maxStackSize) maxStackSize = stackSize;
     /*
@@ -733,7 +738,7 @@ popOffReal(void)
 
 static INLINE void
 popOff(void) {
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     // debugBelch("\tpopOff(): stackTop = 0x%x, currentStackBoundary = 0x%x\n", stackTop, currentStackBoundary);
 #endif
 
@@ -742,16 +747,16 @@ popOff(void) {
 
     // <= (instead of <) is wrong!
     if (stackTop + 1 < stackLimit) {
-	stackTop++;
-#ifdef DEBUG_RETAINER
-	stackSize--;
-	if (stackSize > maxStackSize) maxStackSize = stackSize;
-	/*
-	  ASSERT(stackSize >= 0);
-	  debugBelch("stackSize = %d\n", stackSize);
-	*/
+        stackTop++;
+#if defined(DEBUG_RETAINER)
+        stackSize--;
+        if (stackSize > maxStackSize) maxStackSize = stackSize;
+        /*
+          ASSERT(stackSize >= 0);
+          debugBelch("stackSize = %d\n", stackSize);
+        */
 #endif
-	return;
+        return;
     }
 
     popOffReal();
@@ -767,7 +772,7 @@ popOff(void) {
  *  the next object.
  *  If the topmost stack element indicates no more objects are left, pop
  *  off the stack element until either an object can be retrieved or
- *  the current stack chunk becomes empty, indicated by rtsTrue returned by
+ *  the current stack chunk becomes empty, indicated by true returned by
  *  isOnBoundary(), in which case *c is set to NULL.
  *  Note:
  *    It is okay to call this function even when the current stack chunk
@@ -778,188 +783,186 @@ pop( StgClosure **c, StgClosure **cp, retainer *r )
 {
     stackElement *se;
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     // debugBelch("pop(): stackTop = 0x%x, currentStackBoundary = 0x%x\n", stackTop, currentStackBoundary);
 #endif
 
     do {
-	if (isOnBoundary()) {     // if the current stack chunk is depleted
-	    *c = NULL;
-	    return;
-	}
+        if (isOnBoundary()) {     // if the current stack chunk is depleted
+            *c = NULL;
+            return;
+        }
 
-	se = stackTop;
+        se = stackTop;
 
-	switch (get_itbl(se->c)->type) {
-	    // two children (fixed), no SRT
-	    // nothing in se.info
-	case CONSTR_2_0:
-	    *c = se->c->payload[1];
-	    *cp = se->c;
-	    *r = se->c_child_r;
-	    popOff();
-	    return;
+        switch (get_itbl(se->c)->type) {
+            // two children (fixed), no SRT
+            // nothing in se.info
+        case CONSTR_2_0:
+            *c = se->c->payload[1];
+            *cp = se->c;
+            *r = se->c_child_r;
+            popOff();
+            return;
 
-	    // three children (fixed), no SRT
-	    // need to push a stackElement
+            // three children (fixed), no SRT
+            // need to push a stackElement
         case MVAR_CLEAN:
         case MVAR_DIRTY:
-	    if (se->info.next.step == 2) {
-		*c = (StgClosure *)((StgMVar *)se->c)->tail;
-		se->info.next.step++;             // move to the next step
-		// no popOff
-	    } else {
-		*c = ((StgMVar *)se->c)->value;
-		popOff();
-	    }
-	    *cp = se->c;
-	    *r = se->c_child_r;
-	    return;
+            if (se->info.next.step == 2) {
+                *c = (StgClosure *)((StgMVar *)se->c)->tail;
+                se->info.next.step++;             // move to the next step
+                // no popOff
+            } else {
+                *c = ((StgMVar *)se->c)->value;
+                popOff();
+            }
+            *cp = se->c;
+            *r = se->c_child_r;
+            return;
 
-	    // three children (fixed), no SRT
-	case WEAK:
-	    if (se->info.next.step == 2) {
-		*c = ((StgWeak *)se->c)->value;
-		se->info.next.step++;
-		// no popOff
-	    } else {
-		*c = ((StgWeak *)se->c)->finalizer;
-		popOff();
-	    }
-	    *cp = se->c;
-	    *r = se->c_child_r;
-	    return;
+            // three children (fixed), no SRT
+        case WEAK:
+            if (se->info.next.step == 2) {
+                *c = ((StgWeak *)se->c)->value;
+                se->info.next.step++;
+                // no popOff
+            } else {
+                *c = ((StgWeak *)se->c)->finalizer;
+                popOff();
+            }
+            *cp = se->c;
+            *r = se->c_child_r;
+            return;
 
-	case TREC_CHUNK: {
-	    // These are pretty complicated: we have N entries, each
-	    // of which contains 3 fields that we want to follow.  So
-	    // we divide the step counter: the 2 low bits indicate
-	    // which field, and the rest of the bits indicate the
-	    // entry number (starting from zero).
-	    TRecEntry *entry;
-	    nat entry_no = se->info.next.step >> 2;
-	    nat field_no = se->info.next.step & 3;
-	    if (entry_no == ((StgTRecChunk *)se->c)->next_entry_idx) {
-		*c = NULL;
-		popOff();
-		return;
-	    }
-	    entry = &((StgTRecChunk *)se->c)->entries[entry_no];
-	    if (field_no == 0) {
-		*c = (StgClosure *)entry->tvar;
-	    } else if (field_no == 1) {
-		*c = entry->expected_value;
-	    } else {
-		*c = entry->new_value;
-	    }
-	    *cp = se->c;
-	    *r = se->c_child_r;
-	    se->info.next.step++;
-	    return;
-	}
+        case TREC_CHUNK: {
+            // These are pretty complicated: we have N entries, each
+            // of which contains 3 fields that we want to follow.  So
+            // we divide the step counter: the 2 low bits indicate
+            // which field, and the rest of the bits indicate the
+            // entry number (starting from zero).
+            TRecEntry *entry;
+            uint32_t entry_no = se->info.next.step >> 2;
+            uint32_t field_no = se->info.next.step & 3;
+            if (entry_no == ((StgTRecChunk *)se->c)->next_entry_idx) {
+                *c = NULL;
+                popOff();
+                return;
+            }
+            entry = &((StgTRecChunk *)se->c)->entries[entry_no];
+            if (field_no == 0) {
+                *c = (StgClosure *)entry->tvar;
+            } else if (field_no == 1) {
+                *c = entry->expected_value;
+            } else {
+                *c = entry->new_value;
+            }
+            *cp = se->c;
+            *r = se->c_child_r;
+            se->info.next.step++;
+            return;
+        }
 
         case TVAR:
         case CONSTR:
-	case PRIM:
-	case MUT_PRIM:
-	case BCO:
-	case CONSTR_STATIC:
-	    // StgMutArrPtr.ptrs, no SRT
-	case MUT_ARR_PTRS_CLEAN:
-	case MUT_ARR_PTRS_DIRTY:
-	case MUT_ARR_PTRS_FROZEN:
-	case MUT_ARR_PTRS_FROZEN0:
-	    *c = find_ptrs(&se->info);
-	    if (*c == NULL) {
-		popOff();
-		break;
-	    }
-	    *cp = se->c;
-	    *r = se->c_child_r;
-	    return;
+        case PRIM:
+        case MUT_PRIM:
+        case BCO:
+            // StgMutArrPtr.ptrs, no SRT
+        case MUT_ARR_PTRS_CLEAN:
+        case MUT_ARR_PTRS_DIRTY:
+        case MUT_ARR_PTRS_FROZEN:
+        case MUT_ARR_PTRS_FROZEN0:
+            *c = find_ptrs(&se->info);
+            if (*c == NULL) {
+                popOff();
+                break;
+            }
+            *cp = se->c;
+            *r = se->c_child_r;
+            return;
 
-	    // layout.payload.ptrs, SRT
-	case FUN:         // always a heap object
-	case FUN_2_0:
-	    if (se->info.type == posTypePtrs) {
-		*c = find_ptrs(&se->info);
-		if (*c != NULL) {
-		    *cp = se->c;
-		    *r = se->c_child_r;
-		    return;
-		}
-		init_srt_fun(&se->info, get_fun_itbl(se->c));
-	    }
-	    goto do_srt;
+            // layout.payload.ptrs, SRT
+        case FUN:         // always a heap object
+        case FUN_2_0:
+            if (se->info.type == posTypePtrs) {
+                *c = find_ptrs(&se->info);
+                if (*c != NULL) {
+                    *cp = se->c;
+                    *r = se->c_child_r;
+                    return;
+                }
+                init_srt_fun(&se->info, get_fun_itbl(se->c));
+            }
+            goto do_srt;
 
-	case THUNK:
-	case THUNK_2_0:
-	    if (se->info.type == posTypePtrs) {
-		*c = find_ptrs(&se->info);
-		if (*c != NULL) {
-		    *cp = se->c;
-		    *r = se->c_child_r;
-		    return;
-		}
-		init_srt_thunk(&se->info, get_thunk_itbl(se->c));
-	    }
-	    goto do_srt;
+        case THUNK:
+        case THUNK_2_0:
+            if (se->info.type == posTypePtrs) {
+                *c = find_ptrs(&se->info);
+                if (*c != NULL) {
+                    *cp = se->c;
+                    *r = se->c_child_r;
+                    return;
+                }
+                init_srt_thunk(&se->info, get_thunk_itbl(se->c));
+            }
+            goto do_srt;
 
-	    // SRT
-	do_srt:
-	case THUNK_STATIC:
-	case FUN_STATIC:
-	case FUN_0_1:
-	case FUN_0_2:
-	case THUNK_0_1:
-	case THUNK_0_2:
-	case FUN_1_0:
-	case FUN_1_1:
-	case THUNK_1_0:
-	case THUNK_1_1:
-	    *c = find_srt(&se->info);
-	    if (*c != NULL) {
-		*cp = se->c;
-		*r = se->c_child_r;
-		return;
-	    }
-	    popOff();
-	    break;
+            // SRT
+        do_srt:
+        case THUNK_STATIC:
+        case FUN_STATIC:
+        case FUN_0_1:
+        case FUN_0_2:
+        case THUNK_0_1:
+        case THUNK_0_2:
+        case FUN_1_0:
+        case FUN_1_1:
+        case THUNK_1_0:
+        case THUNK_1_1:
+            *c = find_srt(&se->info);
+            if (*c != NULL) {
+                *cp = se->c;
+                *r = se->c_child_r;
+                return;
+            }
+            popOff();
+            break;
 
-	    // no child (fixed), no SRT
-	case CONSTR_0_1:
-	case CONSTR_0_2:
-	case ARR_WORDS:
-	    // one child (fixed), no SRT
-	case MUT_VAR_CLEAN:
-	case MUT_VAR_DIRTY:
-	case THUNK_SELECTOR:
-	case IND_PERM:
-	case CONSTR_1_1:
-	    // cannot appear
-	case PAP:
-	case AP:
-	case AP_STACK:
-	case TSO:
+            // no child (fixed), no SRT
+        case CONSTR_0_1:
+        case CONSTR_0_2:
+        case ARR_WORDS:
+            // one child (fixed), no SRT
+        case MUT_VAR_CLEAN:
+        case MUT_VAR_DIRTY:
+        case THUNK_SELECTOR:
+        case CONSTR_1_1:
+            // cannot appear
+        case PAP:
+        case AP:
+        case AP_STACK:
+        case TSO:
         case STACK:
         case IND_STATIC:
-	case CONSTR_NOCAF_STATIC:
-	    // stack objects
+        case CONSTR_NOCAF:
+            // stack objects
         case UPDATE_FRAME:
-	case CATCH_FRAME:
+        case CATCH_FRAME:
         case UNDERFLOW_FRAME:
         case STOP_FRAME:
-	case RET_BCO:
-	case RET_SMALL:
-	case RET_BIG:
-	    // invalid objects
-	case IND:
-	case INVALID_OBJECT:
-	default:
-	    barf("Invalid object *c in pop()");
-	    return;
-	}
-    } while (rtsTrue);
+        case RET_BCO:
+        case RET_SMALL:
+        case RET_BIG:
+            // invalid objects
+        case IND:
+        case INVALID_OBJECT:
+        default:
+            barf("Invalid object *c in pop()");
+            return;
+        }
+    } while (true);
 }
 
 /* -----------------------------------------------------------------------------
@@ -979,7 +982,7 @@ initRetainerProfiling( void )
 void
 endRetainerProfiling( void )
 {
-#ifdef SECOND_APPROACH
+#if defined(SECOND_APPROACH)
     outputAllRetainerSet(prof_file);
 #endif
 }
@@ -1002,25 +1005,25 @@ static INLINE void
 maybeInitRetainerSet( StgClosure *c )
 {
     if (!isRetainerSetFieldValid(c)) {
-	setRetainerSetToNull(c);
+        setRetainerSetToNull(c);
     }
 }
 
 /* -----------------------------------------------------------------------------
- * Returns rtsTrue if *c is a retainer.
+ * Returns true if *c is a retainer.
  * -------------------------------------------------------------------------- */
-static INLINE rtsBool
+static INLINE bool
 isRetainer( StgClosure *c )
 {
     switch (get_itbl(c)->type) {
-	//
-	//  True case
-	//
-	// TSOs MUST be retainers: they constitute the set of roots.
+        //
+        //  True case
+        //
+        // TSOs MUST be retainers: they constitute the set of roots.
     case TSO:
     case STACK:
 
-	// mutable objects
+        // mutable objects
     case MUT_PRIM:
     case MVAR_CLEAN:
     case MVAR_DIRTY:
@@ -1029,8 +1032,11 @@ isRetainer( StgClosure *c )
     case MUT_VAR_DIRTY:
     case MUT_ARR_PTRS_CLEAN:
     case MUT_ARR_PTRS_DIRTY:
+    case SMALL_MUT_ARR_PTRS_CLEAN:
+    case SMALL_MUT_ARR_PTRS_DIRTY:
+    case BLOCKING_QUEUE:
 
-	// thunks are retainers.
+        // thunks are retainers.
     case THUNK:
     case THUNK_1_0:
     case THUNK_0_1:
@@ -1041,76 +1047,80 @@ isRetainer( StgClosure *c )
     case AP:
     case AP_STACK:
 
-	// Static thunks, or CAFS, are obviously retainers.
+        // Static thunks, or CAFS, are obviously retainers.
     case THUNK_STATIC:
 
-	// WEAK objects are roots; there is separate code in which traversing
-	// begins from WEAK objects.
+        // WEAK objects are roots; there is separate code in which traversing
+        // begins from WEAK objects.
     case WEAK:
-	return rtsTrue;
+        return true;
 
-	//
-	// False case
-	//
+        //
+        // False case
+        //
 
-	// constructors
+        // constructors
     case CONSTR:
+    case CONSTR_NOCAF:
     case CONSTR_1_0:
     case CONSTR_0_1:
     case CONSTR_2_0:
     case CONSTR_1_1:
     case CONSTR_0_2:
-	// functions
+        // functions
     case FUN:
     case FUN_1_0:
     case FUN_0_1:
     case FUN_2_0:
     case FUN_1_1:
     case FUN_0_2:
-	// partial applications
+        // partial applications
     case PAP:
-	// indirection
-    case IND_PERM:
+        // indirection
     // IND_STATIC used to be an error, but at the moment it can happen
     // as isAlive doesn't look through IND_STATIC as it ignores static
     // closures. See trac #3956 for a program that hit this error.
     case IND_STATIC:
     case BLACKHOLE:
-	// static objects
-    case CONSTR_STATIC:
+    case WHITEHOLE:
+        // static objects
     case FUN_STATIC:
-	// misc
+        // misc
     case PRIM:
     case BCO:
     case ARR_WORDS:
-	// STM
+    case COMPACT_NFDATA:
+        // STM
     case TREC_CHUNK:
         // immutable arrays
     case MUT_ARR_PTRS_FROZEN:
     case MUT_ARR_PTRS_FROZEN0:
-	return rtsFalse;
+    case SMALL_MUT_ARR_PTRS_FROZEN:
+    case SMALL_MUT_ARR_PTRS_FROZEN0:
+        return false;
 
-	//
-	// Error case
-	//
-	// CONSTR_NOCAF_STATIC
-	// cannot be *c, *cp, *r in the retainer profiling loop.
-    case CONSTR_NOCAF_STATIC:
-	// Stack objects are invalid because they are never treated as
-	// legal objects during retainer profiling.
+        //
+        // Error case
+        //
+        // Stack objects are invalid because they are never treated as
+        // legal objects during retainer profiling.
     case UPDATE_FRAME:
     case CATCH_FRAME:
+    case CATCH_RETRY_FRAME:
+    case CATCH_STM_FRAME:
     case UNDERFLOW_FRAME:
+    case ATOMICALLY_FRAME:
     case STOP_FRAME:
     case RET_BCO:
     case RET_SMALL:
     case RET_BIG:
-	// other cases
+    case RET_FUN:
+        // other cases
     case IND:
     case INVALID_OBJECT:
     default:
-	barf("Invalid object in isRetainer(): %d", get_itbl(c)->type);
-	return rtsFalse;
+        barf("Invalid object in isRetainer(): %d", get_itbl(c)->type);
+        return false;
     }
 }
 
@@ -1133,16 +1143,7 @@ getRetainerFrom( StgClosure *c )
 {
     ASSERT(isRetainer(c));
 
-#if defined(RETAINER_SCHEME_INFO)
-    // Retainer scheme 1: retainer = info table
-    return get_itbl(c);
-#elif defined(RETAINER_SCHEME_CCS)
-    // Retainer scheme 2: retainer = cost centre stack
     return c->header.prof.ccs;
-#elif defined(RETAINER_SCHEME_CC)
-    // Retainer scheme 3: retainer = cost centre
-    return c->header.prof.ccs->cc;
-#endif
 }
 
 /* -----------------------------------------------------------------------------
@@ -1165,40 +1166,40 @@ associate( StgClosure *c, RetainerSet *s )
    -------------------------------------------------------------------------- */
 
 static void
-retain_large_bitmap (StgPtr p, StgLargeBitmap *large_bitmap, nat size,
-		     StgClosure *c, retainer c_child_r)
+retain_large_bitmap (StgPtr p, StgLargeBitmap *large_bitmap, uint32_t size,
+                     StgClosure *c, retainer c_child_r)
 {
-    nat i, b;
+    uint32_t i, b;
     StgWord bitmap;
-    
+
     b = 0;
     bitmap = large_bitmap->bitmap[b];
     for (i = 0; i < size; ) {
-	if ((bitmap & 1) == 0) {
-	    retainClosure((StgClosure *)*p, c, c_child_r);
-	}
-	i++;
-	p++;
-	if (i % BITS_IN(W_) == 0) {
-	    b++;
-	    bitmap = large_bitmap->bitmap[b];
-	} else {
-	    bitmap = bitmap >> 1;
-	}
+        if ((bitmap & 1) == 0) {
+            retainClosure((StgClosure *)*p, c, c_child_r);
+        }
+        i++;
+        p++;
+        if (i % BITS_IN(W_) == 0) {
+            b++;
+            bitmap = large_bitmap->bitmap[b];
+        } else {
+            bitmap = bitmap >> 1;
+        }
     }
 }
 
 static INLINE StgPtr
-retain_small_bitmap (StgPtr p, nat size, StgWord bitmap,
-		     StgClosure *c, retainer c_child_r)
+retain_small_bitmap (StgPtr p, uint32_t size, StgWord bitmap,
+                     StgClosure *c, retainer c_child_r)
 {
     while (size > 0) {
-	if ((bitmap & 1) == 0) {
-	    retainClosure((StgClosure *)*p, c, c_child_r);
-	}
-	p++;
-	bitmap = bitmap >> 1;
-	size--;
+        if ((bitmap & 1) == 0) {
+            retainClosure((StgClosure *)*p, c, c_child_r);
+        }
+        p++;
+        bitmap = bitmap >> 1;
+        size--;
     }
     return p;
 }
@@ -1210,39 +1211,40 @@ retain_small_bitmap (StgPtr p, nat size, StgWord bitmap,
 static void
 retain_large_srt_bitmap (StgLargeSRT *srt, StgClosure *c, retainer c_child_r)
 {
-    nat i, b, size;
+    uint32_t i, b, size;
     StgWord bitmap;
     StgClosure **p;
-    
+
     b = 0;
     p = (StgClosure **)srt->srt;
     size   = srt->l.size;
     bitmap = srt->l.bitmap[b];
     for (i = 0; i < size; ) {
-	if ((bitmap & 1) != 0) {
-	    retainClosure((StgClosure *)*p, c, c_child_r);
-	}
-	i++;
-	p++;
-	if (i % BITS_IN(W_) == 0) {
-	    b++;
-	    bitmap = srt->l.bitmap[b];
-	} else {
-	    bitmap = bitmap >> 1;
-	}
+        if ((bitmap & 1) != 0) {
+            retainClosure((StgClosure *)*p, c, c_child_r);
+        }
+        i++;
+        p++;
+        if (i % BITS_IN(W_) == 0) {
+            b++;
+            bitmap = srt->l.bitmap[b];
+        } else {
+            bitmap = bitmap >> 1;
+        }
     }
 }
 
 static INLINE void
-retainSRT (StgClosure **srt, nat srt_bitmap, StgClosure *c, retainer c_child_r)
+retainSRT (StgClosure **srt, uint32_t srt_bitmap, StgClosure *c,
+            retainer c_child_r)
 {
-  nat bitmap;
+  uint32_t bitmap;
   StgClosure **p;
 
   bitmap = srt_bitmap;
   p = srt;
 
-  if (bitmap == (StgHalfWord)(-1)) {  
+  if (bitmap == (StgHalfWord)(-1)) {
       retain_large_srt_bitmap( (StgLargeSRT *)srt, c, c_child_r );
       return;
   }
@@ -1250,14 +1252,14 @@ retainSRT (StgClosure **srt, nat srt_bitmap, StgClosure *c, retainer c_child_r)
   while (bitmap != 0) {
       if ((bitmap & 1) != 0) {
 #if defined(COMPILING_WINDOWS_DLL)
-	  if ( (unsigned long)(*srt) & 0x1 ) {
-	      retainClosure(* (StgClosure**) ((unsigned long) (*srt) & ~0x1), 
-			    c, c_child_r);
-	  } else {
-	      retainClosure(*srt,c,c_child_r);
-	  }
+          if ( (unsigned long)(*srt) & 0x1 ) {
+              retainClosure(* (StgClosure**) ((unsigned long) (*srt) & ~0x1),
+                            c, c_child_r);
+          } else {
+              retainClosure(*srt,c,c_child_r);
+          }
 #else
-	  retainClosure(*srt,c,c_child_r);
+          retainClosure(*srt,c,c_child_r);
 #endif
       }
       p++;
@@ -1277,7 +1279,7 @@ retainSRT (StgClosure **srt, nat srt_bitmap, StgClosure *c, retainer c_child_r)
  *    RSET(c) and RSET(c_child_r) are valid, i.e., their
  *    interpretation conforms to the current value of flip (even when they
  *    are interpreted to be NULL).
- *    If *c is TSO, its state is not ThreadComplete,or ThreadKilled, 
+ *    If *c is TSO, its state is not ThreadComplete,or ThreadKilled,
  *    which means that its stack is ready to process.
  *  Note:
  *    This code was almost plagiarzied from GC.c! For each pointer,
@@ -1285,15 +1287,15 @@ retainSRT (StgClosure **srt, nat srt_bitmap, StgClosure *c, retainer c_child_r)
  * -------------------------------------------------------------------------- */
 static void
 retainStack( StgClosure *c, retainer c_child_r,
-	     StgPtr stackStart, StgPtr stackEnd )
+             StgPtr stackStart, StgPtr stackEnd )
 {
     stackElement *oldStackBoundary;
     StgPtr p;
-    StgRetInfoTable *info;
+    const StgRetInfoTable *info;
     StgWord bitmap;
-    nat size;
+    uint32_t size;
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     cStackSize++;
     if (cStackSize > maxCStackSize) maxCStackSize = cStackSize;
 #endif
@@ -1307,7 +1309,7 @@ retainStack( StgClosure *c, retainer c_child_r,
     oldStackBoundary = currentStackBoundary;
     currentStackBoundary = stackTop;
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     // debugBelch("retainStack() called: oldStackBoundary = 0x%x, currentStackBoundary = 0x%x\n", oldStackBoundary, currentStackBoundary);
 #endif
 
@@ -1315,96 +1317,96 @@ retainStack( StgClosure *c, retainer c_child_r,
 
     p = stackStart;
     while (p < stackEnd) {
-	info = get_ret_itbl((StgClosure *)p);
+        info = get_ret_itbl((StgClosure *)p);
 
-	switch(info->i.type) {
+        switch(info->i.type) {
 
-	case UPDATE_FRAME:
-	    retainClosure(((StgUpdateFrame *)p)->updatee, c, c_child_r);
-	    p += sizeofW(StgUpdateFrame);
-	    continue;
+        case UPDATE_FRAME:
+            retainClosure(((StgUpdateFrame *)p)->updatee, c, c_child_r);
+            p += sizeofW(StgUpdateFrame);
+            continue;
 
         case UNDERFLOW_FRAME:
         case STOP_FRAME:
-	case CATCH_FRAME:
-	case CATCH_STM_FRAME:
-	case CATCH_RETRY_FRAME:
-	case ATOMICALLY_FRAME:
-	case RET_SMALL:
-	    bitmap = BITMAP_BITS(info->i.layout.bitmap);
-	    size   = BITMAP_SIZE(info->i.layout.bitmap);
-	    p++;
-	    p = retain_small_bitmap(p, size, bitmap, c, c_child_r);
+        case CATCH_FRAME:
+        case CATCH_STM_FRAME:
+        case CATCH_RETRY_FRAME:
+        case ATOMICALLY_FRAME:
+        case RET_SMALL:
+            bitmap = BITMAP_BITS(info->i.layout.bitmap);
+            size   = BITMAP_SIZE(info->i.layout.bitmap);
+            p++;
+            p = retain_small_bitmap(p, size, bitmap, c, c_child_r);
 
-	follow_srt:
-	    retainSRT((StgClosure **)GET_SRT(info), info->i.srt_bitmap, c, c_child_r);
-	    continue;
+        follow_srt:
+            retainSRT((StgClosure **)GET_SRT(info), info->i.srt_bitmap, c, c_child_r);
+            continue;
 
-	case RET_BCO: {
-	    StgBCO *bco;
-	    
-	    p++;
-	    retainClosure((StgClosure *)*p, c, c_child_r);
-	    bco = (StgBCO *)*p;
-	    p++;
-	    size = BCO_BITMAP_SIZE(bco);
-	    retain_large_bitmap(p, BCO_BITMAP(bco), size, c, c_child_r);
-	    p += size;
-	    continue;
-	}
+        case RET_BCO: {
+            StgBCO *bco;
 
-	    // large bitmap (> 32 entries, or > 64 on a 64-bit machine) 
-	case RET_BIG:
-	    size = GET_LARGE_BITMAP(&info->i)->size;
-	    p++;
-	    retain_large_bitmap(p, GET_LARGE_BITMAP(&info->i),
-				size, c, c_child_r);
-	    p += size;
-	    // and don't forget to follow the SRT 
-	    goto follow_srt;
+            p++;
+            retainClosure((StgClosure *)*p, c, c_child_r);
+            bco = (StgBCO *)*p;
+            p++;
+            size = BCO_BITMAP_SIZE(bco);
+            retain_large_bitmap(p, BCO_BITMAP(bco), size, c, c_child_r);
+            p += size;
+            continue;
+        }
+
+            // large bitmap (> 32 entries, or > 64 on a 64-bit machine)
+        case RET_BIG:
+            size = GET_LARGE_BITMAP(&info->i)->size;
+            p++;
+            retain_large_bitmap(p, GET_LARGE_BITMAP(&info->i),
+                                size, c, c_child_r);
+            p += size;
+            // and don't forget to follow the SRT
+            goto follow_srt;
 
         case RET_FUN: {
-	    StgRetFun *ret_fun = (StgRetFun *)p;
-	    StgFunInfoTable *fun_info;
-	    
-	    retainClosure(ret_fun->fun, c, c_child_r);
-	    fun_info = get_fun_itbl(UNTAG_CLOSURE(ret_fun->fun));
-	    
-	    p = (P_)&ret_fun->payload;
-	    switch (fun_info->f.fun_type) {
-	    case ARG_GEN:
-		bitmap = BITMAP_BITS(fun_info->f.b.bitmap);
-		size = BITMAP_SIZE(fun_info->f.b.bitmap);
-		p = retain_small_bitmap(p, size, bitmap, c, c_child_r);
-		break;
-	    case ARG_GEN_BIG:
-		size = GET_FUN_LARGE_BITMAP(fun_info)->size;
-		retain_large_bitmap(p, GET_FUN_LARGE_BITMAP(fun_info), 
-				    size, c, c_child_r);
-		p += size;
-		break;
-	    default:
-		bitmap = BITMAP_BITS(stg_arg_bitmaps[fun_info->f.fun_type]);
-		size = BITMAP_SIZE(stg_arg_bitmaps[fun_info->f.fun_type]);
-		p = retain_small_bitmap(p, size, bitmap, c, c_child_r);
-		break;
-	    }
-	    goto follow_srt;
-	}
+            StgRetFun *ret_fun = (StgRetFun *)p;
+            const StgFunInfoTable *fun_info;
 
-	default:
-	    barf("Invalid object found in retainStack(): %d",
-		 (int)(info->i.type));
-	}
+            retainClosure(ret_fun->fun, c, c_child_r);
+            fun_info = get_fun_itbl(UNTAG_CONST_CLOSURE(ret_fun->fun));
+
+            p = (P_)&ret_fun->payload;
+            switch (fun_info->f.fun_type) {
+            case ARG_GEN:
+                bitmap = BITMAP_BITS(fun_info->f.b.bitmap);
+                size = BITMAP_SIZE(fun_info->f.b.bitmap);
+                p = retain_small_bitmap(p, size, bitmap, c, c_child_r);
+                break;
+            case ARG_GEN_BIG:
+                size = GET_FUN_LARGE_BITMAP(fun_info)->size;
+                retain_large_bitmap(p, GET_FUN_LARGE_BITMAP(fun_info),
+                                    size, c, c_child_r);
+                p += size;
+                break;
+            default:
+                bitmap = BITMAP_BITS(stg_arg_bitmaps[fun_info->f.fun_type]);
+                size = BITMAP_SIZE(stg_arg_bitmaps[fun_info->f.fun_type]);
+                p = retain_small_bitmap(p, size, bitmap, c, c_child_r);
+                break;
+            }
+            goto follow_srt;
+        }
+
+        default:
+            barf("Invalid object found in retainStack(): %d",
+                 (int)(info->i.type));
+        }
     }
 
     // restore currentStackBoundary
     currentStackBoundary = oldStackBoundary;
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     // debugBelch("retainStack() finished: currentStackBoundary = 0x%x\n", currentStackBoundary);
 #endif
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     cStackSize--;
 #endif
 }
@@ -1415,13 +1417,13 @@ retainStack( StgClosure *c, retainer c_child_r,
 
 static INLINE StgPtr
 retain_PAP_payload (StgClosure *pap,    /* NOT tagged */
-                    retainer c_child_r, /* NOT tagged */ 
+                    retainer c_child_r, /* NOT tagged */
                     StgClosure *fun,    /* tagged */
-		    StgClosure** payload, StgWord n_args)
+                    StgClosure** payload, StgWord n_args)
 {
     StgPtr p;
     StgWord bitmap;
-    StgFunInfoTable *fun_info;
+    const StgFunInfoTable *fun_info;
 
     retainClosure(fun, pap, c_child_r);
     fun = UNTAG_CLOSURE(fun);
@@ -1432,24 +1434,24 @@ retain_PAP_payload (StgClosure *pap,    /* NOT tagged */
 
     switch (fun_info->f.fun_type) {
     case ARG_GEN:
-	bitmap = BITMAP_BITS(fun_info->f.b.bitmap);
-	p = retain_small_bitmap(p, n_args, bitmap, 
-				pap, c_child_r);
-	break;
+        bitmap = BITMAP_BITS(fun_info->f.b.bitmap);
+        p = retain_small_bitmap(p, n_args, bitmap,
+                                pap, c_child_r);
+        break;
     case ARG_GEN_BIG:
-	retain_large_bitmap(p, GET_FUN_LARGE_BITMAP(fun_info),
-			    n_args, pap, c_child_r);
-	p += n_args;
-	break;
+        retain_large_bitmap(p, GET_FUN_LARGE_BITMAP(fun_info),
+                            n_args, pap, c_child_r);
+        p += n_args;
+        break;
     case ARG_BCO:
-	retain_large_bitmap((StgPtr)payload, BCO_BITMAP(fun),
-			    n_args, pap, c_child_r);
-	p += n_args;
-	break;
+        retain_large_bitmap((StgPtr)payload, BCO_BITMAP(fun),
+                            n_args, pap, c_child_r);
+        p += n_args;
+        break;
     default:
-	bitmap = BITMAP_BITS(stg_arg_bitmaps[fun_info->f.fun_type]);
-	p = retain_small_bitmap(p, n_args, bitmap, pap, c_child_r);
-	break;
+        bitmap = BITMAP_BITS(stg_arg_bitmaps[fun_info->f.fun_type]);
+        p = retain_small_bitmap(p, n_args, bitmap, pap, c_child_r);
+        break;
     }
     return p;
 }
@@ -1483,11 +1485,11 @@ retainClosure( StgClosure *c0, StgClosure *cp0, retainer r0 )
     retainer r, c_child_r;
     StgWord typeOfc;
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     // StgPtr oldStackTop;
 #endif
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     // oldStackTop = stackTop;
     // debugBelch("retainClosure() called: c0 = 0x%x, cp0 = 0x%x, r0 = 0x%x\n", c0, cp0, r0);
 #endif
@@ -1504,10 +1506,10 @@ loop:
     pop(&c, &cp, &r);
 
     if (c == NULL) {
-#ifdef DEBUG_RETAINER
-	// debugBelch("retainClosure() ends: oldStackTop = 0x%x, stackTop = 0x%x\n", oldStackTop, stackTop);
+#if defined(DEBUG_RETAINER)
+        // debugBelch("retainClosure() ends: oldStackTop = 0x%x, stackTop = 0x%x\n", oldStackTop, stackTop);
 #endif
-	return;
+        return;
     }
 
     //debugBelch("inner_loop");
@@ -1529,77 +1531,76 @@ inner_loop:
 
     typeOfc = get_itbl(c)->type;
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     switch (typeOfc) {
     case IND_STATIC:
-    case CONSTR_NOCAF_STATIC:
-    case CONSTR_STATIC:
+    case CONSTR_NOCAF:
     case THUNK_STATIC:
     case FUN_STATIC:
-	break;
+        break;
     default:
-	if (retainerSetOf(c) == NULL) {   // first visit?
-	    costArray[typeOfc] += cost(c);
-	    sumOfNewCost += cost(c);
-	}
-	break;
+        if (retainerSetOf(c) == NULL) {   // first visit?
+            costArray[typeOfc] += cost(c);
+            sumOfNewCost += cost(c);
+        }
+        break;
     }
 #endif
 
     // special cases
     switch (typeOfc) {
     case TSO:
-	if (((StgTSO *)c)->what_next == ThreadComplete ||
-	    ((StgTSO *)c)->what_next == ThreadKilled) {
-#ifdef DEBUG_RETAINER
-	    debugBelch("ThreadComplete or ThreadKilled encountered in retainClosure()\n");
+        if (((StgTSO *)c)->what_next == ThreadComplete ||
+            ((StgTSO *)c)->what_next == ThreadKilled) {
+#if defined(DEBUG_RETAINER)
+            debugBelch("ThreadComplete or ThreadKilled encountered in retainClosure()\n");
 #endif
-	    goto loop;
-	}
+            goto loop;
+        }
         break;
 
     case IND_STATIC:
-	// We just skip IND_STATIC, so its retainer set is never computed.
-	c = ((StgIndStatic *)c)->indirectee;
-	goto inner_loop;
-	// static objects with no pointers out, so goto loop.
-    case CONSTR_NOCAF_STATIC:
-	// It is not just enough not to compute the retainer set for *c; it is
-	// mandatory because CONSTR_NOCAF_STATIC are not reachable from
-	// scavenged_static_objects, the list from which is assumed to traverse
-	// all static objects after major garbage collections.
-	goto loop;
+        // We just skip IND_STATIC, so its retainer set is never computed.
+        c = ((StgIndStatic *)c)->indirectee;
+        goto inner_loop;
+        // static objects with no pointers out, so goto loop.
+    case CONSTR_NOCAF:
+        // It is not just enough not to compute the retainer set for *c; it is
+        // mandatory because CONSTR_NOCAF are not reachable from
+        // scavenged_static_objects, the list from which is assumed to traverse
+        // all static objects after major garbage collections.
+        goto loop;
     case THUNK_STATIC:
     case FUN_STATIC:
-	if (get_itbl(c)->srt_bitmap == 0) {
-	    // No need to compute the retainer set; no dynamic objects
-	    // are reachable from *c.
-	    //
-	    // Static objects: if we traverse all the live closures,
-	    // including static closures, during each heap census then
-	    // we will observe that some static closures appear and
-	    // disappear.  eg. a closure may contain a pointer to a
-	    // static function 'f' which is not otherwise reachable
-	    // (it doesn't indirectly point to any CAFs, so it doesn't
-	    // appear in any SRTs), so we would find 'f' during
-	    // traversal.  However on the next sweep there may be no
-	    // closures pointing to 'f'.
-	    //
-	    // We must therefore ignore static closures whose SRT is
-	    // empty, because these are exactly the closures that may
-	    // "appear".  A closure with a non-empty SRT, and which is
-	    // still required, will always be reachable.
-	    //
-	    // But what about CONSTR_STATIC?  Surely these may be able
-	    // to appear, and they don't have SRTs, so we can't
-	    // check.  So for now, we're calling
-	    // resetStaticObjectForRetainerProfiling() from the
-	    // garbage collector to reset the retainer sets in all the
-	    // reachable static objects.
-	    goto loop;
-	}
+        if (get_itbl(c)->srt_bitmap == 0) {
+            // No need to compute the retainer set; no dynamic objects
+            // are reachable from *c.
+            //
+            // Static objects: if we traverse all the live closures,
+            // including static closures, during each heap census then
+            // we will observe that some static closures appear and
+            // disappear.  eg. a closure may contain a pointer to a
+            // static function 'f' which is not otherwise reachable
+            // (it doesn't indirectly point to any CAFs, so it doesn't
+            // appear in any SRTs), so we would find 'f' during
+            // traversal.  However on the next sweep there may be no
+            // closures pointing to 'f'.
+            //
+            // We must therefore ignore static closures whose SRT is
+            // empty, because these are exactly the closures that may
+            // "appear".  A closure with a non-empty SRT, and which is
+            // still required, will always be reachable.
+            //
+            // But what about CONSTR?  Surely these may be able
+            // to appear, and they don't have SRTs, so we can't
+            // check.  So for now, we're calling
+            // resetStaticObjectForRetainerProfiling() from the
+            // garbage collector to reset the retainer sets in all the
+            // reachable static objects.
+            goto loop;
+        }
     default:
-	break;
+        break;
     }
 
     // The above objects are ignored in computing the average number of times
@@ -1611,54 +1612,54 @@ inner_loop:
     retainerSetOfc = retainerSetOf(c);
 
     // Now compute s:
-    //    isRetainer(cp) == rtsTrue => s == NULL
-    //    isRetainer(cp) == rtsFalse => s == cp.retainer
+    //    isRetainer(cp) == true => s == NULL
+    //    isRetainer(cp) == false => s == cp.retainer
     if (isRetainer(cp))
-	s = NULL;
+        s = NULL;
     else
-	s = retainerSetOf(cp);
+        s = retainerSetOf(cp);
 
     // (c, cp, r, s) is available.
 
     // (c, cp, r, s, R_r) is available, so compute the retainer set for *c.
     if (retainerSetOfc == NULL) {
-	// This is the first visit to *c.
-	numObjectVisited++;
+        // This is the first visit to *c.
+        numObjectVisited++;
 
-	if (s == NULL)
-	    associate(c, singleton(r));
-	else
-	    // s is actually the retainer set of *c!
-	    associate(c, s);
+        if (s == NULL)
+            associate(c, singleton(r));
+        else
+            // s is actually the retainer set of *c!
+            associate(c, s);
 
-	// compute c_child_r
-	c_child_r = isRetainer(c) ? getRetainerFrom(c) : r;
+        // compute c_child_r
+        c_child_r = isRetainer(c) ? getRetainerFrom(c) : r;
     } else {
-	// This is not the first visit to *c.
-	if (isMember(r, retainerSetOfc))
-	    goto loop;          // no need to process child
+        // This is not the first visit to *c.
+        if (isMember(r, retainerSetOfc))
+            goto loop;          // no need to process child
 
-	if (s == NULL)
-	    associate(c, addElement(r, retainerSetOfc));
-	else {
-	    // s is not NULL and cp is not a retainer. This means that
-	    // each time *cp is visited, so is *c. Thus, if s has
-	    // exactly one more element in its retainer set than c, s
-	    // is also the new retainer set for *c.
-	    if (s->num == retainerSetOfc->num + 1) {
-		associate(c, s);
-	    }
-	    // Otherwise, just add R_r to the current retainer set of *c.
-	    else {
-		associate(c, addElement(r, retainerSetOfc));
-	    }
-	}
+        if (s == NULL)
+            associate(c, addElement(r, retainerSetOfc));
+        else {
+            // s is not NULL and cp is not a retainer. This means that
+            // each time *cp is visited, so is *c. Thus, if s has
+            // exactly one more element in its retainer set than c, s
+            // is also the new retainer set for *c.
+            if (s->num == retainerSetOfc->num + 1) {
+                associate(c, s);
+            }
+            // Otherwise, just add R_r to the current retainer set of *c.
+            else {
+                associate(c, addElement(r, retainerSetOfc));
+            }
+        }
 
-	if (isRetainer(c))
-	    goto loop;          // no need to process child
+        if (isRetainer(c))
+            goto loop;          // no need to process child
 
-	// compute c_child_r
-	c_child_r = r;
+        // compute c_child_r
+        c_child_r = r;
     }
 
     // now, RSET() of all of *c, *cp, and *r is valid.
@@ -1671,19 +1672,19 @@ inner_loop:
     // would be hard.
     switch (typeOfc) {
     case STACK:
-	retainStack(c, c_child_r,
+        retainStack(c, c_child_r,
                     ((StgStack *)c)->sp,
                     ((StgStack *)c)->stack + ((StgStack *)c)->stack_size);
-	goto loop;
+        goto loop;
 
     case TSO:
     {
         StgTSO *tso = (StgTSO *)c;
 
-        retainClosure(tso->stackobj,           c, c_child_r);
-        retainClosure(tso->blocked_exceptions, c, c_child_r);
-        retainClosure(tso->bq,                 c, c_child_r);
-        retainClosure(tso->trec,               c, c_child_r);
+        retainClosure((StgClosure*) tso->stackobj,           c, c_child_r);
+        retainClosure((StgClosure*) tso->blocked_exceptions, c, c_child_r);
+        retainClosure((StgClosure*) tso->bq,                 c, c_child_r);
+        retainClosure((StgClosure*) tso->trec,               c, c_child_r);
         if (   tso->why_blocked == BlockedOnMVar
                || tso->why_blocked == BlockedOnMVarRead
                || tso->why_blocked == BlockedOnBlackHole
@@ -1694,27 +1695,36 @@ inner_loop:
         goto loop;
     }
 
+    case BLOCKING_QUEUE:
+    {
+        StgBlockingQueue *bq = (StgBlockingQueue *)c;
+        retainClosure((StgClosure*) bq->link,           c, c_child_r);
+        retainClosure((StgClosure*) bq->bh,             c, c_child_r);
+        retainClosure((StgClosure*) bq->owner,          c, c_child_r);
+        goto loop;
+    }
+
     case PAP:
     {
-	StgPAP *pap = (StgPAP *)c;
-	retain_PAP_payload(c, c_child_r, pap->fun, pap->payload, pap->n_args);
-	goto loop;
+        StgPAP *pap = (StgPAP *)c;
+        retain_PAP_payload(c, c_child_r, pap->fun, pap->payload, pap->n_args);
+        goto loop;
     }
 
     case AP:
     {
-	StgAP *ap = (StgAP *)c;
-	retain_PAP_payload(c, c_child_r, ap->fun, ap->payload, ap->n_args);
-	goto loop;
+        StgAP *ap = (StgAP *)c;
+        retain_PAP_payload(c, c_child_r, ap->fun, ap->payload, ap->n_args);
+        goto loop;
     }
 
     case AP_STACK:
-	retainClosure(((StgAP_STACK *)c)->fun, c, c_child_r);
-	retainStack(c, c_child_r,
-		    (StgPtr)((StgAP_STACK *)c)->payload,
-		    (StgPtr)((StgAP_STACK *)c)->payload +
-		             ((StgAP_STACK *)c)->size);
-	goto loop;
+        retainClosure(((StgAP_STACK *)c)->fun, c, c_child_r);
+        retainStack(c, c_child_r,
+                    (StgPtr)((StgAP_STACK *)c)->payload,
+                    (StgPtr)((StgAP_STACK *)c)->payload +
+                             ((StgAP_STACK *)c)->size);
+        goto loop;
     }
 
     push(c, c_child_r, &first_child);
@@ -1723,7 +1733,7 @@ inner_loop:
     // If first_child is not null, the top stack element points to the next
     // object. push() may or may not push a stackElement on the stack.
     if (first_child == NULL)
-	goto loop;
+        goto loop;
 
     // (c, cp, r) = (first_child, c, c_child_r)
     r = c_child_r;
@@ -1749,9 +1759,9 @@ retainRoot(void *user STG_UNUSED, StgClosure **tl)
     c = UNTAG_CLOSURE(*tl);
     maybeInitRetainerSet(c);
     if (c != &stg_END_TSO_QUEUE_closure && isRetainer(c)) {
-	retainClosure(c, c, getRetainerFrom(c));
+        retainClosure(c, c, getRetainerFrom(c));
     } else {
-	retainClosure(c, c, CCS_SYSTEM);
+        retainClosure(c, c, CCS_SYSTEM);
     }
 
     // NOT TRUE: ASSERT(isMember(getRetainerFrom(*tl), retainerSetOf(*tl)));
@@ -1766,15 +1776,15 @@ static void
 computeRetainerSet( void )
 {
     StgWeak *weak;
-    RetainerSet *rtl;
-    nat g, n;
+    uint32_t g, n;
     StgPtr ml;
     bdescr *bd;
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
+    RetainerSet *rtl;
     RetainerSet tmpRetainerSet;
 #endif
 
-    markCapabilities(retainRoot, NULL);	// for scheduler roots
+    markCapabilities(retainRoot, NULL); // for scheduler roots
 
     // This function is called after a major GC, when key, value, and finalizer
     // all are guaranteed to be valid, or reachable.
@@ -1801,44 +1811,43 @@ computeRetainerSet( void )
     // object (computing sumOfNewCostExtra and updating costArray[] when
     // debugging retainer profiler).
     for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
-	// NOT TRUE: even G0 has a block on its mutable list
+        // NOT true: even G0 has a block on its mutable list
         // ASSERT(g != 0 || (generations[g].mut_list == NULL));
 
-	// Traversing through mut_list is necessary
-	// because we can find MUT_VAR objects which have not been
-	// visited during retainer profiling.
+        // Traversing through mut_list is necessary
+        // because we can find MUT_VAR objects which have not been
+        // visited during retainer profiling.
         for (n = 0; n < n_capabilities; n++) {
           for (bd = capabilities[n]->mut_lists[g]; bd != NULL; bd = bd->link) {
-	    for (ml = bd->start; ml < bd->free; ml++) {
+            for (ml = bd->start; ml < bd->free; ml++) {
 
-		maybeInitRetainerSet((StgClosure *)*ml);
-		rtl = retainerSetOf((StgClosure *)*ml);
+                maybeInitRetainerSet((StgClosure *)*ml);
 
-#ifdef DEBUG_RETAINER
-		if (rtl == NULL) {
-		    // first visit to *ml
-		    // This is a violation of the interface rule!
-		    RSET(ml) = (RetainerSet *)((StgWord)(&tmpRetainerSet) | flip);
-		    
-		    switch (get_itbl((StgClosure *)ml)->type) {
-		    case IND_STATIC:
-			// no cost involved
-			break;
-		    case CONSTR_NOCAF_STATIC:
-		    case CONSTR_STATIC:
-		    case THUNK_STATIC:
-		    case FUN_STATIC:
-			barf("Invalid object in computeRetainerSet(): %d", get_itbl((StgClosure*)ml)->type);
-			break;
-		    default:
-			// dynamic objects
-			costArray[get_itbl((StgClosure *)ml)->type] += cost((StgClosure *)ml);
-			sumOfNewCostExtra += cost((StgClosure *)ml);
-			break;
-		    }
-		}
+#if defined(DEBUG_RETAINER)
+                rtl = retainerSetOf((StgClosure *)*ml);
+                if (rtl == NULL) {
+                    // first visit to *ml
+                    // This is a violation of the interface rule!
+                    RSET(ml) = (RetainerSet *)((StgWord)(&tmpRetainerSet) | flip);
+
+                    switch (get_itbl((StgClosure *)ml)->type) {
+                    case IND_STATIC:
+                        // no cost involved
+                        break;
+                    case CONSTR_NOCAF:
+                    case THUNK_STATIC:
+                    case FUN_STATIC:
+                        barf("Invalid object in computeRetainerSet(): %d", get_itbl((StgClosure*)ml)->type);
+                        break;
+                    default:
+                        // dynamic objects
+                        costArray[get_itbl((StgClosure *)ml)->type] += cost((StgClosure *)ml);
+                        sumOfNewCostExtra += cost((StgClosure *)ml);
+                        break;
+                    }
+                }
 #endif
-	    }
+            }
           }
         }
     }
@@ -1849,7 +1858,7 @@ computeRetainerSet( void )
  *  and reset their rs fields to NULL, which is accomplished by
  *  invoking maybeInitRetainerSet(). This function must be called
  *  before zeroing all objects reachable from scavenged_static_objects
- *  in the case of major gabage collections. See GarbageCollect() in
+ *  in the case of major garbage collections. See GarbageCollect() in
  *  GC.c.
  *  Note:
  *    The mut_once_list of the oldest generation must also be traversed?
@@ -1872,45 +1881,50 @@ computeRetainerSet( void )
 void
 resetStaticObjectForRetainerProfiling( StgClosure *static_objects )
 {
-#ifdef DEBUG_RETAINER
-    nat count;
+#if defined(DEBUG_RETAINER)
+    uint32_t count;
 #endif
     StgClosure *p;
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     count = 0;
 #endif
     p = static_objects;
-    while (p != END_OF_STATIC_LIST) {
-#ifdef DEBUG_RETAINER
-	count++;
+    while (p != END_OF_STATIC_OBJECT_LIST) {
+        p = UNTAG_STATIC_LIST_PTR(p);
+#if defined(DEBUG_RETAINER)
+        count++;
 #endif
-	switch (get_itbl(p)->type) {
-	case IND_STATIC:
-	    // Since we do not compute the retainer set of any
-	    // IND_STATIC object, we don't have to reset its retainer
-	    // field.
-	    p = (StgClosure*)*IND_STATIC_LINK(p);
-	    break;
-	case THUNK_STATIC:
-	    maybeInitRetainerSet(p);
-	    p = (StgClosure*)*THUNK_STATIC_LINK(p);
-	    break;
-	case FUN_STATIC:
-	    maybeInitRetainerSet(p);
-	    p = (StgClosure*)*FUN_STATIC_LINK(p);
-	    break;
-	case CONSTR_STATIC:
-	    maybeInitRetainerSet(p);
-	    p = (StgClosure*)*STATIC_LINK(get_itbl(p), p);
-	    break;
-	default:
-	    barf("resetStaticObjectForRetainerProfiling: %p (%s)",
-		 p, get_itbl(p)->type);
-	    break;
-	}
+        switch (get_itbl(p)->type) {
+        case IND_STATIC:
+            // Since we do not compute the retainer set of any
+            // IND_STATIC object, we don't have to reset its retainer
+            // field.
+            p = (StgClosure*)*IND_STATIC_LINK(p);
+            break;
+        case THUNK_STATIC:
+            maybeInitRetainerSet(p);
+            p = (StgClosure*)*THUNK_STATIC_LINK(p);
+            break;
+        case FUN_STATIC:
+            maybeInitRetainerSet(p);
+            p = (StgClosure*)*FUN_STATIC_LINK(p);
+            break;
+        case CONSTR:
+        case CONSTR_1_0:
+        case CONSTR_2_0:
+        case CONSTR_1_1:
+        case CONSTR_NOCAF:
+            maybeInitRetainerSet(p);
+            p = (StgClosure*)*STATIC_LINK(get_itbl(p), p);
+            break;
+        default:
+            barf("resetStaticObjectForRetainerProfiling: %p (%s)",
+                 p, get_itbl(p)->type);
+            break;
+        }
     }
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     // debugBelch("count in scavenged_static_objects = %d\n", count);
 #endif
 }
@@ -1927,19 +1941,19 @@ resetStaticObjectForRetainerProfiling( StgClosure *static_objects )
 void
 retainerProfile(void)
 {
-#ifdef DEBUG_RETAINER
-  nat i;
-  nat totalHeapSize;        // total raw heap size (computed by linear scanning)
+#if defined(DEBUG_RETAINER)
+  uint32_t i;
+  uint32_t totalHeapSize;   // total raw heap size (computed by linear scanning)
 #endif
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
   debugBelch(" < retainerProfile() invoked : %d>\n", retainerGeneration);
 #endif
 
   stat_startRP();
 
   // We haven't flipped the bit yet.
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
   debugBelch("Before traversing:\n");
   sumOfCostLinear = 0;
   for (i = 0;i < N_CLOSURE_TYPES; i++)
@@ -1962,15 +1976,14 @@ retainerProfile(void)
     debugBelch("costArrayLinear[" #index "] = %u\n", costArrayLinear[index])
   pcostArrayLinear(THUNK_STATIC);
   pcostArrayLinear(FUN_STATIC);
-  pcostArrayLinear(CONSTR_STATIC);
-  pcostArrayLinear(CONSTR_NOCAF_STATIC);
+  pcostArrayLinear(CONSTR_NOCAF);
 */
 #endif
 
   // Now we flips flip.
   flip = flip ^ 1;
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
   stackSize = 0;
   maxStackSize = 0;
   cStackSize = 0;
@@ -1979,7 +1992,7 @@ retainerProfile(void)
   numObjectVisited = 0;
   timesAnyObjectVisited = 0;
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
   debugBelch("During traversing:\n");
   sumOfNewCost = 0;
   sumOfNewCostExtra = 0;
@@ -1994,14 +2007,14 @@ retainerProfile(void)
     retainer sets.
    */
   initializeTraverseStack();
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
   initializeAllRetainerSet();
 #else
   refreshAllRetainerSet();
 #endif
   computeRetainerSet();
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
   debugBelch("After traversing:\n");
   sumOfCostLinear = 0;
   for (i = 0;i < N_CLOSURE_TYPES; i++)
@@ -2042,7 +2055,7 @@ retainerProfile(void)
 
   // post-processing
   closeTraverseStack();
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
   closeAllRetainerSet();
 #else
   // Note that there is no post-processing for the retainer sets.
@@ -2051,7 +2064,7 @@ retainerProfile(void)
 
   stat_endRP(
     retainerGeneration - 1,   // retainerGeneration has just been incremented!
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     maxCStackSize, maxStackSize,
 #endif
     (double)timesAnyObjectVisited / numObjectVisited);
@@ -2061,160 +2074,157 @@ retainerProfile(void)
  * DEBUGGING CODE
  * -------------------------------------------------------------------------- */
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
 
 #define LOOKS_LIKE_PTR(r) ((LOOKS_LIKE_STATIC_CLOSURE(r) || \
-        ((HEAP_ALLOCED(r) && ((Bdescr((P_)r)->flags & BF_FREE) == 0)))) && \
-        ((StgWord)(*(StgPtr)r)!=0xaaaaaaaa))
+        (HEAP_ALLOCED(r))) && \
+        ((StgWord)(*(StgPtr)r)!=(StgWord)0xaaaaaaaaaaaaaaaaULL))
 
-static nat
+static uint32_t
 sanityCheckHeapClosure( StgClosure *c )
 {
-    StgInfoTable *info;
-
     ASSERT(LOOKS_LIKE_GHC_INFO(c->header.info));
-    ASSERT(!closure_STATIC(c));
     ASSERT(LOOKS_LIKE_PTR(c));
 
     if ((((StgWord)RSET(c) & 1) ^ flip) != 0) {
-	if (get_itbl(c)->type == CONSTR &&
-	    !strcmp(GET_PROF_TYPE(get_itbl(c)), "DEAD_WEAK") &&
-	    !strcmp(GET_PROF_DESC(get_itbl(c)), "DEAD_WEAK")) {
-	    debugBelch("\tUnvisited dead weak pointer object found: c = %p\n", c);
-	    costArray[get_itbl(c)->type] += cost(c);
-	    sumOfNewCost += cost(c);
-	} else
-	    debugBelch(
-		    "Unvisited object: flip = %d, c = %p(%d, %s, %s), rs = %p\n",
-		    flip, c, get_itbl(c)->type,
-		    get_itbl(c)->prof.closure_type, GET_PROF_DESC(get_itbl(c)),
-		    RSET(c));
+        if (get_itbl(c)->type == CONSTR &&
+            !strcmp(GET_PROF_TYPE(get_itbl(c)), "DEAD_WEAK") &&
+            !strcmp(GET_PROF_DESC(get_itbl(c)), "DEAD_WEAK")) {
+            debugBelch("\tUnvisited dead weak pointer object found: c = %p\n", c);
+            costArray[get_itbl(c)->type] += cost(c);
+            sumOfNewCost += cost(c);
+        } else
+            debugBelch(
+                    "Unvisited object: flip = %d, c = %p(%d, %s, %s), rs = %p\n",
+                    flip, c, get_itbl(c)->type,
+                    get_itbl(c)->prof.closure_type, GET_PROF_DESC(get_itbl(c)),
+                    RSET(c));
     } else {
-	// debugBelch("sanityCheckHeapClosure) S: flip = %d, c = %p(%d), rs = %p\n", flip, c, get_itbl(c)->type, RSET(c));
+        // debugBelch("sanityCheckHeapClosure) S: flip = %d, c = %p(%d), rs = %p\n", flip, c, get_itbl(c)->type, RSET(c));
     }
 
     return closure_sizeW(c);
 }
 
-static nat
+static uint32_t
 heapCheck( bdescr *bd )
 {
     StgPtr p;
-    static nat costSum, size;
+    static uint32_t costSum, size;
 
     costSum = 0;
     while (bd != NULL) {
-	p = bd->start;
-	while (p < bd->free) {
-	    size = sanityCheckHeapClosure((StgClosure *)p);
-	    sumOfCostLinear += size;
-	    costArrayLinear[get_itbl((StgClosure *)p)->type] += size;
-	    p += size;
-	    // no need for slop check; I think slops are not used currently.
-	}
-	ASSERT(p == bd->free);
-	costSum += bd->free - bd->start;
-	bd = bd->link;
+        p = bd->start;
+        while (p < bd->free) {
+            size = sanityCheckHeapClosure((StgClosure *)p);
+            sumOfCostLinear += size;
+            costArrayLinear[get_itbl((StgClosure *)p)->type] += size;
+            p += size;
+            // no need for slop check; I think slops are not used currently.
+        }
+        ASSERT(p == bd->free);
+        costSum += bd->free - bd->start;
+        bd = bd->link;
     }
 
     return costSum;
 }
 
-static nat
+static uint32_t
 smallObjectPoolCheck(void)
 {
     bdescr *bd;
     StgPtr p;
-    static nat costSum, size;
+    static uint32_t costSum, size;
 
     bd = g0s0->blocks;
     costSum = 0;
 
     // first block
     if (bd == NULL)
-	return costSum;
+        return costSum;
 
     p = bd->start;
     while (p < alloc_Hp) {
-	size = sanityCheckHeapClosure((StgClosure *)p);
-	sumOfCostLinear += size;
-	costArrayLinear[get_itbl((StgClosure *)p)->type] += size;
-	p += size;
+        size = sanityCheckHeapClosure((StgClosure *)p);
+        sumOfCostLinear += size;
+        costArrayLinear[get_itbl((StgClosure *)p)->type] += size;
+        p += size;
     }
     ASSERT(p == alloc_Hp);
     costSum += alloc_Hp - bd->start;
 
     bd = bd->link;
     while (bd != NULL) {
-	p = bd->start;
-	while (p < bd->free) {
-	    size = sanityCheckHeapClosure((StgClosure *)p);
-	    sumOfCostLinear += size;
-	    costArrayLinear[get_itbl((StgClosure *)p)->type] += size;
-	    p += size;
-	}
-	ASSERT(p == bd->free);
-	costSum += bd->free - bd->start;
-	bd = bd->link;
+        p = bd->start;
+        while (p < bd->free) {
+            size = sanityCheckHeapClosure((StgClosure *)p);
+            sumOfCostLinear += size;
+            costArrayLinear[get_itbl((StgClosure *)p)->type] += size;
+            p += size;
+        }
+        ASSERT(p == bd->free);
+        costSum += bd->free - bd->start;
+        bd = bd->link;
     }
 
     return costSum;
 }
 
-static nat
+static uint32_t
 chainCheck(bdescr *bd)
 {
-    nat costSum, size;
+    uint32_t costSum, size;
 
     costSum = 0;
     while (bd != NULL) {
-	// bd->free - bd->start is not an accurate measurement of the
-	// object size.  Actually it is always zero, so we compute its
-	// size explicitly.
-	size = sanityCheckHeapClosure((StgClosure *)bd->start);
-	sumOfCostLinear += size;
-	costArrayLinear[get_itbl((StgClosure *)bd->start)->type] += size;
-	costSum += size;
-	bd = bd->link;
+        // bd->free - bd->start is not an accurate measurement of the
+        // object size.  Actually it is always zero, so we compute its
+        // size explicitly.
+        size = sanityCheckHeapClosure((StgClosure *)bd->start);
+        sumOfCostLinear += size;
+        costArrayLinear[get_itbl((StgClosure *)bd->start)->type] += size;
+        costSum += size;
+        bd = bd->link;
     }
 
     return costSum;
 }
 
-static nat
+static uint32_t
 checkHeapSanityForRetainerProfiling( void )
 {
-    nat costSum, g, s;
+    uint32_t costSum, g, s;
 
     costSum = 0;
     debugBelch("START: sumOfCostLinear = %d, costSum = %d\n", sumOfCostLinear, costSum);
     if (RtsFlags.GcFlags.generations == 1) {
-	costSum += heapCheck(g0s0->to_blocks);
-	debugBelch("heapCheck: sumOfCostLinear = %d, costSum = %d\n", sumOfCostLinear, costSum);
-	costSum += chainCheck(g0s0->large_objects);
-	debugBelch("chainCheck: sumOfCostLinear = %d, costSum = %d\n", sumOfCostLinear, costSum);
+        costSum += heapCheck(g0s0->to_blocks);
+        debugBelch("heapCheck: sumOfCostLinear = %d, costSum = %d\n", sumOfCostLinear, costSum);
+        costSum += chainCheck(g0s0->large_objects);
+        debugBelch("chainCheck: sumOfCostLinear = %d, costSum = %d\n", sumOfCostLinear, costSum);
     } else {
-	for (g = 0; g < RtsFlags.GcFlags.generations; g++)
-	for (s = 0; s < generations[g].n_steps; s++) {
-	    /*
-	      After all live objects have been scavenged, the garbage
-	      collector may create some objects in
-	      scheduleFinalizers(). These objects are created throught
-	      allocate(), so the small object pool or the large object
-	      pool of the g0s0 may not be empty.
-	    */
-	    if (g == 0 && s == 0) {
-		costSum += smallObjectPoolCheck();
-		debugBelch("smallObjectPoolCheck(): sumOfCostLinear = %d, costSum = %d\n", sumOfCostLinear, costSum);
-		costSum += chainCheck(generations[g].steps[s].large_objects);
-		debugBelch("chainCheck(): sumOfCostLinear = %d, costSum = %d\n", sumOfCostLinear, costSum);
-	    } else {
-		costSum += heapCheck(generations[g].steps[s].blocks);
-		debugBelch("heapCheck(): sumOfCostLinear = %d, costSum = %d\n", sumOfCostLinear, costSum);
-		costSum += chainCheck(generations[g].steps[s].large_objects);
-		debugBelch("chainCheck(): sumOfCostLinear = %d, costSum = %d\n", sumOfCostLinear, costSum);
-	    }
-	}
+        for (g = 0; g < RtsFlags.GcFlags.generations; g++)
+        for (s = 0; s < generations[g].n_steps; s++) {
+            /*
+              After all live objects have been scavenged, the garbage
+              collector may create some objects in
+              scheduleFinalizers(). These objects are created through
+              allocate(), so the small object pool or the large object
+              pool of the g0s0 may not be empty.
+            */
+            if (g == 0 && s == 0) {
+                costSum += smallObjectPoolCheck();
+                debugBelch("smallObjectPoolCheck(): sumOfCostLinear = %d, costSum = %d\n", sumOfCostLinear, costSum);
+                costSum += chainCheck(generations[g].steps[s].large_objects);
+                debugBelch("chainCheck(): sumOfCostLinear = %d, costSum = %d\n", sumOfCostLinear, costSum);
+            } else {
+                costSum += heapCheck(generations[g].steps[s].blocks);
+                debugBelch("heapCheck(): sumOfCostLinear = %d, costSum = %d\n", sumOfCostLinear, costSum);
+                costSum += chainCheck(generations[g].steps[s].large_objects);
+                debugBelch("chainCheck(): sumOfCostLinear = %d, costSum = %d\n", sumOfCostLinear, costSum);
+            }
+        }
     }
 
     return costSum;
@@ -2225,35 +2235,35 @@ findPointer(StgPtr p)
 {
     StgPtr q, r, e;
     bdescr *bd;
-    nat g, s;
+    uint32_t g, s;
 
     for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
-	for (s = 0; s < generations[g].n_steps; s++) {
-	    // if (g == 0 && s == 0) continue;
-	    bd = generations[g].steps[s].blocks;
-	    for (; bd; bd = bd->link) {
-		for (q = bd->start; q < bd->free; q++) {
-		    if (*q == (StgWord)p) {
-			r = q;
-			while (!LOOKS_LIKE_GHC_INFO(*r)) r--;
-			debugBelch("Found in gen[%d], step[%d]: q = %p, r = %p\n", g, s, q, r);
-			// return;
-		    }
-		}
-	    }
-	    bd = generations[g].steps[s].large_objects;
-	    for (; bd; bd = bd->link) {
-		e = bd->start + cost((StgClosure *)bd->start);
-		for (q = bd->start; q < e; q++) {
-		    if (*q == (StgWord)p) {
-			r = q;
-			while (*r == 0 || !LOOKS_LIKE_GHC_INFO(*r)) r--;
-			debugBelch("Found in gen[%d], large_objects: %p\n", g, r);
-			// return;
-		    }
-		}
-	    }
-	}
+        for (s = 0; s < generations[g].n_steps; s++) {
+            // if (g == 0 && s == 0) continue;
+            bd = generations[g].steps[s].blocks;
+            for (; bd; bd = bd->link) {
+                for (q = bd->start; q < bd->free; q++) {
+                    if (*q == (StgWord)p) {
+                        r = q;
+                        while (!LOOKS_LIKE_GHC_INFO(*r)) r--;
+                        debugBelch("Found in gen[%d], step[%d]: q = %p, r = %p\n", g, s, q, r);
+                        // return;
+                    }
+                }
+            }
+            bd = generations[g].steps[s].large_objects;
+            for (; bd; bd = bd->link) {
+                e = bd->start + cost((StgClosure *)bd->start);
+                for (q = bd->start; q < e; q++) {
+                    if (*q == (StgWord)p) {
+                        r = q;
+                        while (*r == 0 || !LOOKS_LIKE_GHC_INFO(*r)) r--;
+                        debugBelch("Found in gen[%d], large_objects: %p\n", g, r);
+                        // return;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2261,36 +2271,28 @@ static void
 belongToHeap(StgPtr p)
 {
     bdescr *bd;
-    nat g, s;
+    uint32_t g, s;
 
     for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
-	for (s = 0; s < generations[g].n_steps; s++) {
-	    // if (g == 0 && s == 0) continue;
-	    bd = generations[g].steps[s].blocks;
-	    for (; bd; bd = bd->link) {
-		if (bd->start <= p && p < bd->free) {
-		    debugBelch("Belongs to gen[%d], step[%d]", g, s);
-		    return;
-		}
-	    }
-	    bd = generations[g].steps[s].large_objects;
-	    for (; bd; bd = bd->link) {
-		if (bd->start <= p && p < bd->start + getHeapClosureSize((StgClosure *)bd->start)) {
-		    debugBelch("Found in gen[%d], large_objects: %p\n", g, bd->start);
-		    return;
-		}
-	    }
-	}
+        for (s = 0; s < generations[g].n_steps; s++) {
+            // if (g == 0 && s == 0) continue;
+            bd = generations[g].steps[s].blocks;
+            for (; bd; bd = bd->link) {
+                if (bd->start <= p && p < bd->free) {
+                    debugBelch("Belongs to gen[%d], step[%d]", g, s);
+                    return;
+                }
+            }
+            bd = generations[g].steps[s].large_objects;
+            for (; bd; bd = bd->link) {
+                if (bd->start <= p && p < bd->start + getHeapClosureSize((StgClosure *)bd->start)) {
+                    debugBelch("Found in gen[%d], large_objects: %p\n", g, bd->start);
+                    return;
+                }
+            }
+        }
     }
 }
 #endif /* DEBUG_RETAINER */
 
 #endif /* PROFILING */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

@@ -37,7 +37,9 @@ module PPC.Regs (
         fits16Bits,
         makeImmediate,
         fReg,
-        sp, r3, r4, r27, r28, f1, f20, f21,
+        r0, sp, toc, r3, r4, r11, r12, r27, r28, r30,
+        tmpReg,
+        f1, f20, f21,
 
         allocatableRegs
 
@@ -48,9 +50,11 @@ where
 #include "nativeGen/NCG.h"
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import Reg
 import RegClass
-import Size
+import Format
 
 import Cmm
 import CLabel           ( CLabel )
@@ -59,66 +63,64 @@ import Unique
 import CodeGen.Platform
 import DynFlags
 import Outputable
-import FastBool
-import FastTypes
 import Platform
 
-import Data.Word        ( Word8, Word16, Word32 )
-import Data.Int         ( Int8, Int16, Int32 )
+import Data.Word        ( Word8, Word16, Word32, Word64 )
+import Data.Int         ( Int8, Int16, Int32, Int64 )
 
 
 -- squeese functions for the graph allocator -----------------------------------
 
 -- | regSqueeze_class reg
---      Calculuate the maximum number of register colors that could be
+--      Calculate the maximum number of register colors that could be
 --      denied to a node of this class due to having this reg
 --      as a neighbour.
 --
 {-# INLINE virtualRegSqueeze #-}
-virtualRegSqueeze :: RegClass -> VirtualReg -> FastInt
+virtualRegSqueeze :: RegClass -> VirtualReg -> Int
 virtualRegSqueeze cls vr
  = case cls of
         RcInteger
          -> case vr of
-                VirtualRegI{}           -> _ILIT(1)
-                VirtualRegHi{}          -> _ILIT(1)
-                _other                  -> _ILIT(0)
+                VirtualRegI{}           -> 1
+                VirtualRegHi{}          -> 1
+                _other                  -> 0
 
         RcDouble
          -> case vr of
-                VirtualRegD{}           -> _ILIT(1)
-                VirtualRegF{}           -> _ILIT(0)
-                _other                  -> _ILIT(0)
+                VirtualRegD{}           -> 1
+                VirtualRegF{}           -> 0
+                _other                  -> 0
 
-        _other -> _ILIT(0)
+        _other -> 0
 
 {-# INLINE realRegSqueeze #-}
-realRegSqueeze :: RegClass -> RealReg -> FastInt
+realRegSqueeze :: RegClass -> RealReg -> Int
 realRegSqueeze cls rr
  = case cls of
         RcInteger
          -> case rr of
                 RealRegSingle regNo
-                        | regNo < 32    -> _ILIT(1)     -- first fp reg is 32
-                        | otherwise     -> _ILIT(0)
+                        | regNo < 32    -> 1     -- first fp reg is 32
+                        | otherwise     -> 0
 
-                RealRegPair{}           -> _ILIT(0)
+                RealRegPair{}           -> 0
 
         RcDouble
          -> case rr of
                 RealRegSingle regNo
-                        | regNo < 32    -> _ILIT(0)
-                        | otherwise     -> _ILIT(1)
+                        | regNo < 32    -> 0
+                        | otherwise     -> 1
 
-                RealRegPair{}           -> _ILIT(0)
+                RealRegPair{}           -> 0
 
-        _other -> _ILIT(0)
+        _other -> 0
 
-mkVirtualReg :: Unique -> Size -> VirtualReg
-mkVirtualReg u size
-   | not (isFloatSize size) = VirtualRegI u
+mkVirtualReg :: Unique -> Format -> VirtualReg
+mkVirtualReg u format
+   | not (isFloatFormat format) = VirtualRegI u
    | otherwise
-   = case size of
+   = case format of
         FF32    -> VirtualRegD u
         FF64    -> VirtualRegD u
         _       -> panic "mkVirtualReg"
@@ -146,6 +148,8 @@ data Imm
         | LO Imm
         | HI Imm
         | HA Imm        {- high halfword adjusted -}
+        | HIGHERA Imm
+        | HIGHESTA Imm
 
 
 strImmLit :: String -> Imm
@@ -227,6 +231,7 @@ allArgRegs = map regSingle [3..10]
 callClobberedRegs :: Platform -> [Reg]
 callClobberedRegs platform
   = case platformOS platform of
+    OSAIX    -> map regSingle (0:[2..12] ++ map fReg [0..13])
     OSDarwin -> map regSingle (0:[2..12] ++ map fReg [0..13])
     OSLinux  -> map regSingle (0:[2..13] ++ map fReg [0..13])
     _        -> panic "PPC.Regs.callClobberedRegs: not defined for this architecture"
@@ -258,8 +263,12 @@ showReg n
 allFPArgRegs :: Platform -> [Reg]
 allFPArgRegs platform
     = case platformOS platform of
+      OSAIX    -> map (regSingle . fReg) [1..13]
       OSDarwin -> map (regSingle . fReg) [1..13]
-      OSLinux  -> map (regSingle . fReg) [1..8]
+      OSLinux  -> case platformArch platform of
+        ArchPPC      -> map (regSingle . fReg) [1..8]
+        ArchPPC_64 _ -> map (regSingle . fReg) [1..13]
+        _            -> panic "PPC.Regs.allFPArgRegs: unknown PPC Linux"
       _        -> panic "PPC.Regs.allFPArgRegs: not defined for this architecture"
 
 fits16Bits :: Integral a => a -> Bool
@@ -268,9 +277,11 @@ fits16Bits x = x >= -32768 && x < 32768
 makeImmediate :: Integral a => Width -> Bool -> a -> Maybe Imm
 makeImmediate rep signed x = fmap ImmInt (toI16 rep signed)
     where
+        narrow W64 False = fromIntegral (fromIntegral x :: Word64)
         narrow W32 False = fromIntegral (fromIntegral x :: Word32)
         narrow W16 False = fromIntegral (fromIntegral x :: Word16)
         narrow W8  False = fromIntegral (fromIntegral x :: Word8)
+        narrow W64 True  = fromIntegral (fromIntegral x :: Int64)
         narrow W32 True  = fromIntegral (fromIntegral x :: Int32)
         narrow W16 True  = fromIntegral (fromIntegral x :: Int16)
         narrow W8  True  = fromIntegral (fromIntegral x :: Int8)
@@ -284,6 +295,12 @@ makeImmediate rep signed x = fmap ImmInt (toI16 rep signed)
         toI16 W32 False
             | narrowed >= 0 && narrowed < 65536 = Just narrowed
             | otherwise = Nothing
+        toI16 W64 True
+            | narrowed >= -32768 && narrowed < 32768 = Just narrowed
+            | otherwise = Nothing
+        toI16 W64 False
+            | narrowed >= 0 && narrowed < 65536 = Just narrowed
+            | otherwise = Nothing
         toI16 _ _  = Just narrowed
 
 
@@ -295,12 +312,17 @@ point registers.
 fReg :: Int -> RegNo
 fReg x = (32 + x)
 
-sp, r3, r4, r27, r28, f1, f20, f21 :: Reg
+r0, sp, toc, r3, r4, r11, r12, r27, r28, r30, f1, f20, f21 :: Reg
+r0      = regSingle 0
 sp      = regSingle 1
+toc     = regSingle 2
 r3      = regSingle 3
 r4      = regSingle 4
+r11     = regSingle 11
+r12     = regSingle 12
 r27     = regSingle 27
 r28     = regSingle 28
+r30     = regSingle 30
 f1      = regSingle $ fReg 1
 f20     = regSingle $ fReg 20
 f21     = regSingle $ fReg 21
@@ -310,5 +332,13 @@ f21     = regSingle $ fReg 21
 -- register allocator to attempt to map VRegs to.
 allocatableRegs :: Platform -> [RealReg]
 allocatableRegs platform
-   = let isFree i = isFastTrue (freeReg platform i)
+   = let isFree i = freeReg platform i
      in  map RealRegSingle $ filter isFree allMachRegNos
+
+-- temporary register for compiler use
+tmpReg :: Platform -> Reg
+tmpReg platform =
+       case platformArch platform of
+       ArchPPC      -> regSingle 13
+       ArchPPC_64 _ -> regSingle 30
+       _            -> panic "PPC.Regs.tmpReg: unknowm arch"

@@ -6,8 +6,7 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef RTSUTILS_H
-#define RTSUTILS_H
+#pragma once
 
 #include "BeginPrivate.h"
 
@@ -18,13 +17,15 @@
 void initAllocator(void);
 void shutdownAllocator(void);
 
-void *stgMallocBytes(int n, char *msg)
+void *stgMallocBytes(size_t n, char *msg)
     GNUC3_ATTRIBUTE(__malloc__);
 
-void *stgReallocBytes(void *p, int n, char *msg);
+void *stgReallocBytes(void *p, size_t n, char *msg);
 
-void *stgCallocBytes(int n, int m, char *msg)
+void *stgCallocBytes(size_t n, size_t m, char *msg)
      GNUC3_ATTRIBUTE(__malloc__);
+
+char *stgStrndup(const char *s, size_t n);
 
 void stgFree(void* p);
 
@@ -32,12 +33,10 @@ void stgFree(void* p);
  * Misc other utilities
  * -------------------------------------------------------------------------- */
 
-void heapOverflow(void);
-
 char *time_str(void);
-char *showStgWord64(StgWord64, char *, rtsBool);
+char *showStgWord64(StgWord64, char *, bool);
 
-#ifdef DEBUG
+#if defined(DEBUG)
 void heapCheckFail( void );
 #endif
 
@@ -46,13 +45,3 @@ void printRtsInfo(void);
 void checkFPUStack(void);
 
 #include "EndPrivate.h"
-
-#endif /* RTSUTILS_H */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

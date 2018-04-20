@@ -6,38 +6,39 @@
  *
  * Documentation on the architecture of the Garbage Collector can be
  * found in the online commentary:
- * 
+ *
  *   http://ghc.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/GC
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef SM_GC_H
-#define SM_GC_H
+#pragma once
 
 #include "BeginPrivate.h"
 
-void GarbageCollect (rtsBool force_major_gc,
-                     rtsBool do_heap_census,
-                     nat gc_type, Capability *cap);
+#include "HeapAlloc.h"
+
+void GarbageCollect (uint32_t force_major_gc,
+                     bool do_heap_census,
+                     uint32_t gc_type, Capability *cap, bool idle_cap[]);
 
 typedef void (*evac_fn)(void *user, StgClosure **root);
 
 StgClosure * isAlive      ( StgClosure *p );
 void         markCAFs     ( evac_fn evac, void *user );
 
-extern nat N;
-extern rtsBool major_gc;
+bool doIdleGCWork(Capability *cap, bool all);
+
+extern uint32_t N;
+extern bool major_gc;
 
 extern bdescr *mark_stack_bd;
 extern bdescr *mark_stack_top_bd;
 extern StgPtr mark_sp;
 
-extern long copied;
+extern bool work_stealing;
 
-extern rtsBool work_stealing;
-
-#ifdef DEBUG
-extern nat mutlist_MUTVARS, mutlist_MUTARRS, mutlist_MVARS, mutlist_OTHERS,
+#if defined(DEBUG)
+extern uint32_t mutlist_MUTVARS, mutlist_MUTARRS, mutlist_MVARS, mutlist_OTHERS,
     mutlist_TVAR,
     mutlist_TVAR_WATCH_QUEUE,
     mutlist_TREC_CHUNK,
@@ -47,28 +48,20 @@ extern nat mutlist_MUTVARS, mutlist_MUTARRS, mutlist_MVARS, mutlist_OTHERS,
 #endif
 
 #if defined(PROF_SPIN) && defined(THREADED_RTS)
-extern StgWord64 whitehole_spin;
+extern volatile StgWord64 whitehole_gc_spin;
+extern volatile StgWord64 waitForGcThreads_spin;
+extern volatile StgWord64 waitForGcThreads_yield;
 #endif
 
 void gcWorkerThread (Capability *cap);
-void initGcThreads (nat from, nat to);
+void initGcThreads (uint32_t from, uint32_t to);
 void freeGcThreads (void);
 
 #if defined(THREADED_RTS)
-void waitForGcThreads (Capability *cap);
-void releaseGCThreads (Capability *cap);
+void waitForGcThreads (Capability *cap, bool idle_cap[]);
+void releaseGCThreads (Capability *cap, bool idle_cap[]);
 #endif
 
 #define WORK_UNIT_WORDS 128
 
 #include "EndPrivate.h"
-
-#endif /* SM_GC_H */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

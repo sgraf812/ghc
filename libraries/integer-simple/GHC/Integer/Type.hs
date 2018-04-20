@@ -18,7 +18,7 @@
 -- Stability   :  internal
 -- Portability :  non-portable (GHC Extensions)
 --
--- An simple definition of the 'Integer' type.
+-- A simple definition of the 'Integer' type.
 --
 -----------------------------------------------------------------------------
 
@@ -33,8 +33,6 @@ import GHC.Tuple ()
 #if WORD_SIZE_IN_BITS < 64
 import GHC.IntWord64
 #endif
-
-#if !defined(__HADDOCK__)
 
 data Integer = Positive !Positive | Negative !Positive | Naught
 
@@ -783,7 +781,7 @@ quotRemPositive :: Positive -> Positive -> (# Integer, Integer #)
                                else Cons (ys `smallShiftLPositive` n)
                                          (mkSubtractors (n -# 1#))
 
-          -- The main function. Go the the end of xs, then walk
+          -- The main function. Go the end of xs, then walk
           -- back trying to divide the number we accumulate by ys.
           f :: Positive -> (# Digits, Digits #)
           f None = (# None, None #)
@@ -867,8 +865,6 @@ floatFromPositive (Some w ds)
        `plusFloat#` (int2Float# (word2Int# h) `timesFloat#`
              (2.0# `powerFloat#` int2Float# (highHalfShift ())))
        `plusFloat#` int2Float# (word2Int# l)
-
-#endif
 
 {-
 Note [Avoid patError]

@@ -3,12 +3,14 @@ module CodeGen.Platform
        (callerSaves, activeStgRegs, haveRegBase, globalRegMaybe, freeReg)
        where
 
+import GhcPrelude
+
 import CmmExpr
-import FastBool
 import Platform
 import Reg
 
 import qualified CodeGen.Platform.ARM        as ARM
+import qualified CodeGen.Platform.ARM64      as ARM64
 import qualified CodeGen.Platform.PPC        as PPC
 import qualified CodeGen.Platform.PPC_Darwin as PPC_Darwin
 import qualified CodeGen.Platform.SPARC      as SPARC
@@ -28,8 +30,9 @@ callerSaves platform
    ArchX86_64 -> X86_64.callerSaves
    ArchSPARC  -> SPARC.callerSaves
    ArchARM {} -> ARM.callerSaves
+   ArchARM64  -> ARM64.callerSaves
    arch
-    | arch `elem` [ArchPPC, ArchPPC_64] ->
+    | arch `elem` [ArchPPC, ArchPPC_64 ELF_V1, ArchPPC_64 ELF_V2] ->
        case platformOS platform of
        OSDarwin -> PPC_Darwin.callerSaves
        _        -> PPC.callerSaves
@@ -50,8 +53,9 @@ activeStgRegs platform
    ArchX86_64 -> X86_64.activeStgRegs
    ArchSPARC  -> SPARC.activeStgRegs
    ArchARM {} -> ARM.activeStgRegs
+   ArchARM64  -> ARM64.activeStgRegs
    arch
-    | arch `elem` [ArchPPC, ArchPPC_64] ->
+    | arch `elem` [ArchPPC, ArchPPC_64 ELF_V1, ArchPPC_64 ELF_V2] ->
        case platformOS platform of
        OSDarwin -> PPC_Darwin.activeStgRegs
        _        -> PPC.activeStgRegs
@@ -67,8 +71,9 @@ haveRegBase platform
    ArchX86_64 -> X86_64.haveRegBase
    ArchSPARC  -> SPARC.haveRegBase
    ArchARM {} -> ARM.haveRegBase
+   ArchARM64  -> ARM64.haveRegBase
    arch
-    | arch `elem` [ArchPPC, ArchPPC_64] ->
+    | arch `elem` [ArchPPC, ArchPPC_64 ELF_V1, ArchPPC_64 ELF_V2] ->
        case platformOS platform of
        OSDarwin -> PPC_Darwin.haveRegBase
        _        -> PPC.haveRegBase
@@ -84,15 +89,16 @@ globalRegMaybe platform
    ArchX86_64 -> X86_64.globalRegMaybe
    ArchSPARC  -> SPARC.globalRegMaybe
    ArchARM {} -> ARM.globalRegMaybe
+   ArchARM64  -> ARM64.globalRegMaybe
    arch
-    | arch `elem` [ArchPPC, ArchPPC_64] ->
+    | arch `elem` [ArchPPC, ArchPPC_64 ELF_V1, ArchPPC_64 ELF_V2] ->
        case platformOS platform of
        OSDarwin -> PPC_Darwin.globalRegMaybe
        _        -> PPC.globalRegMaybe
 
     | otherwise -> NoRegs.globalRegMaybe
 
-freeReg :: Platform -> RegNo -> FastBool
+freeReg :: Platform -> RegNo -> Bool
 freeReg platform
  | platformUnregisterised platform = NoRegs.freeReg
  | otherwise
@@ -101,8 +107,9 @@ freeReg platform
    ArchX86_64 -> X86_64.freeReg
    ArchSPARC  -> SPARC.freeReg
    ArchARM {} -> ARM.freeReg
+   ArchARM64  -> ARM64.freeReg
    arch
-    | arch `elem` [ArchPPC, ArchPPC_64] ->
+    | arch `elem` [ArchPPC, ArchPPC_64 ELF_V1, ArchPPC_64 ELF_V2] ->
        case platformOS platform of
        OSDarwin -> PPC_Darwin.freeReg
        _        -> PPC.freeReg

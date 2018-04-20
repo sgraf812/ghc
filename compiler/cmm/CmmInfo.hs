@@ -26,12 +26,15 @@ module CmmInfo (
   maxStdInfoTableSizeW,
   maxRetInfoTableSizeW,
   stdInfoTableSizeB,
+  conInfoTableSizeB,
   stdSrtBitmapOffset,
   stdClosureTypeOffset,
   stdPtrsOffset, stdNonPtrsOffset,
 ) where
 
 #include "HsVersions.h"
+
+import GhcPrelude
 
 import Cmm
 import CmmUtils
@@ -40,7 +43,7 @@ import SMRep
 import Bitmap
 import Stream (Stream)
 import qualified Stream
-import Hoopl
+import Hoopl.Collections
 
 import Maybes
 import DynFlags
@@ -132,7 +135,7 @@ mkInfoTable dflags proc@(CmmProc infos entry_lbl live blocks)
         --
         return (top_decls ++
                 [CmmProc mapEmpty entry_lbl live blocks,
-                 mkDataLits Data info_lbl
+                 mkRODataLits info_lbl
                     (CmmLabel entry_lbl : rel_std_info ++ rel_extra_bits)])
 
   --
@@ -323,7 +326,7 @@ mkLivenessBits :: DynFlags -> Liveness -> UniqSM (CmmLit, [RawCmmDecl])
 
 mkLivenessBits dflags liveness
   | n_bits > mAX_SMALL_BITMAP_SIZE dflags -- does not fit in one word
-  = do { uniq <- getUniqueUs
+  = do { uniq <- getUniqueM
        ; let bitmap_lbl = mkBitmapLabel uniq
        ; return (CmmLabel bitmap_lbl,
                  [mkRODataLits bitmap_lbl lits]) }
@@ -398,8 +401,8 @@ mkProfLits _ (ProfilingInfo td cd)
 
 newStringLit :: [Word8] -> UniqSM (CmmLit, GenCmmDecl CmmStatics info stmt)
 newStringLit bytes
-  = do { uniq <- getUniqueUs
-       ; return (mkByteStringCLit uniq bytes) }
+  = do { uniq <- getUniqueM
+       ; return (mkByteStringCLit (mkStringLitLabel uniq) bytes) }
 
 
 -- Misc utils
@@ -414,9 +417,19 @@ srtEscape dflags = toStgHalfWord dflags (-1)
 --
 -------------------------------------------------------------------------
 
+-- | Wrap a 'CmmExpr' in an alignment check when @-falignment-sanitisation@ is
+-- enabled.
+wordAligned :: DynFlags -> CmmExpr -> CmmExpr
+wordAligned dflags e
+  | gopt Opt_AlignmentSanitisation dflags
+  = CmmMachOp (MO_AlignmentCheck (wORD_SIZE dflags) (wordWidth dflags)) [e]
+  | otherwise
+  = e
+
 closureInfoPtr :: DynFlags -> CmmExpr -> CmmExpr
 -- Takes a closure pointer and returns the info table pointer
-closureInfoPtr dflags e = CmmLoad e (bWord dflags)
+closureInfoPtr dflags e =
+    CmmLoad (wordAligned dflags e) (bWord dflags)
 
 entryCode :: DynFlags -> CmmExpr -> CmmExpr
 -- Takes an info pointer (the first word of a closure)
@@ -551,3 +564,6 @@ stdClosureTypeOffset dflags = stdInfoTableSizeB dflags - wORD_SIZE dflags
 stdPtrsOffset, stdNonPtrsOffset :: DynFlags -> ByteOff
 stdPtrsOffset    dflags = stdInfoTableSizeB dflags - 2 * wORD_SIZE dflags
 stdNonPtrsOffset dflags = stdInfoTableSizeB dflags - 2 * wORD_SIZE dflags + hALF_WORD_SIZE dflags
+
+conInfoTableSizeB :: DynFlags -> Int
+conInfoTableSizeB dflags = stdInfoTableSizeB dflags + wORD_SIZE dflags

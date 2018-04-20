@@ -4,21 +4,19 @@
 {- BlockId module should probably go away completely, being superseded by Label -}
 module BlockId
   ( BlockId, mkBlockId -- ToDo: BlockId should be abstract, but it isn't yet
-  , BlockSet, BlockEnv
-  , IsSet(..), setInsertList, setDeleteList, setUnions
-  , IsMap(..), mapInsertList, mapDeleteList, mapUnions
-  , emptyBlockSet, emptyBlockMap
-  , blockLbl, infoTblLbl, retPtLbl
+  , newBlockId
+  , blockLbl, infoTblLbl
   ) where
+
+import GhcPrelude
 
 import CLabel
 import IdInfo
 import Name
-import Outputable
 import Unique
+import UniqSupply
 
-import Compiler.Hoopl as Hoopl hiding (Unique)
-import Compiler.Hoopl.Internals (uniqueToLbl, lblToUnique)
+import Hoopl.Label (Label, mkHooplLabel)
 
 ----------------------------------------------------------------
 --- Block Ids, their environments, and their sets
@@ -32,40 +30,17 @@ most assembly languages allow, a label is visible throughout the entire
 compilation unit in which it appears.
 -}
 
-type BlockId = Hoopl.Label
-
-instance Uniquable BlockId where
-  getUnique label = getUnique (lblToUnique label)
-
-instance Outputable BlockId where
-  ppr label = ppr (getUnique label)
+type BlockId = Label
 
 mkBlockId :: Unique -> BlockId
-mkBlockId unique = uniqueToLbl $ intToUnique $ getKey unique
+mkBlockId unique = mkHooplLabel $ getKey unique
 
-retPtLbl :: BlockId -> CLabel
-retPtLbl label = mkReturnPtLabel $ getUnique label
+newBlockId :: MonadUnique m => m BlockId
+newBlockId = mkBlockId <$> getUniqueM
 
 blockLbl :: BlockId -> CLabel
-blockLbl label = mkEntryLabel (mkFCallName (getUnique label) "block") NoCafRefs
+blockLbl label = mkLocalBlockLabel (getUnique label)
 
 infoTblLbl :: BlockId -> CLabel
-infoTblLbl label = mkInfoTableLabel (mkFCallName (getUnique label) "block") NoCafRefs
-
--- Block environments: Id blocks
-type BlockEnv a = Hoopl.LabelMap a
-
-instance Outputable a => Outputable (BlockEnv a) where
-  ppr = ppr . mapToList
-
-emptyBlockMap :: BlockEnv a
-emptyBlockMap = mapEmpty
-
--- Block sets
-type BlockSet = Hoopl.LabelSet
-
-instance Outputable BlockSet where
-  ppr = ppr . setElems
-
-emptyBlockSet :: BlockSet
-emptyBlockSet = setEmpty
+infoTblLbl label
+  = mkBlockInfoTableLabel (mkFCallName (getUnique label) "block") NoCafRefs

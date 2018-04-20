@@ -1,42 +1,43 @@
-{-# LANGUAGE BangPatterns, CPP, GADTs #-}
+{-# LANGUAGE BangPatterns, GADTs #-}
 
 module MkGraph
-  ( CmmAGraph, CgStmt(..)
+  ( CmmAGraph, CmmAGraphScoped, CgStmt(..)
   , (<*>), catAGraphs
   , mkLabel, mkMiddle, mkLast, outOfLine
   , lgraphOfAGraph, labelAGraph
 
   , stackStubExpr
-  , mkNop, mkAssign, mkStore, mkUnsafeCall, mkFinalCall, mkCallReturnsTo
+  , mkNop, mkAssign, mkStore
+  , mkUnsafeCall, mkFinalCall, mkCallReturnsTo
   , mkJumpReturnsTo
   , mkJump, mkJumpExtra
   , mkRawJump
   , mkCbranch, mkSwitch
   , mkReturn, mkComment, mkCallEntry, mkBranch
+  , mkUnwind
   , copyInOflow, copyOutOflow
   , noExtraStack
   , toCall, Transfer(..)
   )
 where
 
+import GhcPrelude hiding ( (<*>) ) -- avoid importing (<*>)
+
 import BlockId
 import Cmm
 import CmmCallConv
+import CmmSwitch (SwitchTargets)
 
-import Compiler.Hoopl hiding (Unique, (<*>), mkFirst, mkMiddle, mkLast, mkLabel, mkBranch, Shape(..))
+import Hoopl.Block
+import Hoopl.Graph
+import Hoopl.Label
 import DynFlags
 import FastString
 import ForeignCall
+import OrdList
 import SMRep (ByteOff)
 import UniqSupply
-import OrdList
-
-import Control.Monad
-import Data.List
-import Data.Maybe
-import Prelude (($),Int,Eq(..)) -- avoid importing (<*>)
-
-#include "HsVersions.h"
+import Util
 
 
 -----------------------------------------------------------------------------
@@ -58,22 +59,24 @@ import Prelude (($),Int,Eq(..)) -- avoid importing (<*>)
 -- control flows from the first to the second.
 --
 -- A 'CmmAGraph' can be turned into a 'CmmGraph' (closed at both ends)
--- by providing a label for the entry point; see 'labelAGraph'.
---
+-- by providing a label for the entry point and a tick scope; see
+-- 'labelAGraph'.
 type CmmAGraph = OrdList CgStmt
+-- | Unlabeled graph with tick scope
+type CmmAGraphScoped = (CmmAGraph, CmmTickScope)
 
 data CgStmt
-  = CgLabel BlockId
+  = CgLabel BlockId CmmTickScope
   | CgStmt  (CmmNode O O)
   | CgLast  (CmmNode O C)
-  | CgFork  BlockId CmmAGraph
+  | CgFork  BlockId CmmAGraph CmmTickScope
 
-flattenCmmAGraph :: BlockId -> CmmAGraph -> CmmGraph
-flattenCmmAGraph id stmts =
+flattenCmmAGraph :: BlockId -> CmmAGraphScoped -> CmmGraph
+flattenCmmAGraph id (stmts_t, tscope) =
     CmmGraph { g_entry = id,
                g_graph = GMany NothingO body NothingO }
   where
-  body = foldr addBlock emptyBody $ flatten id stmts []
+  body = foldr addBlock emptyBody $ flatten id stmts_t tscope []
 
   --
   -- flatten: given an entry label and a CmmAGraph, make a list of blocks.
@@ -81,10 +84,11 @@ flattenCmmAGraph id stmts =
   -- NB. avoid the quadratic-append trap by passing in the tail of the
   -- list.  This is important for Very Long Functions (e.g. in T783).
   --
-  flatten :: Label -> CmmAGraph -> [Block CmmNode C C] -> [Block CmmNode C C]
-  flatten id g blocks
-      = flatten1 (fromOL g) (blockJoinHead (CmmEntry id) emptyBlock) blocks
-
+  flatten :: Label -> CmmAGraph -> CmmTickScope -> [Block CmmNode C C]
+          -> [Block CmmNode C C]
+  flatten id g tscope blocks
+      = flatten1 (fromOL g) block' blocks
+      where !block' = blockJoinHead (CmmEntry id tscope) emptyBlock
   --
   -- flatten0: we are outside a block at this point: any code before
   -- the first label is unreachable, so just drop it.
@@ -92,12 +96,12 @@ flattenCmmAGraph id stmts =
   flatten0 :: [CgStmt] -> [Block CmmNode C C] -> [Block CmmNode C C]
   flatten0 [] blocks = blocks
 
-  flatten0 (CgLabel id : stmts) blocks
+  flatten0 (CgLabel id tscope : stmts) blocks
     = flatten1 stmts block blocks
-    where !block = blockJoinHead (CmmEntry id) emptyBlock
+    where !block = blockJoinHead (CmmEntry id tscope) emptyBlock
 
-  flatten0 (CgFork fork_id stmts : rest) blocks
-    = flatten fork_id stmts $ flatten0 rest blocks
+  flatten0 (CgFork fork_id stmts_t tscope : rest) blocks
+    = flatten fork_id stmts_t tscope $ flatten0 rest blocks
 
   flatten0 (CgLast _ : stmts) blocks = flatten0 stmts blocks
   flatten0 (CgStmt _ : stmts) blocks = flatten0 stmts blocks
@@ -127,14 +131,14 @@ flattenCmmAGraph id stmts =
     = flatten1 stmts block' blocks
     where !block' = blockSnoc block stmt
 
-  flatten1 (CgFork fork_id stmts : rest) block blocks
-    = flatten fork_id stmts $ flatten1 rest block blocks
+  flatten1 (CgFork fork_id stmts_t tscope : rest) block blocks
+    = flatten fork_id stmts_t tscope $ flatten1 rest block blocks
 
   -- a label here means that we should start a new block, and the
   -- current block should fall through to the new block.
-  flatten1 (CgLabel id : stmts) block blocks
+  flatten1 (CgLabel id tscp : stmts) block blocks
     = blockJoinTail block (CmmBranch id) :
-      flatten1 stmts (blockJoinHead (CmmEntry id) emptyBlock) blocks
+      flatten1 stmts (blockJoinHead (CmmEntry id tscp) emptyBlock) blocks
 
 
 
@@ -147,8 +151,8 @@ catAGraphs     :: [CmmAGraph] -> CmmAGraph
 catAGraphs      = concatOL
 
 -- | created a sequence "goto id; id:" as an AGraph
-mkLabel        :: BlockId -> CmmAGraph
-mkLabel bid     = unitOL (CgLabel bid)
+mkLabel        :: BlockId -> CmmTickScope -> CmmAGraph
+mkLabel bid scp = unitOL (CgLabel bid scp)
 
 -- | creates an open AGraph from a given node
 mkMiddle        :: CmmNode O O -> CmmAGraph
@@ -159,16 +163,17 @@ mkLast         :: CmmNode O C -> CmmAGraph
 mkLast last     = unitOL (CgLast last)
 
 -- | A labelled code block; should end in a last node
-outOfLine      :: BlockId -> CmmAGraph -> CmmAGraph
-outOfLine l g   = unitOL (CgFork l g)
+outOfLine      :: BlockId -> CmmAGraphScoped -> CmmAGraph
+outOfLine l (c,s) = unitOL (CgFork l c s)
 
 -- | allocate a fresh label for the entry point
-lgraphOfAGraph :: CmmAGraph -> UniqSM CmmGraph
-lgraphOfAGraph g = do u <- getUniqueM
-                      return (labelAGraph (mkBlockId u) g)
+lgraphOfAGraph :: CmmAGraphScoped -> UniqSM CmmGraph
+lgraphOfAGraph g = do
+  u <- getUniqueM
+  return (labelAGraph (mkBlockId u) g)
 
 -- | use the given BlockId as the label of the entry point
-labelAGraph    :: BlockId -> CmmAGraph -> CmmGraph
+labelAGraph    :: BlockId -> CmmAGraphScoped -> CmmGraph
 labelAGraph lbl ag = flattenCmmAGraph lbl ag
 
 ---------- No-ops
@@ -176,12 +181,10 @@ mkNop        :: CmmAGraph
 mkNop         = nilOL
 
 mkComment    :: FastString -> CmmAGraph
-#ifdef DEBUG
--- SDM: generating all those comments takes time, this saved about 4% for me
-mkComment fs  = mkMiddle $ CmmComment fs
-#else
-mkComment _   = nilOL
-#endif
+mkComment fs
+  -- SDM: generating all those comments takes time, this saved about 4% for me
+  | debugIsOn = mkMiddle $ CmmComment fs
+  | otherwise = nilOL
 
 ---------- Assignment and store
 mkAssign     :: CmmReg  -> CmmExpr -> CmmAGraph
@@ -193,7 +196,7 @@ mkStore  l r  = mkMiddle $ CmmStore  l r
 
 ---------- Control transfer
 mkJump          :: DynFlags -> Convention -> CmmExpr
-                -> [CmmActual]
+                -> [CmmExpr]
                 -> UpdFrameOffset
                 -> CmmAGraph
 mkJump dflags conv e actuals updfr_off =
@@ -209,20 +212,21 @@ mkRawJump dflags e updfr_off vols =
     \arg_space _  -> toCall e Nothing updfr_off 0 arg_space vols
 
 
-mkJumpExtra :: DynFlags -> Convention -> CmmExpr -> [CmmActual]
-                -> UpdFrameOffset -> [CmmActual]
+mkJumpExtra :: DynFlags -> Convention -> CmmExpr -> [CmmExpr]
+                -> UpdFrameOffset -> [CmmExpr]
                 -> CmmAGraph
 mkJumpExtra dflags conv e actuals updfr_off extra_stack =
   lastWithArgsAndExtraStack dflags Jump Old conv actuals updfr_off extra_stack $
     toCall e Nothing updfr_off 0
 
-mkCbranch       :: CmmExpr -> BlockId -> BlockId -> CmmAGraph
-mkCbranch pred ifso ifnot = mkLast (CmmCondBranch pred ifso ifnot)
+mkCbranch       :: CmmExpr -> BlockId -> BlockId -> Maybe Bool -> CmmAGraph
+mkCbranch pred ifso ifnot likely =
+  mkLast (CmmCondBranch pred ifso ifnot likely)
 
-mkSwitch        :: CmmExpr -> [Maybe BlockId] -> CmmAGraph
+mkSwitch        :: CmmExpr -> SwitchTargets -> CmmAGraph
 mkSwitch e tbl   = mkLast $ CmmSwitch e tbl
 
-mkReturn        :: DynFlags -> CmmExpr -> [CmmActual] -> UpdFrameOffset
+mkReturn        :: DynFlags -> CmmExpr -> [CmmExpr] -> UpdFrameOffset
                 -> CmmAGraph
 mkReturn dflags e actuals updfr_off =
   lastWithArgs dflags Ret  Old NativeReturn actuals updfr_off $
@@ -232,17 +236,17 @@ mkBranch        :: BlockId -> CmmAGraph
 mkBranch bid     = mkLast (CmmBranch bid)
 
 mkFinalCall   :: DynFlags
-              -> CmmExpr -> CCallConv -> [CmmActual] -> UpdFrameOffset
+              -> CmmExpr -> CCallConv -> [CmmExpr] -> UpdFrameOffset
               -> CmmAGraph
 mkFinalCall dflags f _ actuals updfr_off =
   lastWithArgs dflags Call Old NativeDirectCall actuals updfr_off $
     toCall f Nothing updfr_off 0
 
-mkCallReturnsTo :: DynFlags -> CmmExpr -> Convention -> [CmmActual]
+mkCallReturnsTo :: DynFlags -> CmmExpr -> Convention -> [CmmExpr]
                 -> BlockId
                 -> ByteOff
                 -> UpdFrameOffset
-                -> [CmmActual]
+                -> [CmmExpr]
                 -> CmmAGraph
 mkCallReturnsTo dflags f callConv actuals ret_lbl ret_off updfr_off extra_stack = do
   lastWithArgsAndExtraStack dflags Call (Young ret_lbl) callConv actuals
@@ -251,7 +255,7 @@ mkCallReturnsTo dflags f callConv actuals ret_lbl ret_off updfr_off extra_stack 
 
 -- Like mkCallReturnsTo, but does not push the return address (it is assumed to be
 -- already on the stack).
-mkJumpReturnsTo :: DynFlags -> CmmExpr -> Convention -> [CmmActual]
+mkJumpReturnsTo :: DynFlags -> CmmExpr -> Convention -> [CmmExpr]
                 -> BlockId
                 -> ByteOff
                 -> UpdFrameOffset
@@ -263,6 +267,10 @@ mkJumpReturnsTo dflags f callConv actuals ret_lbl ret_off updfr_off  = do
 mkUnsafeCall  :: ForeignTarget -> [CmmFormal] -> [CmmActual] -> CmmAGraph
 mkUnsafeCall t fs as = mkMiddle $ CmmUnsafeForeignCall t fs as
 
+-- | Construct a 'CmmUnwind' node for the given register and unwinding
+-- expression.
+mkUnwind     :: GlobalReg -> CmmExpr -> CmmAGraph
+mkUnwind r e  = mkMiddle $ CmmUnwind [(r, Just e)]
 
 --------------------------------------------------------------------------
 
@@ -319,9 +327,9 @@ copyIn dflags conv area formals extra_stk
 
 data Transfer = Call | JumpRet | Jump | Ret deriving Eq
 
-copyOutOflow :: DynFlags -> Convention -> Transfer -> Area -> [CmmActual]
+copyOutOflow :: DynFlags -> Convention -> Transfer -> Area -> [CmmExpr]
              -> UpdFrameOffset
-             -> [CmmActual] -- extra stack args
+             -> [CmmExpr] -- extra stack args
              -> (Int, [GlobalReg], CmmAGraph)
 
 -- Generate code to move the actual parameters into the locations
@@ -372,7 +380,7 @@ mkCallEntry :: DynFlags -> Convention -> [CmmFormal] -> [CmmFormal]
 mkCallEntry dflags conv formals extra_stk
   = copyInOflow dflags conv Old formals extra_stk
 
-lastWithArgs :: DynFlags -> Transfer -> Area -> Convention -> [CmmActual]
+lastWithArgs :: DynFlags -> Transfer -> Area -> Convention -> [CmmExpr]
              -> UpdFrameOffset
              -> (ByteOff -> [GlobalReg] -> CmmAGraph)
              -> CmmAGraph
@@ -381,8 +389,8 @@ lastWithArgs dflags transfer area conv actuals updfr_off last =
                             updfr_off noExtraStack last
 
 lastWithArgsAndExtraStack :: DynFlags
-             -> Transfer -> Area -> Convention -> [CmmActual]
-             -> UpdFrameOffset -> [CmmActual]
+             -> Transfer -> Area -> Convention -> [CmmExpr]
+             -> UpdFrameOffset -> [CmmExpr]
              -> (ByteOff -> [GlobalReg] -> CmmAGraph)
              -> CmmAGraph
 lastWithArgsAndExtraStack dflags transfer area conv actuals updfr_off
@@ -393,7 +401,7 @@ lastWithArgsAndExtraStack dflags transfer area conv actuals updfr_off
                                updfr_off extra_stack
 
 
-noExtraStack :: [CmmActual]
+noExtraStack :: [CmmExpr]
 noExtraStack = []
 
 toCall :: CmmExpr -> Maybe BlockId -> UpdFrameOffset -> ByteOff

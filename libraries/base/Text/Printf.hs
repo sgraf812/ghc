@@ -1,8 +1,5 @@
 {-# LANGUAGE Safe #-}
-{-# LANGUAGE CPP #-}
-#if defined(__GLASGOW_HASKELL__) && __GLASGOW_HASKELL__ >=  700
 {-# LANGUAGE GADTs #-}
-#endif
 
 -----------------------------------------------------------------------------
 -- |
@@ -30,7 +27,7 @@ module Text.Printf(
 --
 -- | This 'printf' can be extended to format types
 -- other than those provided for by default. This
--- is done by instancing 'PrintfArg' and providing
+-- is done by instantiating 'PrintfArg' and providing
 -- a 'formatArg' for the type. It is possible to
 -- provide a 'parseFormat' to process type-specific
 -- modifiers, but the default instance is usually
@@ -94,17 +91,21 @@ module Text.Printf(
   IsChar(..)
 ) where
 
-import Prelude
 import Data.Char
 import Data.Int
 import Data.List
 import Data.Word
 import Numeric
+import Numeric.Natural
 import System.IO
 
 -------------------
 
 -- | Format a variable number of arguments with the C-style formatting string.
+--
+-- >>> printf "%s, %d, %.4f" "hello" 123 pi
+-- hello, 123, 3.1416
+--
 -- The return value is either 'String' or @('IO' a)@ (which
 -- should be @('IO' '()')@, but Haskell's type system
 -- makes this hard).
@@ -136,11 +137,11 @@ import System.IO
 -- A conversion specification begins with the
 -- character @%@, followed by zero or more of the following flags:
 --
--- >    -      left adjust (default is right adjust)
--- >    +      always use a sign (+ or -) for signed conversions
--- >    space  leading space for positive numbers in signed conversions
--- >    0      pad with zeros rather than spaces
--- >    #      use an \"alternate form\": see below
+-- > -      left adjust (default is right adjust)
+-- > +      always use a sign (+ or -) for signed conversions
+-- > space  leading space for positive numbers in signed conversions
+-- > 0      pad with zeros rather than spaces
+-- > #      use an \"alternate form\": see below
 --
 -- When both flags are given, @-@ overrides @0@ and @+@ overrides space.
 -- A negative width specifier in a @*@ conversion is treated as
@@ -149,32 +150,32 @@ import System.IO
 -- The \"alternate form\" for unsigned radix conversions is
 -- as in C @printf(3)@:
 --
--- >    %o           prefix with a leading 0 if needed
--- >    %x           prefix with a leading 0x if nonzero
--- >    %X           prefix with a leading 0X if nonzero
--- >    %b           prefix with a leading 0b if nonzero
--- >    %[eEfFgG]    ensure that the number contains a decimal point
+-- > %o           prefix with a leading 0 if needed
+-- > %x           prefix with a leading 0x if nonzero
+-- > %X           prefix with a leading 0X if nonzero
+-- > %b           prefix with a leading 0b if nonzero
+-- > %[eEfFgG]    ensure that the number contains a decimal point
 --
 -- Any flags are followed optionally by a field width:
 --
--- >    num    field width
--- >    *      as num, but taken from argument list
+-- > num    field width
+-- > *      as num, but taken from argument list
 --
 -- The field width is a minimum, not a maximum: it will be
 -- expanded as needed to avoid mutilating a value.
 --
 -- Any field width is followed optionally by a precision:
 --
--- >    .num   precision
--- >    .      same as .0
--- >    .*     as num, but taken from argument list
+-- > .num   precision
+-- > .      same as .0
+-- > .*     as num, but taken from argument list
 --
 -- Negative precision is taken as 0. The meaning of the
 -- precision depends on the conversion type.
 --
--- >    Integral    minimum number of digits to show
--- >    RealFloat   number of digits after the decimal point
--- >    String      maximum number of characters
+-- > Integral    minimum number of digits to show
+-- > RealFloat   number of digits after the decimal point
+-- > String      maximum number of characters
 --
 -- The precision for Integral types is accomplished by zero-padding.
 -- If both precision and zero-pad are given for an Integral field,
@@ -185,29 +186,29 @@ import System.IO
 -- to set the implicit size of the operand for conversion of
 -- a negative operand to unsigned:
 --
--- >    hh     Int8
--- >    h      Int16
--- >    l      Int32
--- >    ll     Int64
--- >    L      Int64
+-- > hh     Int8
+-- > h      Int16
+-- > l      Int32
+-- > ll     Int64
+-- > L      Int64
 --
 -- The specification ends with a format character:
 --
--- >    c      character               Integral
--- >    d      decimal                 Integral
--- >    o      octal                   Integral
--- >    x      hexadecimal             Integral
--- >    X      hexadecimal             Integral
--- >    b      binary                  Integral
--- >    u      unsigned decimal        Integral
--- >    f      floating point          RealFloat
--- >    F      floating point          RealFloat
--- >    g      general format float    RealFloat
--- >    G      general format float    RealFloat
--- >    e      exponent format float   RealFloat
--- >    E      exponent format float   RealFloat
--- >    s      string                  String
--- >    v      default format          any type
+-- > c      character               Integral
+-- > d      decimal                 Integral
+-- > o      octal                   Integral
+-- > x      hexadecimal             Integral
+-- > X      hexadecimal             Integral
+-- > b      binary                  Integral
+-- > u      unsigned decimal        Integral
+-- > f      floating point          RealFloat
+-- > F      floating point          RealFloat
+-- > g      general format float    RealFloat
+-- > G      general format float    RealFloat
+-- > e      exponent format float   RealFloat
+-- > E      exponent format float   RealFloat
+-- > s      string                  String
+-- > v      default format          any type
 --
 -- The \"%v\" specifier is provided for all built-in types,
 -- and should be provided for user-defined type formatters
@@ -215,11 +216,11 @@ import System.IO
 -- type. For the built-in types the \"%v\" specifier is
 -- converted as follows:
 --
--- >    c      Char
--- >    u      other unsigned Integral
--- >    d      other signed Integral
--- >    g      RealFloat
--- >    s      String
+-- > c      Char
+-- > u      other unsigned Integral
+-- > d      other signed Integral
+-- > g      RealFloat
+-- > s      String
 --
 -- Mismatch between the argument types and the format
 -- string, as well as any other syntactic or semantic errors
@@ -249,16 +250,6 @@ import System.IO
 --
 -- * Haskell 'printf' will place a zero after a decimal point when
 --   possible.
---
--- Examples:
---
--- >   > printf "%d\n" (23::Int)
--- >   23
--- >   > printf "%s %s\n" "Hello" "World"
--- >   Hello World
--- >   > printf "%.2f\n" pi
--- >   3.14
---
 printf :: (PrintfType r) => String -> r
 printf fmts = spr fmts []
 
@@ -285,6 +276,7 @@ class HPrintfType t where
 instance PrintfType String where
     spr fmt args = uprintf fmt (reverse args)
 -}
+-- | @since 2.01
 instance (IsChar c) => PrintfType [c] where
     spr fmts args = map fromChar (uprintf fmts (reverse args))
 
@@ -292,35 +284,22 @@ instance (IsChar c) => PrintfType [c] where
 -- type system won't readily let us say that without
 -- bringing the GADTs. So we go conditional for these defs.
 
-#if defined(__GLASGOW_HASKELL__) && __GLASGOW_HASKELL__ >=  700
-
+-- | @since 4.7.0.0
 instance (a ~ ()) => PrintfType (IO a) where
     spr fmts args =
         putStr $ map fromChar $ uprintf fmts $ reverse args
 
+-- | @since 4.7.0.0
 instance (a ~ ()) => HPrintfType (IO a) where
     hspr hdl fmts args = do
         hPutStr hdl (uprintf fmts (reverse args))
 
-#else
-
-instance PrintfType (IO a) where
-    spr fmts args = do
-        putStr $ map fromChar $ uprintf fmts $ reverse args
-        return (error "PrintfType (IO a): result should not be used.")
-
-instance HPrintfType (IO a) where
-    hspr hdl fmts args = do
-        hPutStr hdl (uprintf fmts (reverse args))
-        return (error "HPrintfType (IO a): result should not be used.")
-
-#endif
-
-
+-- | @since 2.01
 instance (PrintfArg a, PrintfType r) => PrintfType (a -> r) where
     spr fmts args = \ a -> spr fmts
                              ((parseFormat a, formatArg a) : args)
 
+-- | @since 2.01
 instance (PrintfArg a, HPrintfType r) => HPrintfType (a -> r) where
     hspr hdl fmts args = \ a -> hspr hdl fmts
                                   ((parseFormat a, formatArg a) : args)
@@ -331,67 +310,87 @@ instance (PrintfArg a, HPrintfType r) => HPrintfType (a -> r) where
 -- default 'parseFormat' expects no modifiers: this is the normal
 -- case. Minimal instance: 'formatArg'.
 class PrintfArg a where
-    -- | /Since: 4.7.0.0/
+    -- | @since 4.7.0.0
     formatArg :: a -> FieldFormatter
-    -- | /Since: 4.7.0.0/
+    -- | @since 4.7.0.0
     parseFormat :: a -> ModifierParser
     parseFormat _ (c : cs) = FormatParse "" c cs
     parseFormat _ "" = errorShortFormat
 
+-- | @since 2.01
 instance PrintfArg Char where
     formatArg = formatChar
     parseFormat _ cf = parseIntFormat (undefined :: Int) cf
 
+-- | @since 2.01
 instance (IsChar c) => PrintfArg [c] where
     formatArg = formatString
 
+-- | @since 2.01
 instance PrintfArg Int where
     formatArg = formatInt
     parseFormat = parseIntFormat
 
+-- | @since 2.01
 instance PrintfArg Int8 where
     formatArg = formatInt
     parseFormat = parseIntFormat
 
+-- | @since 2.01
 instance PrintfArg Int16 where
     formatArg = formatInt
     parseFormat = parseIntFormat
 
+-- | @since 2.01
 instance PrintfArg Int32 where
     formatArg = formatInt
     parseFormat = parseIntFormat
 
+-- | @since 2.01
 instance PrintfArg Int64 where
     formatArg = formatInt
     parseFormat = parseIntFormat
 
+-- | @since 2.01
 instance PrintfArg Word where
     formatArg = formatInt
     parseFormat = parseIntFormat
 
+-- | @since 2.01
 instance PrintfArg Word8 where
     formatArg = formatInt
     parseFormat = parseIntFormat
 
+-- | @since 2.01
 instance PrintfArg Word16 where
     formatArg = formatInt
     parseFormat = parseIntFormat
 
+-- | @since 2.01
 instance PrintfArg Word32 where
     formatArg = formatInt
     parseFormat = parseIntFormat
 
+-- | @since 2.01
 instance PrintfArg Word64 where
     formatArg = formatInt
     parseFormat = parseIntFormat
 
+-- | @since 2.01
 instance PrintfArg Integer where
     formatArg = formatInteger
     parseFormat = parseIntFormat
 
+-- | @since 4.8.0.0
+instance PrintfArg Natural where
+    formatArg = formatInteger . toInteger
+    parseFormat = parseIntFormat
+
+-- | @since 2.01
 instance PrintfArg Float where
     formatArg = formatRealFloat
 
+-- | @since 2.01
 instance PrintfArg Double where
     formatArg = formatRealFloat
 
@@ -400,11 +399,12 @@ instance PrintfArg Double where
 -- type, is not allowable as a typeclass instance. 'IsChar'
 -- is exported for backward-compatibility.
 class IsChar c where
-    -- | /Since: 4.7.0.0/
+    -- | @since 4.7.0.0
     toChar :: c -> Char
-    -- | /Since: 4.7.0.0/
+    -- | @since 4.7.0.0
     fromChar :: Char -> c
 
+-- | @since 2.01
 instance IsChar Char where
     toChar c = c
     fromChar c = c
@@ -414,19 +414,19 @@ instance IsChar Char where
 -- | Whether to left-adjust or zero-pad a field. These are
 -- mutually exclusive, with 'LeftAdjust' taking precedence.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 data FormatAdjustment = LeftAdjust | ZeroPad
 
 -- | How to handle the sign of a numeric field.  These are
 -- mutually exclusive, with 'SignPlus' taking precedence.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 data FormatSign = SignPlus | SignSpace
 
 -- | Description of field formatting for 'formatArg'. See UNIX `printf`(3)
 -- for a description of how field formatting works.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 data FieldFormat = FieldFormat {
   fmtWidth :: Maybe Int,       -- ^ Total width of the field.
   fmtPrecision :: Maybe Int,   -- ^ Secondary field width specifier.
@@ -460,7 +460,7 @@ data FieldFormat = FieldFormat {
 -- modifier characters to find the primary format character.
 -- This is the type of its result.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 data FormatParse = FormatParse {
   fpModifiers :: String,   -- ^ Any modifiers found.
   fpChar :: Char,          -- ^ Primary format character.
@@ -477,7 +477,7 @@ intModifierMap = [
   ("ll", toInteger (minBound :: Int64)),
   ("L", toInteger (minBound :: Int64)) ]
 
-parseIntFormat :: Integral a => a -> String -> FormatParse
+parseIntFormat :: a -> String -> FormatParse
 parseIntFormat _ s =
   case foldr matchPrefix Nothing intModifierMap of
     Just m -> m
@@ -502,13 +502,13 @@ parseIntFormat _ s =
 -- | This is the type of a field formatter reified over its
 -- argument.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 type FieldFormatter = FieldFormat -> ShowS
 
 -- | Type of a function that will parse modifier characters
 -- from the format string.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 type ModifierParser = String -> FormatParse
 
 -- | Substitute a \'v\' format character with the given
@@ -516,21 +516,21 @@ type ModifierParser = String -> FormatParse
 -- convenience for user-implemented types, which should
 -- support \"%v\".
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 vFmt :: Char -> FieldFormat -> FieldFormat
 vFmt c ufmt@(FieldFormat {fmtChar = 'v'}) = ufmt {fmtChar = c}
 vFmt _ ufmt = ufmt
 
 -- | Formatter for 'Char' values.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 formatChar :: Char -> FieldFormatter
 formatChar x ufmt =
   formatIntegral (Just 0) (toInteger $ ord x) $ vFmt 'c' ufmt
 
 -- | Formatter for 'String' values.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 formatString :: IsChar a => [a] -> FieldFormatter
 formatString x ufmt =
   case fmtChar $ vFmt 's' ufmt of
@@ -555,7 +555,7 @@ fixupMods ufmt m =
 
 -- | Formatter for 'Int' values.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 formatInt :: (Integral a, Bounded a) => a -> FieldFormatter
 formatInt x ufmt =
   let lb = toInteger $ minBound `asTypeOf` x
@@ -568,7 +568,7 @@ formatInt x ufmt =
 
 -- | Formatter for 'Integer' values.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 formatInteger :: Integer -> FieldFormatter
 formatInteger x ufmt =
   let m = fixupMods ufmt Nothing in
@@ -609,7 +609,7 @@ formatIntegral m x ufmt0 =
 
 -- | Formatter for 'RealFloat' values.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 formatRealFloat :: RealFloat a => a -> FieldFormatter
 formatRealFloat x ufmt =
   let c = fmtChar $ vFmt 'g' ufmt
@@ -885,14 +885,14 @@ dfmt c p a d =
 -- | Raises an 'error' with a printf-specific prefix on the
 -- message string.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 perror :: String -> a
-perror s = error $ "printf: " ++ s
+perror s = errorWithoutStackTrace $ "printf: " ++ s
 
 -- | Calls 'perror' to indicate an unknown format letter for
 -- a given type.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 errorBadFormat :: Char -> a
 errorBadFormat c = perror $ "bad formatting char " ++ show c
 
@@ -900,15 +900,15 @@ errorShortFormat, errorMissingArgument, errorBadArgument :: a
 -- | Calls 'perror' to indicate that the format string ended
 -- early.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 errorShortFormat = perror "formatting string ended prematurely"
 -- | Calls 'perror' to indicate that there is a missing
 -- argument in the argument list.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 errorMissingArgument = perror "argument list ended prematurely"
 -- | Calls 'perror' to indicate that there is a type
 -- error or similar in the given argument.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 errorBadArgument = perror "bad argument"

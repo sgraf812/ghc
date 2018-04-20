@@ -1,4 +1,5 @@
-{-# LANGUAGE UndecidableInstances, MultiParamTypeClasses, 
+{-# OPTIONS_GHC -Wno-redundant-constraints -Wno-simplifiable-class-constraints #-}
+{-# LANGUAGE UndecidableInstances, MultiParamTypeClasses,
              FunctionalDependencies, FlexibleInstances #-}
 
 module T3108 where
@@ -28,6 +29,7 @@ class C1 x
 instance {-# OVERLAPPING #-} (C1 x, C1 y) => C1 (x,y)
 instance {-# OVERLAPPING #-} C1 Bool
 instance {-# OVERLAPPABLE #-} (C2 x y, C1 (y,Bool)) => C1 x
+-- Weird test case: (C1 (y,Bool)) is simplifiable
 
 class C2 x y | x -> y
 instance C2 Int Int

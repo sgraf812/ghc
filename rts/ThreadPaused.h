@@ -6,17 +6,14 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef THREADPAUSED_H
-#define THREADPAUSED_H
+#pragma once
+
+#include "BeginPrivate.h"
 
 RTS_PRIVATE void threadPaused ( Capability *cap, StgTSO * );
 
-#endif /* THREADPAUSED_H */
+#include "EndPrivate.h"
 
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:
+#if defined(THREADED_RTS) && defined(PROF_SPIN)
+extern volatile StgWord64 whitehole_threadPaused_spin;
+#endif

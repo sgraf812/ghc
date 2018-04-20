@@ -102,15 +102,6 @@ endif
 $1_$2_PKGDATA_DEP = $1/$2/package-data.mk
 endif
 
-# We don't bother splitting the bootstrap packages (built with stage 0)
-ifeq "$$($1_$2_SplitObjs)" ""
-ifeq "$$(SplitObjs) $3" "YES 1"
-$1_$2_SplitObjs = YES
-else
-$1_$2_SplitObjs = NO
-endif
-endif
-
 $(call hs-sources,$1,$2)
 $(call c-sources,$1,$2)
 $(call includes-sources,$1,$2)
@@ -133,7 +124,15 @@ $$(foreach way,$$($1_$2_WAYS),$$(eval \
 # If dyn libs are not being built then $$($1_$2_dyn_LIB) will just
 # expand to the empty string, and be ignored.
 $1_$2_PROGRAM_DEP_LIB = $$($1_$2_v_LIB) $$($1_$2_dyn_LIB)
-$$($1_PACKAGE)-$$($1_$2_VERSION)_$2_PROGRAM_DEP_LIB = $$($1_$2_PROGRAM_DEP_LIB)
+$$($1_$2_COMPONENT_ID)_$2_PROGRAM_DEP_LIB = $$($1_$2_PROGRAM_DEP_LIB)
+
+# See Note [inconsistent distdirs] in rules/build-package-way.mk.
+ifeq "$$($1_PACKAGE) $2" "ghc stage1"
+$$($1_$2_COMPONENT_ID)_dist-boot_PROGRAM_DEP_LIB = $$($1_$2_PROGRAM_DEP_LIB)
+endif
+ifeq "$$($1_PACKAGE) $2" "ghc stage2"
+$$($1_$2_COMPONENT_ID)_dist-install_PROGRAM_DEP_LIB = $$($1_$2_PROGRAM_DEP_LIB)
+endif
 
 # C and S files are possibly built the "dyn" way.
 ifeq "$$(BuildSharedLibs)" "YES"
@@ -156,7 +155,7 @@ endif
 
 # Don't put bootstrapping packages in the bindist
 ifneq "$3" "0"
-BINDIST_EXTRAS += $1/*.cabal $$(wildcard $1/*.buildinfo) $1/$2/setup-config $1/LICENSE
+BINDIST_EXTRAS += $1/*.cabal $$(wildcard $1/*.buildinfo) $$(wildcard $1/dist-install/build/*.buildinfo) $1/$2/setup-config $1/LICENSE
 BINDIST_EXTRAS += $$($1_$2_INSTALL_INCLUDES_SRCS)
 endif
 

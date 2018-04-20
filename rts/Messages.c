@@ -19,13 +19,13 @@
    Send a message to another Capability
    ------------------------------------------------------------------------- */
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
 
 void sendMessage(Capability *from_cap, Capability *to_cap, Message *msg)
 {
     ACQUIRE_LOCK(&to_cap->lock);
 
-#ifdef DEBUG
+#if defined(DEBUG)
     {
         const StgInfoTable *i = msg->header.info;
         if (i != &stg_MSG_THROWTO_info &&
@@ -46,7 +46,7 @@ void sendMessage(Capability *from_cap, Capability *to_cap, Message *msg)
     if (to_cap->running_task == NULL) {
         to_cap->running_task = myTask();
             // precond for releaseCapability_()
-        releaseCapability_(to_cap,rtsFalse);
+        releaseCapability_(to_cap,false);
     } else {
         interruptCapability(to_cap);
     }
@@ -60,7 +60,7 @@ void sendMessage(Capability *from_cap, Capability *to_cap, Message *msg)
    Handle a message
    ------------------------------------------------------------------------- */
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
 
 void
 executeMessage (Capability *cap, Message *m)
@@ -80,7 +80,7 @@ loop:
     else if (i == &stg_MSG_THROWTO_info)
     {
         MessageThrowTo *t = (MessageThrowTo *)m;
-        nat r;
+        uint32_t r;
         const StgInfoTable *i;
 
         i = lockClosure((StgClosure*)m);
@@ -113,7 +113,7 @@ loop:
     }
     else if (i == &stg_MSG_BLACKHOLE_info)
     {
-        nat r;
+        uint32_t r;
         MessageBlackHole *b = (MessageBlackHole*)m;
 
         r = messageBlackHole(cap, b);
@@ -129,6 +129,9 @@ loop:
     }
     else if (i == &stg_WHITEHOLE_info)
     {
+#if defined(PROF_SPIN)
+        ++whitehole_executeMessage_spin;
+#endif
         goto loop;
     }
     else
@@ -158,7 +161,7 @@ loop:
 
    ------------------------------------------------------------------------- */
 
-nat messageBlackHole(Capability *cap, MessageBlackHole *msg)
+uint32_t messageBlackHole(Capability *cap, MessageBlackHole *msg)
 {
     const StgInfoTable *info;
     StgClosure *p;
@@ -200,6 +203,7 @@ loop:
         // just been replaced with an IND by another thread in
         // updateThunk().  In which case, if we read the indirectee
         // again we should get the value.
+        // See Note [BLACKHOLE pointing to IND] in sm/Evac.c
         goto loop;
     }
 
@@ -207,7 +211,7 @@ loop:
     {
         owner = (StgTSO*)p;
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
         if (owner->cap != cap) {
             sendMessage(cap, owner->cap, (Message*)msg);
             debugTraceCap(DEBUG_sched, cap, "forwarding message to cap %d",
@@ -271,7 +275,7 @@ loop:
 
         ASSERT(owner != END_TSO_QUEUE);
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
         if (owner->cap != cap) {
             sendMessage(cap, owner->cap, (Message*)msg);
             debugTraceCap(DEBUG_sched, cap, "forwarding message to cap %d",
@@ -289,7 +293,9 @@ loop:
             recordClosureMutated(cap,(StgClosure*)bq);
         }
 
-        debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d",
+        debugTraceCap(DEBUG_sched, cap,
+                      "thread %d blocked on existing BLOCKING_QUEUE "
+                      "owned by thread %d",
                       (W_)msg->tso->id, (W_)owner->id);
 
         // See above, #3838
@@ -344,11 +350,3 @@ loop:
 
     return NULL; // not blocked
 }
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

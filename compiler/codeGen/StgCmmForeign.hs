@@ -1,5 +1,3 @@
-{-# LANGUAGE CPP #-}
-
 -----------------------------------------------------------------------------
 --
 -- Code generation for foreign calls.
@@ -9,28 +7,33 @@
 -----------------------------------------------------------------------------
 
 module StgCmmForeign (
-  cgForeignCall, loadThreadState, saveThreadState,
+  cgForeignCall,
   emitPrimCall, emitCCall,
   emitForeignCall,     -- For CmmParse
-  emitSaveThreadState, -- will be needed by the Cmm parser
-  emitLoadThreadState, -- ditto
-  emitCloseNursery, emitOpenNursery
+  emitSaveThreadState,
+  saveThreadState,
+  emitLoadThreadState,
+  loadThreadState,
+  emitOpenNursery,
+  emitCloseNursery,
  ) where
 
-#include "HsVersions.h"
+import GhcPrelude hiding( succ, (<*>) )
 
 import StgSyn
-import StgCmmProf (storeCurCCS, ccsType, curCCS)
+import StgCmmProf (storeCurCCS, ccsType)
 import StgCmmEnv
 import StgCmmMonad
 import StgCmmUtils
 import StgCmmClosure
 import StgCmmLayout
 
+import BlockId (newBlockId)
 import Cmm
 import CmmUtils
 import MkGraph
 import Type
+import RepType
 import TysPrim
 import CLabel
 import SMRep
@@ -38,10 +41,10 @@ import ForeignCall
 import DynFlags
 import Maybes
 import Outputable
+import UniqSupply
 import BasicTypes
 
 import Control.Monad
-import Prelude hiding( succ )
 
 -----------------------------------------------------------------------------
 -- Code generation for Foreign Calls
@@ -71,9 +74,9 @@ cgForeignCall (CCall (CCallSpec target cconv safety)) stg_args res_ty
         ; (res_regs, res_hints) <- newUnboxedTupleRegs res_ty
         ; let ((call_args, arg_hints), cmm_target)
                 = case target of
-                   StaticTarget _   _      False ->
+                   StaticTarget _ _   _      False ->
                        panic "cgForeignCall: unexpected FFI value import"
-                   StaticTarget lbl mPkgId True
+                   StaticTarget _ lbl mPkgId True
                      -> let labelSource
                                 = case mPkgId of
                                         Nothing         -> ForeignLabelInThisPackage
@@ -217,9 +220,10 @@ emitForeignCall safety results target args
     updfr_off <- getUpdFrameOff
     target' <- load_target_into_temp target
     args' <- mapM maybe_assign_temp args
-    k <- newLabelC
+    k <- newBlockId
     let (off, _, copyout) = copyInOflow dflags NativeReturn (Young k) results []
        -- see Note [safe foreign call convention]
+    tscope <- getTickScope
     emit $
            (    mkStore (CmmStackSlot (Young k) (widthInBytes (wordWidth dflags)))
                         (CmmLit (CmmBlock k))
@@ -230,7 +234,7 @@ emitForeignCall safety results target args
                                        , ret_args = off
                                        , ret_off = updfr_off
                                        , intrbl = playInterruptible safety })
-            <*> mkLabel k
+            <*> mkLabel k tscope
             <*> copyout
            )
     return (ReturnedTo k off)
@@ -266,94 +270,220 @@ maybe_assign_temp e = do
 -- This stuff can't be done in suspendThread/resumeThread, because it
 -- refers to global registers which aren't available in the C world.
 
-saveThreadState :: DynFlags -> CmmAGraph
-saveThreadState dflags =
-  -- CurrentTSO->stackobj->sp = Sp;
-  mkStore (cmmOffset dflags (CmmLoad (cmmOffset dflags stgCurrentTSO (tso_stackobj dflags)) (bWord dflags)) (stack_SP dflags)) stgSp
-  <*> closeNursery dflags
-  -- and save the current cost centre stack in the TSO when profiling:
-  <*> if gopt Opt_SccProfilingOn dflags then
-        mkStore (cmmOffset dflags stgCurrentTSO (tso_CCCS dflags)) curCCS
-      else mkNop
-
 emitSaveThreadState :: FCode ()
 emitSaveThreadState = do
   dflags <- getDynFlags
-  emit (saveThreadState dflags)
+  code <- saveThreadState dflags
+  emit code
+
+-- | Produce code to save the current thread state to @CurrentTSO@
+saveThreadState :: MonadUnique m => DynFlags -> m CmmAGraph
+saveThreadState dflags = do
+  tso <- newTemp (gcWord dflags)
+  close_nursery <- closeNursery dflags tso
+  pure $ catAGraphs [
+    -- tso = CurrentTSO;
+    mkAssign (CmmLocal tso) currentTSOExpr,
+    -- tso->stackobj->sp = Sp;
+    mkStore (cmmOffset dflags
+                       (CmmLoad (cmmOffset dflags
+                                           (CmmReg (CmmLocal tso))
+                                           (tso_stackobj dflags))
+                                (bWord dflags))
+                       (stack_SP dflags))
+            spExpr,
+    close_nursery,
+    -- and save the current cost centre stack in the TSO when profiling:
+    if gopt Opt_SccProfilingOn dflags then
+        mkStore (cmmOffset dflags (CmmReg (CmmLocal tso)) (tso_CCCS dflags)) cccsExpr
+      else mkNop
+    ]
 
 emitCloseNursery :: FCode ()
 emitCloseNursery = do
-  df <- getDynFlags
-  emit (closeNursery df)
+  dflags <- getDynFlags
+  tso <- newTemp (bWord dflags)
+  code <- closeNursery dflags tso
+  emit $ mkAssign (CmmLocal tso) currentTSOExpr <*> code
 
-   -- CurrentNursery->free = Hp+1;
-closeNursery :: DynFlags -> CmmAGraph
-closeNursery dflags = mkStore (nursery_bdescr_free dflags) (cmmOffsetW dflags stgHp 1)
+{- |
+@closeNursery dflags tso@ produces code to close the nursery.
+A local register holding the value of @CurrentTSO@ is expected for
+efficiency.
 
-loadThreadState :: DynFlags -> LocalReg -> LocalReg -> CmmAGraph
-loadThreadState dflags tso stack = do
-  catAGraphs [
-        -- tso = CurrentTSO;
-        mkAssign (CmmLocal tso) stgCurrentTSO,
-        -- stack = tso->stackobj;
-        mkAssign (CmmLocal stack) (CmmLoad (cmmOffset dflags (CmmReg (CmmLocal tso)) (tso_stackobj dflags)) (bWord dflags)),
-        -- Sp = stack->sp;
-        mkAssign sp (CmmLoad (cmmOffset dflags (CmmReg (CmmLocal stack)) (stack_SP dflags)) (bWord dflags)),
-        -- SpLim = stack->stack + RESERVED_STACK_WORDS;
-        mkAssign spLim (cmmOffsetW dflags (cmmOffset dflags (CmmReg (CmmLocal stack)) (stack_STACK dflags))
-                                    (rESERVED_STACK_WORDS dflags)),
-        -- HpAlloc = 0;
-        --   HpAlloc is assumed to be set to non-zero only by a failed
-        --   a heap check, see HeapStackCheck.cmm:GC_GENERIC
-        mkAssign hpAlloc (zeroExpr dflags),
+Closing the nursery corresponds to the following code:
 
-        openNursery dflags,
-        -- and load the current cost centre stack from the TSO when profiling:
-        if gopt Opt_SccProfilingOn dflags then
-          storeCurCCS
-            (CmmLoad (cmmOffset dflags (CmmReg (CmmLocal tso)) (tso_CCCS dflags)) (ccsType dflags))
-        else mkNop]
+@
+  tso = CurrentTSO;
+  cn = CurrentNuresry;
+
+  // Update the allocation limit for the current thread.  We don't
+  // check to see whether it has overflowed at this point, that check is
+  // made when we run out of space in the current heap block (stg_gc_noregs)
+  // and in the scheduler when context switching (schedulePostRunThread).
+  tso->alloc_limit -= Hp + WDS(1) - cn->start;
+
+  // Set cn->free to the next unoccupied word in the block
+  cn->free = Hp + WDS(1);
+@
+-}
+closeNursery :: MonadUnique m => DynFlags -> LocalReg -> m CmmAGraph
+closeNursery df tso = do
+  let tsoreg  = CmmLocal tso
+  cnreg      <- CmmLocal <$> newTemp (bWord df)
+  pure $ catAGraphs [
+    mkAssign cnreg currentNurseryExpr,
+
+    -- CurrentNursery->free = Hp+1;
+    mkStore (nursery_bdescr_free df cnreg) (cmmOffsetW df hpExpr 1),
+
+    let alloc =
+           CmmMachOp (mo_wordSub df)
+              [ cmmOffsetW df hpExpr 1
+              , CmmLoad (nursery_bdescr_start df cnreg) (bWord df)
+              ]
+
+        alloc_limit = cmmOffset df (CmmReg tsoreg) (tso_alloc_limit df)
+    in
+
+    -- tso->alloc_limit += alloc
+    mkStore alloc_limit (CmmMachOp (MO_Sub W64)
+                               [ CmmLoad alloc_limit b64
+                               , CmmMachOp (mo_WordTo64 df) [alloc] ])
+   ]
 
 emitLoadThreadState :: FCode ()
 emitLoadThreadState = do
   dflags <- getDynFlags
-  load_tso <- newTemp (gcWord dflags)
-  load_stack <- newTemp (gcWord dflags)
-  emit $ loadThreadState dflags load_tso load_stack
+  code <- loadThreadState dflags
+  emit code
+
+-- | Produce code to load the current thread state from @CurrentTSO@
+loadThreadState :: MonadUnique m => DynFlags -> m CmmAGraph
+loadThreadState dflags = do
+  tso <- newTemp (gcWord dflags)
+  stack <- newTemp (gcWord dflags)
+  open_nursery <- openNursery dflags tso
+  pure $ catAGraphs [
+    -- tso = CurrentTSO;
+    mkAssign (CmmLocal tso) currentTSOExpr,
+    -- stack = tso->stackobj;
+    mkAssign (CmmLocal stack) (CmmLoad (cmmOffset dflags (CmmReg (CmmLocal tso)) (tso_stackobj dflags)) (bWord dflags)),
+    -- Sp = stack->sp;
+    mkAssign spReg (CmmLoad (cmmOffset dflags (CmmReg (CmmLocal stack)) (stack_SP dflags)) (bWord dflags)),
+    -- SpLim = stack->stack + RESERVED_STACK_WORDS;
+    mkAssign spLimReg (cmmOffsetW dflags (cmmOffset dflags (CmmReg (CmmLocal stack)) (stack_STACK dflags))
+                                (rESERVED_STACK_WORDS dflags)),
+    -- HpAlloc = 0;
+    --   HpAlloc is assumed to be set to non-zero only by a failed
+    --   a heap check, see HeapStackCheck.cmm:GC_GENERIC
+    mkAssign hpAllocReg (zeroExpr dflags),
+    open_nursery,
+    -- and load the current cost centre stack from the TSO when profiling:
+    if gopt Opt_SccProfilingOn dflags
+       then storeCurCCS
+              (CmmLoad (cmmOffset dflags (CmmReg (CmmLocal tso))
+                 (tso_CCCS dflags)) (ccsType dflags))
+       else mkNop
+   ]
+
 
 emitOpenNursery :: FCode ()
 emitOpenNursery = do
-  df <- getDynFlags
-  emit (openNursery df)
+  dflags <- getDynFlags
+  tso <- newTemp (bWord dflags)
+  code <- openNursery dflags tso
+  emit $ mkAssign (CmmLocal tso) currentTSOExpr <*> code
 
-openNursery :: DynFlags -> CmmAGraph
-openNursery dflags = catAGraphs [
-        -- Hp = CurrentNursery->free - 1;
-        mkAssign hp (cmmOffsetW dflags (CmmLoad (nursery_bdescr_free dflags) (bWord dflags)) (-1)),
+{- |
+@openNursery dflags tso@ produces code to open the nursery. A local register
+holding the value of @CurrentTSO@ is expected for efficiency.
 
-        -- HpLim = CurrentNursery->start +
-        --              CurrentNursery->blocks*BLOCK_SIZE_W - 1;
-        mkAssign hpLim
-            (cmmOffsetExpr dflags
-                (CmmLoad (nursery_bdescr_start dflags) (bWord dflags))
-                (cmmOffset dflags
-                  (CmmMachOp (mo_wordMul dflags) [
-                    CmmMachOp (MO_SS_Conv W32 (wordWidth dflags))
-                      [CmmLoad (nursery_bdescr_blocks dflags) b32],
-                    mkIntExpr dflags (bLOCK_SIZE dflags)
-                   ])
-                  (-1)
-                )
-            )
+Opening the nursery corresponds to the following code:
+
+@
+   tso = CurrentTSO;
+   cn = CurrentNursery;
+   bdfree = CurrentNursery->free;
+   bdstart = CurrentNursery->start;
+
+   // We *add* the currently occupied portion of the nursery block to
+   // the allocation limit, because we will subtract it again in
+   // closeNursery.
+   tso->alloc_limit += bdfree - bdstart;
+
+   // Set Hp to the last occupied word of the heap block.  Why not the
+   // next unocupied word?  Doing it this way means that we get to use
+   // an offset of zero more often, which might lead to slightly smaller
+   // code on some architectures.
+   Hp = bdfree - WDS(1);
+
+   // Set HpLim to the end of the current nursery block (note that this block
+   // might be a block group, consisting of several adjacent blocks.
+   HpLim = bdstart + CurrentNursery->blocks*BLOCK_SIZE_W - 1;
+@
+-}
+openNursery :: MonadUnique m => DynFlags -> LocalReg -> m CmmAGraph
+openNursery df tso = do
+  let tsoreg =  CmmLocal tso
+  cnreg      <- CmmLocal <$> newTemp (bWord df)
+  bdfreereg  <- CmmLocal <$> newTemp (bWord df)
+  bdstartreg <- CmmLocal <$> newTemp (bWord df)
+
+  -- These assignments are carefully ordered to reduce register
+  -- pressure and generate not completely awful code on x86.  To see
+  -- what code we generate, look at the assembly for
+  -- stg_returnToStackTop in rts/StgStartup.cmm.
+  pure $ catAGraphs [
+     mkAssign cnreg currentNurseryExpr,
+     mkAssign bdfreereg  (CmmLoad (nursery_bdescr_free df cnreg)  (bWord df)),
+
+     -- Hp = CurrentNursery->free - 1;
+     mkAssign hpReg (cmmOffsetW df (CmmReg bdfreereg) (-1)),
+
+     mkAssign bdstartreg (CmmLoad (nursery_bdescr_start df cnreg) (bWord df)),
+
+     -- HpLim = CurrentNursery->start +
+     --              CurrentNursery->blocks*BLOCK_SIZE_W - 1;
+     mkAssign hpLimReg
+         (cmmOffsetExpr df
+             (CmmReg bdstartreg)
+             (cmmOffset df
+               (CmmMachOp (mo_wordMul df) [
+                 CmmMachOp (MO_SS_Conv W32 (wordWidth df))
+                   [CmmLoad (nursery_bdescr_blocks df cnreg) b32],
+                 mkIntExpr df (bLOCK_SIZE df)
+                ])
+               (-1)
+             )
+         ),
+
+     -- alloc = bd->free - bd->start
+     let alloc =
+           CmmMachOp (mo_wordSub df) [CmmReg bdfreereg, CmmReg bdstartreg]
+
+         alloc_limit = cmmOffset df (CmmReg tsoreg) (tso_alloc_limit df)
+     in
+
+     -- tso->alloc_limit += alloc
+     mkStore alloc_limit (CmmMachOp (MO_Add W64)
+                               [ CmmLoad alloc_limit b64
+                               , CmmMachOp (mo_WordTo64 df) [alloc] ])
+
    ]
 
-nursery_bdescr_free, nursery_bdescr_start, nursery_bdescr_blocks :: DynFlags -> CmmExpr
-nursery_bdescr_free   dflags = cmmOffset dflags stgCurrentNursery (oFFSET_bdescr_free dflags)
-nursery_bdescr_start  dflags = cmmOffset dflags stgCurrentNursery (oFFSET_bdescr_start dflags)
-nursery_bdescr_blocks dflags = cmmOffset dflags stgCurrentNursery (oFFSET_bdescr_blocks dflags)
+nursery_bdescr_free, nursery_bdescr_start, nursery_bdescr_blocks
+  :: DynFlags -> CmmReg -> CmmExpr
+nursery_bdescr_free   dflags cn =
+  cmmOffset dflags (CmmReg cn) (oFFSET_bdescr_free dflags)
+nursery_bdescr_start  dflags cn =
+  cmmOffset dflags (CmmReg cn) (oFFSET_bdescr_start dflags)
+nursery_bdescr_blocks dflags cn =
+  cmmOffset dflags (CmmReg cn) (oFFSET_bdescr_blocks dflags)
 
-tso_stackobj, tso_CCCS, stack_STACK, stack_SP :: DynFlags -> ByteOff
+tso_stackobj, tso_CCCS, tso_alloc_limit, stack_STACK, stack_SP :: DynFlags -> ByteOff
 tso_stackobj dflags = closureField dflags (oFFSET_StgTSO_stackobj dflags)
+tso_alloc_limit dflags = closureField dflags (oFFSET_StgTSO_alloc_limit dflags)
 tso_CCCS     dflags = closureField dflags (oFFSET_StgTSO_cccs dflags)
 stack_STACK  dflags = closureField dflags (oFFSET_StgStack_stack dflags)
 stack_SP     dflags = closureField dflags (oFFSET_StgStack_sp dflags)
@@ -361,21 +491,6 @@ stack_SP     dflags = closureField dflags (oFFSET_StgStack_sp dflags)
 
 closureField :: DynFlags -> ByteOff -> ByteOff
 closureField dflags off = off + fixedHdrSize dflags
-
-stgSp, stgHp, stgCurrentTSO, stgCurrentNursery :: CmmExpr
-stgSp             = CmmReg sp
-stgHp             = CmmReg hp
-stgCurrentTSO     = CmmReg currentTSO
-stgCurrentNursery = CmmReg currentNursery
-
-sp, spLim, hp, hpLim, currentTSO, currentNursery, hpAlloc :: CmmReg
-sp                = CmmGlobal Sp
-spLim             = CmmGlobal SpLim
-hp                = CmmGlobal Hp
-hpLim             = CmmGlobal HpLim
-currentTSO        = CmmGlobal CurrentTSO
-currentNursery    = CmmGlobal CurrentNursery
-hpAlloc           = CmmGlobal HpAlloc
 
 -- -----------------------------------------------------------------------------
 -- For certain types passed to foreign calls, we adjust the actual
@@ -391,16 +506,16 @@ getFCallArgs args
   = do  { mb_cmms <- mapM get args
         ; return (catMaybes mb_cmms) }
   where
-    get arg | isVoidRep arg_rep
+    get arg | null arg_reps
             = return Nothing
             | otherwise
             = do { cmm <- getArgAmode (NonVoid arg)
                  ; dflags <- getDynFlags
                  ; return (Just (add_shim dflags arg_ty cmm, hint)) }
             where
-              arg_ty  = stgArgType arg
-              arg_rep = typePrimRep arg_ty
-              hint    = typeForeignHint arg_ty
+              arg_ty   = stgArgType arg
+              arg_reps = typePrimRep arg_ty
+              hint     = typeForeignHint arg_ty
 
 add_shim :: DynFlags -> Type -> CmmExpr -> CmmExpr
 add_shim dflags arg_ty expr
@@ -415,6 +530,5 @@ add_shim dflags arg_ty expr
 
   | otherwise = expr
   where
-    UnaryRep rep_ty = repType arg_ty
-    tycon           = tyConAppTyCon rep_ty
+    tycon           = tyConAppTyCon (unwrapType arg_ty)
         -- should be a tycon app, since this is a foreign call

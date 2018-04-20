@@ -1,9 +1,7 @@
-{-# LANGUAGE CPP #-}
-
 module CmmMachOp
     ( MachOp(..)
     , pprMachOp, isCommutableMachOp, isAssociativeMachOp
-    , isComparisonMachOp, machOpResultType
+    , isComparisonMachOp, maybeIntComparison, machOpResultType
     , machOpArgReps, maybeInvertComparison
 
     -- MachOp builders
@@ -11,21 +9,24 @@ module CmmMachOp
     , mo_wordSRem, mo_wordSNeg, mo_wordUQuot, mo_wordURem
     , mo_wordSGe, mo_wordSLe, mo_wordSGt, mo_wordSLt, mo_wordUGe
     , mo_wordULe, mo_wordUGt, mo_wordULt
-    , mo_wordAnd, mo_wordOr, mo_wordXor, mo_wordNot, mo_wordShl, mo_wordSShr, mo_wordUShr
+    , mo_wordAnd, mo_wordOr, mo_wordXor, mo_wordNot
+    , mo_wordShl, mo_wordSShr, mo_wordUShr
     , mo_u_8To32, mo_s_8To32, mo_u_16To32, mo_s_16To32
-    , mo_u_8ToWord, mo_s_8ToWord, mo_u_16ToWord, mo_s_16ToWord, mo_u_32ToWord, mo_s_32ToWord
+    , mo_u_8ToWord, mo_s_8ToWord, mo_u_16ToWord, mo_s_16ToWord
+    , mo_u_32ToWord, mo_s_32ToWord
     , mo_32To8, mo_32To16, mo_WordTo8, mo_WordTo16, mo_WordTo32, mo_WordTo64
 
     -- CallishMachOp
     , CallishMachOp(..), callishMachOpHints
     , pprCallishMachOp
+    , machOpMemcpyishAlign
 
     -- Atomic read-modify-write
     , AtomicMachOp(..)
    )
 where
 
-#include "HsVersions.h"
+import GhcPrelude
 
 import CmmType
 import Outputable
@@ -133,9 +134,12 @@ data MachOp
   -- Floating point vector operations
   | MO_VF_Add  Length Width
   | MO_VF_Sub  Length Width
-  | MO_VF_Neg  Length Width             -- unary -
+  | MO_VF_Neg  Length Width      -- unary negation
   | MO_VF_Mul  Length Width
   | MO_VF_Quot Length Width
+
+  -- Alignment check (for -falignment-sanitisation)
+  | MO_AlignmentCheck Int Width
   deriving (Eq, Show)
 
 pprMachOp :: MachOp -> SDoc
@@ -260,6 +264,7 @@ isAssociativeMachOp mop =
         MO_Xor {} -> True
         _other    -> False
 
+
 -- ----------------------------------------------------------------------------
 -- isComparisonMachOp
 
@@ -289,6 +294,25 @@ isComparisonMachOp mop =
     MO_F_Gt {} -> True
     MO_F_Lt {} -> True
     _other     -> False
+
+{- |
+Returns @Just w@ if the operation is an integer comparison with width
+@w@, or @Nothing@ otherwise.
+-}
+maybeIntComparison :: MachOp -> Maybe Width
+maybeIntComparison mop =
+  case mop of
+    MO_Eq   w  -> Just w
+    MO_Ne   w  -> Just w
+    MO_S_Ge w  -> Just w
+    MO_S_Le w  -> Just w
+    MO_S_Gt w  -> Just w
+    MO_S_Lt w  -> Just w
+    MO_U_Ge w  -> Just w
+    MO_U_Le w  -> Just w
+    MO_U_Gt w  -> Just w
+    MO_U_Lt w  -> Just w
+    _ -> Nothing
 
 -- -----------------------------------------------------------------------------
 -- Inverting conditions
@@ -394,6 +418,8 @@ machOpResultType dflags mop tys =
     MO_VF_Mul  l w      -> cmmVec l (cmmFloat w)
     MO_VF_Quot l w      -> cmmVec l (cmmFloat w)
     MO_VF_Neg  l w      -> cmmVec l (cmmFloat w)
+
+    MO_AlignmentCheck _ _ -> ty1
   where
     (ty1:_) = tys
 
@@ -484,6 +510,8 @@ machOpArgReps dflags op =
     MO_VF_Quot _ r      -> [r,r]
     MO_VF_Neg  _ r      -> [r]
 
+    MO_AlignmentCheck _ r -> [r]
+
 -----------------------------------------------------------------------------
 -- CallishMachOp
 -----------------------------------------------------------------------------
@@ -505,6 +533,7 @@ data CallishMachOp
   | MO_F64_Atan
   | MO_F64_Log
   | MO_F64_Exp
+  | MO_F64_Fabs
   | MO_F64_Sqrt
   | MO_F32_Pwr
   | MO_F32_Sin
@@ -518,6 +547,7 @@ data CallishMachOp
   | MO_F32_Atan
   | MO_F32_Log
   | MO_F32_Exp
+  | MO_F32_Fabs
   | MO_F32_Sqrt
 
   | MO_UF_Conv Width
@@ -526,6 +556,9 @@ data CallishMachOp
   | MO_U_QuotRem Width
   | MO_U_QuotRem2 Width
   | MO_Add2      Width
+  | MO_SubWordC  Width
+  | MO_AddIntC   Width
+  | MO_SubIntC   Width
   | MO_U_Mul2    Width
 
   | MO_WriteBarrier
@@ -541,14 +574,17 @@ data CallishMachOp
                      -- would the majority of use cases in ghc anyways
 
 
-  -- Note that these three MachOps all take 1 extra parameter than the
-  -- standard C lib versions. The extra (last) parameter contains
-  -- alignment of the pointers. Used for optimisation in backends.
-  | MO_Memcpy
-  | MO_Memset
-  | MO_Memmove
+  -- These three MachOps are parameterised by the known alignment
+  -- of the destination and source (for memcpy/memmove) pointers.
+  -- This information may be used for optimisation in backends.
+  | MO_Memcpy Int
+  | MO_Memset Int
+  | MO_Memmove Int
+  | MO_Memcmp Int
 
   | MO_PopCnt Width
+  | MO_Pdep Width
+  | MO_Pext Width
   | MO_Clz Width
   | MO_Ctz Width
 
@@ -576,8 +612,18 @@ pprCallishMachOp mo = text (show mo)
 
 callishMachOpHints :: CallishMachOp -> ([ForeignHint], [ForeignHint])
 callishMachOpHints op = case op of
-  MO_Memcpy  -> ([], [AddrHint,AddrHint,NoHint,NoHint])
-  MO_Memset  -> ([], [AddrHint,NoHint,NoHint,NoHint])
-  MO_Memmove -> ([], [AddrHint,AddrHint,NoHint,NoHint])
-  _          -> ([],[])
+  MO_Memcpy _  -> ([], [AddrHint,AddrHint,NoHint])
+  MO_Memset _  -> ([], [AddrHint,NoHint,NoHint])
+  MO_Memmove _ -> ([], [AddrHint,AddrHint,NoHint])
+  MO_Memcmp _  -> ([], [AddrHint, AddrHint, NoHint])
+  _            -> ([],[])
   -- empty lists indicate NoHint
+
+-- | The alignment of a 'memcpy'-ish operation.
+machOpMemcpyishAlign :: CallishMachOp -> Maybe Int
+machOpMemcpyishAlign op = case op of
+  MO_Memcpy  align -> Just align
+  MO_Memset  align -> Just align
+  MO_Memmove align -> Just align
+  MO_Memcmp  align -> Just align
+  _                -> Nothing

@@ -5,8 +5,8 @@
            , NondecreasingIndentation
            , RankNTypes
   #-}
-{-# OPTIONS_GHC -fno-warn-unused-matches #-}
-{-# OPTIONS_GHC -fno-warn-name-shadowing #-}
+{-# OPTIONS_GHC -Wno-unused-matches #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 {-# OPTIONS_HADDOCK hide #-}
 
 -----------------------------------------------------------------------------
@@ -14,7 +14,7 @@
 -- Module      :  GHC.IO.Handle.Internals
 -- Copyright   :  (c) The University of Glasgow, 1994-2001
 -- License     :  see libraries/base/LICENSE
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  internal
 -- Portability :  non-portable
@@ -28,7 +28,7 @@
 module GHC.IO.Handle.Internals (
   withHandle, withHandle', withHandle_,
   withHandle__', withHandle_', withAllHandles__,
-  wantWritableHandle, wantReadableHandle, wantReadableHandle_, 
+  wantWritableHandle, wantReadableHandle, wantReadableHandle_,
   wantSeekableHandle,
 
   mkHandle, mkFileHandle, mkDuplexHandle,
@@ -42,7 +42,8 @@ module GHC.IO.Handle.Internals (
   decodeByteBuf,
 
   augmentIOError,
-  ioe_closedHandle, ioe_EOF, ioe_notReadable, ioe_notWritable,
+  ioe_closedHandle, ioe_semiclosedHandle,
+  ioe_EOF, ioe_notReadable, ioe_notWritable,
   ioe_finalizedHandle, ioe_bufsiz,
 
   hClose_help, hLookAhead_,
@@ -73,9 +74,8 @@ import GHC.Show
 import GHC.IORef
 import GHC.MVar
 import Data.Typeable
-import Control.Monad
 import Data.Maybe
-import Foreign.Safe
+import Foreign
 import System.Posix.Internals hiding (FD)
 
 import Foreign.C
@@ -239,7 +239,7 @@ checkWritableHandle :: (Handle__ -> IO a) -> Handle__ -> IO a
 checkWritableHandle act h_@Handle__{..}
   = case haType of
       ClosedHandle         -> ioe_closedHandle
-      SemiClosedHandle     -> ioe_closedHandle
+      SemiClosedHandle     -> ioe_semiclosedHandle
       ReadHandle           -> ioe_notWritable
       ReadWriteHandle      -> do
         buf <- readIORef haCharBuffer
@@ -278,7 +278,7 @@ checkReadableHandle :: (Handle__ -> IO a) -> Handle__ -> IO a
 checkReadableHandle act h_@Handle__{..} =
     case haType of
       ClosedHandle         -> ioe_closedHandle
-      SemiClosedHandle     -> ioe_closedHandle
+      SemiClosedHandle     -> ioe_semiclosedHandle
       AppendHandle         -> ioe_notReadable
       WriteHandle          -> ioe_notReadable
       ReadWriteHandle      -> do
@@ -308,7 +308,7 @@ checkSeekableHandle :: (Handle__ -> IO a) -> Handle__ -> IO a
 checkSeekableHandle act handle_@Handle__{haDevice=dev} =
     case haType handle_ of
       ClosedHandle      -> ioe_closedHandle
-      SemiClosedHandle  -> ioe_closedHandle
+      SemiClosedHandle  -> ioe_semiclosedHandle
       AppendHandle      -> ioe_notSeekable
       _ -> do b <- IODevice.isSeekable dev
               if b then act handle_
@@ -317,13 +317,16 @@ checkSeekableHandle act handle_@Handle__{haDevice=dev} =
 -- -----------------------------------------------------------------------------
 -- Handy IOErrors
 
-ioe_closedHandle, ioe_EOF,
+ioe_closedHandle, ioe_semiclosedHandle, ioe_EOF,
   ioe_notReadable, ioe_notWritable, ioe_cannotFlushNotSeekable,
   ioe_notSeekable :: IO a
 
 ioe_closedHandle = ioException
    (IOError Nothing IllegalOperation ""
         "handle is closed" Nothing Nothing)
+ioe_semiclosedHandle = ioException
+   (IOError Nothing IllegalOperation ""
+        "handle is semi-closed" Nothing Nothing)
 ioe_EOF = ioException
    (IOError Nothing EOF "" "" Nothing Nothing)
 ioe_notReadable = ioException
@@ -440,8 +443,8 @@ getCharBuffer dev state = do
   ioref  <- newIORef buffer
   is_tty <- IODevice.isTerminal dev
 
-  let buffer_mode 
-         | is_tty    = LineBuffering 
+  let buffer_mode
+         | is_tty    = LineBuffering
          | otherwise = BlockBuffering Nothing
 
   return (ioref, buffer_mode)
@@ -477,15 +480,19 @@ flushCharBuffer h_@Handle__{..} = do
     ReadBuffer  -> do
         flushCharReadBuffer h_
     WriteBuffer ->
+        -- Nothing to do here. Char buffer on a write Handle is always empty
+        -- between Handle operations.
+        -- See [note Buffer Flushing], GHC.IO.Handle.Types.
         when (not (isEmptyBuffer cbuf)) $
            error "internal IO library error: Char buffer non-empty"
 
 -- -----------------------------------------------------------------------------
 -- Writing data (flushing write buffers)
 
--- flushWriteBuffer flushes the buffer iff it contains pending write
--- data.  Flushes both the Char and the byte buffer, leaving both
--- empty.
+-- flushWriteBuffer flushes the byte buffer iff it contains pending write
+-- data. Because the Char buffer on a write Handle is always empty between
+-- Handle operations (see [note Buffer Flushing], GHC.IO.Handle.Types),
+-- both buffers are empty after this.
 flushWriteBuffer :: Handle__ -> IO ()
 flushWriteBuffer h_@Handle__{..} = do
   buf <- readIORef haByteBuffer
@@ -516,7 +523,7 @@ writeCharBuffer h_@Handle__{..} !cbuf = do
   debugIO ("writeCharBuffer after encoding: cbuf=" ++ summaryBuffer cbuf' ++
         " bbuf=" ++ summaryBuffer bbuf')
 
-          -- flush if the write buffer is full
+          -- flush the byte buffer if it is full
   if isFullBuffer bbuf'
           --  or we made no progress
      || not (isEmptyBuffer cbuf') && bufL cbuf' == bufL cbuf
@@ -571,10 +578,10 @@ flushCharReadBuffer Handle__{..} = do
 
       -- restore the codec state
       setState decoder codec_state
-    
+
       (bbuf1,cbuf1) <- (streamEncode decoder) bbuf0
                                cbuf0{ bufL=0, bufR=0, bufSize = bufL cbuf0 }
-    
+
       debugIO ("finished, bbuf=" ++ summaryBuffer bbuf1 ++
                " cbuf=" ++ summaryBuffer cbuf1)
 
@@ -621,9 +628,9 @@ mkHandle dev filepath ha_type buffered mb_codec nl finalizer other_side = do
    let buf_state = initBufferState ha_type
    bbuf <- Buffered.newBuffer dev buf_state
    bbufref <- newIORef bbuf
-   last_decode <- newIORef (error "codec_state", bbuf)
+   last_decode <- newIORef (errorWithoutStackTrace "codec_state", bbuf)
 
-   (cbufref,bmode) <- 
+   (cbufref,bmode) <-
          if buffered then getCharBuffer dev buf_state
                      else mkUnBuffer buf_state
 
@@ -646,7 +653,7 @@ mkHandle dev filepath ha_type buffered mb_codec nl finalizer other_side = do
 
 -- | makes a new 'Handle'
 mkFileHandle :: (IODevice dev, BufferedIO dev, Typeable dev)
-             => dev -- ^ the underlying IO device, which must support 
+             => dev -- ^ the underlying IO device, which must support
                     -- 'IODevice', 'BufferedIO' and 'Typeable'
              -> FilePath
                     -- ^ a string describing the 'Handle', e.g. the file
@@ -670,13 +677,13 @@ mkDuplexHandle :: (IODevice dev, BufferedIO dev, Typeable dev) => dev
                -> FilePath -> Maybe TextEncoding -> NewlineMode -> IO Handle
 mkDuplexHandle dev filepath mb_codec tr_newlines = do
 
-  write_side@(FileHandle _ write_m) <- 
+  write_side@(FileHandle _ write_m) <-
        mkHandle dev filepath WriteHandle True mb_codec
                         tr_newlines
                         (Just handleFinalizer)
                         Nothing -- no othersie
 
-  read_side@(FileHandle _ read_m) <- 
+  read_side@(FileHandle _ read_m) <-
       mkHandle dev filepath ReadHandle True mb_codec
                         tr_newlines
                         Nothing -- no finalizer
@@ -710,7 +717,7 @@ openTextEncoding (Just TextEncoding{..}) ha_type cont = do
     mb_encoder <- if isWritableHandleType ha_type then do
                      encoder <- mkTextEncoder
                      return (Just encoder)
-                  else 
+                  else
                      return Nothing
     cont mb_encoder mb_decoder
 
@@ -730,7 +737,7 @@ closeTextCodecs Handle__{..} = do
 -- use.
 hClose_help :: Handle__ -> IO (Handle__, Maybe SomeException)
 hClose_help handle_ =
-  case haType handle_ of 
+  case haType handle_ of
       ClosedHandle -> return (handle_,Nothing)
       _ -> do mb_exc1 <- trymaybe $ flushWriteBuffer handle_ -- interruptible
                     -- it is important that hClose doesn't fail and
@@ -749,10 +756,10 @@ hClose_handle_ h_@Handle__{..} = do
     -- close the file descriptor, but not when this is the read
     -- side of a duplex handle.
     -- If an exception is raised by the close(), we want to continue
-    -- to close the handle and release the lock if it has one, then 
+    -- to close the handle and release the lock if it has one, then
     -- we return the exception to the caller of hClose_help which can
     -- raise it if necessary.
-    maybe_exception <- 
+    maybe_exception <-
       case haOtherSide of
         Nothing -> trymaybe $ IODevice.close haDevice
         Just _  -> return Nothing
@@ -761,7 +768,7 @@ hClose_handle_ h_@Handle__{..} = do
     writeIORef haBuffers BufferListNil
     writeIORef haCharBuffer noCharBuffer
     writeIORef haByteBuffer noByteBuffer
-  
+
     -- release our encoder/decoder
     closeTextCodecs h_
 
@@ -785,13 +792,13 @@ noByteBuffer = unsafePerformIO $ newByteBuffer 1 ReadBuffer
 hLookAhead_ :: Handle__ -> IO Char
 hLookAhead_ handle_@Handle__{..} = do
     buf <- readIORef haCharBuffer
-  
+
     -- fill up the read buffer if necessary
     new_buf <- if isEmptyBuffer buf
                   then readTextDevice handle_ buf
                   else return buf
     writeIORef haCharBuffer new_buf
-  
+
     peekCharBuf (bufRaw buf) (bufL buf)
 
 -- ---------------------------------------------------------------------------
@@ -809,7 +816,7 @@ debugIO s
 -- Text input/output
 
 -- Read characters into the provided buffer.  Return when any
--- characters are available; raise an exception if the end of 
+-- characters are available; raise an exception if the end of
 -- file is reached.
 --
 -- In uses of readTextDevice within base, the input buffer is either:
@@ -826,7 +833,7 @@ readTextDevice h_@Handle__{..} cbuf = do
   --
   bbuf0 <- readIORef haByteBuffer
 
-  debugIO ("readTextDevice: cbuf=" ++ summaryBuffer cbuf ++ 
+  debugIO ("readTextDevice: cbuf=" ++ summaryBuffer cbuf ++
         " bbuf=" ++ summaryBuffer bbuf0)
 
   bbuf1 <- if not (isEmptyBuffer bbuf0)
@@ -838,17 +845,17 @@ readTextDevice h_@Handle__{..} cbuf = do
 
   debugIO ("readTextDevice after reading: bbuf=" ++ summaryBuffer bbuf1)
 
-  (bbuf2,cbuf') <- 
+  (bbuf2,cbuf') <-
       case haDecoder of
           Nothing      -> do
-               writeIORef haLastDecode (error "codec_state", bbuf1)
+               writeIORef haLastDecode (errorWithoutStackTrace "codec_state", bbuf1)
                latin1_decode bbuf1 cbuf
           Just decoder -> do
                state <- getState decoder
                writeIORef haLastDecode (state, bbuf1)
                (streamEncode decoder) bbuf1 cbuf
 
-  debugIO ("readTextDevice after decoding: cbuf=" ++ summaryBuffer cbuf' ++ 
+  debugIO ("readTextDevice after decoding: cbuf=" ++ summaryBuffer cbuf' ++
         " bbuf=" ++ summaryBuffer bbuf2)
 
   -- We can't return from readTextDevice without reading at least a single extra character,
@@ -872,7 +879,7 @@ readTextDevice' h_@Handle__{..} bbuf0 cbuf0 = do
   -- readTextDevice only calls us if we got some bytes but not some characters.
   -- This can't occur if haDecoder is Nothing because latin1_decode accepts all bytes.
   let Just decoder = haDecoder
-  
+
   (r,bbuf2) <- Buffered.fillReadBuffer haDevice bbuf1
   if r == 0
    then do
@@ -894,15 +901,15 @@ readTextDevice' h_@Handle__{..} bbuf0 cbuf0 = do
       else return cbuf1
    else do
     debugIO ("readTextDevice' after reading: bbuf=" ++ summaryBuffer bbuf2)
-  
+
     (bbuf3,cbuf1) <- do
        state <- getState decoder
        writeIORef haLastDecode (state, bbuf2)
        (streamEncode decoder) bbuf2 cbuf0
-  
-    debugIO ("readTextDevice' after decoding: cbuf=" ++ summaryBuffer cbuf1 ++ 
+
+    debugIO ("readTextDevice' after decoding: cbuf=" ++ summaryBuffer cbuf1 ++
           " bbuf=" ++ summaryBuffer bbuf3)
-  
+
     writeIORef haByteBuffer bbuf3
     if bufR cbuf0 == bufR cbuf1
        then readTextDevice' h_ bbuf3 cbuf1
@@ -930,7 +937,7 @@ decodeByteBuf h_@Handle__{..} cbuf = do
   (bbuf2,cbuf') <-
       case haDecoder of
           Nothing      -> do
-               writeIORef haLastDecode (error "codec_state", bbuf0)
+               writeIORef haLastDecode (errorWithoutStackTrace "codec_state", bbuf0)
                latin1_decode bbuf0 cbuf
           Just decoder -> do
                state <- getState decoder

@@ -5,6 +5,7 @@
 
 module Eval where
 
+import Control.Monad
 import Data.Array
 
 import Geometry
@@ -22,9 +23,16 @@ class Monad m => MonadEval m where
 
 newtype Pure a = Pure a deriving Show
 
+instance Functor Pure where
+    fmap = liftM
+
+instance Applicative Pure where
+    pure = Pure
+    (<*>) = ap
+
 instance Monad Pure where
     Pure x >>= k = k x
-    return       = Pure
+    return       = pure
     fail s       = error s
 
 instance MonadEval Pure where
@@ -39,10 +47,10 @@ instance MonadEval IO where
   err  s = error s
 
 data State
-	= State { env   :: Env
-	        , stack :: Stack
-	        , code  :: Code
-	        } deriving Show
+        = State { env   :: Env
+                , stack :: Stack
+                , code  :: Code
+                } deriving Show
 
 callback :: Env -> Code -> Stack -> Stack
 callback env code stk
@@ -143,7 +151,7 @@ step _ = err "Tripped on sidewalk while stepping."
 
 opFnTable :: Array GMLOp PrimOp
 opFnTable = array (minBound,maxBound)
-	          [ (op,prim) | (_,TOp op,prim) <- opcodes ]
+                  [ (op,prim) | (_,TOp op,prim) <- opcodes ]
 
 
 
@@ -173,7 +181,7 @@ doPrimOp (Surface_Obj fn) _ (VClosure env code:stk)
   = case absapply env code [VAbsObj AbsFACE,VAbsObj AbsU,VAbsObj AbsV] of
       Just [VReal r3,VReal r2,VReal r1,VPoint c1 c2 c3] ->
            let
-	       res = prop (color c1 c2 c3) r1 r2 r3
+               res = prop (color c1 c2 c3) r1 r2 r3
            in
                return ((VObject (fn (SConst res))) : stk)
       _ -> return ((VObject (fn (SFun call))) : stk)
@@ -182,7 +190,7 @@ doPrimOp (Surface_Obj fn) _ (VClosure env code:stk)
         call i r1 r2 =
           case callback env code [VReal r2,VReal r1,VInt i] of
              [VReal r3,VReal r2,VReal r1,VPoint c1 c2 c3]
-		 -> prop (color c1 c2 c3) r1 r2 r3
+                 -> prop (color c1 c2 c3) r1 r2 r3
              stk -> error ("callback failed: incorrectly typed return arguments"
                          ++ show stk)
 
@@ -233,10 +241,10 @@ doPrimOp primOp op args
   = err ("\n\ntype error when attempting to execute builtin primitive \"" ++
           show op ++ "\"\n\n| " ++
           show op ++ " takes " ++ show (length types) ++ " argument" ++ s
-	           ++ " with" ++ the ++ " type" ++ s ++ "\n|\n|" ++
+                   ++ " with" ++ the ++ " type" ++ s ++ "\n|\n|" ++
           "      " ++ unwords [ show ty | ty <- types ]  ++ "\n|\n|" ++
-          " currently, the relevent argument" ++ s ++ " on the stack " ++
-	          are ++ "\n|\n| " ++
+          " currently, the relevant argument" ++ s ++ " on the stack " ++
+                  are ++ "\n|\n| " ++
           unwords [ "(" ++ show arg ++ ")"
                   | arg <-  reverse (take (length types) args) ]  ++ "\n|\n| "
           ++ "    (top of stack is on the right hand side)\n\n")
@@ -248,12 +256,12 @@ doPrimOp primOp op args
       types = getPrimOpType primOp
 
 
--- Render is somewhat funny, becauase it can only get called at top level.
+-- Render is somewhat funny, because it can only get called at top level.
 -- All other operations are purely functional.
 
 doAllOp :: PrimOp -> GMLOp -> Stack -> IO Stack
 doAllOp (Render render) Op_render
-			   (VString str:VInt ht:VInt wid:VReal fov
+                           (VString str:VInt ht:VInt wid:VReal fov
                            :VInt dep:VObject obj:VArray arr
                            :VPoint r g b : stk)
   = do { render (color r g b) lights obj dep (fov * (pi / 180.0)) wid ht str
@@ -286,11 +294,18 @@ newtype Abs a   = Abs { runAbs :: Int -> AbsState a }
 data AbsState a = AbsState a !Int
                 | AbsFail String
 
+instance Functor Abs where
+    fmap = liftM
+
+instance Applicative Abs where
+    pure x = Abs (\ n -> AbsState x n)
+    (<*>) = ap
+
 instance Monad Abs where
     (Abs fn) >>= k = Abs (\ s -> case fn s of
-			           AbsState r s' -> runAbs (k r) s'
+                                   AbsState r s' -> runAbs (k r) s'
                                    AbsFail m     -> AbsFail m)
-    return x     = Abs (\ n -> AbsState x n)
+    return       = pure
     fail s       = Abs (\ n -> AbsFail s)
 
 instance MonadEval Abs where
@@ -318,14 +333,14 @@ mainEval prog = do { stk <- eval (State emptyEnv [] prog)
   * Oops, one of the example actually has something
   * on the stack at the end.
   * Oh well...
-		   ; if null stk
+                   ; if null stk
                      then return ()
-		     else do { putStrLn done
+                     else do { putStrLn done
                              ; print stk
                              }
 -}
 
-done = "Items still on stack at (successfull) termination of program"
+done = "Items still on stack at (successful) termination of program"
 
 ------------------------------------------------------------------------------
 -- testing

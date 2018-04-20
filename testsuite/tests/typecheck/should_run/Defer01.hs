@@ -30,10 +30,10 @@ d = 1
 e = 'p'
 f = e 'q'
 
-h :: a -> (Char,Char) 
+h :: a -> (Char,Char)
 h x = (x,'c')
 
-data T a where 
+data T a where
   K  :: a -> T a
 
 i a = seq (not (K a)) ()
@@ -42,12 +42,12 @@ class MyClass a where myOp :: a -> String
 
 j = myOp 23 -- Two errors, should not combine them
 
+-- No longer reported as an error: Trac #12466
 k :: (Int ~ Bool) => Int -> Bool
 k x = x
 
 l :: IO ()
 l = putChar >> putChar 'p'
-
 
 main :: IO ()
 main = print "No errors!"

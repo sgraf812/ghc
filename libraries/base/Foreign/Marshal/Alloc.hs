@@ -1,8 +1,6 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE NoImplicitPrelude
-           , MagicHash
-           , UnboxedTuples
-  #-}
+{-# LANGUAGE NoImplicitPrelude, MagicHash, UnboxedTuples,
+             ScopedTypeVariables #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -52,6 +50,9 @@ module Foreign.Marshal.Alloc (
   malloc,
   mallocBytes,
 
+  calloc,
+  callocBytes,
+
   realloc,
   reallocBytes,
 
@@ -79,11 +80,14 @@ import GHC.Base
 -- no longer required.
 --
 {-# INLINE malloc #-}
-malloc :: Storable a => IO (Ptr a)
-malloc  = doMalloc undefined
-  where
-    doMalloc       :: Storable b => b -> IO (Ptr b)
-    doMalloc dummy  = mallocBytes (sizeOf dummy)
+malloc :: forall a . Storable a => IO (Ptr a)
+malloc  = mallocBytes (sizeOf (undefined :: a))
+
+-- |Like 'malloc' but memory is filled with bytes of value zero.
+--
+{-# INLINE calloc #-}
+calloc :: forall a . Storable a => IO (Ptr a)
+calloc = callocBytes (sizeOf (undefined :: a))
 
 -- |Allocate a block of memory of the given number of bytes.
 -- The block of memory is sufficiently aligned for any of the basic
@@ -95,6 +99,11 @@ malloc  = doMalloc undefined
 mallocBytes      :: Int -> IO (Ptr a)
 mallocBytes size  = failWhenNULL "malloc" (_malloc (fromIntegral size))
 
+-- |Llike 'mallocBytes' but memory is filled with bytes of value zero.
+--
+callocBytes :: Int -> IO (Ptr a)
+callocBytes size = failWhenNULL "calloc" $ _calloc 1 (fromIntegral size)
+
 -- |@'alloca' f@ executes the computation @f@, passing as argument
 -- a pointer to a temporarily allocated block of memory sufficient to
 -- hold values of type @a@.
@@ -103,11 +112,9 @@ mallocBytes size  = failWhenNULL "malloc" (_malloc (fromIntegral size))
 -- exception), so the pointer passed to @f@ must /not/ be used after this.
 --
 {-# INLINE alloca #-}
-alloca :: Storable a => (Ptr a -> IO b) -> IO b
-alloca  = doAlloca undefined
-  where
-    doAlloca       :: Storable a' => a' -> (Ptr a' -> IO b') -> IO b'
-    doAlloca dummy  = allocaBytesAligned (sizeOf dummy) (alignment dummy)
+alloca :: forall a b . Storable a => (Ptr a -> IO b) -> IO b
+alloca  =
+  allocaBytesAligned (sizeOf (undefined :: a)) (alignment (undefined :: a))
 
 -- |@'allocaBytes' n f@ executes the computation @f@, passing as argument
 -- a pointer to a temporarily allocated block of memory of @n@ bytes.
@@ -149,14 +156,10 @@ allocaBytesAligned (I# size) (I# align) action = IO $ \ s0 ->
 -- If the argument to 'realloc' is 'nullPtr', 'realloc' behaves like
 -- 'malloc'.
 --
-realloc :: Storable b => Ptr a -> IO (Ptr b)
-realloc  = doRealloc undefined
+realloc :: forall a b . Storable b => Ptr a -> IO (Ptr b)
+realloc ptr = failWhenNULL "realloc" (_realloc ptr size)
   where
-    doRealloc           :: Storable b' => b' -> Ptr a' -> IO (Ptr b')
-    doRealloc dummy ptr  = let
-                             size = fromIntegral (sizeOf dummy)
-                           in
-                           failWhenNULL "realloc" (_realloc ptr size)
+    size = fromIntegral (sizeOf (undefined :: b))
 
 -- |Resize a memory area that was allocated with 'malloc' or 'mallocBytes'
 -- to the given size.  The returned pointer may refer to an entirely
@@ -184,7 +187,7 @@ free :: Ptr a -> IO ()
 free  = _free
 
 
--- auxilliary routines
+-- auxiliary routines
 -- -------------------
 
 -- asserts that the pointer returned from the action in the second argument is
@@ -201,6 +204,7 @@ failWhenNULL name f = do
 -- basic C routines needed for memory allocation
 --
 foreign import ccall unsafe "stdlib.h malloc"  _malloc  ::          CSize -> IO (Ptr a)
+foreign import ccall unsafe "stdlib.h calloc"  _calloc  :: CSize -> CSize -> IO (Ptr a)
 foreign import ccall unsafe "stdlib.h realloc" _realloc :: Ptr a -> CSize -> IO (Ptr b)
 foreign import ccall unsafe "stdlib.h free"    _free    :: Ptr a -> IO ()
 

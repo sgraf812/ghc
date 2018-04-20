@@ -6,7 +6,7 @@
 -- Module      :  Text.ParserCombinators.ReadPrec
 -- Copyright   :  (c) The University of Glasgow 2002
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  provisional
 -- Portability :  non-portable (uses Text.ParserCombinators.ReadP)
@@ -16,9 +16,9 @@
 -----------------------------------------------------------------------------
 
 module Text.ParserCombinators.ReadPrec
-  ( 
+  (
   ReadPrec,
-  
+
   -- * Precedences
   Prec,
   minPrec,
@@ -61,9 +61,10 @@ import qualified Text.ParserCombinators.ReadP as ReadP
   , pfail
   )
 
-import Control.Monad( MonadPlus(..) )
 import GHC.Num( Num(..) )
 import GHC.Base
+
+import qualified Control.Monad.Fail as MonadFail
 
 -- ---------------------------------------------------------------------------
 -- The readPrec type
@@ -72,20 +73,34 @@ newtype ReadPrec a = P (Prec -> ReadP a)
 
 -- Functor, Monad, MonadPlus
 
+-- | @since 2.01
 instance Functor ReadPrec where
   fmap h (P f) = P (\n -> fmap h (f n))
 
+-- | @since 4.6.0.0
+instance Applicative ReadPrec where
+    pure x  = P (\_ -> pure x)
+    (<*>) = ap
+    liftA2 = liftM2
+
+-- | @since 2.01
 instance Monad ReadPrec where
-  return x  = P (\_ -> return x)
   fail s    = P (\_ -> fail s)
   P f >>= k = P (\n -> do a <- f n; let P f' = k a in f' n)
-  
-instance MonadPlus ReadPrec where
-  mzero = pfail
-  mplus = (+++)
+
+-- | @since 4.9.0.0
+instance MonadFail.MonadFail ReadPrec where
+  fail s    = P (\_ -> MonadFail.fail s)
+
+-- | @since 2.01
+instance MonadPlus ReadPrec
+
+-- | @since 4.6.0.0
+instance Alternative ReadPrec where
+  empty = pfail
+  (<|>) = (+++)
 
 -- precedences
-  
 type Prec = Int
 
 minPrec :: Prec
@@ -107,7 +122,7 @@ reset :: ReadPrec a -> ReadPrec a
 reset (P f) = P (\_ -> f minPrec)
 
 prec :: Prec -> ReadPrec a -> ReadPrec a
--- ^ @(prec n p)@ checks whether the precedence context is 
+-- ^ @(prec n p)@ checks whether the precedence context is
 --   less than or equal to @n@, and
 --
 --   * if not, fails

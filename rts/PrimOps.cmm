@@ -22,17 +22,23 @@
  * ---------------------------------------------------------------------------*/
 
 #include "Cmm.h"
+#include "MachDeps.h"
+#include "SMPClosureOps.h"
 
-#ifdef __PIC__
+#if defined(__PIC__)
 import pthread_mutex_lock;
 import pthread_mutex_unlock;
 #endif
-import base_ControlziExceptionziBase_nestedAtomically_closure;
+import CLOSURE base_ControlziExceptionziBase_nestedAtomically_closure;
+import CLOSURE base_GHCziIOziException_heapOverflow_closure;
 import EnterCriticalSection;
 import LeaveCriticalSection;
-import ghczmprim_GHCziTypes_False_closure;
+import CLOSURE ghczmprim_GHCziTypes_False_closure;
 #if defined(USE_MINIINTERPRETER) || !defined(mingw32_HOST_OS)
-import sm_mutex;
+import CLOSURE sm_mutex;
+#endif
+#if defined(PROFILING)
+import CLOSURE CCS_MAIN;
 #endif
 
 /*-----------------------------------------------------------------------------
@@ -56,11 +62,14 @@ stg_newByteArrayzh ( W_ n )
     MAYBE_GC_N(stg_newByteArrayzh, n);
 
     payload_words = ROUNDUP_BYTES_TO_WDS(n);
-    words = BYTES_TO_WDS(SIZEOF_StgArrWords) + payload_words;
-    ("ptr" p) = ccall allocate(MyCapability() "ptr",words);
-    TICK_ALLOC_PRIM(SIZEOF_StgArrWords,WDS(payload_words),0);
+    words = BYTES_TO_WDS(SIZEOF_StgArrBytes) + payload_words;
+    ("ptr" p) = ccall allocateMightFail(MyCapability() "ptr", words);
+    if (p == NULL) {
+        jump stg_raisezh(base_GHCziIOziException_heapOverflow_closure);
+    }
+    TICK_ALLOC_PRIM(SIZEOF_StgArrBytes,WDS(payload_words),0);
     SET_HDR(p, stg_ARR_WORDS_info, CCCS);
-    StgArrWords_bytes(p) = n;
+    StgArrBytes_bytes(p) = n;
     return (p);
 }
 
@@ -79,7 +88,7 @@ stg_newPinnedByteArrayzh ( W_ n )
     payload_words = ROUNDUP_BYTES_TO_WDS(bytes);
     /* When we actually allocate memory, we need to allow space for the
        header: */
-    bytes = bytes + SIZEOF_StgArrWords;
+    bytes = bytes + SIZEOF_StgArrBytes;
     /* And we want to align to BA_ALIGN bytes, so we need to allow space
        to shift up to BA_ALIGN - 1 bytes: */
     bytes = bytes + BA_ALIGN - 1;
@@ -87,14 +96,17 @@ stg_newPinnedByteArrayzh ( W_ n )
     words = ROUNDUP_BYTES_TO_WDS(bytes);
 
     ("ptr" p) = ccall allocatePinned(MyCapability() "ptr", words);
-    TICK_ALLOC_PRIM(SIZEOF_StgArrWords,WDS(payload_words),0);
+    if (p == NULL) {
+        jump stg_raisezh(base_GHCziIOziException_heapOverflow_closure);
+    }
+    TICK_ALLOC_PRIM(SIZEOF_StgArrBytes,WDS(payload_words),0);
 
     /* Now we need to move p forward so that the payload is aligned
        to BA_ALIGN bytes: */
-    p = p + ((-p - SIZEOF_StgArrWords) & BA_MASK);
+    p = p + ((-p - SIZEOF_StgArrBytes) & BA_MASK);
 
     SET_HDR(p, stg_ARR_WORDS_info, CCCS);
-    StgArrWords_bytes(p) = n;
+    StgArrBytes_bytes(p) = n;
     return (p);
 }
 
@@ -117,7 +129,7 @@ stg_newAlignedPinnedByteArrayzh ( W_ n, W_ alignment )
 
     /* When we actually allocate memory, we need to allow space for the
        header: */
-    bytes = bytes + SIZEOF_StgArrWords;
+    bytes = bytes + SIZEOF_StgArrBytes;
     /* And we want to align to <alignment> bytes, so we need to allow space
        to shift up to <alignment - 1> bytes: */
     bytes = bytes + alignment - 1;
@@ -125,16 +137,38 @@ stg_newAlignedPinnedByteArrayzh ( W_ n, W_ alignment )
     words = ROUNDUP_BYTES_TO_WDS(bytes);
 
     ("ptr" p) = ccall allocatePinned(MyCapability() "ptr", words);
-    TICK_ALLOC_PRIM(SIZEOF_StgArrWords,WDS(payload_words),0);
+    if (p == NULL) {
+        jump stg_raisezh(base_GHCziIOziException_heapOverflow_closure);
+    }
+    TICK_ALLOC_PRIM(SIZEOF_StgArrBytes,WDS(payload_words),0);
 
     /* Now we need to move p forward so that the payload is aligned
        to <alignment> bytes. Note that we are assuming that
        <alignment> is a power of 2, which is technically not guaranteed */
-    p = p + ((-p - SIZEOF_StgArrWords) & (alignment - 1));
+    p = p + ((-p - SIZEOF_StgArrBytes) & (alignment - 1));
 
     SET_HDR(p, stg_ARR_WORDS_info, CCCS);
-    StgArrWords_bytes(p) = n;
+    StgArrBytes_bytes(p) = n;
     return (p);
+}
+
+stg_isByteArrayPinnedzh ( gcptr ba )
+// ByteArray# s -> Int#
+{
+    W_ bd, flags;
+    bd = Bdescr(ba);
+    // Pinned byte arrays live in blocks with the BF_PINNED flag set.
+    // We also consider BF_LARGE objects to be immovable. See #13894.
+    // See the comment in Storage.c:allocatePinned.
+    // We also consider BF_COMPACT objects to be immovable. See #14900.
+    flags = TO_W_(bdescr_flags(bd));
+    return (flags & (BF_PINNED | BF_LARGE | BF_COMPACT) != 0);
+}
+
+stg_isMutableByteArrayPinnedzh ( gcptr mba )
+// MutableByteArray# s -> Int#
+{
+    jump stg_isByteArrayPinnedzh(mba);
 }
 
 // shrink size of MutableByteArray in-place
@@ -142,11 +176,11 @@ stg_shrinkMutableByteArrayzh ( gcptr mba, W_ new_size )
 // MutableByteArray# s -> Int# -> State# s -> State# s
 {
    ASSERT(new_size >= 0);
-   ASSERT(new_size <= StgArrWords_bytes(mba));
+   ASSERT(new_size <= StgArrBytes_bytes(mba));
 
-   OVERWRITING_CLOSURE_OFS(mba, (BYTES_TO_WDS(SIZEOF_StgArrWords) +
+   OVERWRITING_CLOSURE_OFS(mba, (BYTES_TO_WDS(SIZEOF_StgArrBytes) +
                                  ROUNDUP_BYTES_TO_WDS(new_size)));
-   StgArrWords_bytes(mba) = new_size;
+   StgArrBytes_bytes(mba) = new_size;
    LDV_RECORD_CREATE(mba);
 
    return ();
@@ -168,9 +202,9 @@ stg_resizzeMutableByteArrayzh ( gcptr mba, W_ new_size )
    new_size_wds = ROUNDUP_BYTES_TO_WDS(new_size);
 
    if (new_size_wds <= BYTE_ARR_WDS(mba)) {
-      OVERWRITING_CLOSURE_OFS(mba, (BYTES_TO_WDS(SIZEOF_StgArrWords) +
+      OVERWRITING_CLOSURE_OFS(mba, (BYTES_TO_WDS(SIZEOF_StgArrBytes) +
                                     new_size_wds));
-      StgArrWords_bytes(mba) = new_size;
+      StgArrBytes_bytes(mba) = new_size;
       LDV_RECORD_CREATE(mba);
 
       return (mba);
@@ -185,7 +219,7 @@ stg_resizzeMutableByteArrayzh ( gcptr mba, W_ new_size )
 
       // copy over old content
       prim %memcpy(BYTE_ARR_CTS(new_mba), BYTE_ARR_CTS(mba),
-                   StgArrWords_bytes(mba), WDS(1));
+                   StgArrBytes_bytes(mba), SIZEOF_W);
 
       return (new_mba);
    }
@@ -198,8 +232,8 @@ stg_casIntArrayzh( gcptr arr, W_ ind, W_ old, W_ new )
 {
     W_ p, h;
 
-    p = arr + SIZEOF_StgArrWords + WDS(ind);
-    (h) = ccall cas(p, old, new);
+    p = arr + SIZEOF_StgArrBytes + WDS(ind);
+    (h) = prim %cmpxchgW(p, old, new);
 
     return(h);
 }
@@ -217,17 +251,20 @@ stg_newArrayzh ( W_ n /* words */, gcptr init )
     // number of words.
     size = n + mutArrPtrsCardWords(n);
     words = BYTES_TO_WDS(SIZEOF_StgMutArrPtrs) + size;
-    ("ptr" arr) = ccall allocate(MyCapability() "ptr",words);
+    ("ptr" arr) = ccall allocateMightFail(MyCapability() "ptr",words);
+    if (arr == NULL) {
+        jump stg_raisezh(base_GHCziIOziException_heapOverflow_closure);
+    }
     TICK_ALLOC_PRIM(SIZEOF_StgMutArrPtrs, WDS(size), 0);
 
     SET_HDR(arr, stg_MUT_ARR_PTRS_DIRTY_info, CCCS);
     StgMutArrPtrs_ptrs(arr) = n;
     StgMutArrPtrs_size(arr) = size;
 
-    // Initialise all elements of the the array with the value in R2
+    // Initialise all elements of the array with the value in R2
     p = arr + SIZEOF_StgMutArrPtrs;
   for:
-    if (p < arr + SIZEOF_StgMutArrPtrs + WDS(n)) {
+    if (p < arr + SIZEOF_StgMutArrPtrs + WDS(n)) (likely: True) {
         W_[p] = init;
         p = p + WDS(1);
         goto for;
@@ -316,8 +353,8 @@ stg_casArrayzh ( gcptr arr, W_ ind, gcptr old, gcptr new )
     W_ p, len;
 
     p = arr + SIZEOF_StgMutArrPtrs + WDS(ind);
-    (h) = ccall cas(p, old, new);
-    
+    (h) = prim %cmpxchgW(p, old, new);
+
     if (h != old) {
         // Failure, return what was there instead of 'old':
         return (1,h);
@@ -343,7 +380,10 @@ stg_newArrayArrayzh ( W_ n /* words */ )
     // number of words.
     size = n + mutArrPtrsCardWords(n);
     words = BYTES_TO_WDS(SIZEOF_StgMutArrPtrs) + size;
-    ("ptr" arr) = ccall allocate(MyCapability() "ptr",words);
+    ("ptr" arr) = ccall allocateMightFail(MyCapability() "ptr",words);
+    if (arr == NULL) {
+        jump stg_raisezh(base_GHCziIOziException_heapOverflow_closure);
+    }
     TICK_ALLOC_PRIM(SIZEOF_StgMutArrPtrs, WDS(size), 0);
 
     SET_HDR(arr, stg_MUT_ARR_PTRS_DIRTY_info, W_[CCCS]);
@@ -353,7 +393,7 @@ stg_newArrayArrayzh ( W_ n /* words */ )
     // Initialise all elements of the array with a pointer to the new array
     p = arr + SIZEOF_StgMutArrPtrs;
   for:
-    if (p < arr + SIZEOF_StgMutArrPtrs + WDS(n)) {
+    if (p < arr + SIZEOF_StgMutArrPtrs + WDS(n)) (likely: True) {
         W_[p] = arr;
         p = p + WDS(1);
         goto for;
@@ -375,16 +415,19 @@ stg_newSmallArrayzh ( W_ n /* words */, gcptr init )
     again: MAYBE_GC(again);
 
     words = BYTES_TO_WDS(SIZEOF_StgSmallMutArrPtrs) + n;
-    ("ptr" arr) = ccall allocate(MyCapability() "ptr",words);
+    ("ptr" arr) = ccall allocateMightFail(MyCapability() "ptr",words);
+    if (arr == NULL) {
+        jump stg_raisezh(base_GHCziIOziException_heapOverflow_closure);
+    }
     TICK_ALLOC_PRIM(SIZEOF_StgSmallMutArrPtrs, WDS(n), 0);
 
     SET_HDR(arr, stg_SMALL_MUT_ARR_PTRS_DIRTY_info, CCCS);
     StgSmallMutArrPtrs_ptrs(arr) = n;
 
-    // Initialise all elements of the the array with the value in R2
+    // Initialise all elements of the array with the value in R2
     p = arr + SIZEOF_StgSmallMutArrPtrs;
   for:
-    if (p < arr + SIZEOF_StgSmallMutArrPtrs + WDS(n)) {
+    if (p < arr + SIZEOF_StgSmallMutArrPtrs + WDS(n)) (likely: True) {
         W_[p] = init;
         p = p + WDS(1);
         goto for;
@@ -437,7 +480,7 @@ stg_copySmallArrayzh ( gcptr src, W_ src_off, gcptr dst, W_ dst_off, W_ n)
     dst_p = dst + SIZEOF_StgSmallMutArrPtrs + WDS(dst_off);
     src_p = src + SIZEOF_StgSmallMutArrPtrs + WDS(src_off);
     bytes = WDS(n);
-    prim %memcpy(dst_p, src_p, bytes, WDS(1));
+    prim %memcpy(dst_p, src_p, bytes, SIZEOF_W);
 
     return ();
 }
@@ -452,9 +495,9 @@ stg_copySmallMutableArrayzh ( gcptr src, W_ src_off, gcptr dst, W_ dst_off, W_ n
     src_p = src + SIZEOF_StgSmallMutArrPtrs + WDS(src_off);
     bytes = WDS(n);
     if (src == dst) {
-        prim %memmove(dst_p, src_p, bytes, WDS(1));
+        prim %memmove(dst_p, src_p, bytes, SIZEOF_W);
     } else {
-        prim %memcpy(dst_p, src_p, bytes, WDS(1));
+        prim %memcpy(dst_p, src_p, bytes, SIZEOF_W);
     }
 
     return ();
@@ -468,7 +511,7 @@ stg_casSmallArrayzh ( gcptr arr, W_ ind, gcptr old, gcptr new )
     W_ p, len;
 
     p = arr + SIZEOF_StgSmallMutArrPtrs + WDS(ind);
-    (h) = ccall cas(p, old, new);
+    (h) = prim %cmpxchgW(p, old, new);
 
     if (h != old) {
         // Failure, return what was there instead of 'old':
@@ -506,9 +549,10 @@ stg_newMutVarzh ( gcptr init )
 stg_casMutVarzh ( gcptr mv, gcptr old, gcptr new )
  /* MutVar# s a -> a -> a -> State# s -> (# State#, Int#, Any a #) */
 {
+#if defined(THREADED_RTS)
     gcptr h;
 
-    (h) = ccall cas(mv + SIZEOF_StgHeader + OFFSET_StgMutVar_var, old, new);
+    (h) = prim %cmpxchgW(mv + SIZEOF_StgHeader + OFFSET_StgMutVar_var, old, new);
     if (h != old) {
         return (1,h);
     } else {
@@ -517,6 +561,20 @@ stg_casMutVarzh ( gcptr mv, gcptr old, gcptr new )
         }
         return (0,new);
     }
+#else
+    gcptr prev_val;
+
+    prev_val = StgMutVar_var(mv);
+    if (prev_val != old) {
+        return (1,prev_val);
+    } else {
+        StgMutVar_var(mv) = new;
+        if (GET_INFO(mv) == stg_MUT_VAR_CLEAN_info) {
+            ccall dirty_MUT_VAR(BaseReg "ptr", mv "ptr");
+        }
+        return (0,new);
+    }
+#endif
 }
 
 stg_atomicModifyMutVarzh ( gcptr mv, gcptr f )
@@ -539,7 +597,7 @@ stg_atomicModifyMutVarzh ( gcptr mv, gcptr f )
          r = [stg_sel_1 z]   (max (HS + 1) MIN_UPD_SIZE)
     */
 
-#if MIN_UPD_SIZE > 1
+#if defined(MIN_UPD_SIZE) && MIN_UPD_SIZE > 1
 #define THUNK_1_SIZE (SIZEOF_StgThunkHeader + WDS(MIN_UPD_SIZE))
 #define TICK_ALLOC_THUNK_1() TICK_ALLOC_UP_THK(WDS(1),WDS(MIN_UPD_SIZE-1))
 #else
@@ -547,7 +605,7 @@ stg_atomicModifyMutVarzh ( gcptr mv, gcptr f )
 #define TICK_ALLOC_THUNK_1() TICK_ALLOC_UP_THK(WDS(1),0)
 #endif
 
-#if MIN_UPD_SIZE > 2
+#if defined(MIN_UPD_SIZE) && MIN_UPD_SIZE > 2
 #define THUNK_2_SIZE (SIZEOF_StgThunkHeader + WDS(MIN_UPD_SIZE))
 #define TICK_ALLOC_THUNK_2() TICK_ALLOC_UP_THK(WDS(2),WDS(MIN_UPD_SIZE-2))
 #else
@@ -583,8 +641,8 @@ stg_atomicModifyMutVarzh ( gcptr mv, gcptr f )
   retry:
     x = StgMutVar_var(mv);
     StgThunk_payload(z,1) = x;
-#ifdef THREADED_RTS
-    (h) = ccall cas(mv + SIZEOF_StgHeader + OFFSET_StgMutVar_var, x, y);
+#if defined(THREADED_RTS)
+    (h) = prim %cmpxchgW(mv + SIZEOF_StgHeader + OFFSET_StgMutVar_var, x, y);
     if (h != x) { goto retry; }
 #else
     StgMutVar_var(mv) = y;
@@ -692,7 +750,7 @@ stg_finalizzeWeakzh ( gcptr w )
     list = StgWeak_cfinalizers(w);
 
     // kill it
-#ifdef PROFILING
+#if defined(PROFILING)
     // @LDV profiling
     // A weak pointer is inherently used, so we do not need to call
     // LDV_recordDead_FILL_SLOP_DYNAMIC():
@@ -701,7 +759,7 @@ stg_finalizzeWeakzh ( gcptr w )
     //    LDV_recordDead((StgClosure *)w, sizeofW(StgWeak) - sizeofW(StgProfHeader));
     // Furthermore, when PROFILING is turned on, dead weak pointers are exactly as
     // large as weak pointers, so there is no need to fill the slop, either.
-    // See stg_DEAD_WEAK_info in StgMiscClosures.hc.
+    // See stg_DEAD_WEAK_info in StgMiscClosures.cmm.
 #endif
 
     //
@@ -790,7 +848,7 @@ stg_decodeDoublezu2Intzh ( D_ arg )
         mp_tmp2    = tmp + WDS(2);
         mp_result1 = tmp + WDS(1);
         mp_result2 = tmp;
-  
+
         /* Perform the operation */
         ccall __decodeDouble_2Int(mp_tmp1 "ptr", mp_tmp2 "ptr",
                                   mp_result1 "ptr", mp_result2 "ptr",
@@ -805,6 +863,22 @@ stg_decodeDoublezu2Intzh ( D_ arg )
     /* returns:
        (Int# (mant sign), Word# (mant high), Word# (mant low), Int# (expn)) */
     return (r1, r2, r3, r4);
+}
+
+/* Double# -> (# Int64#, Int# #) */
+stg_decodeDoublezuInt64zh ( D_ arg )
+{
+    CInt exp;
+    I64  mant;
+    W_   mant_ptr;
+
+    STK_CHK_GEN_N (SIZEOF_INT64);
+    reserve BYTES_TO_WDS(SIZEOF_INT64) = mant_ptr {
+        (exp) = ccall __decodeDouble_Int64(mant_ptr "ptr", arg);
+        mant = I64[mant_ptr];
+    }
+
+    return (mant, TO_W_(exp));
 }
 
 /* -----------------------------------------------------------------------------
@@ -868,11 +942,6 @@ stg_yieldzh ()
     // thread again.
     Capability_context_switch(MyCapability()) = 1 :: CInt;
     jump stg_yield_noregs();
-}
-
-stg_myThreadIdzh ()
-{
-    return (CurrentTSO);
 }
 
 stg_labelThreadzh ( gcptr threadid, W_ addr )
@@ -950,6 +1019,7 @@ INFO_TABLE_RET(stg_catch_retry_frame, CATCH_RETRY_FRAME,
                                         alt_code))
     return (P_ ret)
 {
+    unwind Sp = Sp + SIZEOF_StgCatchRetryFrame;
     W_ r;
     gcptr trec, outer, arg;
 
@@ -1225,7 +1295,6 @@ stg_catchRetryzh (P_ first_code, /* :: STM a */
                                   alt_code))
         (first_code);
 }
-
 
 stg_retryzh /* no arg list: explicit stack layout */
 {
@@ -1688,7 +1757,7 @@ loop:
 
     ccall tryWakeupThread(MyCapability() "ptr", tso);
 
-    // If it was an readMVar, then we can still do work,
+    // If it was a readMVar, then we can still do work,
     // so loop back. (XXX: This could take a while)
     if (why_blocked == BlockedOnMVarRead) {
         q = StgMVarTSOQueue_link(q);
@@ -1702,6 +1771,13 @@ loop:
 }
 
 
+// NOTE: there is another implementation of this function in
+// Threads.c:performTryPutMVar().  Keep them in sync!  It was
+// measurably slower to call the C function from here (70% for a
+// tight loop doing tryPutMVar#).
+//
+// TODO: we could kill the duplication by making tryPutMVar# into an
+// inline primop that expands into a C call to performTryPutMVar().
 stg_tryPutMVarzh ( P_ mvar, /* :: MVar a */
                    P_ val,  /* :: a */ )
 {
@@ -1762,7 +1838,7 @@ loop:
 
     ccall tryWakeupThread(MyCapability() "ptr", tso);
 
-    // If it was an readMVar, then we can still do work,
+    // If it was a readMVar, then we can still do work,
     // so loop back. (XXX: This could take a while)
     if (why_blocked == BlockedOnMVarRead) {
         q = StgMVarTSOQueue_link(q);
@@ -1774,6 +1850,7 @@ loop:
     unlockClosure(mvar, info);
     return (1);
 }
+
 
 stg_readMVarzh ( P_ mvar, /* :: MVar a */ )
 {
@@ -1897,7 +1974,7 @@ stg_newBCOzh ( P_ instrs,
     ALLOC_PRIM (bytes);
 
     bco = Hp - bytes + WDS(1);
-    SET_HDR(bco, stg_BCO_info, CCCS);
+    SET_HDR(bco, stg_BCO_info, CCS_MAIN);
 
     StgBCO_instrs(bco)     = instrs;
     StgBCO_literals(bco)   = literals;
@@ -1910,7 +1987,7 @@ stg_newBCOzh ( P_ instrs,
     i = 0;
 for:
     if (i < BYTE_ARR_WDS(bitmap_arr)) {
-        StgBCO_bitmap(bco,i) = StgArrWords_payload(bitmap_arr,i);
+        StgBCO_bitmap(bco,i) = StgArrBytes_payload(bitmap_arr,i);
         i = i + 1;
         goto for;
     }
@@ -1923,7 +2000,7 @@ stg_mkApUpd0zh ( P_ bco )
     W_ ap;
 
     // This function is *only* used to wrap zero-arity BCOs in an
-    // updatable wrapper (see ByteCodeLink.lhs).  An AP thunk is always
+    // updatable wrapper (see ByteCodeLink.hs).  An AP thunk is always
     // saturated and always points directly to a FUN or BCO.
     ASSERT(%INFO_TYPE(%GET_STD_INFO(bco)) == HALF_W_(BCO) &&
            StgBCO_arity(bco) == HALF_W_(0));
@@ -1933,7 +2010,7 @@ stg_mkApUpd0zh ( P_ bco )
     CCCS_ALLOC(SIZEOF_StgAP);
 
     ap = Hp - SIZEOF_StgAP + WDS(1);
-    SET_HDR(ap, stg_AP_info, CCCS);
+    SET_HDR(ap, stg_AP_info, CCS_MAIN);
 
     StgAP_n_args(ap) = HALF_W_(0);
     StgAP_fun(ap) = bco;
@@ -1943,10 +2020,9 @@ stg_mkApUpd0zh ( P_ bco )
 
 stg_unpackClosurezh ( P_ closure )
 {
-// TODO: Consider the absence of ptrs or nonptrs as a special case ?
-
-    W_ info, ptrs, nptrs, p, ptrs_arr, nptrs_arr;
-    info  = %GET_STD_INFO(UNTAG(closure));
+    W_ clos, info, ptrs, nptrs, p, ptrs_arr, nptrs_arr;
+    clos  = UNTAG(closure);
+    info  = %GET_STD_INFO(clos);
 
     // Some closures have non-standard layout, so we omit those here.
     W_ type;
@@ -1968,17 +2044,14 @@ stg_unpackClosurezh ( P_ closure )
         nptrs = TO_W_(%INFO_NPTRS(info));
         goto out;
     }}
-out:
 
+out:
     W_ ptrs_arr_sz, ptrs_arr_cards, nptrs_arr_sz;
-    nptrs_arr_sz = SIZEOF_StgArrWords   + WDS(nptrs);
+    nptrs_arr_sz = SIZEOF_StgArrBytes   + WDS(nptrs);
     ptrs_arr_cards = mutArrPtrsCardWords(ptrs);
     ptrs_arr_sz  = SIZEOF_StgMutArrPtrs + WDS(ptrs) + WDS(ptrs_arr_cards);
 
     ALLOC_PRIM_P (ptrs_arr_sz + nptrs_arr_sz, stg_unpackClosurezh, closure);
-
-    W_ clos;
-    clos = UNTAG(closure);
 
     ptrs_arr  = Hp - nptrs_arr_sz - ptrs_arr_sz + WDS(1);
     nptrs_arr = Hp - nptrs_arr_sz + WDS(1);
@@ -1988,25 +2061,28 @@ out:
     StgMutArrPtrs_size(ptrs_arr) = ptrs + ptrs_arr_cards;
 
     p = 0;
-for:
+
+write_ptrs:
     if(p < ptrs) {
          W_[ptrs_arr + SIZEOF_StgMutArrPtrs + WDS(p)] = StgClosure_payload(clos,p);
          p = p + 1;
-         goto for;
+         goto write_ptrs;
     }
     /* We can leave the card table uninitialised, since the array is
        allocated in the nursery.  The GC will fill it in if/when the array
        is promoted. */
 
     SET_HDR(nptrs_arr, stg_ARR_WORDS_info, CCCS);
-    StgArrWords_bytes(nptrs_arr) = WDS(nptrs);
+    StgArrBytes_bytes(nptrs_arr) = WDS(nptrs);
     p = 0;
-for2:
+
+write_nptrs:
     if(p < nptrs) {
          W_[BYTE_ARR_CTS(nptrs_arr) + WDS(p)] = StgClosure_payload(clos, p+ptrs);
          p = p + 1;
-         goto for2;
+         goto write_nptrs;
     }
+
     return (info, ptrs_arr, nptrs_arr);
 }
 
@@ -2028,7 +2104,7 @@ for2:
 
 stg_waitReadzh ( W_ fd )
 {
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     ccall barf("waitRead# on threaded RTS") never returns;
 #else
 
@@ -2044,7 +2120,7 @@ stg_waitReadzh ( W_ fd )
 
 stg_waitWritezh ( W_ fd )
 {
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     ccall barf("waitWrite# on threaded RTS") never returns;
 #else
 
@@ -2062,21 +2138,21 @@ stg_waitWritezh ( W_ fd )
 STRING(stg_delayzh_malloc_str, "stg_delayzh")
 stg_delayzh ( W_ us_delay )
 {
-#ifdef mingw32_HOST_OS
+#if defined(mingw32_HOST_OS)
     W_ ares;
     CInt reqID;
 #else
     W_ t, prev, target;
 #endif
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     ccall barf("delay# on threaded RTS") never returns;
 #else
 
     ASSERT(StgTSO_why_blocked(CurrentTSO) == NotBlocked::I16);
     StgTSO_why_blocked(CurrentTSO) = BlockedOnDelay::I16;
 
-#ifdef mingw32_HOST_OS
+#if defined(mingw32_HOST_OS)
 
     /* could probably allocate this on the heap instead */
     ("ptr" ares) = ccall stgMallocBytes(SIZEOF_StgAsyncIOResult,
@@ -2124,14 +2200,14 @@ while:
 }
 
 
-#ifdef mingw32_HOST_OS
+#if defined(mingw32_HOST_OS)
 STRING(stg_asyncReadzh_malloc_str, "stg_asyncReadzh")
 stg_asyncReadzh ( W_ fd, W_ is_sock, W_ len, W_ buf )
 {
     W_ ares;
     CInt reqID;
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     ccall barf("asyncRead# on threaded RTS") never returns;
 #else
 
@@ -2157,7 +2233,7 @@ stg_asyncWritezh ( W_ fd, W_ is_sock, W_ len, W_ buf )
     W_ ares;
     CInt reqID;
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     ccall barf("asyncWrite# on threaded RTS") never returns;
 #else
 
@@ -2183,7 +2259,7 @@ stg_asyncDoProczh ( W_ proc, W_ param )
     W_ ares;
     CInt reqID;
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     ccall barf("asyncDoProc# on threaded RTS") never returns;
 #else
 
@@ -2298,7 +2374,7 @@ stg_noDuplicatezh /* no arg list: explicit stack layout */
 
 stg_getApStackValzh ( P_ ap_stack, W_ offset )
 {
-   if (%INFO_PTR(ap_stack) == stg_AP_STACK_info) {
+   if (%INFO_PTR(UNTAG(ap_stack)) == stg_AP_STACK_info) {
        return (1,StgAP_STACK_payload(ap_stack,offset));
    } else {
        return (0,ap_stack);
@@ -2312,7 +2388,7 @@ stg_traceCcszh ( P_ obj, P_ ret )
 {
     W_ ccs;
 
-#ifdef PROFILING
+#if defined(PROFILING)
     ccs = StgHeader_ccs(UNTAG(obj));
     ccall fprintCCS_stderr(ccs "ptr");
 #endif
@@ -2324,10 +2400,10 @@ stg_getSparkzh ()
 {
     W_ spark;
 
-#ifndef THREADED_RTS
+#if !defined(THREADED_RTS)
     return (0,ghczmprim_GHCziTypes_False_closure);
 #else
-    (spark) = ccall findSpark(MyCapability());
+    ("ptr" spark) = ccall findSpark(MyCapability() "ptr");
     if (spark != 0) {
         return (1,spark);
     } else {
@@ -2336,10 +2412,18 @@ stg_getSparkzh ()
 #endif
 }
 
+stg_clearCCSzh (P_ arg)
+{
+#if defined(PROFILING)
+    CCCS = CCS_MAIN;
+#endif
+    jump stg_ap_v_fast(arg);
+}
+
 stg_numSparkszh ()
 {
     W_ n;
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     (n) = ccall dequeElements(Capability_sparks(MyCapability()));
 #else
     n = 0;
@@ -2407,3 +2491,23 @@ stg_traceMarkerzh ( W_ msg )
     return ();
 }
 
+
+stg_getThreadAllocationCounterzh ()
+{
+    // Account for the allocation in the current block
+    W_ offset;
+    offset = Hp - bdescr_start(CurrentNursery);
+    return (StgTSO_alloc_limit(CurrentTSO) - TO_I64(offset));
+}
+
+stg_setThreadAllocationCounterzh ( I64 counter )
+{
+    // Allocation in the current block will be subtracted by
+    // getThreadAllocationCounter#, so we have to offset any existing
+    // allocation here.  See also openNursery/closeNursery in
+    // compiler/codeGen/StgCmmForeign.hs.
+    W_ offset;
+    offset = Hp - bdescr_start(CurrentNursery);
+    StgTSO_alloc_limit(CurrentTSO) = counter + TO_I64(offset);
+    return ();
+}

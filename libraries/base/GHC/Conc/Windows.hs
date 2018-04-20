@@ -1,6 +1,6 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude, MagicHash, UnboxedTuples, AutoDeriveTypeable #-}
-{-# OPTIONS_GHC -fno-warn-missing-signatures #-}
+{-# LANGUAGE CPP, NoImplicitPrelude, MagicHash, UnboxedTuples #-}
+{-# OPTIONS_GHC -Wno-missing-signatures #-}
 {-# OPTIONS_HADDOCK not-home #-}
 
 -----------------------------------------------------------------------------
@@ -38,10 +38,7 @@ module GHC.Conc.Windows
        , toWin32ConsoleEvent
        ) where
 
-import Control.Monad
 import Data.Bits (shiftR)
-import Data.Maybe (Maybe(..))
-import Data.Typeable
 import GHC.Base
 import GHC.Conc.Sync
 import GHC.Enum (Enum)
@@ -56,7 +53,7 @@ import GHC.Show (Show)
 import GHC.Word (Word32, Word64)
 import GHC.Windows
 
-#ifdef mingw32_HOST_OS
+#if defined(mingw32_HOST_OS)
 # if defined(i386_HOST_ARCH)
 #  define WINDOWS_CCONV stdcall
 # elif defined(x86_64_HOST_ARCH)
@@ -126,7 +123,7 @@ threadDelay time
 registerDelay :: Int -> IO (TVar Bool)
 registerDelay usecs
   | threaded = waitForDelayEventSTM usecs
-  | otherwise = error "registerDelay: requires -threaded"
+  | otherwise = errorWithoutStackTrace "registerDelay: requires -threaded"
 
 foreign import ccall unsafe "rtsSupportsBoundThreads" threaded :: Bool
 
@@ -226,7 +223,7 @@ prodServiceThread = do
   -- conditions in which prodding is left at True but the server is
   -- blocked in select().
   was_set <- atomicModifyIORef prodding $ \b -> (True,b)
-  unless was_set wakeupIOManager
+  when (not was_set) wakeupIOManager
 
 -- ----------------------------------------------------------------------------
 -- Windows IO manager thread
@@ -259,7 +256,7 @@ service_loop wakeup old_delays = do
                 _ | r2 == io_MANAGER_DIE    -> return True
                 0 -> return False -- spurious wakeup
                 _ -> do start_console_handler (r2 `shiftR` 1); return False
-        unless exit $ service_cont wakeup delays'
+        when (not exit) $ service_cont wakeup delays'
 
     _other -> service_cont wakeup delays' -- probably timeout
 
@@ -281,7 +278,12 @@ data ConsoleEvent
     -- these are sent to Services only.
  | Logoff
  | Shutdown
- deriving (Eq, Ord, Enum, Show, Read, Typeable)
+ deriving ( Eq   -- ^ @since 4.3.0.0
+          , Ord  -- ^ @since 4.3.0.0
+          , Enum -- ^ @since 4.3.0.0
+          , Show -- ^ @since 4.3.0.0
+          , Read -- ^ @since 4.3.0.0
+          )
 
 start_console_handler :: Word32 -> IO ()
 start_console_handler r =
@@ -302,7 +304,7 @@ toWin32ConsoleEvent ev =
        _ -> Nothing
 
 win32ConsoleHandler :: MVar (ConsoleEvent -> IO ())
-win32ConsoleHandler = unsafePerformIO (newMVar (error "win32ConsoleHandler"))
+win32ConsoleHandler = unsafePerformIO (newMVar (errorWithoutStackTrace "win32ConsoleHandler"))
 
 wakeupIOManager :: IO ()
 wakeupIOManager = c_sendIOManagerEvent io_MANAGER_WAKEUP

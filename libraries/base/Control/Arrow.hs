@@ -1,4 +1,9 @@
 {-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# OPTIONS_GHC -Wno-inline-rule-shadowing #-}
+    -- The RULES for the methods of class Arrow may never fire
+    -- e.g. compose/arr;  see Trac #10528
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Control.Arrow
@@ -41,11 +46,11 @@ module Control.Arrow (
     ArrowLoop(..)
     ) where
 
-import Prelude hiding (id,(.))
-
-import Control.Monad
+import Data.Tuple ( fst, snd, uncurry )
+import Data.Either
 import Control.Monad.Fix
 import Control.Category
+import GHC.Base hiding ( (.), id )
 
 infixr 5 <+>
 infixr 3 ***
@@ -57,7 +62,7 @@ infixr 1 ^<<, <<^
 
 -- | The basic arrow class.
 --
--- Minimal complete definition: 'arr' and 'first', satisfying the laws
+-- Instances should satisfy the following laws:
 --
 --  * @'arr' id = 'id'@
 --
@@ -81,6 +86,7 @@ infixr 1 ^<<, <<^
 -- which may be overridden for efficiency.
 
 class Category a => Arrow a where
+    {-# MINIMAL arr, (first | (***)) #-}
 
     -- | Lift a function to an arrow.
     arr :: (b -> c) -> a b c
@@ -88,16 +94,14 @@ class Category a => Arrow a where
     -- | Send the first component of the input through the argument
     --   arrow, and copy the rest unchanged to the output.
     first :: a b c -> a (b,d) (c,d)
+    first = (*** id)
 
     -- | A mirror image of 'first'.
     --
     --   The default definition may be overridden with a more efficient
     --   version if desired.
     second :: a b c -> a (d,b) (d,c)
-    second f = arr swap >>> first f >>> arr swap
-      where
-        swap :: (x,y) -> (y,x)
-        swap ~(x,y) = (y,x)
+    second = (id ***)
 
     -- | Split the input between the two argument arrows and combine
     --   their output.  Note that this is in general not a functor.
@@ -105,7 +109,8 @@ class Category a => Arrow a where
     --   The default definition may be overridden with a more efficient
     --   version if desired.
     (***) :: a b c -> a b' c' -> a (b,b') (c,c')
-    f *** g = first f >>> second g
+    f *** g = first f >>> arr swap >>> first g >>> arr swap
+      where swap ~(x,y) = (y,x)
 
     -- | Fanout: send the input to both argument arrows and combine
     --   their output.
@@ -134,10 +139,9 @@ class Category a => Arrow a where
 
 -- Ordinary functions are arrows.
 
+-- | @since 2.01
 instance Arrow (->) where
     arr f = f
-    first f = f *** id
-    second f = id *** f
 --  (f *** g) ~(x,y) = (f x, g y)
 --  sorry, although the above defn is fully H'98, nhc98 can't parse it.
     (***) f g ~(x,y) = (f x, g y)
@@ -145,10 +149,12 @@ instance Arrow (->) where
 -- | Kleisli arrows of a monad.
 newtype Kleisli m a b = Kleisli { runKleisli :: a -> m b }
 
+-- | @since 3.0
 instance Monad m => Category (Kleisli m) where
     id = Kleisli return
     (Kleisli f) . (Kleisli g) = Kleisli (\b -> g b >>= f)
 
+-- | @since 2.01
 instance Monad m => Arrow (Kleisli m) where
     arr f = Kleisli (return . f)
     first (Kleisli f) = Kleisli (\ ~(b,d) -> f b >>= \c -> return (c,d))
@@ -177,6 +183,7 @@ f ^<< a = arr f <<< a
 class Arrow a => ArrowZero a where
     zeroArrow :: a b c
 
+-- | @since 2.01
 instance MonadPlus m => ArrowZero (Kleisli m) where
     zeroArrow = Kleisli (\_ -> mzero)
 
@@ -185,13 +192,14 @@ class ArrowZero a => ArrowPlus a where
     -- | An associative operation with identity 'zeroArrow'.
     (<+>) :: a b c -> a b c -> a b c
 
+-- | @since 2.01
 instance MonadPlus m => ArrowPlus (Kleisli m) where
     Kleisli f <+> Kleisli g = Kleisli (\x -> f x `mplus` g x)
 
 -- | Choice, for arrows that support it.  This class underlies the
 -- @if@ and @case@ constructs in arrow notation.
 --
--- Minimal complete definition: 'left', satisfying the laws
+-- Instances should satisfy the following laws:
 --
 --  * @'left' ('arr' f) = 'arr' ('left' f)@
 --
@@ -213,21 +221,19 @@ instance MonadPlus m => ArrowPlus (Kleisli m) where
 -- be overridden for efficiency.
 
 class Arrow a => ArrowChoice a where
+    {-# MINIMAL (left | (+++)) #-}
 
     -- | Feed marked inputs through the argument arrow, passing the
     --   rest through unchanged to the output.
     left :: a b c -> a (Either b d) (Either c d)
+    left = (+++ id)
 
     -- | A mirror image of 'left'.
     --
     --   The default definition may be overridden with a more efficient
     --   version if desired.
     right :: a b c -> a (Either d b) (Either d c)
-    right f = arr mirror >>> left f >>> arr mirror
-      where
-        mirror :: Either x y -> Either y x
-        mirror (Left x) = Right x
-        mirror (Right y) = Left y
+    right = (id +++)
 
     -- | Split the input between the two argument arrows, retagging
     --   and merging their outputs.
@@ -236,7 +242,11 @@ class Arrow a => ArrowChoice a where
     --   The default definition may be overridden with a more efficient
     --   version if desired.
     (+++) :: a b c -> a b' c' -> a (Either b b') (Either c c')
-    f +++ g = left f >>> right g
+    f +++ g = left f >>> arr mirror >>> left g >>> arr mirror
+      where
+        mirror :: Either x y -> Either y x
+        mirror (Left x) = Right x
+        mirror (Right y) = Left y
 
     -- | Fanin: Split the input between the two argument arrows and
     --   merge their outputs.
@@ -264,12 +274,14 @@ class Arrow a => ArrowChoice a where
                 right f . right g = right (f . g)
  #-}
 
+-- | @since 2.01
 instance ArrowChoice (->) where
     left f = f +++ id
     right f = id +++ f
     f +++ g = (Left . f) ||| (Right . g)
     (|||) = either
 
+-- | @since 2.01
 instance Monad m => ArrowChoice (Kleisli m) where
     left f = f +++ arr id
     right f = arr id +++ f
@@ -290,9 +302,11 @@ instance Monad m => ArrowChoice (Kleisli m) where
 class Arrow a => ArrowApply a where
     app :: a (a b c, b) c
 
+-- | @since 2.01
 instance ArrowApply (->) where
     app (f,x) = f x
 
+-- | @since 2.01
 instance Monad m => ArrowApply (Kleisli m) where
     app = Kleisli (\(Kleisli f, x) -> f x)
 
@@ -301,17 +315,27 @@ instance Monad m => ArrowApply (Kleisli m) where
 
 newtype ArrowMonad a b = ArrowMonad (a () b)
 
+-- | @since 4.6.0.0
 instance Arrow a => Functor (ArrowMonad a) where
     fmap f (ArrowMonad m) = ArrowMonad $ m >>> arr f
 
+-- | @since 4.6.0.0
+instance Arrow a => Applicative (ArrowMonad a) where
+   pure x = ArrowMonad (arr (const x))
+   ArrowMonad f <*> ArrowMonad x = ArrowMonad (f &&& x >>> arr (uncurry id))
+
+-- | @since 2.01
 instance ArrowApply a => Monad (ArrowMonad a) where
-    return x = ArrowMonad (arr (\_ -> x))
     ArrowMonad m >>= f = ArrowMonad $
         m >>> arr (\x -> let ArrowMonad h = f x in (h, ())) >>> app
 
-instance (ArrowApply a, ArrowPlus a) => MonadPlus (ArrowMonad a) where
-   mzero = ArrowMonad zeroArrow
-   ArrowMonad x `mplus` ArrowMonad y = ArrowMonad (x <+> y)
+-- | @since 4.6.0.0
+instance ArrowPlus a => Alternative (ArrowMonad a) where
+   empty = ArrowMonad zeroArrow
+   ArrowMonad x <|> ArrowMonad y = ArrowMonad (x <+> y)
+
+-- | @since 4.6.0.0
+instance (ArrowApply a, ArrowPlus a) => MonadPlus (ArrowMonad a)
 
 -- | Any instance of 'ArrowApply' can be made into an instance of
 --   'ArrowChoice' by defining 'left' = 'leftApp'.
@@ -351,12 +375,15 @@ leftApp f = arr ((\b -> (arr (\() -> b) >>> f >>> arr Left, ())) |||
 class Arrow a => ArrowLoop a where
     loop :: a (b,d) (c,d) -> a b c
 
+-- | @since 2.01
 instance ArrowLoop (->) where
     loop f b = let (c,d) = f (b,d) in c
 
 -- | Beware that for many monads (those for which the '>>=' operation
 -- is strict) this instance will /not/ satisfy the right-tightening law
 -- required by the 'ArrowLoop' class.
+--
+-- @since 2.01
 instance MonadFix m => ArrowLoop (Kleisli m) where
     loop (Kleisli f) = Kleisli (liftM fst . mfix . f')
       where f' x y = f (x, snd y)

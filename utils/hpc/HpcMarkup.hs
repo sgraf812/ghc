@@ -13,11 +13,12 @@ import HpcFlags
 import HpcUtils
 
 import System.Directory
+import System.FilePath
 import System.IO (localeEncoding)
 import Data.List
 import Data.Maybe(fromJust)
+import Data.Semigroup as Semi
 import Data.Array
-import Data.Monoid
 import Control.Monad
 import qualified Data.Set as Set
 
@@ -33,6 +34,7 @@ markup_options
         . funTotalsOpt
         . altHighlightOpt
         . destDirOpt
+        . verbosityOpt
 
 markup_plugin :: Plugin
 markup_plugin = Plugin { name = "markup"
@@ -77,9 +79,10 @@ markup_main flags (prog:modNames) = do
   let writeSummary filename cmp = do
         let mods' = sortBy cmp mods
 
-        putStrLn $ "Writing: " ++ (filename ++ ".html")
+        unless (verbosity flags < Normal) $
+            putStrLn $ "Writing: " ++ (filename <.> "html")
 
-        writeFileUsing (dest_dir ++ "/" ++ filename ++ ".html") $
+        writeFileUsing (dest_dir </> filename <.> "html") $
             "<html>" ++
             "<head>" ++
             charEncodingTag ++
@@ -140,6 +143,16 @@ charEncodingTag :: String
 charEncodingTag =
     "<meta http-equiv=\"Content-Type\" " ++
           "content=\"text/html; " ++ "charset=" ++ show localeEncoding ++ "\">"
+
+-- Add characters to the left of a string until it is at least as
+-- large as requested.
+padLeft :: Int -> Char -> String -> String
+padLeft n c str = go n str
+  where
+    -- If the string is already long enough, stop traversing it.
+    go 0 _       = str
+    go k []      = replicate k c ++ str
+    go k (_:xs)  = go (k-1) xs
 
 genHtmlFromMod
   :: String
@@ -211,12 +224,12 @@ genHtmlFromMod dest_dir flags tix theFunTotals invertOutput = do
   content <- readFileFromPath (hpcError markup_plugin) origFile theHsPath
 
   let content' = markup tabStop info content
-  let show' = reverse . take 5 . (++ "       ") . reverse . show
-  let addLine n xs = "<span class=\"lineno\">" ++ show' n ++ " </span>" ++ xs
+  let addLine n xs = "<span class=\"lineno\">" ++ padLeft 5 ' ' (show n) ++ " </span>" ++ xs
   let addLines = unlines . map (uncurry addLine) . zip [1 :: Int ..] . lines
-  let fileName = modName0 ++ ".hs.html"
-  putStrLn $ "Writing: " ++ fileName
-  writeFileUsing (dest_dir ++ "/" ++ fileName) $
+  let fileName = modName0 <.> "hs" <.> "html"
+  unless (verbosity flags < Normal) $
+            putStrLn $ "Writing: " ++ fileName
+  writeFileUsing (dest_dir </> fileName) $
             unlines ["<html>",
                      "<head>",
                      charEncodingTag,
@@ -238,6 +251,13 @@ genHtmlFromMod dest_dir flags tix theFunTotals invertOutput = do
                      "</style>",
                      "</head>",
                      "<body>",
+                     "<pre>",
+                     concat [
+                         "<span class=\"decl\">",
+                         "<span class=\"nottickedoff\">never executed</span> ",
+                         "<span class=\"tickonlytrue\">always true</span> ",
+                         "<span class=\"tickonlyfalse\">always false</span></span>"],
+                     "</pre>",
                      "<pre>"] ++ addLines content' ++ "\n</pre>\n</body>\n</html>\n";
 
 
@@ -364,10 +384,14 @@ openTick (TopLevelDecl True 1)
 openTick (TopLevelDecl True n0)
          = "<span class=\"funcount\">-- entered " ++ showBigNum n0 ++ " times</span>" ++ openTopDecl
   where showBigNum n | n <= 9999 = show n
-                     | otherwise = showBigNum' (n `div` 1000) ++ "," ++ showWith (n `mod` 1000)
+                     | otherwise = case n `quotRem` 1000 of
+                                     (q, r) -> showBigNum' q ++ "," ++ showWith r
         showBigNum' n | n <= 999 = show n
-                      | otherwise = showBigNum' (n `div` 1000) ++ "," ++ showWith (n `mod` 1000)
-        showWith n = take 3 $ reverse $ ("000" ++) $ reverse $ show n
+                      | otherwise = case n `quotRem` 1000 of
+                                      (q, r) -> showBigNum' q ++ "," ++ showWith r
+        showWith n = padLeft 3 '0' $ show n
+
+
 
 closeTick :: String
 closeTick = "</span>"
@@ -444,6 +468,9 @@ showSummary ticked total =
 percent :: (Integral a) => a -> a -> Maybe a
 percent ticked total = if total == 0 then Nothing else Just (ticked * 100 `div` total)
 
+instance Semi.Semigroup ModuleSummary where
+  (ModuleSummary eTik1 eTot1 tTik1 tTot1 aTik1 aTot1) <> (ModuleSummary eTik2 eTot2 tTik2 tTot2 aTik2 aTot2)
+     = ModuleSummary (eTik1 + eTik2) (eTot1 + eTot2) (tTik1 + tTik2) (tTot1 + tTot2) (aTik1 + aTik2) (aTot1 + aTot2)
 
 instance Monoid ModuleSummary where
   mempty = ModuleSummary
@@ -454,24 +481,18 @@ instance Monoid ModuleSummary where
                   , altTicked = 0
                   , altTotal  = 0
                   }
-  mappend (ModuleSummary eTik1 eTot1 tTik1 tTot1 aTik1 aTot1)
-          (ModuleSummary eTik2 eTot2 tTik2 tTot2 aTik2 aTot2)
-     = ModuleSummary (eTik1 + eTik2) (eTot1 + eTot2) (tTik1 + tTik2) (tTot1 + tTot2) (aTik1 + aTik2) (aTot1 + aTot2)
-
+  mappend = (<>)
 
 ------------------------------------------------------------------------------
 
 writeFileUsing :: String -> String -> IO ()
 writeFileUsing filename text = do
-  let dest_dir = reverse . dropWhile (\ x -> x /= '/') . reverse $ filename
-
 -- We need to check for the dest_dir each time, because we use sub-dirs for
 -- packages, and a single .tix file might contain information about
 -- many package.
 
   -- create the dest_dir if needed
-  when (not (null dest_dir)) $
-    createDirectoryIfMissing True dest_dir
+  createDirectoryIfMissing True (takeDirectory filename)
 
   writeFile filename text
 

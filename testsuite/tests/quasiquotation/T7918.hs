@@ -15,6 +15,7 @@ import Control.Monad
 import Control.Monad.Trans.State
 import Data.List
 import Data.Ord
+import Prelude hiding (traverse)
 
 type Traverse a = State (SrcSpan, [(Name, SrcSpan)]) a
 
@@ -27,20 +28,20 @@ traverse a =
       showPatVar (cast a)
       gmapM traverse a
   where
-    showVar :: Maybe (HsExpr Id) -> Traverse ()
-    showVar (Just (HsVar v)) =
+    showVar :: Maybe (HsExpr GhcTc) -> Traverse ()
+    showVar (Just (HsVar _ (L _ v))) =
       modify $ \(loc, ids) -> (loc, (varName v, loc) : ids)
     showVar _ =
       return ()
 
-    showTyVar :: Maybe (HsType Name) -> Traverse ()
-    showTyVar (Just (HsTyVar v)) =
+    showTyVar :: Maybe (HsType GhcRn) -> Traverse ()
+    showTyVar (Just (HsTyVar _ _ (L _ v))) =
       modify $ \(loc, ids) -> (loc, (v, loc) : ids)
     showTyVar _ =
       return ()
 
-    showPatVar :: Maybe (Pat Id) -> Traverse ()
-    showPatVar (Just (VarPat v)) =
+    showPatVar :: Maybe (Pat GhcTc) -> Traverse ()
+    showPatVar (Just (VarPat _ (L _ v))) =
       modify $ \(loc, ids) -> (loc, (varName v, loc) : ids)
     showPatVar _
       = return ()

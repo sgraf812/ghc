@@ -19,7 +19,9 @@ define distdir-way-opts # args: $1 = dir, $2 = distdir, $3 = way, $4 = stage
 #   $1 is the directory we're building in
 #   $2 is the distdir (e.g. "dist", "dist-install" etc.)
 #   $3 is the way (e.g. "v", "p", etc.)
-#   $4 is the stage ("1", "2", "3")
+#   $4 is the stage ("0", "1", "2") that the options are passed to
+#                                   See Note [Stage number in build variables]
+#                                   in mk/config.mk.in.
 # 
 # -----------------------------
 # The variables affecting Haskell compilations are as follows, including
@@ -28,22 +30,43 @@ define distdir-way-opts # args: $1 = dir, $2 = distdir, $3 = way, $4 = stage
 #  Variable              Purpose                           Defined by
 #  --------------        ------------------------------    --------------
 #  $1_PACKAGE            Package name for this dir,        $1/$2/ghc.mk
-#                        if it is a package   
-#   
+#                        if it is a package
+#
 #  CONF_HC_OPTS          GHC options from ./configure      mk/config.mk.in
-#   
+#
+#  CONF_CPP_OPTS_STAGE$4 CPP options from ./configure      mk/config.mk.in
+#
+#  CONF_CC_OPTS_STAGE$4  C compiler options from           mk/config.mk.in
+#                        ./configure
+#
 #  CONF_HC_OPTS_STAGE$4  GHC options from ./configure      mk/config.mk.in
-#                        specific to stage $4   
-#   
+#                        specific to stage $4
+#
+#  CONF_LD_LINKER_OPTS_STAGE$4
+#                        GHC options from ./configure      mk/config.mk.in
+#                        specific to stage $4
+#
 #  WAY_$3_HC_OPTS        GHC options specific to way $3    mk/ways.mk
 #   
 #  SRC_HC_OPTS           source-tree-wide GHC options      mk/config.mk.in
 #                                                          mk/build.mk
 #                                                          mk/validate.mk
-#   
+#                                                          mk/warnings.mk
+#
+#  SRC_HC_OPTS_STAGE$4   source-tree-wide GHC options,     mk/config.mk.in
+#                        supplied to the stage $4          mk/build.mk
+#                        compiler only                     mk/validate.mk
+#                                                          mk/warnings.mk
+#
 #  SRC_HC_WARNING_OPTS   source-tree-wide GHC warning      mk/config.mk.in
 #                        options                           mk/build.mk
 #                                                          mk/validate.mk
+#                                                          mk/warnings.mk
+#
+#  SRC_HC_WARNING_OPTS_STAGE$4                             mk/config.mk.in
+#                        source-tree-wide GHC warning      mk/build.mk
+#                        options, supplied to the          mk/validate.mk
+#                        stage $4 compiler only            mk/warnings.mk
 #   
 #  EXTRA_HC_OPTS         for supplying extra options on    make EXTRA_HC_OPTS=...
 #                        the command line   
@@ -60,6 +83,7 @@ define distdir-way-opts # args: $1 = dir, $2 = distdir, $3 = way, $4 = stage
 #  $1_$2_MORE_HC_OPTS    GHC options for this dir/distdir  ???
 #   
 #  $1_$2_EXTRA_HC_OPTS   GHC options for this dir/distdir  mk/build.mk
+#                                                          mk/warnings.mk
 #   
 #  $1_$2_HC_PKGCONF      -package-db flag if necessary   rules/package-config.mk
 #   
@@ -67,7 +91,7 @@ define distdir-way-opts # args: $1 = dir, $2 = distdir, $3 = way, $4 = stage
 #                        source files   
 #   
 #  $1_$2_CPP_OPTS        CPP options                       $1/$2/package-data.mk
-#  
+#
 #  <file>_HC_OPTS        GHC options for this source       $1/$2/ghc.mk
 #                        file (without the extension)
 
@@ -81,48 +105,51 @@ define distdir-way-opts # args: $1 = dir, $2 = distdir, $3 = way, $4 = stage
 # $1_$2_$3_MOST_HC_OPTS is also passed to C compilations when we use
 # GHC as the C compiler.
 
-ifeq "$(SUPPORTS_PACKAGE_KEY)" "NO"
-ifeq "$4" "0"
-$4_USE_PACKAGE_KEY=NO
-endif
-endif
+$1_$2_$4_DEP_OPTS = \
+ $$(foreach pkg,$$($1_$2_DEP_IPIDS),-package-id $$(pkg))
 
-ifeq "$($4_USE_PACKAGE_KEY)" "NO"
-$1_$2_$4_DEP_OPTS = \
- $$(foreach pkg,$$($1_$2_DEPS),-package $$(pkg))
-$4_THIS_PACKAGE_KEY = -package-name
-else
-$1_$2_$4_DEP_OPTS = \
- $$(foreach pkg,$$($1_$2_DEP_KEYS),-package-key $$(pkg))
-$4_THIS_PACKAGE_KEY = -this-package-key
-endif
+$4_THIS_UNIT_ID = -this-unit-id
 
 $1_$2_$3_MOST_HC_OPTS = \
  $$(WAY_$3_HC_OPTS) \
  $$(CONF_HC_OPTS) \
  $$(SRC_HC_OPTS) \
+ $$(SRC_HC_OPTS_STAGE$4) \
  $$($1_HC_OPTS) \
  $$($1_$2_HC_PKGCONF) \
  $$(if $$($1_$2_PROG),, \
-        $$(if $$($1_PACKAGE),$$($4_THIS_PACKAGE_KEY) $$($1_$2_PACKAGE_KEY))) \
+        $$(if $$($1_PACKAGE),$$($4_THIS_UNIT_ID) $$($1_$2_COMPONENT_ID))) \
  $$(if $$($1_PACKAGE),-hide-all-packages) \
  -i $$(if $$($1_$2_HS_SRC_DIRS),$$(foreach dir,$$($1_$2_HS_SRC_DIRS),-i$1/$$(dir)),-i$1) \
- -i$1/$2/build -i$1/$2/build/autogen \
- -I$1/$2/build -I$1/$2/build/autogen \
+ -i$1/$2/build \
+ -I$1/$2/build \
+ -i$1/$2/build/$$(or $$($1_EXECUTABLE),$$($1_$2_PROGNAME),.)/autogen \
+ -I$1/$2/build/$$(or $$($1_EXECUTABLE),$$($1_$2_PROGNAME),.)/autogen \
  $$(foreach dir,$$(filter-out /%,$$($1_$2_INCLUDE_DIRS)),-I$1/$$(dir)) \
  $$(foreach dir,$$(filter /%,$$($1_$2_INCLUDE_DIRS)),-I$$(dir)) \
  $$(foreach inc,$$($1_$2_INCLUDE),-\#include "$$(inc)") \
  $$(foreach opt,$$($1_$2_CPP_OPTS),-optP$$(opt)) \
- $$(if $$($1_PACKAGE),-optP-include -optP$1/$2/build/autogen/cabal_macros.h) \
+ $$(if $$($1_PACKAGE),-optP-include \
+    -optP$1/$2/build/$$(or $$($1_EXECUTABLE),$$($1_$2_PROGNAME),.)/autogen/cabal_macros.h) \
  $$($1_$2_$4_DEP_OPTS) \
  $$($1_$2_HC_OPTS) \
  $$(CONF_HC_OPTS_STAGE$4) \
  $$($1_$2_MORE_HC_OPTS) \
+ $$($1_EXTRA_HC_OPTS) \
  $$($1_$2_EXTRA_HC_OPTS) \
  $$($1_$2_$3_HC_OPTS) \
  $$($$(basename $$(subst ./,,$$<))_HC_OPTS) \
  $$(SRC_HC_WARNING_OPTS) \
+ $$(SRC_HC_WARNING_OPTS_STAGE$4) \
  $$(EXTRA_HC_OPTS)
+
+# What is going on with $1_EXECUTABLE?  Recent version of Cabal
+# place the cabal_macros.h for executables in build/exename/autogen
+# rather than the traditional build/autogen.  This is Right(TM)
+# thing to do, but we have to accommodate it.  Usually, it suffices
+# to look in the PROGNAME, but for ghc the PROGNAME is ghc-stage1
+# while Cabal puts it in 'ghc', so we $1_EXECUTABLE is for that
+# case.
 
 $1_$2_$3_MOST_DIR_HC_OPTS = \
  $$($1_$2_$3_MOST_HC_OPTS) \
@@ -137,15 +164,8 @@ $1_$2_$3_ALL_HC_OPTS = \
  -hisuf $$($3_hisuf) -osuf  $$($3_osuf) -hcsuf $$($3_hcsuf) \
  $$($1_$2_$3_MOST_DIR_HC_OPTS) \
  $$(if $$(findstring YES,$$($1_$2_SplitObjs)),$$(if $$(findstring dyn,$3),,-split-objs),) \
+ $$(if $$(findstring YES,$$($1_$2_SplitSections)),$$(if $$(findstring dyn,$3),,-split-sections),) \
  $$(if $$(findstring YES,$$($1_$2_DYNAMIC_TOO)),$$(if $$(findstring v,$3),-dynamic-too))
-
-ifeq "$3" "dyn"
-ifeq "$$(HostOS_CPP)" "mingw32"
-ifneq "$$($1_$2_dll0_MODULES)" ""
-$1_$2_$3_ALL_HC_OPTS += -dll-split $1/$2/dll-split
-endif
-endif
-endif
 
 $1_$2_$3_ALL_CC_OPTS = \
  $$(WAY_$3_CC_OPTS) \
@@ -153,19 +173,22 @@ $1_$2_$3_ALL_CC_OPTS = \
  $$($1_$2_$3_CC_OPTS) \
  $$($$(basename $$<)_CC_OPTS) \
  $$($1_$2_EXTRA_CC_OPTS) \
- $$(EXTRA_CC_OPTS)
+ $$(EXTRA_CC_OPTS) \
+ $$(if $$(findstring YES,$$($1_$2_SplitSections)),-ffunction-sections -fdata-sections)
 
 $1_$2_$3_GHC_CC_OPTS = \
  $$(addprefix -optc, $$($1_$2_$3_ALL_CC_OPTS)) \
  $$($1_$2_$3_MOST_HC_OPTS)
 
-# Options for passing to plain ld
+# Options for passing to gcc for linking
 $1_$2_$3_ALL_LD_OPTS = \
  $$(WAY_$3_LD_OPTS) \
  $$($1_$2_DIST_LD_OPTS) \
  $$($1_$2_$3_LD_OPTS) \
  $$($1_$2_EXTRA_LD_OPTS) \
- $$(EXTRA_LD_OPTS)
+ $$(EXTRA_LD_OPTS) \
+ $$(foreach o,$$(EXTRA_LD_LINKER_OPTS),-optl-Wl$$(comma)$$o) \
+ $$(foreach o,$$(CONF_LD_LINKER_OPTS_STAGE$4),-optl-Wl$$(comma)$$o)
 
 # Options for passing to GHC when we use it for linking
 $1_$2_$3_GHC_LD_OPTS = \
@@ -186,11 +209,11 @@ ifneq "$4" "0"
 ifeq "$$(TargetElf)" "YES"
 $1_$2_$3_GHC_LD_OPTS += \
     -fno-use-rpaths \
-    $$(foreach d,$$($1_$2_TRANSITIVE_DEP_KEYS),-optl-Wl$$(comma)-rpath -optl-Wl$$(comma)'$$$$ORIGIN/../$$d') -optl-Wl,-zorigin
+    $$(foreach d,$$($1_$2_TRANSITIVE_DEP_COMPONENT_IDS),-optl-Wl$$(comma)-rpath -optl-Wl$$(comma)'$$$$ORIGIN/../$$d') -optl-Wl,-zorigin
 else ifeq "$$(TargetOS_CPP)" "darwin"
 $1_$2_$3_GHC_LD_OPTS += \
     -fno-use-rpaths \
-    $$(foreach d,$$($1_$2_TRANSITIVE_DEP_KEYS),-optl-Wl$$(comma)-rpath -optl-Wl$$(comma)'@loader_path/../$$d')
+    $$(foreach d,$$($1_$2_TRANSITIVE_DEP_COMPONENT_IDS),-optl-Wl$$(comma)-rpath -optl-Wl$$(comma)'@loader_path/../$$d')
 endif
 endif
 endif

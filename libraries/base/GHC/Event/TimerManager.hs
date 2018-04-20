@@ -39,17 +39,15 @@ module GHC.Event.TimerManager
 -- Imports
 
 import Control.Exception (finally)
-import Control.Monad ((=<<), liftM, sequence_, when)
+import Data.Foldable (sequence_)
 import Data.IORef (IORef, atomicModifyIORef', mkWeakIORef, newIORef, readIORef,
                    writeIORef)
-import Data.Maybe (Maybe(..))
-import Data.Monoid (mempty)
 import GHC.Base
+import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Conc.Signal (runHandlers)
 import GHC.Num (Num(..))
-import GHC.Real ((/), fromIntegral )
+import GHC.Real (fromIntegral)
 import GHC.Show (Show(..))
-import GHC.Event.Clock (getMonotonicTime)
 import GHC.Event.Control
 import GHC.Event.Internal (Backend, Event, evtRead, Timeout(..))
 import GHC.Event.Unique (Unique, UniqueSource, newSource, newUnique)
@@ -69,7 +67,7 @@ import qualified GHC.Event.Poll   as Poll
 
 -- | A timeout registration cookie.
 newtype TimeoutKey   = TK Unique
-    deriving (Eq)
+    deriving Eq -- ^ @since 4.7.0.0
 
 -- | Callback invoked on timeout events.
 type TimeoutCallback = IO ()
@@ -78,36 +76,12 @@ data State = Created
            | Running
            | Dying
            | Finished
-             deriving (Eq, Show)
+             deriving ( Eq   -- ^ @since 4.7.0.0
+                      , Show -- ^ @since 4.7.0.0
+                      )
 
 -- | A priority search queue, with timeouts as priorities.
 type TimeoutQueue = Q.PSQ TimeoutCallback
-
-{-
-Instead of directly modifying the 'TimeoutQueue' in
-e.g. 'registerTimeout' we keep a list of edits to perform, in the form
-of a chain of function closures, and have the I/O manager thread
-perform the edits later.  This exist to address the following GC
-problem:
-
-Since e.g. 'registerTimeout' doesn't force the evaluation of the
-thunks inside the 'emTimeouts' IORef a number of thunks build up
-inside the IORef.  If the I/O manager thread doesn't evaluate these
-thunks soon enough they'll get promoted to the old generation and
-become roots for all subsequent minor GCs.
-
-When the thunks eventually get evaluated they will each create a new
-intermediate 'TimeoutQueue' that immediately becomes garbage.  Since
-the thunks serve as roots until the next major GC these intermediate
-'TimeoutQueue's will get copied unnecessarily in the next minor GC,
-increasing GC time.  This problem is known as "floating garbage".
-
-Keeping a list of edits doesn't stop this from happening but makes the
-amount of data that gets copied smaller.
-
-TODO: Evaluate the content of the IORef to WHNF on each insert once
-this bug is resolved: http://ghc.haskell.org/trac/ghc/ticket/3838
--}
 
 -- | An edit to apply to a 'TimeoutQueue'.
 type TimeoutEdit = TimeoutQueue -> TimeoutQueue
@@ -136,7 +110,7 @@ newDefaultBackend :: IO Backend
 #if defined(HAVE_POLL)
 newDefaultBackend = Poll.new
 #else
-newDefaultBackend = error "no back end for this platform"
+newDefaultBackend = errorWithoutStackTrace "no back end for this platform"
 #endif
 
 -- | Create a new event manager.
@@ -196,7 +170,7 @@ loop mgr = do
     Created -> go `finally` cleanup mgr
     Dying   -> cleanup mgr
     _       -> do cleanup mgr
-                  error $ "GHC.Event.Manager.loop: state is already " ++
+                  errorWithoutStackTrace $ "GHC.Event.Manager.loop: state is already " ++
                       show state
  where
   go = do running <- step mgr
@@ -214,7 +188,7 @@ step mgr = do
   -- next timeout.
   mkTimeout :: IO Timeout
   mkTimeout = do
-      now <- getMonotonicTime
+      now <- getMonotonicTimeNSec
       (expired, timeout) <- atomicModifyIORef' (emTimeouts mgr) $ \tq ->
            let (expired, tq') = Q.atMost now tq
                timeout = case Q.minView tq' of
@@ -243,29 +217,40 @@ registerTimeout mgr us cb = do
   !key <- newUnique (emUniqueSource mgr)
   if us <= 0 then cb
     else do
-      now <- getMonotonicTime
-      let expTime = fromIntegral us / 1000000.0 + now
+      now <- getMonotonicTimeNSec
+      let expTime = fromIntegral us * 1000 + now
 
       editTimeouts mgr (Q.insert key expTime cb)
-      wakeManager mgr
   return $ TK key
 
 -- | Unregister an active timeout.
 unregisterTimeout :: TimerManager -> TimeoutKey -> IO ()
 unregisterTimeout mgr (TK key) = do
   editTimeouts mgr (Q.delete key)
-  wakeManager mgr
 
 -- | Update an active timeout to fire in the given number of
 -- microseconds.
 updateTimeout :: TimerManager -> TimeoutKey -> Int -> IO ()
 updateTimeout mgr (TK key) us = do
-  now <- getMonotonicTime
-  let expTime = fromIntegral us / 1000000.0 + now
+  now <- getMonotonicTimeNSec
+  let expTime = fromIntegral us * 1000 + now
 
   editTimeouts mgr (Q.adjust (const expTime) key)
-  wakeManager mgr
 
 editTimeouts :: TimerManager -> TimeoutEdit -> IO ()
-editTimeouts mgr g = atomicModifyIORef' (emTimeouts mgr) $ \tq -> (g tq, ())
-
+editTimeouts mgr g = do
+  wake <- atomicModifyIORef' (emTimeouts mgr) f
+  when wake (wakeManager mgr)
+  where
+    f q = (q', wake)
+      where
+        q' = g q
+        wake = case Q.minView q of
+                Nothing -> True
+                Just (Q.E _ t0 _, _) ->
+                  case Q.minView q' of
+                    Just (Q.E _ t1 _, _) ->
+                      -- don't wake the manager if the
+                      -- minimum element didn't change.
+                      t0 /= t1
+                    _ -> True

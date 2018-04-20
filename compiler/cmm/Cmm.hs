@@ -1,5 +1,5 @@
 -- Cmm representations using Hoopl's Graph CmmNode e x.
-{-# LANGUAGE CPP, GADTs #-}
+{-# LANGUAGE GADTs #-}
 
 module Cmm (
      -- * Cmm top-level datatypes
@@ -8,54 +8,56 @@ module Cmm (
      CmmGraph, GenCmmGraph(..),
      CmmBlock,
      RawCmmDecl, RawCmmGroup,
-     Section(..), CmmStatics(..), CmmStatic(..),
+     Section(..), SectionType(..), CmmStatics(..), CmmStatic(..),
+     isSecConstant,
 
      -- ** Blocks containing lists
      GenBasicBlock(..), blockId,
      ListGraph(..), pprBBlock,
 
-     -- * Cmm graphs
-     CmmReplGraph, GenCmmReplGraph, CmmFwdRewrite, CmmBwdRewrite,
-   
      -- * Info Tables
      CmmTopInfo(..), CmmStackInfo(..), CmmInfoTable(..), topInfoTable,
-     ClosureTypeInfo(..), 
+     ClosureTypeInfo(..),
      C_SRT(..), needsSRT,
-     ProfilingInfo(..), ConstrDescription, 
+     ProfilingInfo(..), ConstrDescription,
 
      -- * Statements, expressions and types
      module CmmNode,
      module CmmExpr,
   ) where
 
+import GhcPrelude
+
 import CLabel
 import BlockId
 import CmmNode
 import SMRep
 import CmmExpr
-import UniqSupply
-import Compiler.Hoopl
+import Hoopl.Block
+import Hoopl.Collections
+import Hoopl.Graph
+import Hoopl.Label
 import Outputable
 
 import Data.Word        ( Word8 )
-
-#include "HsVersions.h"
 
 -----------------------------------------------------------------------------
 --  Cmm, GenCmm
 -----------------------------------------------------------------------------
 
--- A CmmProgram is a list of CmmGroups  
--- A CmmGroup is a list of top-level declarations  
+-- A CmmProgram is a list of CmmGroups
+-- A CmmGroup is a list of top-level declarations
 
--- When object-splitting is on,each group is compiled into a separate
+-- When object-splitting is on, each group is compiled into a separate
 -- .o file. So typically we put closely related stuff in a CmmGroup.
+-- Section-splitting follows suit and makes one .text subsection for each
+-- CmmGroup.
 
 type CmmProgram = [CmmGroup]
 
 type GenCmmGroup d h g = [GenCmmDecl d h g]
 type CmmGroup = GenCmmGroup CmmStatics CmmTopInfo CmmGraph
-type RawCmmGroup = GenCmmGroup CmmStatics (BlockEnv CmmStatics) CmmGraph
+type RawCmmGroup = GenCmmGroup CmmStatics (LabelMap CmmStatics) CmmGraph
 
 -----------------------------------------------------------------------------
 --  CmmDecl, GenCmmDecl
@@ -92,7 +94,7 @@ type CmmDecl = GenCmmDecl CmmStatics CmmTopInfo CmmGraph
 type RawCmmDecl
    = GenCmmDecl
         CmmStatics
-        (BlockEnv CmmStatics)
+        (LabelMap CmmStatics)
         CmmGraph
 
 -----------------------------------------------------------------------------
@@ -103,16 +105,11 @@ type CmmGraph = GenCmmGraph CmmNode
 data GenCmmGraph n = CmmGraph { g_entry :: BlockId, g_graph :: Graph n C C }
 type CmmBlock = Block CmmNode C C
 
-type CmmReplGraph e x = GenCmmReplGraph CmmNode e x
-type GenCmmReplGraph n e x = UniqSM (Maybe (Graph n e x))
-type CmmFwdRewrite f = FwdRewrite UniqSM CmmNode f
-type CmmBwdRewrite f = BwdRewrite UniqSM CmmNode f
-
 -----------------------------------------------------------------------------
 --     Info Tables
 -----------------------------------------------------------------------------
 
-data CmmTopInfo   = TopInfo { info_tbls  :: BlockEnv CmmInfoTable
+data CmmTopInfo   = TopInfo { info_tbls  :: LabelMap CmmInfoTable
                             , stack_info :: CmmStackInfo }
 
 topInfoTable :: GenCmmDecl a CmmTopInfo (GenCmmGraph n) -> Maybe CmmInfoTable
@@ -148,7 +145,7 @@ data ProfilingInfo
   = NoProfilingInfo
   | ProfilingInfo [Word8] [Word8] -- closure_type, closure_desc
 
--- C_SRT is what StgSyn.SRT gets translated to... 
+-- C_SRT is what StgSyn.SRT gets translated to...
 -- we add a label for the table, and expect only the 'offset/length' form
 
 data C_SRT = NoC_SRT
@@ -163,14 +160,30 @@ needsSRT (C_SRT _ _ _) = True
 --              Static Data
 -----------------------------------------------------------------------------
 
-data Section
+data SectionType
   = Text
   | Data
   | ReadOnlyData
   | RelocatableReadOnlyData
   | UninitialisedData
   | ReadOnlyData16      -- .rodata.cst16 on x86_64, 16-byte aligned
+  | CString
   | OtherSection String
+  deriving (Show)
+
+-- | Should a data in this section be considered constant
+isSecConstant :: Section -> Bool
+isSecConstant (Section t _) = case t of
+    Text                    -> True
+    ReadOnlyData            -> True
+    RelocatableReadOnlyData -> True
+    ReadOnlyData16          -> True
+    CString                 -> True
+    Data                    -> False
+    UninitialisedData       -> False
+    (OtherSection _)        -> False
+
+data Section = Section SectionType CLabel
 
 data CmmStatic
   = CmmStaticLit CmmLit

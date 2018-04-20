@@ -1,4 +1,4 @@
-#ifndef __MINGW32__
+#if !defined(_WIN32)
 
 #include <stdlib.h>
 #include <iconv.h>

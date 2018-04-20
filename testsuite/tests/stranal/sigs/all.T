@@ -1,7 +1,7 @@
 # This directory contains tests where we annotate functions with expected
 # type signatures, and verify that these actually those found by the compiler
 
-setTestOpts(extra_hc_opts('-ddump-strsigs'))
+setTestOpts(extra_hc_opts('-ddump-str-signatures'))
 
 # We are testing the result of an optimization, so no use
 # running them in various runtimes
@@ -15,3 +15,5 @@ test('FacState', expect_broken(1600), compile, [''])
 test('UnsatFun', normal, compile, [''])
 test('BottomFromInnerLambda', normal, compile, [''])
 test('DmdAnalGADTs', normal, compile, [''])
+test('T12370', normal, compile, [''])
+test('CaseBinderCPR', normal, compile, [''])

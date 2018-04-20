@@ -25,8 +25,7 @@
  *
  * -------------------------------------------------------------------------- */
 
-#ifndef CMM_H
-#define CMM_H
+#pragma once
 
 /*
  * In files that are included into both C and C-- (and perhaps
@@ -38,19 +37,20 @@
 #include "ghcconfig.h"
 
 /* -----------------------------------------------------------------------------
-   Types 
+   Types
 
    The following synonyms for C-- types are declared here:
 
      I8, I16, I32, I64    MachRep-style names for convenience
 
      W_                   is shorthand for the word type (== StgWord)
-     F_		 	  shorthand for float  (F_ == StgFloat == C's float)
-     D_	 		  shorthand for double (D_ == StgDouble == C's double)
+     F_                   shorthand for float  (F_ == StgFloat == C's float)
+     D_                   shorthand for double (D_ == StgDouble == C's double)
 
-     CInt		  has the same size as an int in C on this platform
-     CLong		  has the same size as a long in C on this platform
-   
+     CInt                 has the same size as an int in C on this platform
+     CLong                has the same size as a long in C on this platform
+     CBool                has the same size as a bool in C on this platform
+
   --------------------------------------------------------------------------- */
 
 #define I8  bits8
@@ -73,7 +73,7 @@
 
 /*
  * The RTS must sometimes UNTAG a pointer before dereferencing it.
- * See the wiki page Commentary/Rts/HaskellExecution/PointerTagging 
+ * See the wiki page Commentary/Rts/HaskellExecution/PointerTagging
  */
 #define TAG_MASK ((1 << TAG_BITS) - 1)
 #define UNTAG(p) (p & ~TAG_MASK)
@@ -95,6 +95,8 @@
 #error Unknown long size
 #endif
 
+#define CBool bits8
+
 #define F_   float32
 #define D_   float64
 #define L_   bits64
@@ -113,18 +115,18 @@
 
 #define NULL (0::W_)
 
-#define STRING(name,str)			\
-  section "rodata" {				\
-	name : bits8[] str;			\
-  }						\
+#define STRING(name,str)                        \
+  section "rodata" {                            \
+        name : bits8[] str;                     \
+  }                                             \
 
-#ifdef TABLES_NEXT_TO_CODE
+#if defined(TABLES_NEXT_TO_CODE)
 #define RET_LBL(f) f##_info
 #else
 #define RET_LBL(f) f##_ret
 #endif
 
-#ifdef TABLES_NEXT_TO_CODE
+#if defined(TABLES_NEXT_TO_CODE)
 #define ENTRY_LBL(f) f##_info
 #else
 #define ENTRY_LBL(f) f##_entry
@@ -159,9 +161,11 @@
 
 /* TO_W_(n) converts n to W_ type from a smaller type */
 #if SIZEOF_W == 4
+#define TO_I64(x) %sx64(x)
 #define TO_W_(x) %sx32(x)
 #define HALF_W_(x) %lobits16(x)
 #elif SIZEOF_W == 8
+#define TO_I64(x) (x)
 #define TO_W_(x) %sx64(x)
 #define HALF_W_(x) %lobits32(x)
 #endif
@@ -179,6 +183,16 @@
 #endif
 
 /* -----------------------------------------------------------------------------
+   Atomic memory operations.
+   -------------------------------------------------------------------------- */
+
+#if SIZEOF_W == 4
+#define cmpxchgW cmpxchg32
+#elif SIZEOF_W == 8
+#define cmpxchgW cmpxchg64
+#endif
+
+/* -----------------------------------------------------------------------------
    Heap/stack access, and adjusting the heap/stack pointers.
    -------------------------------------------------------------------------- */
 
@@ -192,18 +206,18 @@
    Assertions and Debuggery
    -------------------------------------------------------------------------- */
 
-#ifdef DEBUG
-#define ASSERT(predicate)			\
-	if (predicate) {			\
-	    /*null*/;				\
-	} else {				\
-	    foreign "C" _assertFail(NULL, __LINE__) never returns; \
+#if defined(DEBUG)
+#define ASSERT(predicate)                       \
+        if (predicate) {                        \
+            /*null*/;                           \
+        } else {                                \
+            foreign "C" _assertFail(NULL, __LINE__) never returns; \
         }
 #else
 #define ASSERT(p) /* nothing */
 #endif
 
-#ifdef DEBUG
+#if defined(DEBUG)
 #define DEBUG_ONLY(s) s
 #else
 #define DEBUG_ONLY(s) /* nothing */
@@ -212,20 +226,20 @@
 /*
  * The IF_DEBUG macro is useful for debug messages that depend on one
  * of the RTS debug options.  For example:
- * 
+ *
  *   IF_DEBUG(RtsFlags_DebugFlags_apply,
  *      foreign "C" fprintf(stderr, stg_ap_0_ret_str));
  *
  * Note the syntax is slightly different to the C version of this macro.
  */
-#ifdef DEBUG
-#define IF_DEBUG(c,s)  if (RtsFlags_DebugFlags_##c(RtsFlags) != 0::I32) { s; }
+#if defined(DEBUG)
+#define IF_DEBUG(c,s)  if (RtsFlags_DebugFlags_##c(RtsFlags) != 0::CBool) { s; }
 #else
 #define IF_DEBUG(c,s)  /* nothing */
 #endif
 
 /* -----------------------------------------------------------------------------
-   Entering 
+   Entering
 
    It isn't safe to "enter" every closure.  Functions in particular
    have no entry code as such; their entry point contains the code to
@@ -244,7 +258,7 @@
    Indirections can contain tagged pointers, so their tag is checked.
    -------------------------------------------------------------------------- */
 
-#ifdef PROFILING
+#if defined(PROFILING)
 
 // When profiling, we cannot shortcut ENTER() by checking the tag,
 // because LDV profiling relies on entering closures to mark them as
@@ -275,43 +289,48 @@
 //    explicit jumps, for use when we are doing the stack management
 //    ourselves.
 
+#if defined(PROFILING)
+// See Note [Evaluating functions with profiling] in rts/Apply.cmm
+#define ENTER(x) jump stg_ap_0_fast(x);
+#else
 #define ENTER(x) ENTER_(return,x)
+#endif
+
 #define ENTER_R1() ENTER_(RET_R1,R1)
 
 #define RET_R1(x) jump %ENTRY_CODE(Sp(0)) [R1]
 
 #define ENTER_(ret,x)                                   \
- again:							\
-  W_ info;						\
+ again:                                                 \
+  W_ info;                                              \
   LOAD_INFO(ret,x)                                       \
-  switch [INVALID_OBJECT .. N_CLOSURE_TYPES]		\
-         (TO_W_( %INFO_TYPE(%STD_INFO(info)) )) {	\
-  case							\
-    IND,						\
-    IND_PERM,						\
-    IND_STATIC:						\
-   {							\
+  switch [INVALID_OBJECT .. N_CLOSURE_TYPES]            \
+         (TO_W_( %INFO_TYPE(%STD_INFO(info)) )) {       \
+  case                                                  \
+    IND,                                                \
+    IND_STATIC:                                         \
+   {                                                    \
       x = StgInd_indirectee(x);                         \
-      goto again;					\
-   }							\
-  case							\
-    FUN,						\
-    FUN_1_0,						\
-    FUN_0_1,						\
-    FUN_2_0,						\
-    FUN_1_1,						\
-    FUN_0_2,						\
+      goto again;                                       \
+   }                                                    \
+  case                                                  \
+    FUN,                                                \
+    FUN_1_0,                                            \
+    FUN_0_1,                                            \
+    FUN_2_0,                                            \
+    FUN_1_1,                                            \
+    FUN_0_2,                                            \
     FUN_STATIC,                                         \
-    BCO,						\
-    PAP:						\
-   {							\
+    BCO,                                                \
+    PAP:                                                \
+   {                                                    \
        ret(x);                                          \
-   }							\
-  default:						\
-   {							\
+   }                                                    \
+  default:                                              \
+   {                                                    \
        x = UNTAG_IF_PROF(x);                            \
        jump %ENTRY_CODE(info) (x);                      \
-   }							\
+   }                                                    \
   }
 
 // The FUN cases almost never happen: a pointer to a non-static FUN
@@ -326,7 +345,6 @@
 #include "DerivedConstants.h"
 #include "rts/storage/ClosureTypes.h"
 #include "rts/storage/FunTypes.h"
-#include "rts/storage/SMPClosureOps.h"
 #include "rts/OSThreads.h"
 
 /*
@@ -371,11 +389,11 @@
  */
 #define ALLOC_PRIM(bytes)                                       \
    HP_CHK_GEN_TICKY(bytes);                                     \
-   TICK_ALLOC_PRIM(SIZEOF_StgHeader,bytes-SIZEOF_StgHeader,0);	\
+   TICK_ALLOC_PRIM(SIZEOF_StgHeader,bytes-SIZEOF_StgHeader,0);  \
    CCCS_ALLOC(bytes);
 
 #define HEAP_CHECK(bytes,failure)                       \
-    TICK_BUMP(HEAP_CHK_ctr);				\
+    TICK_BUMP(HEAP_CHK_ctr);                            \
     Hp = Hp + (bytes);                                  \
     if (Hp > HpLim) { HpAlloc = (bytes); failure; }     \
     TICK_ALLOC_HEAP_NOCTR(bytes);
@@ -406,8 +424,8 @@
 
 // TODO I'm not seeing where ALLOC_P_TICKY is used; can it be removed?
 //         -NSF March 2013
-#define ALLOC_P_TICKY(bytes, fun, arg)		\
-   HP_CHK_P(bytes);				\
+#define ALLOC_P_TICKY(bytes, fun, arg)          \
+   HP_CHK_P(bytes);                             \
    TICK_ALLOC_HEAP_NOCTR(bytes);
 
 #define CHECK_GC()                                                      \
@@ -491,7 +509,7 @@
    }
 
 #define STK_CHK_LL(n, fun)                      \
-    TICK_BUMP(STK_CHK_ctr); 			\
+    TICK_BUMP(STK_CHK_ctr);                     \
     if (Sp - (n) < SpLim) {                     \
         GC_PRIM_LL(fun)                         \
     }
@@ -525,7 +543,7 @@
 
 /*
  * This is really ugly, since we don't do the rest of StgHeader this
- * way.  The problem is that values from DerivedConstants.h cannot be 
+ * way.  The problem is that values from DerivedConstants.h cannot be
  * dependent on the way (SMP, PROF etc.).  For SIZEOF_StgHeader we get
  * the value from GHC, but it seems like too much trouble to do that
  * for StgThunkHeader.
@@ -540,10 +558,10 @@
    -------------------------------------------------------------------------- */
 
 /* The offset of the payload of an array */
-#define BYTE_ARR_CTS(arr)  ((arr) + SIZEOF_StgArrWords)
+#define BYTE_ARR_CTS(arr)  ((arr) + SIZEOF_StgArrBytes)
 
 /* The number of words allocated in an array payload */
-#define BYTE_ARR_WDS(arr) ROUNDUP_BYTES_TO_WDS(StgArrWords_bytes(arr))
+#define BYTE_ARR_WDS(arr) ROUNDUP_BYTES_TO_WDS(StgArrBytes_bytes(arr))
 
 /* Getting/setting the info pointer of a closure */
 #define SET_INFO(p,info) StgHeader_info(p) = info
@@ -573,12 +591,12 @@
  * depending on TABLES_NEXT_TO_CODE.  So we define field access
  * macros which use the appropriate version here:
  */
-#ifdef TABLES_NEXT_TO_CODE
+#if defined(TABLES_NEXT_TO_CODE)
 /*
  * when TABLES_NEXT_TO_CODE, slow_apply is stored as an offset
  * instead of the normal pointer.
  */
-        
+
 #define StgFunInfoExtra_slow_apply(fun_info)    \
         (TO_W_(StgFunInfoExtraRev_slow_apply_offset(fun_info))    \
                + (fun_info) + SIZEOF_StgFunInfoExtraRev + SIZEOF_StgInfoTable)
@@ -607,17 +625,17 @@
 #define OVERWRITING_CLOSURE_OFS(c,n) /* nothing */
 #endif
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
 #define prim_write_barrier prim %write_barrier()
 #else
 #define prim_write_barrier /* nothing */
 #endif
 
 /* -----------------------------------------------------------------------------
-   Ticky macros 
+   Ticky macros
    -------------------------------------------------------------------------- */
 
-#ifdef TICKY_TICKY
+#if defined(TICKY_TICKY)
 #define TICK_BUMP_BY(ctr,n) CLong[ctr] = CLong[ctr] + n
 #else
 #define TICK_BUMP_BY(ctr,n) /* nothing */
@@ -625,48 +643,48 @@
 
 #define TICK_BUMP(ctr)      TICK_BUMP_BY(ctr,1)
 
-#define TICK_ENT_DYN_IND()  		TICK_BUMP(ENT_DYN_IND_ctr)
-#define TICK_ENT_DYN_THK()  		TICK_BUMP(ENT_DYN_THK_ctr)
-#define TICK_ENT_VIA_NODE()  		TICK_BUMP(ENT_VIA_NODE_ctr)
-#define TICK_ENT_STATIC_IND()  		TICK_BUMP(ENT_STATIC_IND_ctr)
-#define TICK_ENT_PERM_IND()  		TICK_BUMP(ENT_PERM_IND_ctr)
-#define TICK_ENT_PAP()  		TICK_BUMP(ENT_PAP_ctr)
-#define TICK_ENT_AP()  			TICK_BUMP(ENT_AP_ctr)
-#define TICK_ENT_AP_STACK()  		TICK_BUMP(ENT_AP_STACK_ctr)
-#define TICK_ENT_BH()  			TICK_BUMP(ENT_BH_ctr)
-#define TICK_ENT_LNE() 			TICK_BUMP(ENT_LNE_ctr)
-#define TICK_UNKNOWN_CALL()  		TICK_BUMP(UNKNOWN_CALL_ctr)
-#define TICK_UPDF_PUSHED()  		TICK_BUMP(UPDF_PUSHED_ctr)
-#define TICK_CATCHF_PUSHED()  		TICK_BUMP(CATCHF_PUSHED_ctr)
-#define TICK_UPDF_OMITTED()  		TICK_BUMP(UPDF_OMITTED_ctr)
-#define TICK_UPD_NEW_IND()  		TICK_BUMP(UPD_NEW_IND_ctr)
-#define TICK_UPD_NEW_PERM_IND()  	TICK_BUMP(UPD_NEW_PERM_IND_ctr)
-#define TICK_UPD_OLD_IND()  		TICK_BUMP(UPD_OLD_IND_ctr)
-#define TICK_UPD_OLD_PERM_IND()  	TICK_BUMP(UPD_OLD_PERM_IND_ctr)
-  
-#define TICK_SLOW_CALL_FUN_TOO_FEW()	TICK_BUMP(SLOW_CALL_FUN_TOO_FEW_ctr)
-#define TICK_SLOW_CALL_FUN_CORRECT()	TICK_BUMP(SLOW_CALL_FUN_CORRECT_ctr)
-#define TICK_SLOW_CALL_FUN_TOO_MANY()	TICK_BUMP(SLOW_CALL_FUN_TOO_MANY_ctr)
-#define TICK_SLOW_CALL_PAP_TOO_FEW()	TICK_BUMP(SLOW_CALL_PAP_TOO_FEW_ctr)
-#define TICK_SLOW_CALL_PAP_CORRECT()	TICK_BUMP(SLOW_CALL_PAP_CORRECT_ctr)
-#define TICK_SLOW_CALL_PAP_TOO_MANY()	TICK_BUMP(SLOW_CALL_PAP_TOO_MANY_ctr)
+#define TICK_ENT_DYN_IND()              TICK_BUMP(ENT_DYN_IND_ctr)
+#define TICK_ENT_DYN_THK()              TICK_BUMP(ENT_DYN_THK_ctr)
+#define TICK_ENT_VIA_NODE()             TICK_BUMP(ENT_VIA_NODE_ctr)
+#define TICK_ENT_STATIC_IND()           TICK_BUMP(ENT_STATIC_IND_ctr)
+#define TICK_ENT_PERM_IND()             TICK_BUMP(ENT_PERM_IND_ctr)
+#define TICK_ENT_PAP()                  TICK_BUMP(ENT_PAP_ctr)
+#define TICK_ENT_AP()                   TICK_BUMP(ENT_AP_ctr)
+#define TICK_ENT_AP_STACK()             TICK_BUMP(ENT_AP_STACK_ctr)
+#define TICK_ENT_BH()                   TICK_BUMP(ENT_BH_ctr)
+#define TICK_ENT_LNE()                  TICK_BUMP(ENT_LNE_ctr)
+#define TICK_UNKNOWN_CALL()             TICK_BUMP(UNKNOWN_CALL_ctr)
+#define TICK_UPDF_PUSHED()              TICK_BUMP(UPDF_PUSHED_ctr)
+#define TICK_CATCHF_PUSHED()            TICK_BUMP(CATCHF_PUSHED_ctr)
+#define TICK_UPDF_OMITTED()             TICK_BUMP(UPDF_OMITTED_ctr)
+#define TICK_UPD_NEW_IND()              TICK_BUMP(UPD_NEW_IND_ctr)
+#define TICK_UPD_NEW_PERM_IND()         TICK_BUMP(UPD_NEW_PERM_IND_ctr)
+#define TICK_UPD_OLD_IND()              TICK_BUMP(UPD_OLD_IND_ctr)
+#define TICK_UPD_OLD_PERM_IND()         TICK_BUMP(UPD_OLD_PERM_IND_ctr)
 
-#define TICK_SLOW_CALL_fast_v16()    	TICK_BUMP(SLOW_CALL_fast_v16_ctr)
-#define TICK_SLOW_CALL_fast_v()  	TICK_BUMP(SLOW_CALL_fast_v_ctr)
-#define TICK_SLOW_CALL_fast_p()  	TICK_BUMP(SLOW_CALL_fast_p_ctr)
-#define TICK_SLOW_CALL_fast_pv()  	TICK_BUMP(SLOW_CALL_fast_pv_ctr)
-#define TICK_SLOW_CALL_fast_pp()  	TICK_BUMP(SLOW_CALL_fast_pp_ctr)
-#define TICK_SLOW_CALL_fast_ppv()  	TICK_BUMP(SLOW_CALL_fast_ppv_ctr)
-#define TICK_SLOW_CALL_fast_ppp()  	TICK_BUMP(SLOW_CALL_fast_ppp_ctr)
-#define TICK_SLOW_CALL_fast_pppv()  	TICK_BUMP(SLOW_CALL_fast_pppv_ctr)
-#define TICK_SLOW_CALL_fast_pppp()  	TICK_BUMP(SLOW_CALL_fast_pppp_ctr)
-#define TICK_SLOW_CALL_fast_ppppp()  	TICK_BUMP(SLOW_CALL_fast_ppppp_ctr)
-#define TICK_SLOW_CALL_fast_pppppp()  	TICK_BUMP(SLOW_CALL_fast_pppppp_ctr)
-#define TICK_VERY_SLOW_CALL()  		TICK_BUMP(VERY_SLOW_CALL_ctr)
+#define TICK_SLOW_CALL_FUN_TOO_FEW()    TICK_BUMP(SLOW_CALL_FUN_TOO_FEW_ctr)
+#define TICK_SLOW_CALL_FUN_CORRECT()    TICK_BUMP(SLOW_CALL_FUN_CORRECT_ctr)
+#define TICK_SLOW_CALL_FUN_TOO_MANY()   TICK_BUMP(SLOW_CALL_FUN_TOO_MANY_ctr)
+#define TICK_SLOW_CALL_PAP_TOO_FEW()    TICK_BUMP(SLOW_CALL_PAP_TOO_FEW_ctr)
+#define TICK_SLOW_CALL_PAP_CORRECT()    TICK_BUMP(SLOW_CALL_PAP_CORRECT_ctr)
+#define TICK_SLOW_CALL_PAP_TOO_MANY()   TICK_BUMP(SLOW_CALL_PAP_TOO_MANY_ctr)
 
-/* NOTE: TICK_HISTO_BY and TICK_HISTO 
+#define TICK_SLOW_CALL_fast_v16()       TICK_BUMP(SLOW_CALL_fast_v16_ctr)
+#define TICK_SLOW_CALL_fast_v()         TICK_BUMP(SLOW_CALL_fast_v_ctr)
+#define TICK_SLOW_CALL_fast_p()         TICK_BUMP(SLOW_CALL_fast_p_ctr)
+#define TICK_SLOW_CALL_fast_pv()        TICK_BUMP(SLOW_CALL_fast_pv_ctr)
+#define TICK_SLOW_CALL_fast_pp()        TICK_BUMP(SLOW_CALL_fast_pp_ctr)
+#define TICK_SLOW_CALL_fast_ppv()       TICK_BUMP(SLOW_CALL_fast_ppv_ctr)
+#define TICK_SLOW_CALL_fast_ppp()       TICK_BUMP(SLOW_CALL_fast_ppp_ctr)
+#define TICK_SLOW_CALL_fast_pppv()      TICK_BUMP(SLOW_CALL_fast_pppv_ctr)
+#define TICK_SLOW_CALL_fast_pppp()      TICK_BUMP(SLOW_CALL_fast_pppp_ctr)
+#define TICK_SLOW_CALL_fast_ppppp()     TICK_BUMP(SLOW_CALL_fast_ppppp_ctr)
+#define TICK_SLOW_CALL_fast_pppppp()    TICK_BUMP(SLOW_CALL_fast_pppppp_ctr)
+#define TICK_VERY_SLOW_CALL()           TICK_BUMP(VERY_SLOW_CALL_ctr)
+
+/* NOTE: TICK_HISTO_BY and TICK_HISTO
    currently have no effect.
-   The old code for it didn't typecheck and I 
+   The old code for it didn't typecheck and I
    just commented it out to get ticky to work.
    - krc 1/2007 */
 
@@ -675,34 +693,34 @@
 #define TICK_HISTO(histo,n) TICK_HISTO_BY(histo,n,1)
 
 /* An unboxed tuple with n components. */
-#define TICK_RET_UNBOXED_TUP(n)			\
-  TICK_BUMP(RET_UNBOXED_TUP_ctr++);		\
+#define TICK_RET_UNBOXED_TUP(n)                 \
+  TICK_BUMP(RET_UNBOXED_TUP_ctr++);             \
   TICK_HISTO(RET_UNBOXED_TUP,n)
 
 /*
  * A slow call with n arguments.  In the unevald case, this call has
  * already been counted once, so don't count it again.
  */
-#define TICK_SLOW_CALL(n)			\
-  TICK_BUMP(SLOW_CALL_ctr);			\
+#define TICK_SLOW_CALL(n)                       \
+  TICK_BUMP(SLOW_CALL_ctr);                     \
   TICK_HISTO(SLOW_CALL,n)
 
 /*
  * This slow call was found to be to an unevaluated function; undo the
  * ticks we did in TICK_SLOW_CALL.
  */
-#define TICK_SLOW_CALL_UNEVALD(n)		\
-  TICK_BUMP(SLOW_CALL_UNEVALD_ctr);		\
-  TICK_BUMP_BY(SLOW_CALL_ctr,-1);		\
+#define TICK_SLOW_CALL_UNEVALD(n)               \
+  TICK_BUMP(SLOW_CALL_UNEVALD_ctr);             \
+  TICK_BUMP_BY(SLOW_CALL_ctr,-1);               \
   TICK_HISTO_BY(SLOW_CALL,n,-1);
 
 /* Updating a closure with a new CON */
-#define TICK_UPD_CON_IN_NEW(n)			\
-  TICK_BUMP(UPD_CON_IN_NEW_ctr);		\
+#define TICK_UPD_CON_IN_NEW(n)                  \
+  TICK_BUMP(UPD_CON_IN_NEW_ctr);                \
   TICK_HISTO(UPD_CON_IN_NEW,n)
 
-#define TICK_ALLOC_HEAP_NOCTR(bytes)		\
-    TICK_BUMP(ALLOC_RTS_ctr);			\
+#define TICK_ALLOC_HEAP_NOCTR(bytes)            \
+    TICK_BUMP(ALLOC_RTS_ctr);                   \
     TICK_BUMP_BY(ALLOC_RTS_tot,bytes)
 
 /* -----------------------------------------------------------------------------
@@ -784,20 +802,20 @@
 #define END_INVARIANT_CHECK_QUEUE stg_END_INVARIANT_CHECK_QUEUE_closure
 
 #define recordMutableCap(p, gen)                                        \
-  W_ __bd;								\
-  W_ mut_list;								\
-  mut_list = Capability_mut_lists(MyCapability()) + WDS(gen);		\
- __bd = W_[mut_list];							\
-  if (bdescr_free(__bd) >= bdescr_start(__bd) + BLOCK_SIZE) {		\
-      W_ __new_bd;							\
-      ("ptr" __new_bd) = foreign "C" allocBlock_lock();			\
-      bdescr_link(__new_bd) = __bd;					\
-      __bd = __new_bd;							\
-      W_[mut_list] = __bd;						\
-  }									\
-  W_ free;								\
-  free = bdescr_free(__bd);						\
-  W_[free] = p;								\
+  W_ __bd;                                                              \
+  W_ mut_list;                                                          \
+  mut_list = Capability_mut_lists(MyCapability()) + WDS(gen);           \
+ __bd = W_[mut_list];                                                   \
+  if (bdescr_free(__bd) >= bdescr_start(__bd) + BLOCK_SIZE) {           \
+      W_ __new_bd;                                                      \
+      ("ptr" __new_bd) = foreign "C" allocBlock_lock();                 \
+      bdescr_link(__new_bd) = __bd;                                     \
+      __bd = __new_bd;                                                  \
+      W_[mut_list] = __bd;                                              \
+  }                                                                     \
+  W_ free;                                                              \
+  free = bdescr_free(__bd);                                             \
+  W_[free] = p;                                                         \
   bdescr_free(__bd) = free + WDS(1);
 
 #define recordMutable(p)                                        \
@@ -833,14 +851,7 @@
                                                                \
     dst_p = dst + SIZEOF_StgMutArrPtrs;                        \
     src_p = src + SIZEOF_StgMutArrPtrs + WDS(offset);          \
-  while:                                                       \
-    if (n != 0) {                                              \
-        n = n - 1;                                             \
-        W_[dst_p] = W_[src_p];                                 \
-        dst_p = dst_p + WDS(1);                                \
-        src_p = src_p + WDS(1);                                \
-        goto while;                                            \
-    }                                                          \
+    prim %memcpy(dst_p, src_p, n * SIZEOF_W, SIZEOF_W);        \
                                                                \
     return (dst);
 
@@ -855,7 +866,7 @@
         src_p = (src) + SIZEOF_StgMutArrPtrs + WDS(src_off);      \
         bytes = WDS(n);                                           \
                                                                   \
-        prim %memcpy(dst_p, src_p, bytes, WDS(1));                \
+        prim %memcpy(dst_p, src_p, bytes, SIZEOF_W);              \
                                                                   \
         dst_cards_p = dst_elems_p + WDS(StgMutArrPtrs_ptrs(dst)); \
         setCards(dst_cards_p, dst_off, n);                        \
@@ -875,9 +886,9 @@
         bytes = WDS(n);                                           \
                                                                   \
         if ((src) == (dst)) {                                     \
-            prim %memmove(dst_p, src_p, bytes, WDS(1));           \
+            prim %memmove(dst_p, src_p, bytes, SIZEOF_W);         \
         } else {                                                  \
-            prim %memcpy(dst_p, src_p, bytes, WDS(1));            \
+            prim %memcpy(dst_p, src_p, bytes, SIZEOF_W);          \
         }                                                         \
                                                                   \
         dst_cards_p = dst_elems_p + WDS(StgMutArrPtrs_ptrs(dst)); \
@@ -915,15 +926,6 @@
                                                                \
     dst_p = dst + SIZEOF_StgSmallMutArrPtrs;                   \
     src_p = src + SIZEOF_StgSmallMutArrPtrs + WDS(offset);     \
-  while:                                                       \
-    if (n != 0) {                                              \
-        n = n - 1;                                             \
-        W_[dst_p] = W_[src_p];                                 \
-        dst_p = dst_p + WDS(1);                                \
-        src_p = src_p + WDS(1);                                \
-        goto while;                                            \
-    }                                                          \
+    prim %memcpy(dst_p, src_p, n * SIZEOF_W, SIZEOF_W);        \
                                                                \
     return (dst);
-
-#endif /* CMM_H */

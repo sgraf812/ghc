@@ -1,10 +1,10 @@
 {-# LANGUAGE CPP #-}
 
-module Vectorise.Utils.Base 
+module Vectorise.Utils.Base
   ( voidType
   , newLocalVVar
 
-  , mkDataConTag, dataConTagZ
+  , mkDataConTag
   , mkWrapType
   , mkClosureTypes
   , mkPReprType
@@ -18,14 +18,16 @@ module Vectorise.Utils.Base
   , unwrapNewTypeBodyOfPDataWrap
   , wrapNewTypeBodyOfPDatasWrap
   , unwrapNewTypeBodyOfPDatasWrap
-  
+
   , pdataReprTyCon
   , pdataReprTyConExact
   , pdatasReprTyConExact
   , pdataUnwrapScrut
-  
-  , preprSynTyCon
+
+  , preprFamInst
 ) where
+
+import GhcPrelude
 
 import Vectorise.Monad
 import Vectorise.Vect
@@ -66,9 +68,6 @@ newLocalVVar fs vty
 mkDataConTag :: DynFlags -> DataCon -> CoreExpr
 mkDataConTag dflags = mkIntLitInt dflags . dataConTagZ
 
-dataConTagZ :: DataCon -> Int
-dataConTagZ con = dataConTag con - fIRST_TAG
-
 
 -- Type Construction ----------------------------------------------------------
 
@@ -87,7 +86,7 @@ mkClosureTypes = mkBuiltinTyConApps closureTyCon
 mkPReprType :: Type -> VM Type
 mkPReprType ty = mkBuiltinTyConApp preprTyCon [ty]
 
--- | Make an appliction of the 'PData' tycon to some argument.
+-- | Make an application of the 'PData' tycon to some argument.
 --
 mkPDataType :: Type -> VM Type
 mkPDataType ty = mkBuiltinTyConApp pdataTyCon [ty]
@@ -130,7 +129,7 @@ splitPrimTyCon ty
 
 -- Coercion Construction -----------------------------------------------------
 
--- |Make a representational coersion to some builtin type.
+-- |Make a representational coercion to some builtin type.
 --
 mkBuiltinCo :: (Builtins -> TyCon) -> VM Coercion
 mkBuiltinCo get_tc
@@ -206,10 +205,10 @@ unwrapNewTypeBodyOfPDatasWrap e ty
 -- The type for which we look up a 'PData' instance may be more specific than the type in the
 -- instance declaration.  In that case the second component of the result will be more specific than
 -- a set of distinct type variables.
--- 
+--
 pdataReprTyCon :: Type -> VM (TyCon, [Type])
-pdataReprTyCon ty 
-  = do 
+pdataReprTyCon ty
+  = do
     { FamInstMatch { fim_instance = famInst
                    , fim_tys      = tys } <- builtin pdataTyCon >>= (`lookupFamInst` [ty])
     ; return (dataFamInstRepTyCon famInst, tys)
@@ -222,7 +221,7 @@ pdataReprTyCon ty
 --
 pdataReprTyConExact :: TyCon -> VM TyCon
 pdataReprTyConExact tycon
-  = do {   -- look up the representation tycon; if there is a match at all, it will be be exact
+  = do {   -- look up the representation tycon; if there is a match at all, it will be exact
        ;   -- (i.e.,' _tys' will be distinct type variables)
        ; (ptycon, _tys) <- pdataReprTyCon (tycon `mkTyConApp` mkTyVarTys (tyConTyVars tycon))
        ; return ptycon
@@ -235,7 +234,7 @@ pdataReprTyConExact tycon
 --
 pdatasReprTyConExact :: TyCon -> VM TyCon
 pdatasReprTyConExact tycon
-  = do {   -- look up the representation tycon; if there is a match at all, it will be be exact
+  = do {   -- look up the representation tycon; if there is a match at all, it will be exact
        ; (FamInstMatch { fim_instance = ptycon }) <- pdatasReprTyCon (tycon `mkTyConApp` mkTyVarTys (tyConTyVars tycon))
        ; return $ dataFamInstRepTyCon ptycon
        }
@@ -258,5 +257,5 @@ pdataUnwrapScrut (ve, le)
 
 -- |Get the representation tycon of the 'PRepr' type family for a given type.
 --
-preprSynTyCon :: Type -> VM FamInstMatch
-preprSynTyCon ty = builtin preprTyCon >>= (`lookupFamInst` [ty])
+preprFamInst :: Type -> VM FamInstMatch
+preprFamInst ty = builtin preprTyCon >>= (`lookupFamInst` [ty])

@@ -1,3 +1,4 @@
+{-# LANGUAGE ImpredicativeTypes #-}
 -- This is nofib/smp/threads006.  It fails in GHC 7.8.2 with a GC crash.
 
 {-# OPTIONS_GHC -O2 #-}
@@ -14,7 +15,7 @@ main :: IO ()
 main = do
     hSetBuffering stdout NoBuffering
     [nthreads] <- fmap (map read) getArgs
-    tids <- replicateM nthreads . mask $ \_ -> forkIO $ return ()
+    tids <- replicateM nthreads (mask $ \_ -> forkIO $ return ())
     m <- newEmptyMVar
     -- do it in a subthread to avoid bound-thread overhead
     forkIO $ do mapM_ killThread tids; putMVar m ()

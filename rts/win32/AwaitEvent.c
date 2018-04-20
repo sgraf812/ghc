@@ -22,10 +22,10 @@
 
 // Used to avoid calling abandonRequestWait() if we don't need to.
 // Protected by sched_mutex.
-static nat workerWaitingForRequests = 0;
+static uint32_t workerWaitingForRequests = 0;
 
 void
-awaitEvent(rtsBool wait)
+awaitEvent(bool wait)
 {
   do {
     /* Try to de-queue completed IO requests
@@ -55,11 +55,3 @@ awaitEvent(rtsBool wait)
       );
 }
 #endif
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

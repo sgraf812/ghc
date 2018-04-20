@@ -10,5 +10,8 @@
 
 module PlatformConstants (PlatformConstants(..)) where
 
-#include "../includes/dist-derivedconstants/header/GHCConstantsHaskellType.hs"
+import GhcPrelude
+
+-- Produced by deriveConstants
+#include "GHCConstantsHaskellType.hs"
 

@@ -7,16 +7,23 @@
  * ---------------------------------------------------------------------------*/
 
 #include "PosixSource.h"
+#include "ghcconfig.h"
+
 #include "Rts.h"
 #include "rts/Bytecodes.h"  /* for InstrPtr */
 
 #include "sm/Storage.h"
+#include "Hash.h"
 #include "Printer.h"
 #include "RtsUtils.h"
 
+#if defined(PROFILING)
+#include "Profiling.h"
+#endif
+
 #include <string.h>
 
-#ifdef DEBUG
+#if defined(DEBUG)
 
 #include "Disassembler.h"
 #include "Apply.h"
@@ -25,15 +32,7 @@
  * local function decls
  * ------------------------------------------------------------------------*/
 
-static void    printStdObjPayload( StgClosure *obj );
-#ifdef USING_LIBBFD
-static void    reset_table   ( int size );
-static void    prepare_table ( void );
-static void    insert        ( StgWord value, const char *name );
-#endif
-#if 0 /* unused but might be useful sometime */
-static rtsBool lookup_name   ( char *name, StgWord *result );
-#endif
+static void    printStdObjPayload( const StgClosure *obj );
 
 /* --------------------------------------------------------------------------
  * Printer
@@ -58,17 +57,17 @@ void printObj( StgClosure *obj )
 }
 
 STATIC_INLINE void
-printStdObjHdr( StgClosure *obj, char* tag )
+printStdObjHdr( const StgClosure *obj, char* tag )
 {
     debugBelch("%s(",tag);
     printPtr((StgPtr)obj->header.info);
-#ifdef PROFILING
+#if defined(PROFILING)
     debugBelch(", %s", obj->header.prof.ccs->cc->label);
 #endif
 }
 
 static void
-printStdObjPayload( StgClosure *obj )
+printStdObjPayload( const StgClosure *obj )
 {
     StgWord i, j;
     const StgInfoTable* info;
@@ -109,11 +108,11 @@ printThunkObject( StgThunk *obj, char* tag )
 }
 
 void
-printClosure( StgClosure *obj )
+printClosure( const StgClosure *obj )
 {
-    obj = UNTAG_CLOSURE(obj);
+    const StgInfoTable *info;
 
-    StgInfoTable *info;
+    obj = UNTAG_CONST_CLOSURE(obj);
     info = get_itbl(obj);
 
     switch ( info->type ) {
@@ -123,11 +122,10 @@ printClosure( StgClosure *obj )
     case CONSTR:
     case CONSTR_1_0: case CONSTR_0_1:
     case CONSTR_1_1: case CONSTR_0_2: case CONSTR_2_0:
-    case CONSTR_STATIC:
-    case CONSTR_NOCAF_STATIC:
+    case CONSTR_NOCAF:
         {
             StgWord i, j;
-            StgConInfoTable *con_info = get_con_itbl (obj);
+            const StgConInfoTable *con_info = get_con_itbl (obj);
 
             debugBelch("%s(", GET_CON_DESC(con_info));
             for (i = 0; i < info->layout.payload.ptrs; ++i) {
@@ -148,7 +146,7 @@ printClosure( StgClosure *obj )
     case FUN_STATIC:
         debugBelch("FUN/%d(",(int)itbl_to_fun_itbl(info)->f.arity);
         printPtr((StgPtr)obj->header.info);
-#ifdef PROFILING
+#if defined(PROFILING)
         debugBelch(", %s", obj->header.prof.ccs->cc->label);
 #endif
         printStdObjPayload(obj);
@@ -171,7 +169,7 @@ printClosure( StgClosure *obj )
     case THUNK_1_1: case THUNK_0_2: case THUNK_2_0:
     case THUNK_STATIC:
             /* ToDo: will this work for THUNK_STATIC too? */
-#ifdef PROFILING
+#if defined(PROFILING)
             printThunkObject((StgThunk *)obj,GET_PROF_DESC(info));
 #else
             printThunkObject((StgThunk *)obj,"THUNK");
@@ -228,12 +226,6 @@ printClosure( StgClosure *obj )
         }
 
     case IND:
-            debugBelch("IND(");
-            printPtr((StgPtr)((StgInd*)obj)->indirectee);
-            debugBelch(")\n");
-            break;
-
-    case IND_PERM:
             debugBelch("IND(");
             printPtr((StgPtr)((StgInd*)obj)->indirectee);
             debugBelch(")\n");
@@ -302,8 +294,8 @@ printClosure( StgClosure *obj )
         {
             StgWord i;
             debugBelch("ARR_WORDS(\"");
-            for (i=0; i<arr_words_words((StgArrWords *)obj); i++)
-              debugBelch("%" FMT_Word, (W_)((StgArrWords *)obj)->payload[i]);
+            for (i=0; i<arr_words_words((StgArrBytes *)obj); i++)
+              debugBelch("%" FMT_Word, (W_)((StgArrBytes *)obj)->payload[i]);
             debugBelch("\")\n");
             break;
         }
@@ -339,7 +331,29 @@ printClosure( StgClosure *obj )
     case MVAR_DIRTY:
         {
           StgMVar* mv = (StgMVar*)obj;
-          debugBelch("MVAR(head=%p, tail=%p, value=%p)\n", mv->head, mv->tail, mv->value);
+
+          debugBelch("MVAR(head=");
+          if ((StgClosure*)mv->head == &stg_END_TSO_QUEUE_closure) {
+              debugBelch("END_TSO_QUEUE");
+          } else {
+              debugBelch("%p", mv->head);
+          }
+
+          debugBelch(", tail=");
+          if ((StgClosure*)mv->tail == &stg_END_TSO_QUEUE_closure) {
+              debugBelch("END_TSO_QUEUE");
+          } else {
+              debugBelch("%p", mv->tail);
+          }
+
+          debugBelch(", value=");
+          if ((StgClosure*)mv->value == &stg_END_TSO_QUEUE_closure) {
+              debugBelch("END_TSO_QUEUE");
+          } else {
+              debugBelch("%p", mv->value);
+          }
+          debugBelch(")\n");
+
           break;
         }
 
@@ -366,7 +380,7 @@ printClosure( StgClosure *obj )
 
     case WEAK:
             debugBelch("WEAK(");
-            debugBelch(" key=%p value=%p finalizer=%p",
+            debugBelch("key=%p value=%p finalizer=%p",
                     (StgPtr)(((StgWeak*)obj)->key),
                     (StgPtr)(((StgWeak*)obj)->value),
                     (StgPtr)(((StgWeak*)obj)->finalizer));
@@ -381,7 +395,7 @@ printClosure( StgClosure *obj )
       break;
 
     case STACK:
-      debugBelch("STACK");
+      debugBelch("STACK\n");
       break;
 
 #if 0
@@ -393,6 +407,12 @@ printClosure( StgClosure *obj )
       break;
 #endif
 
+    case COMPACT_NFDATA:
+        debugBelch("COMPACT_NFDATA(size=%" FMT_Word ")\n",
+                   (W_)((StgCompactNFData *)obj)->totalW * (W_)sizeof(W_));
+        break;
+
+
     default:
             //barf("printClosure %d",get_itbl(obj)->type);
             debugBelch("*** printClosure: unknown type %d ****\n",
@@ -403,7 +423,8 @@ printClosure( StgClosure *obj )
 }
 
 // If you know you have an UPDATE_FRAME, but want to know exactly which.
-char *info_update_frame(StgClosure *closure) {
+const char *info_update_frame(const StgClosure *closure)
+{
     // Note: We intentionally don't take the info table pointer as
     // an argument. As it will be confusing whether one should pass
     // it pointing to the code or struct members when compiling with
@@ -427,46 +448,11 @@ void printGraph( StgClosure *obj )
 }
 */
 
-StgPtr
-printStackObj( StgPtr sp )
-{
-    /*debugBelch("Stack[%d] = ", &stgStack[STACK_SIZE] - sp); */
-
-        StgClosure* c = (StgClosure*)(*sp);
-        printPtr((StgPtr)*sp);
-        if (c == (StgClosure*)&stg_ctoi_R1p_info) {
-           debugBelch("\t\t\tstg_ctoi_ret_R1p_info\n" );
-        } else
-        if (c == (StgClosure*)&stg_ctoi_R1n_info) {
-           debugBelch("\t\t\tstg_ctoi_ret_R1n_info\n" );
-        } else
-        if (c == (StgClosure*)&stg_ctoi_F1_info) {
-           debugBelch("\t\t\tstg_ctoi_ret_F1_info\n" );
-        } else
-        if (c == (StgClosure*)&stg_ctoi_D1_info) {
-           debugBelch("\t\t\tstg_ctoi_ret_D1_info\n" );
-        } else
-        if (c == (StgClosure*)&stg_ctoi_V_info) {
-           debugBelch("\t\t\tstg_ctoi_ret_V_info\n" );
-        } else
-        if (get_itbl(c)->type == BCO) {
-           debugBelch("\t\t\t");
-           debugBelch("BCO(...)\n");
-        }
-        else {
-           debugBelch("\t\t\t");
-           printClosure ( (StgClosure*)(*sp));
-        }
-        sp += 1;
-
-    return sp;
-
-}
-
 static void
-printSmallBitmap( StgPtr spBottom, StgPtr payload, StgWord bitmap, nat size )
+printSmallBitmap( StgPtr spBottom, StgPtr payload, StgWord bitmap,
+                    uint32_t size )
 {
-    nat i;
+    uint32_t i;
 
     for(i = 0; i < size; i++, bitmap >>= 1 ) {
         debugBelch("   stk[%ld] (%p) = ", (long)(spBottom-(payload+i)), payload+i);
@@ -480,10 +466,11 @@ printSmallBitmap( StgPtr spBottom, StgPtr payload, StgWord bitmap, nat size )
 }
 
 static void
-printLargeBitmap( StgPtr spBottom, StgPtr payload, StgLargeBitmap* large_bitmap, nat size )
+printLargeBitmap( StgPtr spBottom, StgPtr payload, StgLargeBitmap* large_bitmap,
+                    uint32_t size )
 {
     StgWord bmp;
-    nat i, j;
+    uint32_t i, j;
 
     i = 0;
     for (bmp=0; i < size; bmp++) {
@@ -518,15 +505,63 @@ printStackChunk( StgPtr sp, StgPtr spBottom )
         case CATCH_FRAME:
         case UNDERFLOW_FRAME:
         case STOP_FRAME:
-            printObj((StgClosure*)sp);
+            printClosure((StgClosure*)sp);
             continue;
 
-        case RET_SMALL:
-            debugBelch("RET_SMALL (%p)\n", info);
+        case RET_SMALL: {
+            StgWord c = *sp;
+            if (c == (StgWord)&stg_ctoi_R1p_info) {
+                debugBelch("tstg_ctoi_ret_R1p_info\n" );
+            } else if (c == (StgWord)&stg_ctoi_R1n_info) {
+                debugBelch("stg_ctoi_ret_R1n_info\n" );
+            } else if (c == (StgWord)&stg_ctoi_F1_info) {
+                debugBelch("stg_ctoi_ret_F1_info\n" );
+            } else if (c == (StgWord)&stg_ctoi_D1_info) {
+                debugBelch("stg_ctoi_ret_D1_info\n" );
+            } else if (c == (StgWord)&stg_ctoi_V_info) {
+                debugBelch("stg_ctoi_ret_V_info\n" );
+            } else if (c == (StgWord)&stg_ap_v_info) {
+                debugBelch("stg_ap_v_info\n" );
+            } else if (c == (StgWord)&stg_ap_f_info) {
+                debugBelch("stg_ap_f_info\n" );
+            } else if (c == (StgWord)&stg_ap_d_info) {
+                debugBelch("stg_ap_d_info\n" );
+            } else if (c == (StgWord)&stg_ap_l_info) {
+                debugBelch("stg_ap_l_info\n" );
+            } else if (c == (StgWord)&stg_ap_n_info) {
+                debugBelch("stg_ap_n_info\n" );
+            } else if (c == (StgWord)&stg_ap_p_info) {
+                debugBelch("stg_ap_p_info\n" );
+            } else if (c == (StgWord)&stg_ap_pp_info) {
+                debugBelch("stg_ap_pp_info\n" );
+            } else if (c == (StgWord)&stg_ap_ppp_info) {
+                debugBelch("stg_ap_ppp_info\n" );
+            } else if (c == (StgWord)&stg_ap_pppp_info) {
+                debugBelch("stg_ap_pppp_info\n" );
+            } else if (c == (StgWord)&stg_ap_ppppp_info) {
+                debugBelch("stg_ap_ppppp_info\n" );
+            } else if (c == (StgWord)&stg_ap_pppppp_info) {
+                debugBelch("stg_ap_pppppp_info\n" );
+#if defined(PROFILING)
+            } else if (c == (StgWord)&stg_restore_cccs_info) {
+                debugBelch("stg_restore_cccs_info\n" );
+                fprintCCS(stderr, (CostCentreStack*)sp[1]);
+                debugBelch("\n" );
+                continue;
+            } else if (c == (StgWord)&stg_restore_cccs_eval_info) {
+                debugBelch("stg_restore_cccs_eval_info\n" );
+                fprintCCS(stderr, (CostCentreStack*)sp[1]);
+                debugBelch("\n" );
+                continue;
+#endif
+            } else {
+                debugBelch("RET_SMALL (%p)\n", info);
+            }
             bitmap = info->layout.bitmap;
             printSmallBitmap(spBottom, sp+1,
                              BITMAP_BITS(bitmap), BITMAP_SIZE(bitmap));
             continue;
+        }
 
         case RET_BCO: {
             StgBCO *bco;
@@ -544,7 +579,7 @@ printStackChunk( StgPtr sp, StgPtr spBottom )
 
         case RET_FUN:
         {
-            StgFunInfoTable *fun_info;
+            const StgFunInfoTable *fun_info;
             StgRetFun *ret_fun;
 
             ret_fun = (StgRetFun *)sp;
@@ -591,69 +626,17 @@ void printTSO( StgTSO *tso )
 
 /* --------------------------------------------------------------------------
  * Simple lookup table
- *
- * Current implementation is pretty dumb!
+ * address -> function name
  * ------------------------------------------------------------------------*/
 
-struct entry {
-    StgWord value;
-    const char *name;
-};
-
-static nat table_size;
-static struct entry* table;
-
-#ifdef USING_LIBBFD
-static nat max_table_size;
-
-static void reset_table( int size )
-{
-    max_table_size = size;
-    table_size = 0;
-    table = (struct entry *)stgMallocBytes(size * sizeof(struct entry), "Printer.c:reset_table()");
-}
-
-static void prepare_table( void )
-{
-    /* Could sort it...  */
-}
-
-static void insert( StgWord value, const char *name )
-{
-    if ( table_size >= max_table_size ) {
-        barf( "Symbol table overflow\n" );
-    }
-    table[table_size].value = value;
-    table[table_size].name = name;
-    table_size = table_size + 1;
-}
-#endif
-
-#if 0
-static rtsBool lookup_name( char *name, StgWord *result )
-{
-    nat i;
-    for( i = 0; i < table_size && strcmp(name,table[i].name) != 0; ++i ) {
-    }
-    if (i < table_size) {
-        *result = table[i].value;
-        return rtsTrue;
-    } else {
-        return rtsFalse;
-    }
-}
-#endif
+static HashTable * add_to_fname_table = NULL;
 
 const char *lookupGHCName( void *addr )
 {
-    nat i;
-    for( i = 0; i < table_size && table[i].value != (StgWord) addr; ++i ) {
-    }
-    if (i < table_size) {
-        return table[i].name;
-    } else {
+    if (add_to_fname_table == NULL)
         return NULL;
-    }
+
+    return lookupHashTable(add_to_fname_table, (StgWord)addr);
 }
 
 /* --------------------------------------------------------------------------
@@ -663,15 +646,23 @@ const char *lookupGHCName( void *addr )
 /* Causing linking trouble on Win32 plats, so I'm
    disabling this for now.
 */
-#ifdef USING_LIBBFD
-
-#include <bfd.h>
+#if defined(USING_LIBBFD)
+#    define PACKAGE 1
+#    define PACKAGE_VERSION 1
+/* Those PACKAGE_* defines are workarounds for bfd:
+ *     https://sourceware.org/bugzilla/show_bug.cgi?id=14243
+ * ghc's build system filter PACKAGE_* values out specifically to avoid clashes
+ * with user's autoconf-based Cabal packages.
+ * It's a shame <bfd.h> checks for unrelated fields instead of actually used
+ * macros.
+ */
+#    include <bfd.h>
 
 /* Fairly ad-hoc piece of code that seems to filter out a lot of
  * rubbish like the obj-splitting symbols
  */
 
-static rtsBool isReal( flagword flags STG_UNUSED, const char *name )
+static bool isReal( flagword flags STG_UNUSED, const char *name )
 {
 #if 0
     /* ToDo: make this work on BFD */
@@ -679,19 +670,19 @@ static rtsBool isReal( flagword flags STG_UNUSED, const char *name )
     if (tp == N_TEXT || tp == N_DATA) {
         return (name[0] == '_' && name[1] != '_');
     } else {
-        return rtsFalse;
+        return false;
     }
 #else
     if (*name == '\0'  ||
         (name[0] == 'g' && name[1] == 'c' && name[2] == 'c') ||
         (name[0] == 'c' && name[1] == 'c' && name[2] == '.')) {
-        return rtsFalse;
+        return false;
     }
-    return rtsTrue;
+    return true;
 #endif
 }
 
-extern void DEBUG_LoadSymbols( char *name )
+extern void DEBUG_LoadSymbols( const char *name )
 {
     bfd* abfd;
     char **matching;
@@ -717,11 +708,6 @@ extern void DEBUG_LoadSymbols( char *name )
         if (storage_needed < 0) {
             barf("can't read symbol table");
         }
-#if 0
-        if (storage_needed == 0) {
-            debugBelch("no storage needed");
-        }
-#endif
         symbol_table = (asymbol **) stgMallocBytes(storage_needed,"DEBUG_LoadSymbols");
 
         number_of_symbols = bfd_canonicalize_symtab (abfd, symbol_table);
@@ -730,11 +716,15 @@ extern void DEBUG_LoadSymbols( char *name )
             barf("can't canonicalise symbol table");
         }
 
+        if (add_to_fname_table == NULL)
+            add_to_fname_table = allocHashTable();
+
         for( i = 0; i != number_of_symbols; ++i ) {
             symbol_info info;
             bfd_get_symbol_info(abfd,symbol_table[i],&info);
-            /*debugBelch("\t%c\t0x%x      \t%s\n",info.type,(nat)info.value,info.name); */
             if (isReal(info.type, info.name)) {
+                insertHashTable(add_to_fname_table,
+                                info.value, (void*)info.name);
                 num_real_syms += 1;
             }
         }
@@ -744,29 +734,18 @@ extern void DEBUG_LoadSymbols( char *name )
                          number_of_symbols, num_real_syms)
                  );
 
-        reset_table( num_real_syms );
-
-        for( i = 0; i != number_of_symbols; ++i ) {
-            symbol_info info;
-            bfd_get_symbol_info(abfd,symbol_table[i],&info);
-            if (isReal(info.type, info.name)) {
-                insert( info.value, info.name );
-            }
-        }
-
         stgFree(symbol_table);
     }
-    prepare_table();
 }
 
-#else /* HAVE_BFD_H */
+#else /* USING_LIBBFD */
 
-extern void DEBUG_LoadSymbols( char *name STG_UNUSED )
+extern void DEBUG_LoadSymbols( const char *name STG_UNUSED )
 {
   /* nothing, yet */
 }
 
-#endif /* HAVE_BFD_H */
+#endif /* USING_LIBBFD */
 
 void findPtr(P_ p, int);                /* keep gcc -Wall happy */
 
@@ -779,7 +758,7 @@ findPtrBlocks (StgPtr p, bdescr *bd, StgPtr arr[], int arr_size, int i)
     for (; bd; bd = bd->link) {
         searched++;
         for (q = bd->start; q < bd->free; q++) {
-            if (UNTAG_CLOSURE((StgClosure*)*q) == (StgClosure *)p) {
+            if (UNTAG_CONST_CLOSURE((StgClosure*)*q) == (const StgClosure *)p) {
                 if (i < arr_size) {
                     for (r = bd->start; r < bd->free; r = end) {
                         // skip over zeroed-out slop
@@ -812,7 +791,7 @@ findPtrBlocks (StgPtr p, bdescr *bd, StgPtr arr[], int arr_size, int i)
 void
 findPtr(P_ p, int follow)
 {
-  nat g, n;
+  uint32_t g, n;
   bdescr *bd;
   const int arr_size = 1024;
   StgPtr arr[arr_size];
@@ -838,87 +817,7 @@ findPtr(P_ p, int follow)
   }
 }
 
-/* prettyPrintClosure() is for printing out a closure using the data constructor
-   names found in the info tables. Closures are printed in a fashion that resembles
-   their Haskell representation. Useful during debugging.
-
-   Todo: support for more closure types, and support for non pointer fields in the
-   payload.
-*/
-
-void prettyPrintClosure_ (StgClosure *);
-
-void prettyPrintClosure (StgClosure *obj)
-{
-   prettyPrintClosure_ (obj);
-   debugBelch ("\n");
-}
-
-void prettyPrintClosure_ (StgClosure *obj)
-{
-    StgInfoTable *info;
-    StgConInfoTable *con_info;
-
-    /* collapse any indirections */
-    unsigned int type;
-    type = get_itbl(obj)->type;
-
-    while (type == IND ||
-           type == IND_STATIC ||
-           type == IND_PERM)
-    {
-      obj = ((StgInd *)obj)->indirectee;
-      type = get_itbl(obj)->type;
-    }
-
-    /* find the info table for this object */
-    info = get_itbl(obj);
-
-    /* determine what kind of object we have */
-    switch (info->type)
-    {
-        /* full applications of data constructors */
-        case CONSTR:
-        case CONSTR_1_0:
-        case CONSTR_0_1:
-        case CONSTR_1_1:
-        case CONSTR_0_2:
-        case CONSTR_2_0:
-        case CONSTR_STATIC:
-        case CONSTR_NOCAF_STATIC:
-        {
-           nat i;
-           char *descriptor;
-
-           /* find the con_info for the constructor */
-           con_info = get_con_itbl (obj);
-
-           /* obtain the name of the constructor */
-           descriptor = GET_CON_DESC(con_info);
-
-           debugBelch ("(%s", descriptor);
-
-           /* process the payload of the closure */
-           /* we don't handle non pointers at the moment */
-           for (i = 0; i < info->layout.payload.ptrs; i++)
-           {
-              debugBelch (" ");
-              prettyPrintClosure_ ((StgClosure *) obj->payload[i]);
-           }
-           debugBelch (")");
-           break;
-        }
-
-        /* if it isn't a constructor then just print the closure type */
-        default:
-        {
-           debugBelch ("<%s>", info_type(obj));
-           break;
-        }
-    }
-}
-
-char *what_next_strs[] = {
+const char *what_next_strs[] = {
   [0]               = "(unknown)",
   [ThreadRunGHC]    = "ThreadRunGHC",
   [ThreadInterpret] = "ThreadInterpret",
@@ -943,10 +842,11 @@ void printObj( StgClosure *obj )
 /* -----------------------------------------------------------------------------
    Closure types
 
-   NOTE: must be kept in sync with the closure types in includes/ClosureTypes.h
+   NOTE: must be kept in sync with the closure types in
+   includes/rts/storage/ClosureTypes.h
    -------------------------------------------------------------------------- */
 
-char *closure_type_names[] = {
+const char *closure_type_names[] = {
  [INVALID_OBJECT]        = "INVALID_OBJECT",
  [CONSTR]                = "CONSTR",
  [CONSTR_1_0]            = "CONSTR_1_0",
@@ -954,8 +854,7 @@ char *closure_type_names[] = {
  [CONSTR_2_0]            = "CONSTR_2_0",
  [CONSTR_1_1]            = "CONSTR_1_1",
  [CONSTR_0_2]            = "CONSTR_0_2",
- [CONSTR_STATIC]         = "CONSTR_STATIC",
- [CONSTR_NOCAF_STATIC]   = "CONSTR_NOCAF_STATIC",
+ [CONSTR_NOCAF]          = "CONSTR_NOCAF",
  [FUN]                   = "FUN",
  [FUN_1_0]               = "FUN_1_0",
  [FUN_0_1]               = "FUN_0_1",
@@ -976,7 +875,6 @@ char *closure_type_names[] = {
  [PAP]                   = "PAP",
  [AP_STACK]              = "AP_STACK",
  [IND]                   = "IND",
- [IND_PERM]              = "IND_PERM",
  [IND_STATIC]            = "IND_STATIC",
  [RET_BCO]               = "RET_BCO",
  [RET_SMALL]             = "RET_SMALL",
@@ -1007,29 +905,29 @@ char *closure_type_names[] = {
  [ATOMICALLY_FRAME]      = "ATOMICALLY_FRAME",
  [CATCH_RETRY_FRAME]     = "CATCH_RETRY_FRAME",
  [CATCH_STM_FRAME]       = "CATCH_STM_FRAME",
- [WHITEHOLE]             = "WHITEHOLE"
+ [WHITEHOLE]             = "WHITEHOLE",
+ [SMALL_MUT_ARR_PTRS_CLEAN] = "SMALL_MUT_ARR_PTRS_CLEAN",
+ [SMALL_MUT_ARR_PTRS_DIRTY] = "SMALL_MUT_ARR_PTRS_DIRTY",
+ [SMALL_MUT_ARR_PTRS_FROZEN0] = "SMALL_MUT_ARR_PTRS_FROZEN0",
+ [SMALL_MUT_ARR_PTRS_FROZEN] = "SMALL_MUT_ARR_PTRS_FROZEN",
+ [COMPACT_NFDATA]        = "COMPACT_NFDATA"
 };
 
-char *
-info_type(StgClosure *closure){
+#if N_CLOSURE_TYPES != 64
+#error Closure types changed: update Printer.c!
+#endif
+
+const char *
+info_type(const StgClosure *closure){
   return closure_type_names[get_itbl(closure)->type];
 }
 
-char *
-info_type_by_ip(StgInfoTable *ip){
+const char *
+info_type_by_ip(const StgInfoTable *ip){
   return closure_type_names[ip->type];
 }
 
 void
-info_hdr_type(StgClosure *closure, char *res){
+info_hdr_type(const StgClosure *closure, char *res){
   strcpy(res,closure_type_names[get_itbl(closure)->type]);
 }
-
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

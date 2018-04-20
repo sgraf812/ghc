@@ -31,6 +31,8 @@ module RegAlloc.Linear.State (
 )
 where
 
+import GhcPrelude
+
 import RegAlloc.Linear.Stats
 import RegAlloc.Linear.StackMap
 import RegAlloc.Linear.Base
@@ -43,8 +45,6 @@ import Unique
 import UniqSupply
 
 import Control.Monad (liftM, ap)
-import Control.Applicative (Applicative(..))
-
 
 -- | The register allocator monad type.
 newtype RegM freeRegs a
@@ -54,12 +54,11 @@ instance Functor (RegM freeRegs) where
       fmap = liftM
 
 instance Applicative (RegM freeRegs) where
-      pure = return
+      pure a  =  RegM $ \s -> (# s, a #)
       (<*>) = ap
 
 instance Monad (RegM freeRegs) where
   m >>= k   =  RegM $ \s -> case unReg m s of { (# s, a #) -> unReg (k a) s }
-  return a  =  RegM $ \s -> (# s, a #)
 
 instance HasDynFlags (RegM a) where
     getDynFlags = RegM $ \s -> (# s, ra_DynFlags s #)

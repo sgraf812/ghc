@@ -21,7 +21,7 @@ try:
                     os.killpg(pid, signal.SIGKILL)
                 else:
                     return
-            except OSError, e:
+            except OSError as e:
                 if e.errno == errno.ECHILD:
                     return
                 else:
@@ -35,7 +35,6 @@ try:
     else:
         # parent
         def handler(signum, frame):
-            sys.stderr.write('Timeout happened...killing process...\n')
             killProcess(pid)
             sys.exit(99)
         old = signal.signal(signal.SIGALRM, handler)
@@ -43,8 +42,12 @@ try:
         (pid2, res) = os.waitpid(pid, 0)
         if (os.WIFEXITED(res)):
             sys.exit(os.WEXITSTATUS(res))
-        else:
-            sys.exit(res)
+        elif os.WIFSIGNALED(res):
+            # represent signals using the Bourne shell convention
+            sys.exit(128 + os.WTERMSIG(res))
+        else:                           # WIFCONTINUED or WIFSTOPPED
+            killProcess(pid)
+            sys.exit(99)                # unexpected
 
 except KeyboardInterrupt:
     sys.exit(98)

@@ -51,10 +51,13 @@ compiler/stage%/build/Config.hs : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo '{-# LANGUAGE CPP #-}'                                        >> $@
 	@echo 'module Config where'                                         >> $@
 	@echo                                                               >> $@
+	@echo 'import GhcPrelude'                                           >> $@
+	@echo                                                               >> $@
 	@echo '#include "ghc_boot_platform.h"'                              >> $@
 	@echo                                                               >> $@
-	@echo 'data IntegerLibrary = IntegerGMP | IntegerSimple'            >> $@
-	@echo '    deriving Eq'                                             >> $@
+	@echo 'data IntegerLibrary = IntegerGMP'                            >> $@
+	@echo '                    | IntegerSimple'                         >> $@
+	@echo '                    deriving Eq'                             >> $@
 	@echo                                                               >> $@
 	@echo 'cBuildPlatformString :: String'                              >> $@
 	@echo 'cBuildPlatformString = BuildPlatform_NAME'                   >> $@
@@ -65,12 +68,18 @@ compiler/stage%/build/Config.hs : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo                                                               >> $@
 	@echo 'cProjectName          :: String'                             >> $@
 	@echo 'cProjectName          = "$(ProjectName)"'                    >> $@
+	@echo 'cProjectGitCommitId   :: String'				    >> $@
+	@echo 'cProjectGitCommitId   = "$(ProjectGitCommitId)"'		    >> $@
 	@echo 'cProjectVersion       :: String'                             >> $@
 	@echo 'cProjectVersion       = "$(ProjectVersion)"'                 >> $@
 	@echo 'cProjectVersionInt    :: String'                             >> $@
 	@echo 'cProjectVersionInt    = "$(ProjectVersionInt)"'              >> $@
 	@echo 'cProjectPatchLevel    :: String'                             >> $@
 	@echo 'cProjectPatchLevel    = "$(ProjectPatchLevel)"'              >> $@
+	@echo 'cProjectPatchLevel1   :: String'                             >> $@
+	@echo 'cProjectPatchLevel1   = "$(ProjectPatchLevel1)"'             >> $@
+	@echo 'cProjectPatchLevel2   :: String'                             >> $@
+	@echo 'cProjectPatchLevel2   = "$(ProjectPatchLevel2)"'             >> $@
 	@echo 'cBooterVersion        :: String'                             >> $@
 	@echo 'cBooterVersion        = "$(GhcVersion)"'                     >> $@
 	@echo 'cStage                :: String'                             >> $@
@@ -95,6 +104,12 @@ endif
 	@echo 'cGhcWithSMP           = "$(GhcWithSMP)"'                     >> $@
 	@echo 'cGhcRTSWays           :: String'                             >> $@
 	@echo 'cGhcRTSWays           = "$(GhcRTSWays)"'                     >> $@
+	@echo 'cGhcRtsWithLibdw      :: Bool'                               >> $@
+ifeq "$(GhcRtsWithLibdw)" "YES"
+	@echo 'cGhcRtsWithLibdw      = True'                                >> $@
+else
+	@echo 'cGhcRtsWithLibdw      = False'                               >> $@
+endif
 	@echo 'cGhcEnableTablesNextToCode :: String'                        >> $@
 	@echo 'cGhcEnableTablesNextToCode = "$(GhcEnableTablesNextToCode)"' >> $@
 	@echo 'cLeadingUnderscore    :: String'                             >> $@
@@ -157,6 +172,7 @@ compiler/stage1/$(PLATFORM_H) : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo "#define BUILD_ARCH \"$(BuildArch_CPP)\""           >> $@
 	@echo "#define HOST_ARCH \"$(HostArch_CPP)\""             >> $@
 	@echo "#define TARGET_ARCH \"$(TargetArch_CPP)\""         >> $@
+	@echo "#define LLVM_TARGET \"$(LLVMTarget_CPP)\""         >> $@
 	@echo                                                     >> $@
 	@echo "#define $(BuildOS_CPP)_BUILD_OS 1"                 >> $@
 	@echo "#define $(HostOS_CPP)_HOST_OS 1"                   >> $@
@@ -164,11 +180,6 @@ compiler/stage1/$(PLATFORM_H) : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo "#define BUILD_OS \"$(BuildOS_CPP)\""               >> $@
 	@echo "#define HOST_OS \"$(HostOS_CPP)\""                 >> $@
 	@echo "#define TARGET_OS \"$(TargetOS_CPP)\""             >> $@
-ifeq "$(TargetOS_CPP)" "irix"
-	@echo "#ifndef $(IRIX_MAJOR)_TARGET_OS"                   >> $@
-	@echo "#define $(IRIX_MAJOR)_TARGET_OS 1"                 >> $@
-	@echo "#endif"                                            >> $@
-endif
 	@echo                                                     >> $@
 	@echo "#define $(BuildVendor_CPP)_BUILD_VENDOR 1"         >> $@
 	@echo "#define $(HostVendor_CPP)_HOST_VENDOR 1"           >> $@
@@ -203,6 +214,7 @@ compiler/stage2/$(PLATFORM_H) : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo "#define BUILD_ARCH \"$(HostArch_CPP)\""            >> $@
 	@echo "#define HOST_ARCH \"$(TargetArch_CPP)\""           >> $@
 	@echo "#define TARGET_ARCH \"$(TargetArch_CPP)\""         >> $@
+	@echo "#define LLVM_TARGET \"$(LLVMTarget_CPP)\""         >> $@
 	@echo                                                     >> $@
 	@echo "#define $(HostOS_CPP)_BUILD_OS 1"                  >> $@
 	@echo "#define $(TargetOS_CPP)_HOST_OS 1"                 >> $@
@@ -210,11 +222,6 @@ compiler/stage2/$(PLATFORM_H) : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo "#define BUILD_OS \"$(HostOS_CPP)\""                >> $@
 	@echo "#define HOST_OS \"$(TargetOS_CPP)\""               >> $@
 	@echo "#define TARGET_OS \"$(TargetOS_CPP)\""             >> $@
-ifeq "$(TargetOS_CPP)" "irix"
-	@echo "#ifndef $(IRIX_MAJOR)_TARGET_OS"                   >> $@
-	@echo "#define $(IRIX_MAJOR)_TARGET_OS 1"                 >> $@
-	@echo "#endif"                                            >> $@
-endif
 	@echo                                                     >> $@
 	@echo "#define $(HostVendor_CPP)_BUILD_VENDOR 1"          >> $@
 	@echo "#define $(TargetVendor_CPP)_HOST_VENDOR 1"         >> $@
@@ -230,7 +237,7 @@ compiler/stage3/$(PLATFORM_H) : compiler/stage2/$(PLATFORM_H)
 	"$(CP)" $< $@
 
 # ----------------------------------------------------------------------------
-#		Generate supporting stuff for prelude/PrimOp.lhs
+#		Generate supporting stuff for prelude/PrimOp.hs
 #		from prelude/primops.txt
 
 PRIMOP_BITS_NAMES = primop-data-decl.hs-incl        \
@@ -256,13 +263,15 @@ PRIMOP_BITS_STAGE3 = $(addprefix compiler/stage3/build/,$(PRIMOP_BITS_NAMES))
 compiler_CPP_OPTS += $(addprefix -I,$(GHC_INCLUDE_DIRS))
 compiler_CPP_OPTS += ${GhcCppOpts}
 
+# We add these paths to the Haskell compiler's #include search path list since
+# we must avoid #including files by paths relative to the source file as Hadrian
+# moves the build artifacts out of the source tree. See #8040.
+compiler_HC_OPTS += $(addprefix -I,$(GHC_INCLUDE_DIRS))
+
 define preprocessCompilerFiles
 # $0 = stage
-compiler/stage$1/build/Parser.y: compiler/parser/Parser.y.pp
-	$$(CPP) $$(RAWCPP_FLAGS) -P $$(compiler_CPP_OPTS) -x c $$< | grep -v '^#pragma GCC' > $$@
-
 compiler/stage$1/build/primops.txt: compiler/prelude/primops.txt.pp compiler/stage$1/$$(PLATFORM_H)
-	$$(CPP) $$(RAWCPP_FLAGS) -P $$(compiler_CPP_OPTS) -Icompiler/stage$1 -x c $$< | grep -v '^#pragma GCC' > $$@
+	$$(HS_CPP) -P $$(compiler_CPP_OPTS) -Icompiler/stage$1 -x c $$< | grep -v '^#pragma GCC' > $$@
 
 compiler/stage$1/build/primop-data-decl.hs-incl: compiler/stage$1/build/primops.txt $$$$(genprimopcode_INPLACE)
 	"$$(genprimopcode_INPLACE)" --data-decl          < $$< > $$@
@@ -356,37 +365,35 @@ compiler_CONFIGURE_OPTS += --ghc-option=-DNOSMP
 compiler_CONFIGURE_OPTS += --ghc-option=-optc-DNOSMP
 endif
 
+ifeq "$(WITH_TERMINFO)" "NO"
+compiler_stage2_CONFIGURE_OPTS += --flags=-terminfo
+endif
+
 # Careful optimisation of the parser: we don't want to throw everything
 # at it, because that takes too long and doesn't buy much, but we do want
 # to inline certain key external functions, so we instruct GHC not to
 # throw away inlinings as it would normally do in -O0 mode.
-compiler/stage1/build/Parser_HC_OPTS += -O0 -fno-ignore-interface-pragmas
-# If we're bootstrapping the compiler during stage2, or we're being
-# built by a GHC whose version is > 7.8, we need -fcmm-sink to be
+# Since GHC version 7.8, we need -fcmm-sink to be
 # passed to the compiler. This is required on x86 to avoid the
 # register allocator running out of stack slots when compiling this
 # module with -fPIC -dynamic.
 # See #8182 for all the details
-ifeq "$(CMM_SINK_BOOTSTRAP_IS_NEEDED)" "YES"
-compiler/stage1/build/Parser_HC_OPTS += -fcmm-sink
-endif
-# We also pass -fcmm-sink to every stage != 1
+compiler/stage1/build/Parser_HC_OPTS += -O0 -fno-ignore-interface-pragmas -fcmm-sink
 compiler/stage2/build/Parser_HC_OPTS += -O0 -fno-ignore-interface-pragmas -fcmm-sink
 compiler/stage3/build/Parser_HC_OPTS += -O0 -fno-ignore-interface-pragmas -fcmm-sink
-
 
 ifeq "$(GhcProfiled)" "YES"
 # If we're profiling GHC then we want SCCs.  However, adding -auto-all
 # everywhere tends to give a hard-to-read profile, and adds lots of
 # overhead.  A better approach is to proceed top-down; identify the
 # parts of the compiler of interest, and then add further cost centres
-# as necessary.  Turn on -auto-all for individual modules like this:
+# as necessary.  Turn on -fprof-auto for individual modules like this:
 
-# compiler/main/DriverPipeline_HC_OPTS += -auto-all
-compiler/main/GhcMake_HC_OPTS        += -auto-all
-compiler/main/GHC_HC_OPTS            += -auto-all
+# compiler/main/DriverPipeline_HC_OPTS += -fprof-auto
+compiler/main/GhcMake_HC_OPTS        += -fprof-auto
+compiler/main/GHC_HC_OPTS            += -fprof-auto
 
-# or alternatively add {-# OPTIONS_GHC -auto-all #-} to the top of
+# or alternatively add {-# OPTIONS_GHC -fprof-auto #-} to the top of
 # modules you're interested in.
 
 # We seem to still build the vanilla libraries even if we say
@@ -414,223 +421,17 @@ compiler/stage3/package-data.mk : compiler/ghc.mk
 
 compiler_PACKAGE = ghc
 
-# Note [fiddle-stage1-version]
-# The version of the GHC package changes every day, since the
-# patchlevel is the current date.  We don't want to force
-# recompilation of the entire compiler when this happens, so for stage
-# 1 we omit the patchlevel from the version number.  For stage 2 we
-# have to include the patchlevel since this is the package we install,
-# however.
-#
-# Note: we also have to tweak the version number of the package itself
-# when it gets registered; see Note [munge-stage1-package-config]
-# below.
-# The ProjectPatchLevel > 20000000 iff it's a date. If it's e.g. 6.12.1
-# then we don't want to remove it
-ifneq "$(CLEANING)" "YES"
-ifeq "$(shell [ $(ProjectPatchLevel) -gt 20000000 ] && echo YES)" "YES"
-compiler_stage1_VERSION_MUNGED = YES
-endif
-endif
-
-ifeq "$(compiler_stage1_VERSION_MUNGED)" "YES"
-compiler_stage1_MUNGED_VERSION = $(subst .$(ProjectPatchLevel),,$(ProjectVersion))
-define compiler_PACKAGE_MAGIC
-compiler_stage1_VERSION = $(compiler_stage1_MUNGED_VERSION)
-compiler_stage1_PACKAGE_KEY = $(subst .$(ProjectPatchLevel),,$(compiler_stage1_PACKAGE_KEY))
-endef
-
-# NB: the PACKAGE_KEY munging has no effect for new-style package keys
-# (which indeed, have nothing version like in them, but are important for
-# old-style package keys which do.)  The subst operation is idempotent, so
-# as long as we do it at least once we should be good.
-
-# Don't register the non-munged package
-compiler_stage1_REGISTER_PACKAGE = NO
-
-endif
-
 # Don't do splitting for the GHC package, it takes too long and
 # there's not much benefit.
 compiler_stage1_SplitObjs = NO
 compiler_stage2_SplitObjs = NO
 compiler_stage3_SplitObjs = NO
-
-# There are too many symbols in the ghc package for a Windows DLL.
-# We therefore need to split some of the modules off into a separate
-# DLL. This clump are the modules reachable from DynFlags:
-compiler_stage2_dll0_START_MODULE = DynFlags
-compiler_stage2_dll0_MODULES = \
-	Annotations \
-	Avail \
-	Bag \
-	BasicTypes \
-	BinIface \
-	Binary \
-	Bitmap \
-	BlockId \
-	BooleanFormula \
-	BreakArray \
-	BufWrite \
-	BuildTyCl \
-	ByteCodeAsm \
-	ByteCodeInstr \
-	ByteCodeItbls \
-	CLabel \
-	Class \
-	CmdLineParser \
-	Cmm \
-	CmmCallConv \
-	CmmExpr \
-	CmmInfo \
-	CmmMachOp \
-	CmmNode \
-	CmmType \
-	CmmUtils \
-	CoAxiom \
-	ConLike \
-	CodeGen.Platform \
-	CodeGen.Platform.ARM \
-	CodeGen.Platform.NoRegs \
-	CodeGen.Platform.PPC \
-	CodeGen.Platform.PPC_Darwin \
-	CodeGen.Platform.SPARC \
-	CodeGen.Platform.X86 \
-	CodeGen.Platform.X86_64 \
-	Coercion \
-	Config \
-	Constants \
-	CoreArity \
-	CoreFVs \
-	CoreLint \
-	CoreSubst \
-	CoreSyn \
-	CoreTidy \
-	CoreUnfold \
-	CoreUtils \
-	CostCentre \
-	DataCon \
-	Demand \
-	Digraph \
-	DriverPhases \
-	DsMonad \
-	DynFlags \
-	Encoding \
-	ErrUtils \
-	Exception \
-	ExtsCompat46 \
-	FamInstEnv \
-	FastBool \
-	FastFunctions \
-	FastMutInt \
-	FastString \
-	FastTypes \
-	Finder \
-	Fingerprint \
-	FiniteMap \
-	ForeignCall \
-	Hooks \
-	Hoopl \
-	Hoopl.Dataflow \
-	HsBinds \
-	HsDecls \
-	HsDoc \
-	HsExpr \
-	HsImpExp \
-	HsLit \
-	HsPat \
-	HsSyn \
-	HsTypes \
-	HsUtils \
-	HscTypes \
-	IOEnv \
-	Id \
-	IdInfo \
-	IfaceEnv \
-	IfaceSyn \
-	IfaceType \
-	InstEnv \
-	InteractiveEvalTypes \
-	Kind \
-	ListSetOps \
-	Literal \
-	LoadIface \
-	Maybes \
-	MkCore \
-	MkGraph \
-	MkId \
-	Module \
-	MonadUtils \
-	Name \
-	NameEnv \
-	NameSet \
-	OccName \
-	OccurAnal \
-	OptCoercion \
-	OrdList \
-	Outputable \
-	PackageConfig \
-	Packages \
-	Pair \
-	Panic \
-	PatSyn \
-	PipelineMonad \
-	Platform \
-	PlatformConstants \
-	PprCmm \
-	PprCmmDecl \
-	PprCmmExpr \
-	PprCore \
-	PrelInfo \
-	PrelNames \
-	PrelRules \
-	Pretty \
-	PrimOp \
-	RdrName \
-	Reg \
-	RegClass \
-	Rules \
-	SMRep \
-	Serialized \
-	SrcLoc \
-	StaticFlags \
-	StgCmmArgRep \
-	StgCmmClosure \
-	StgCmmEnv \
-	StgCmmLayout \
-	StgCmmMonad \
-	StgCmmProf \
-	StgCmmTicky \
-	StgCmmUtils \
-	StgSyn \
-	Stream \
-	StringBuffer \
-	TcEvidence \
-	TcIface \
-	TcRnMonad \
-	TcRnTypes \
-	TcType \
-	TcTypeNats \
-	TrieMap \
-	TyCon \
-	Type \
-	TypeRep \
-	TysPrim \
-	TysWiredIn \
-	Unify \
-	UniqFM \
-	UniqSet \
-	UniqSupply \
-	Unique \
-	Util \
-	Var \
-	VarEnv \
-	VarSet
-
-compiler_stage2_dll0_HS_OBJS = \
-    $(patsubst %,compiler/stage2/build/%.$(dyn_osuf),$(subst .,/,$(compiler_stage2_dll0_MODULES)))
+compiler_stage1_SplitSections = NO
+compiler_stage2_SplitSections = NO
+compiler_stage3_SplitSections = NO
 
 # if stage is set to something other than "1" or "", disable stage 1
+# See Note [Stage1Only vs stage=1] in mk/config.mk.in.
 ifneq "$(filter-out 1,$(stage))" ""
 compiler_stage1_NOT_NEEDED = YES
 endif
@@ -652,8 +453,8 @@ $(eval $(call build-package,compiler,stage3,2))
 define keepCAFsForGHCiDynOnly
 # $1 = stage
 # $2 = way
-ifeq "$$(findstring dyn, $1)" ""
-compiler_stage$1_$2_C_OBJS := $$(filter-out %/keepCAFsForGHCi.o,$$(compiler_stage$1_$2_C_OBJS))
+ifeq "$$(findstring dyn, $2)" ""
+compiler_stage$1_$2_C_OBJS := $$(filter-out %/keepCAFsForGHCi.$$($2_osuf),$$(compiler_stage$1_$2_C_OBJS))
 endif
 endef
 $(foreach w,$(compiler_stage1_WAYS),$(eval $(call keepCAFsForGHCiDynOnly,1,$w)))
@@ -671,9 +472,15 @@ compiler_stage2_CONFIGURE_OPTS += --disable-library-for-ghci
 compiler_stage3_CONFIGURE_OPTS += --disable-library-for-ghci
 
 # after build-package, because that sets compiler_stage1_HC_OPTS:
+ifeq "$(V)" "0"
+compiler_stage1_HC_OPTS += $(filter-out -Rghc-timing,$(GhcHcOpts)) $(GhcStage1HcOpts)
+compiler_stage2_HC_OPTS += $(filter-out -Rghc-timing,$(GhcHcOpts)) $(GhcStage2HcOpts)
+compiler_stage3_HC_OPTS += $(filter-out -Rghc-timing,$(GhcHcOpts)) $(GhcStage3HcOpts)
+else
 compiler_stage1_HC_OPTS += $(GhcHcOpts) $(GhcStage1HcOpts)
 compiler_stage2_HC_OPTS += $(GhcHcOpts) $(GhcStage2HcOpts)
 compiler_stage3_HC_OPTS += $(GhcHcOpts) $(GhcStage3HcOpts)
+endif
 
 ifneq "$(BINDIST)" "YES"
 
@@ -712,26 +519,4 @@ ifeq "$(DYNAMIC_GHC_PROGRAMS)" "YES"
 compiler/utils/Util_HC_OPTS += -DDYNAMIC_GHC_PROGRAMS
 endif
 
-# LibFFI.hs #includes ffi.h
-ifneq "$(UseSystemLibFFI)" "YES"
-compiler/stage2/build/LibFFI.hs : $(libffi_HEADERS)
 endif
-
-# Note [munge-stage1-package-config]
-# Strip the date/patchlevel from the version of stage1.  See Note
-# [fiddle-stage1-version] above.
-ifeq "$(compiler_stage1_VERSION_MUNGED)" "YES"
-compiler/stage1/inplace-pkg-config-munged: compiler/stage1/inplace-pkg-config
-	sed -e 's/^\(version: .*\)\.$(ProjectPatchLevel)$$/\1/' \
-	    -e 's/^\(id: .*\)\.$(ProjectPatchLevel)$$/\1/' \
-	    -e 's/^\(hs-libraries: HSghc-.*\)\.$(ProjectPatchLevel)$$/\1/' \
-	  < $< > $@
-	"$(compiler_stage1_GHC_PKG)" update --force $(compiler_stage1_GHC_PKG_OPTS) $@
-
-# We need to make sure the munged config is in the database before we
-# try to configure ghc-bin
-ghc/stage1/package-data.mk : compiler/stage1/inplace-pkg-config-munged
-endif
-
-endif
-

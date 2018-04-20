@@ -78,7 +78,7 @@ extern void *adjustorCode;
  * recover the writable address, we subtract 1 word from the executable
  * address and fetch. This works because Linux kernel magic gives us two
  * pointers with different addresses that refer to the same memory. Whatever
- * you write into the writeable address can be read back at the executable
+ * you write into the writable address can be read back at the executable
  * address. This method is very efficient.
  *
  * On iOS this breaks for two reasons: 1. the two pointers do not refer to
@@ -137,7 +137,7 @@ createAdjustor (int cconv,
 {
     ffi_cif *cif;
     ffi_type **arg_types;
-    nat n_args, i;
+    uint32_t n_args, i;
     ffi_type *result_type;
     ffi_closure *cl;
     int r, abi;
@@ -188,7 +188,7 @@ createAdjustor (int cconv,
 #include <string.h>
 #endif
 
-#ifdef LEADING_UNDERSCORE
+#if defined(LEADING_UNDERSCORE)
 #define UNDERSCORE "_"
 #else 
 #define UNDERSCORE ""
@@ -250,15 +250,15 @@ typedef struct _IA64FunDesc {
 static void *
 stgAllocStable(size_t size_in_bytes, StgStablePtr *stable)
 {
-  StgArrWords* arr;
-  nat data_size_in_words, total_size_in_words;
+  StgArrBytes* arr;
+  uint32_t data_size_in_words, total_size_in_words;
   
   /* round up to a whole number of words */
   data_size_in_words  = ROUNDUP_BYTES_TO_WDS(size_in_bytes);
-  total_size_in_words = sizeofW(StgArrWords) + data_size_in_words;
+  total_size_in_words = sizeofW(StgArrBytes) + data_size_in_words;
   
   /* allocate and fill it in */
-  arr = (StgArrWords *)allocate(total_size_in_words);
+  arr = (StgArrBytes *)allocate(total_size_in_words);
   SET_ARR_HDR(arr, &stg_ARR_WORDS_info, CCCS, size_in_bytes);
  
   /* obtain a stable ptr */
@@ -718,7 +718,7 @@ createAdjustor(int cconv, StgStablePtr hptr,
      To do this, we extend the *caller's* stack frame by 2 words and shift
      the output registers used for argument passing (%o0 - %o5, we are a *leaf*
      procedure because of the tail-jump) by 2 positions. This makes room in
-     %o0 and %o1 for the additinal arguments, namely  hptr and a dummy (used
+     %o0 and %o1 for the additional arguments, namely  hptr and a dummy (used
      for destination addr of jump on SPARC, return address on x86, ...). This
      shouldn't cause any problems for a C-like caller: alloca is implemented
      similarly, and local variables should be accessed via %fp, not %sp. In a
@@ -1057,7 +1057,7 @@ TODO: Depending on how much allocation overhead stgMallocBytes uses for
         AdjustorStub *adjustorStub;
         int sz = 0, extra_sz, total_sz;
 
-#ifdef FUNDESCS
+#if defined(FUNDESCS)
         adjustorStub = stgMallocBytes(sizeof(AdjustorStub), "createAdjustor");
 #else
         adjustorStub = allocateExec(sizeof(AdjustorStub),&code);
@@ -1066,7 +1066,7 @@ TODO: Depending on how much allocation overhead stgMallocBytes uses for
             
         adjustorStub->code = (void*) &adjustorCode;
 
-#ifdef FUNDESCS
+#if defined(FUNDESCS)
             // function descriptors are a cool idea.
             // We don't need to generate any code at runtime.
         adjustorStub->toc = adjustorStub;
@@ -1321,11 +1321,3 @@ freeHaskellFunctionPtr(void* ptr)
 }
 
 #endif // !USE_LIBFFI_FOR_ADJUSTORS
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

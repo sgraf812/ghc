@@ -15,6 +15,8 @@ module Vectorise.Env (
   modVectInfo
 ) where
 
+import GhcPrelude
+
 import HscTypes
 import InstEnv
 import FamInstEnv
@@ -30,6 +32,8 @@ import NameSet
 import Name
 import NameEnv
 import FastString
+import UniqDFM
+import UniqSet
 
 
 import Data.Maybe
@@ -37,8 +41,8 @@ import Data.Maybe
 
 -- |Indicates what scope something (a variable) is in.
 --
-data Scope a b 
-        = Global a 
+data Scope a b
+        = Global a
         | Local  b
 
 
@@ -51,13 +55,13 @@ data LocalEnv
         { local_vars      :: VarEnv (Var, Var)
           -- ^Mapping from local variables to their vectorised and lifted versions.
 
-        , local_tyvars    :: [TyVar]
+        , local_tyvars     :: [TyVar]
           -- ^In-scope type variables.
 
-        , local_tyvar_pa  :: VarEnv CoreExpr
+        , local_tyvar_pa   :: VarEnv CoreExpr
           -- ^Mapping from tyvars to their PA dictionaries.
 
-        , local_bind_name :: FastString
+        , local_bind_name  :: FastString
           -- ^Local binding name. This is only used to generate better names for hoisted
           -- expressions.
         }
@@ -77,7 +81,7 @@ emptyLocalEnv = LocalEnv
 
 -- |The global environment: entities that exist at top-level.
 --
-data GlobalEnv 
+data GlobalEnv
         = GlobalEnv
         { global_vect_avoid           :: Bool
           -- ^'True' implies to avoid vectorisation as far as possible.
@@ -86,7 +90,7 @@ data GlobalEnv
           -- ^Mapping from global variables to their vectorised versions — aka the /vectorisation
           -- map/.
 
-        , global_parallel_vars        :: VarSet
+        , global_parallel_vars        :: DVarSet
           -- ^The domain of 'global_vars'.
           --
           -- This information is not redundant as it is impossible to extract the domain from a
@@ -113,7 +117,7 @@ data GlobalEnv
           --     'global_tycons' (to a type other than themselves) and are still not parallel. An
           --     example is '(->)'. Moreover, some types have *not* got a mapping in 'global_tycons'
           --     (because they couldn't be vectorised), but still contain parallel types.
-        
+
         , global_datacons             :: NameEnv DataCon
           -- ^Mapping from DataCons to their vectorised versions.
 
@@ -123,7 +127,7 @@ data GlobalEnv
         , global_pr_funs              :: NameEnv Var
           -- ^Mapping from TyCons to their PR dfuns.
 
-        , global_inst_env             :: (InstEnv, InstEnv)
+        , global_inst_env             :: InstEnvs
           -- ^External package inst-env & home-package inst-env for class instances.
 
         , global_fam_inst_env         :: FamInstEnvs
@@ -139,11 +143,16 @@ data GlobalEnv
 -- to the global table, so that we can query scalarness during vectorisation, and especially, when
 -- vectorising the scalar entities' definitions themselves.
 --
-initGlobalEnv :: Bool -> VectInfo -> [CoreVect] -> (InstEnv, InstEnv) -> FamInstEnvs -> GlobalEnv
+initGlobalEnv :: Bool
+              -> VectInfo
+              -> [CoreVect]
+              -> InstEnvs
+              -> FamInstEnvs
+              -> GlobalEnv
 initGlobalEnv vectAvoid info vectDecls instEnvs famInstEnvs
-  = GlobalEnv 
+  = GlobalEnv
   { global_vect_avoid           = vectAvoid
-  , global_vars                 = mapVarEnv snd $ vectInfoVar info
+  , global_vars                 = mapVarEnv snd $ udfmToUfm $ vectInfoVar info
   , global_vect_decls           = mkVarEnv vects
   , global_parallel_vars        = vectInfoParallelVars info
   , global_parallel_tycons      = vectInfoParallelTyCons info
@@ -199,12 +208,12 @@ setPRFunsEnv ps genv = genv { global_pr_funs = mkNameEnv ps }
 --
 modVectInfo :: GlobalEnv -> [Id] -> [TyCon] -> [CoreVect]-> VectInfo -> VectInfo
 modVectInfo env mg_ids mg_tyCons vectDecls info
-  = info 
-    { vectInfoVar            = mk_env ids      (global_vars     env)
+  = info
+    { vectInfoVar            = mk_denv ids     (global_vars     env)
     , vectInfoTyCon          = mk_env tyCons   (global_tycons   env)
     , vectInfoDataCon        = mk_env dataCons (global_datacons env)
-    , vectInfoParallelVars   = (global_parallel_vars   env `minusVarSet`  vectInfoParallelVars   info)
-                               `intersectVarSet` (mkVarSet ids)
+    , vectInfoParallelVars   = (global_parallel_vars   env `minusDVarSet`  vectInfoParallelVars   info)
+                               `udfmIntersectUFM` (getUniqSet $ mkVarSet ids)
     , vectInfoParallelTyCons =  global_parallel_tycons env `minusNameSet` vectInfoParallelTyCons info
     }
   where
@@ -217,13 +226,15 @@ modVectInfo env mg_ids mg_tyCons vectDecls info
     tyCons          = mg_tyCons ++ vectTypeTyCons
     dataCons        = concatMap tyConDataCons mg_tyCons ++ vectDataCons
     dataConIds      = map dataConWorkId dataCons
-    selIds          = concat [ classAllSelIds cls 
+    selIds          = concat [ classAllSelIds cls
                              | tycon <- tyCons
                              , cls <- maybeToList . tyConClass_maybe $ tycon]
-    
+
     -- Produce an entry for every declaration that is mentioned in the domain of the 'inspectedEnv'
-    mk_env decls inspectedEnv
-      = mkNameEnv [(name, (decl, to))
-                  | decl     <- decls
-                  , let name = getName decl
-                  , Just to  <- [lookupNameEnv inspectedEnv name]]
+    mk_env decls inspectedEnv = mkNameEnv $ mk_assoc_env decls inspectedEnv
+    mk_denv decls inspectedEnv = listToUDFM $ mk_assoc_env decls inspectedEnv
+    mk_assoc_env decls inspectedEnv
+      = [(name, (decl, to))
+        | decl     <- decls
+        , let name = getName decl
+        , Just to  <- [lookupNameEnv inspectedEnv name]]

@@ -5,7 +5,7 @@
 -- Module      :  System.Exit
 -- Copyright   :  (c) The University of Glasgow 2001
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  provisional
 -- Portability :  portable
@@ -23,7 +23,6 @@ module System.Exit
     , die
   ) where
 
-import Prelude
 import System.IO
 
 import GHC.IO
@@ -44,7 +43,7 @@ import GHC.IO.Exception
 -- A program that fails in any other way is treated as if it had
 -- called 'exitFailure'.
 -- A program that terminates successfully without calling 'exitWith'
--- explicitly is treated as it it had called 'exitWith' 'ExitSuccess'.
+-- explicitly is treated as if it had called 'exitWith' 'ExitSuccess'.
 --
 -- As an 'ExitCode' is not an 'IOError', 'exitWith' bypasses
 -- the error handling in the 'IO' monad and cannot be intercepted by
@@ -78,6 +77,6 @@ exitSuccess = exitWith ExitSuccess
 
 -- | Write given error message to `stderr` and terminate with `exitFailure`.
 --
--- /Since: 4.7.1.0/
+-- @since 4.8.0.0
 die :: String -> IO a
 die err = hPutStrLn stderr err >> exitFailure

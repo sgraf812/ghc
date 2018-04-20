@@ -48,6 +48,8 @@ module Control.Exception (
         NestedAtomically(..),
         BlockedIndefinitelyOnMVar(..),
         BlockedIndefinitelyOnSTM(..),
+        AllocationLimitExceeded(..),
+        CompactionFailed(..),
         Deadlock(..),
         NoMethodError(..),
         PatternMatchFail(..),
@@ -55,6 +57,7 @@ module Control.Exception (
         RecSelError(..),
         RecUpdError(..),
         ErrorCall(..),
+        TypeError(..),
 
         -- * Throwing exceptions
         throw,
@@ -104,6 +107,7 @@ module Control.Exception (
         uninterruptibleMask_,
         MaskingState(..),
         getMaskingState,
+        interruptible,
         allowInterrupt,
 
         -- *** Applying @mask@ to an exception handler
@@ -132,12 +136,12 @@ module Control.Exception (
 import Control.Exception.Base
 
 import GHC.Base
-import GHC.IO (unsafeUnmask)
-import Data.Maybe
+import GHC.IO (interruptible)
 
 -- | You need this when using 'catches'.
 data Handler a = forall e . Exception e => Handler (e -> IO a)
 
+-- | @since 4.6.0.0
 instance Functor Handler where
      fmap f (Handler h) = Handler (fmap f . h)
 
@@ -191,11 +195,11 @@ use:
    case use 'catch' or 'catchJust'.
 
 The difference between using 'try' and 'catch' for recovery is that in
-'catch' the handler is inside an implicit 'block' (see \"Asynchronous
+'catch' the handler is inside an implicit 'mask' (see \"Asynchronous
 Exceptions\") which is important when catching asynchronous
 exceptions, but when catching other kinds of exception it is
 unnecessary.  Furthermore it is possible to accidentally stay inside
-the implicit 'block' by tail-calling rather than returning from the
+the implicit 'mask' by tail-calling rather than returning from the
 handler, which is why we recommend using 'try' rather than 'catch' for
 ordinary exception recovery.
 
@@ -211,17 +215,17 @@ A typical use of 'tryJust' for recovery looks like this:
 -- -----------------------------------------------------------------------------
 -- Asynchronous exceptions
 
--- | When invoked inside 'mask', this function allows a blocked
+-- | When invoked inside 'mask', this function allows a masked
 -- asynchronous exception to be raised, if one exists.  It is
 -- equivalent to performing an interruptible operation (see
--- #interruptible#), but does not involve any actual blocking.
+-- #interruptible), but does not involve any actual blocking.
 --
 -- When called outside 'mask', or inside 'uninterruptibleMask', this
 -- function has no effect.
 --
--- /Since: 4.4.0.0/
+-- @since 4.4.0.0
 allowInterrupt :: IO ()
-allowInterrupt = unsafeUnmask $ return ()
+allowInterrupt = interruptible $ return ()
 
 {- $async
 
@@ -259,7 +263,7 @@ to write something like
 >           catch (restore (...))
 >                 (\e -> handler)
 
-If you need to unblock asynchronous exceptions again in the exception
+If you need to unmask asynchronous exceptions again in the exception
 handler, 'restore' can be used there too.
 
 Note that 'try' and friends /do not/ have a similar default, because
@@ -302,7 +306,7 @@ exceptions is that they normally can occur anywhere, but within a
 interruptible (or call other interruptible operations).  In many cases
 these operations may themselves raise exceptions, such as I\/O errors,
 so the caller will usually be prepared to handle exceptions arising from the
-operation anyway.  To perfom an explicit poll for asynchronous exceptions
+operation anyway.  To perform an explicit poll for asynchronous exceptions
 inside 'mask', use 'allowInterrupt'.
 
 Sometimes it is too onerous to handle exceptions in the middle of a
@@ -372,7 +376,7 @@ handled differently. Instead, you would probably want something like:
 > e <- tryJust (guard . isDoesNotExistError) (readFile f)
 > let str = either (const "") id e
 
-There are occassions when you really do need to catch any sort of
+There are occasions when you really do need to catch any sort of
 exception. However, in most cases this is just so you can do some
 cleaning up; you aren't actually interested in the exception itself.
 For example, if you open a file then you want to close it again,

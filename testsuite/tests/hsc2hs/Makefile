@@ -28,3 +28,24 @@ hsc2hs004:
 T3837:
 	LANG=C '$(HSC2HS)' $@.hsc
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c $@.hs
+
+.PHONY: T4340
+T4340:
+	'$(HSC2HS)' $@.hsc
+	'$(TEST_HC)' $(TEST_HC_OPTS) -v0 --make $@
+	./$@
+
+.PHONY: T10272
+T10272:
+	'$(HSC2HS)' --cross-compile $@.hsc
+	'$(TEST_HC)' $(TEST_HC_OPTS) -v0 --make $@
+	./$@
+
+.PHONY: T12504
+T12504:
+	'$(HSC2HS)' T12504/path/to/$@.hsc
+ifeq "$(WINDOWS)" "YES"
+	grep '{-# LINE 1 \"T12504\\\\path\\\\to\\\\$@\.hsc\" #-}' T12504/path/to/$@.hs
+else
+	grep '{-# LINE 1 \"T12504/path/to/$@\.hsc\" #-}' T12504/path/to/$@.hs
+endif

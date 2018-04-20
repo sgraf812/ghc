@@ -32,15 +32,15 @@ module SPARC.Regs (
 where
 
 
+import GhcPrelude
+
 import CodeGen.Platform.SPARC
 import Reg
 import RegClass
-import Size
+import Format
 
 import Unique
 import Outputable
-import FastTypes
-import FastBool
 
 {-
         The SPARC has 64 registers of interest; 32 integer registers and 32
@@ -77,65 +77,65 @@ classOfRealReg reg
 
 
 -- | regSqueeze_class reg
---      Calculuate the maximum number of register colors that could be
+--      Calculate the maximum number of register colors that could be
 --      denied to a node of this class due to having this reg
 --      as a neighbour.
 --
 {-# INLINE virtualRegSqueeze #-}
-virtualRegSqueeze :: RegClass -> VirtualReg -> FastInt
+virtualRegSqueeze :: RegClass -> VirtualReg -> Int
 
 virtualRegSqueeze cls vr
  = case cls of
         RcInteger
          -> case vr of
-                VirtualRegI{}           -> _ILIT(1)
-                VirtualRegHi{}          -> _ILIT(1)
-                _other                  -> _ILIT(0)
+                VirtualRegI{}           -> 1
+                VirtualRegHi{}          -> 1
+                _other                  -> 0
 
         RcFloat
          -> case vr of
-                VirtualRegF{}           -> _ILIT(1)
-                VirtualRegD{}           -> _ILIT(2)
-                _other                  -> _ILIT(0)
+                VirtualRegF{}           -> 1
+                VirtualRegD{}           -> 2
+                _other                  -> 0
 
         RcDouble
          -> case vr of
-                VirtualRegF{}           -> _ILIT(1)
-                VirtualRegD{}           -> _ILIT(1)
-                _other                  -> _ILIT(0)
+                VirtualRegF{}           -> 1
+                VirtualRegD{}           -> 1
+                _other                  -> 0
 
-        _other -> _ILIT(0)
+        _other -> 0
 
 {-# INLINE realRegSqueeze #-}
-realRegSqueeze :: RegClass -> RealReg -> FastInt
+realRegSqueeze :: RegClass -> RealReg -> Int
 
 realRegSqueeze cls rr
  = case cls of
         RcInteger
          -> case rr of
                 RealRegSingle regNo
-                        | regNo < 32    -> _ILIT(1)
-                        | otherwise     -> _ILIT(0)
+                        | regNo < 32    -> 1
+                        | otherwise     -> 0
 
-                RealRegPair{}           -> _ILIT(0)
+                RealRegPair{}           -> 0
 
         RcFloat
          -> case rr of
                 RealRegSingle regNo
-                        | regNo < 32    -> _ILIT(0)
-                        | otherwise     -> _ILIT(1)
+                        | regNo < 32    -> 0
+                        | otherwise     -> 1
 
-                RealRegPair{}           -> _ILIT(2)
+                RealRegPair{}           -> 2
 
         RcDouble
          -> case rr of
                 RealRegSingle regNo
-                        | regNo < 32    -> _ILIT(0)
-                        | otherwise     -> _ILIT(1)
+                        | regNo < 32    -> 0
+                        | otherwise     -> 1
 
-                RealRegPair{}           -> _ILIT(1)
+                RealRegPair{}           -> 1
 
-        _other -> _ILIT(0)
+        _other -> 0
 
 -- | All the allocatable registers in the machine,
 --      including register pairs.
@@ -193,19 +193,14 @@ fPair reg
 
 
 -- | All the regs that the register allocator can allocate to,
---      with the the fixed use regs removed.
+--      with the fixed use regs removed.
 --
 allocatableRegs :: [RealReg]
 allocatableRegs
    = let isFree rr
            = case rr of
-                RealRegSingle r
-                        -> isFastTrue (freeReg r)
-
-                RealRegPair   r1 r2
-                        -> isFastTrue (freeReg r1)
-                        && isFastTrue (freeReg r2)
-
+                RealRegSingle r     -> freeReg r
+                RealRegPair   r1 r2 -> freeReg r1 && freeReg r2
      in filter isFree allRealRegs
 
 
@@ -245,14 +240,14 @@ callClobberedRegs
 
 
 
--- | Make a virtual reg with this size.
-mkVirtualReg :: Unique -> Size -> VirtualReg
-mkVirtualReg u size
-        | not (isFloatSize size)
+-- | Make a virtual reg with this format.
+mkVirtualReg :: Unique -> Format -> VirtualReg
+mkVirtualReg u format
+        | not (isFloatFormat format)
         = VirtualRegI u
 
         | otherwise
-        = case size of
+        = case format of
                 FF32    -> VirtualRegF u
                 FF64    -> VirtualRegD u
                 _       -> panic "mkVReg"

@@ -1,4 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE CPP #-}
 
 -----------------------------------------------------------------------------
@@ -6,7 +7,7 @@
 -- Module      :  GHC.ConsoleHandler
 -- Copyright   :  (c) The University of Glasgow
 -- License     :  see libraries/base/LICENSE
--- 
+--
 -- Maintainer  :  cvs-ghc@haskell.org
 -- Stability   :  internal
 -- Portability :  non-portable (GHC extensions)
@@ -14,12 +15,14 @@
 -- NB. the contents of this module are only available on Windows.
 --
 -- Installing Win32 console handlers.
--- 
+--
 -----------------------------------------------------------------------------
 
 module GHC.ConsoleHandler
-#if !defined(mingw32_HOST_OS) && !defined(__HADDOCK__)
+#if !defined(mingw32_HOST_OS)
         where
+
+import GHC.Base ()  -- dummy dependency
 #else /* whole file */
         ( Handler(..)
         , installHandler
@@ -38,6 +41,7 @@ Note: this #include is inside a Haskell comment
       by GHC
 -}
 
+import GHC.Base
 import Foreign
 import Foreign.C
 import GHC.IO.FD
@@ -92,7 +96,7 @@ installHandler handler
           STG_SIG_DFL -> return Default
           STG_SIG_IGN -> return Ignore
           STG_SIG_HAN -> return (Catch old_h)
-          _           -> error "installHandler: Bad threaded rc value"
+          _           -> errorWithoutStackTrace "installHandler: Bad threaded rc value"
       return (new_h, prev_handler)
 
   | otherwise =
@@ -114,7 +118,7 @@ installHandler handler
          -- stable pointer is no longer in use, free it.
         freeStablePtr osptr
         return (Catch (\ ev -> oldh (fromConsoleEvent ev)))
-     _           -> error "installHandler: Bad non-threaded rc value"
+     _           -> errorWithoutStackTrace "installHandler: Bad non-threaded rc value"
   where
    fromConsoleEvent ev =
      case ev of
@@ -131,11 +135,11 @@ installHandler handler
         Just x  -> hdlr x >> rts_ConsoleHandlerDone ev
         Nothing -> return () -- silently ignore..
 
-   no_handler = error "win32ConsoleHandler"
+   no_handler = errorWithoutStackTrace "win32ConsoleHandler"
 
-foreign import ccall "rtsSupportsBoundThreads" threaded :: Bool
+foreign import ccall unsafe "rtsSupportsBoundThreads" threaded :: Bool
 
-foreign import ccall unsafe "RtsExternal.h rts_InstallConsoleEvent" 
+foreign import ccall unsafe "RtsExternal.h rts_InstallConsoleEvent"
   rts_installHandler :: CInt -> Ptr (StablePtr (CInt -> IO ())) -> IO CInt
 foreign import ccall unsafe "RtsExternal.h rts_ConsoleHandlerDone"
   rts_ConsoleHandlerDone :: CInt -> IO ()

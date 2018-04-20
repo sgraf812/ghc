@@ -1,4 +1,4 @@
-{-# LANGUAGE Unsafe #-}
+{-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 
 -----------------------------------------------------------------------------
@@ -14,6 +14,9 @@
 -- The 'ForeignPtr' type and operations.  This module is part of the
 -- Foreign Function Interface (FFI) and will usually be imported via
 -- the "Foreign" module.
+--
+-- For non-portable support of Haskell finalizers, see the
+-- "Foreign.Concurrent" module.
 --
 -----------------------------------------------------------------------------
 
@@ -35,6 +38,7 @@ module Foreign.ForeignPtr (
         -- ** Low-level operations
         , touchForeignPtr
         , castForeignPtr
+        , plusForeignPtr
 
         -- ** Allocating managed memory
         , mallocForeignPtr
@@ -43,5 +47,5 @@ module Foreign.ForeignPtr (
         , mallocForeignPtrArray0
     ) where
 
-import Foreign.ForeignPtr.Safe
+import Foreign.ForeignPtr.Imp
 

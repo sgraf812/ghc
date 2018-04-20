@@ -6,8 +6,7 @@
  *
  * -------------------------------------------------------------------------- */
 
-#ifndef RTS_STORAGE_CLOSURES_H
-#define RTS_STORAGE_CLOSURES_H
+#pragma once
 
 /*
  * The Layout of a closure header depends on which kind of system we're
@@ -28,11 +27,11 @@ typedef struct {
 
 /* -----------------------------------------------------------------------------
    The SMP header
-   
+
    A thunk has a padding word to take the updated value.  This is so
    that the update doesn't overwrite the payload, so we can avoid
    needing to lock the thunk during entry and update.
-   
+
    Note: this doesn't apply to THUNK_STATICs, which have no payload.
 
    Note: we leave this padding word in all ways, rather than just SMP,
@@ -52,14 +51,14 @@ typedef struct {
 
 typedef struct {
     const StgInfoTable* info;
-#ifdef PROFILING
+#if defined(PROFILING)
     StgProfHeader         prof;
 #endif
 } StgHeader;
 
 typedef struct {
     const StgInfoTable* info;
-#ifdef PROFILING
+#if defined(PROFILING)
     StgProfHeader         prof;
 #endif
     StgSMPThunkHeader     smp;
@@ -79,12 +78,12 @@ typedef struct {
 
 typedef struct StgClosure_ {
     StgHeader   header;
-    struct StgClosure_ *payload[FLEXIBLE_ARRAY];
+    struct StgClosure_ *payload[];
 } *StgClosurePtr; // StgClosure defined in rts/Types.h
 
 typedef struct {
     StgThunkHeader  header;
-    struct StgClosure_ *payload[FLEXIBLE_ARRAY];
+    struct StgClosure_ *payload[];
 } StgThunk;
 
 typedef struct {
@@ -94,25 +93,25 @@ typedef struct {
 
 typedef struct {
     StgHeader   header;
-    StgHalfWord arity;		/* zero if it is an AP */
+    StgHalfWord arity;          /* zero if it is an AP */
     StgHalfWord n_args;
-    StgClosure *fun;		/* really points to a fun */
-    StgClosure *payload[FLEXIBLE_ARRAY];
+    StgClosure *fun;            /* really points to a fun */
+    StgClosure *payload[];
 } StgPAP;
 
 typedef struct {
     StgThunkHeader   header;
-    StgHalfWord arity;		/* zero if it is an AP */
+    StgHalfWord arity;          /* zero if it is an AP */
     StgHalfWord n_args;
-    StgClosure *fun;		/* really points to a fun */
-    StgClosure *payload[FLEXIBLE_ARRAY];
+    StgClosure *fun;            /* really points to a fun */
+    StgClosure *payload[];
 } StgAP;
 
 typedef struct {
     StgThunkHeader   header;
     StgWord     size;                    /* number of words in payload */
     StgClosure *fun;
-    StgClosure *payload[FLEXIBLE_ARRAY]; /* contains a chunk of *stack* */
+    StgClosure *payload[]; /* contains a chunk of *stack* */
 } StgAP_STACK;
 
 typedef struct {
@@ -123,8 +122,10 @@ typedef struct {
 typedef struct {
     StgHeader     header;
     StgClosure   *indirectee;
-    StgClosure   *static_link;
+    StgClosure   *static_link; // See Note [CAF lists]
     const StgInfoTable *saved_info;
+        // `saved_info` also used for the link field for `debug_caf_list`,
+        // see `newCAF` and Note [CAF lists] in rts/sm/Storage.h.
 } StgIndStatic;
 
 typedef struct StgBlockingQueue_ {
@@ -135,31 +136,24 @@ typedef struct StgBlockingQueue_ {
     struct MessageBlackHole_ *queue;
 } StgBlockingQueue;
 
-/* This struct should be called StgArrBytes rather than StgArrWords.
- *
- * One might be very tempted to store the number of words in the bytes field,
- * but the garbage collector will erase your data then.
- *
- * It's name is for historical reasons, see #3800
- */
 typedef struct {
     StgHeader  header;
     StgWord    bytes;
-    StgWord    payload[FLEXIBLE_ARRAY];
-} StgArrWords; // TODO: s/StgArrWords/StgArrBytes (#8552)
+    StgWord    payload[];
+} StgArrBytes;
 
 typedef struct {
     StgHeader   header;
     StgWord     ptrs;
     StgWord     size; // ptrs plus card table
-    StgClosure *payload[FLEXIBLE_ARRAY];
+    StgClosure *payload[];
     // see also: StgMutArrPtrs macros in ClosureMacros.h
 } StgMutArrPtrs;
 
 typedef struct {
     StgHeader   header;
     StgWord     ptrs;
-    StgClosure *payload[FLEXIBLE_ARRAY];
+    StgClosure *payload[];
 } StgSmallMutArrPtrs;
 
 typedef struct {
@@ -185,7 +179,7 @@ typedef struct {
 
 typedef struct {
     StgHeader  header;
-} StgStopFrame;  
+} StgStopFrame;
 
 typedef struct {
   StgHeader header;
@@ -202,11 +196,11 @@ typedef struct _StgStableName {
   StgWord        sn;
 } StgStableName;
 
-typedef struct _StgWeak {	/* Weak v */
+typedef struct _StgWeak {       /* Weak v */
   StgHeader header;
   StgClosure *cfinalizers;
   StgClosure *key;
-  StgClosure *value;		/* v */
+  StgClosure *value;            /* v */
   StgClosure *finalizer;
   struct _StgWeak *link;
 } StgWeak;
@@ -243,19 +237,19 @@ typedef struct _StgCFinalizerList {
 
 typedef struct {
     StgHeader      header;
-    StgArrWords   *instrs;	/* a pointer to an ArrWords */
-    StgArrWords   *literals;	/* a pointer to an ArrWords */
-    StgMutArrPtrs *ptrs;	/* a pointer to a  MutArrPtrs */
+    StgArrBytes   *instrs;      /* a pointer to an ArrWords */
+    StgArrBytes   *literals;    /* a pointer to an ArrWords */
+    StgMutArrPtrs *ptrs;        /* a pointer to a  MutArrPtrs */
     StgHalfWord   arity;        /* arity of this BCO */
     StgHalfWord   size;         /* size of this BCO (in words) */
-    StgWord       bitmap[FLEXIBLE_ARRAY];  /* an StgLargeBitmap */
+    StgWord       bitmap[];  /* an StgLargeBitmap */
 } StgBCO;
 
 #define BCO_BITMAP(bco)      ((StgLargeBitmap *)((StgBCO *)(bco))->bitmap)
 #define BCO_BITMAP_SIZE(bco) (BCO_BITMAP(bco)->size)
 #define BCO_BITMAP_BITS(bco) (BCO_BITMAP(bco)->bitmap)
 #define BCO_BITMAP_SIZEW(bco) ((BCO_BITMAP_SIZE(bco) + BITS_IN(StgWord) - 1) \
-			        / BITS_IN(StgWord))
+                                / BITS_IN(StgWord))
 
 /* A function return stack frame: used when saving the state for a
  * garbage collection at a function entry point.  The function
@@ -268,7 +262,7 @@ typedef struct {
     const StgInfoTable* info;
     StgWord        size;
     StgClosure *   fun;
-    StgClosure *   payload[FLEXIBLE_ARRAY];
+    StgClosure *   payload[];
 } StgRetFun;
 
 /* Concurrent communication objects */
@@ -291,14 +285,14 @@ typedef struct {
  *
  *  StgTVar defines the only type that can be updated through the STM
  *  interface.
- * 
+ *
  *  Note that various optimisations may be possible in order to use less
  *  space for these data structures at the cost of more complexity in the
  *  implementation:
  *
  *   - In StgTVar, current_value and first_watch_queue_entry could be held in
  *     the same field: if any thread is waiting then its expected_value for
- *     the tvar is the current value.  
+ *     the tvar is the current value.
  *
  *   - In StgTRecHeader, it might be worthwhile having separate chunks
  *     of read-only and read-write locations.  This would save a
@@ -338,7 +332,7 @@ typedef struct {
 typedef struct {
   StgTVar                   *tvar;
   StgClosure                *expected_value;
-  StgClosure                *new_value; 
+  StgClosure                *new_value;
 #if defined(THREADED_RTS)
   StgInt                     num_updates;
 #endif
@@ -353,7 +347,7 @@ typedef struct StgTRecChunk_ {
   TRecEntry                  entries[TREC_CHUNK_NUM_ENTRIES];
 } StgTRecChunk;
 
-typedef enum { 
+typedef enum {
   TREC_ACTIVE,        /* Transaction in progress, outcome undecided */
   TREC_CONDEMNED,     /* Transaction in progress, inconsistent / out of date reads */
   TREC_COMMITTED,     /* Transaction has committed, now updating tvars */
@@ -426,4 +420,59 @@ typedef struct MessageBlackHole_ {
     StgClosure *bh;
 } MessageBlackHole;
 
-#endif /* RTS_STORAGE_CLOSURES_H */
+/* ----------------------------------------------------------------------------
+   Compact Regions
+   ------------------------------------------------------------------------- */
+
+//
+// A compact region is a list of blocks.  Each block starts with an
+// StgCompactNFDataBlock structure, and the list is chained through the next
+// field of these structs.  (the link field of the bdescr is used to chain
+// together multiple compact region on the compact_objects field of a
+// generation).
+//
+// See Note [Compact Normal Forms] for details
+//
+typedef struct StgCompactNFDataBlock_ {
+    struct StgCompactNFDataBlock_ *self;
+       // the address of this block this is copied over to the
+       // receiving end when serializing a compact, so the receiving
+       // end can allocate the block at best as it can, and then
+       // verify if pointer adjustment is needed or not by comparing
+       // self with the actual address; the same data is sent over as
+       // SerializedCompact metadata, but having it here simplifies
+       // the fixup implementation.
+    struct StgCompactNFData_ *owner;
+       // the closure who owns this block (used in objectGetCompact)
+    struct StgCompactNFDataBlock_ *next;
+       // chain of blocks used for serialization and freeing
+} StgCompactNFDataBlock;
+
+//
+// This is the Compact# primitive object.
+//
+typedef struct StgCompactNFData_ {
+    StgHeader header;
+      // for sanity and other checks in practice, nothing should ever
+      // need the compact info pointer (we don't even need fwding
+      // pointers because it's a large object)
+    StgWord totalW;
+      // Total number of words in all blocks in the compact
+    StgWord autoBlockW;
+      // size of automatically appended blocks
+    StgPtr hp, hpLim;
+      // the beginning and end of the free area in the nursery block.  This is
+      // just a convenience so that we can avoid multiple indirections through
+      // the nursery pointer below during compaction.
+    StgCompactNFDataBlock *nursery;
+      // where to (try to) allocate from when appending
+    StgCompactNFDataBlock *last;
+      // the last block of the chain (to know where to append new
+      // blocks for resize)
+    struct hashtable *hash;
+      // the hash table for the current compaction, or NULL if
+      // there's no (sharing-preserved) compaction in progress.
+    StgClosure *result;
+      // Used temporarily to store the result of compaction.  Doesn't need to be
+      // a GC root.
+} StgCompactNFData;

@@ -11,16 +11,15 @@
  *
  * -------------------------------------------------------------------------- */
 
-#ifndef RTS_HPC_H
-#define RTS_HPC_H
+#pragma once
 
 // Simple linked list of modules
 typedef struct _HpcModuleInfo {
-  char *modName;		// name of module
-  StgWord32 tickCount;		// number of ticks
+  char *modName;                // name of module
+  StgWord32 tickCount;          // number of ticks
   StgWord32 hashNo;             // Hash number for this module's mix info
-  StgWord64 *tixArr;		// tix Array; local for this module
-  rtsBool from_file;            // data was read from the .tix file
+  StgWord64 *tixArr;            // tix Array; local for this module
+  bool from_file;               // data was read from the .tix file
   struct _HpcModuleInfo *next;
 } HpcModuleInfo;
 
@@ -33,5 +32,3 @@ HpcModuleInfo * hs_hpc_rootModule (void);
 
 void startupHpc(void);
 void exitHpc(void);
-
-#endif /* RTS_HPC_H */

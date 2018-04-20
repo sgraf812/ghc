@@ -37,7 +37,7 @@ main = do
   -- this time we should get an integer with all bits set, that is -1
   print (I# (magicInt1# `orI#` magicInt2#) == -1)
 
-  -- suprising as the first two tests may look, this is what we expect from
+  -- surprising as the first two tests may look, this is what we expect from
   -- bitwise negation in two's complement enccoding
   print (I# (notI#  0#) == -1)
   print (I# (notI# -1#) ==  0)
@@ -53,7 +53,7 @@ main = do
   -- anything xored with itself is 0
   print (I# (maxI# `xorI#` maxI#) == 0)
   print (I# (minI# `xorI#` minI#) == 0)
-  -- xoring with -1 is like bitwise negation (becuse -1 has all bits set to 1)
+  -- xoring with -1 is like bitwise negation (because -1 has all bits set to 1)
   print (I# (minI# `xorI#`   -1#) == maxI)
   print (I# (maxI# `xorI#`   -1#) == minI)
   print (I# (-1#   `xorI#` minI#) == maxI)

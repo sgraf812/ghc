@@ -2,6 +2,11 @@ module HpcUtils where
 
 import Trace.Hpc.Util
 import qualified Data.Map as Map
+import System.FilePath
+
+dropWhileEndLE :: (a -> Bool) -> [a] -> [a]
+-- Spec: dropWhileEndLE p = reverse . dropWhile p . reverse
+dropWhileEndLE p = foldr (\x r -> if null r && p x then [] else x:r) []
 
 -- turns \n into ' '
 -- | grab's the text behind a HpcPos; 
@@ -26,6 +31,6 @@ readFileFromPath err filename path0 = readTheFile path0
         readTheFile [] = err $ "could not find " ++ show filename
                                  ++ " in path " ++ show path0
         readTheFile (dir:dirs) =
-                catchIO (do str <- readFile (dir ++ "/" ++ filename)
+                catchIO (do str <- readFile (dir </> filename)
                             return str)
                         (\ _ -> readTheFile dirs)

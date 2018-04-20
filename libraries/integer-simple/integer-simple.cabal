@@ -1,12 +1,12 @@
 name:           integer-simple
-version:        0.1.1.0
+version:        0.1.1.1
 -- GHC 7.6.1 released with 0.1.0.1
 license:        BSD3
 license-file:   LICENSE
 maintainer:     igloo@earth.li
 synopsis:       Simple Integer library
 description:
-    This package contains an simple Integer library.
+    This package contains a simple Integer library.
 cabal-version:  >=1.10
 build-type: Simple
 
@@ -26,6 +26,6 @@ Library
     other-modules: GHC.Integer.Type
     default-extensions: CPP, MagicHash, BangPatterns, UnboxedTuples,
                 UnliftedFFITypes, NoImplicitPrelude
-    -- We need to set the package name to integer-simple
+    -- We need to set the unit ID to integer-simple
     -- (without a version number) as it's magic.
-    ghc-options: -this-package-key integer-simple -Wall
+    ghc-options: -this-unit-id integer-simple -Wall

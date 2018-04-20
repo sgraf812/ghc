@@ -3,16 +3,16 @@
  * (c) The GHC Team, 2008-2009
  *
  * Event log format
- * 
+ *
  * The log format is designed to be extensible: old tools should be
  * able to parse (but not necessarily understand all of) new versions
  * of the format, and new tools will be able to understand old log
  * files.
- * 
+ *
  * Each event has a specific format.  If you add new events, give them
  * new numbers: we never re-use old event numbers.
  *
- * - The format is endian-independent: all values are represented in 
+ * - The format is endian-independent: all values are represented in
  *    bigendian order.
  *
  * - The format is extensible:
@@ -51,7 +51,7 @@
  *       Word8*         -- extra info (for future extensions)
  *       EVENT_ET_END
  *
- * Event : 
+ * Event :
  *       Word16         -- event_type
  *       Word64         -- time (nanosecs)
  *       [Word16]       -- length of the rest (for variable-sized events only)
@@ -73,8 +73,7 @@
  *
  * -------------------------------------------------------------------------- */
 
-#ifndef RTS_EVENTLOGFORMAT_H
-#define RTS_EVENTLOGFORMAT_H
+#pragma once
 
 /*
  * Markers for begin/end of the Header.
@@ -113,8 +112,7 @@
 /* 13, 14 deprecated */
 #define EVENT_CREATE_SPARK_THREAD 15 /* (spark_thread)         */
 #define EVENT_LOG_MSG             16 /* (message ...)          */
-/* EVENT_STARTUP should be deprecated at some point */
-#define EVENT_STARTUP             17 /* (num_capabilities)     */
+/* 17 deprecated */
 #define EVENT_BLOCK_MARKER        18 /* (size, end_time, capability) */
 #define EVENT_USER_MSG            19 /* (message ...)          */
 #define EVENT_GC_IDLE             20 /* () */
@@ -156,15 +154,14 @@
 #define EVENT_GC_STATS_GHC        53 /* (heap_capset, generation,
                                          copied_bytes, slop_bytes, frag_bytes,
                                          par_n_threads,
-                                         par_max_copied, par_tot_copied) */
+                                         par_max_copied,
+                                         par_tot_copied, par_balanced_copied) */
 #define EVENT_GC_GLOBAL_SYNC      54 /* ()                     */
 #define EVENT_TASK_CREATE         55 /* (taskID, cap, tid)       */
 #define EVENT_TASK_MIGRATE        56 /* (taskID, cap, new_cap)   */
 #define EVENT_TASK_DELETE         57 /* (taskID)                 */
 #define EVENT_USER_MARKER         58 /* (marker_name) */
 #define EVENT_HACK_BUG_T9003      59 /* Hack: see trac #9003 */
-
-/* Range 59 - 59 is available for new GHC and common events. */
 
 /* Range 60 - 80 is used by eden for parallel tracing
  * see http://www.mathematik.uni-marburg.de/~eden/
@@ -174,12 +171,19 @@
 
 /* Range 140 - 159 is reserved for Perf events. */
 
+/* Range 160 - 180 is reserved for cost-centre heap profiling events. */
+
+#define EVENT_HEAP_PROF_BEGIN              160
+#define EVENT_HEAP_PROF_COST_CENTRE        161
+#define EVENT_HEAP_PROF_SAMPLE_BEGIN       162
+#define EVENT_HEAP_PROF_SAMPLE_COST_CENTRE 163
+#define EVENT_HEAP_PROF_SAMPLE_STRING      164
 /*
  * The highest event code +1 that ghc itself emits. Note that some event
  * ranges higher than this are reserved but not currently emitted by ghc.
  * This must match the size of the EventDesc[] array in EventLog.c
  */
-#define NUM_GHC_EVENT_TAGS        60
+#define NUM_GHC_EVENT_TAGS        165
 
 #if 0  /* DEPRECATED EVENTS: */
 /* we don't actually need to record the thread, it's implicit */
@@ -190,6 +194,7 @@
 /* ghc changed how it handles sparks so these are no longer applicable */
 #define EVENT_CREATE_SPARK        13 /* (cap, thread) */
 #define EVENT_SPARK_TO_THREAD     14 /* (cap, thread, spark_thread) */
+#define EVENT_STARTUP             17 /* (num_capabilities)     */
 /* these are used by eden but are replaced by new alternatives for ghc */
 #define EVENT_VERSION             23 /* (version_string) */
 #define EVENT_PROGRAM_INVOCATION  24 /* (commandline_string) */
@@ -226,7 +231,20 @@
 #define CAPSET_TYPE_OSPROCESS   2  /* caps belong to the same OS process */
 #define CAPSET_TYPE_CLOCKDOMAIN 3  /* caps share a local clock/time      */
 
-#ifndef EVENTLOG_CONSTANTS_ONLY
+/*
+ * Heap profile breakdown types. See EVENT_HEAP_PROF_BEGIN.
+ */
+typedef enum {
+    HEAP_PROF_BREAKDOWN_COST_CENTRE = 0x1,
+    HEAP_PROF_BREAKDOWN_MODULE,
+    HEAP_PROF_BREAKDOWN_CLOSURE_DESCR,
+    HEAP_PROF_BREAKDOWN_TYPE_DESCR,
+    HEAP_PROF_BREAKDOWN_RETAINER,
+    HEAP_PROF_BREAKDOWN_BIOGRAPHY,
+    HEAP_PROF_BREAKDOWN_CLOSURE_TYPE
+} HeapProfBreakdown;
+
+#if !defined(EVENTLOG_CONSTANTS_ONLY)
 
 typedef StgWord16 EventTypeNum;
 typedef StgWord64 EventTimestamp; /* in nanoseconds */
@@ -240,5 +258,3 @@ typedef StgWord64 EventTaskId;         /* for EVENT_TASK_* */
 typedef StgWord64 EventKernelThreadId; /* for EVENT_TASK_CREATE */
 
 #endif
-
-#endif /* RTS_EVENTLOGFORMAT_H */

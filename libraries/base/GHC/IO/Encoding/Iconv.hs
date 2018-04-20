@@ -10,7 +10,7 @@
 -- Module      :  GHC.IO.Encoding.Iconv
 -- Copyright   :  (c) The University of Glasgow, 2008-2009
 -- License     :  see libraries/base/LICENSE
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  internal
 -- Portability :  non-portable
@@ -33,10 +33,11 @@ module GHC.IO.Encoding.Iconv (
 import GHC.Base () -- For build ordering
 #else
 
-import Foreign.Safe
-import Foreign.C
+import Foreign
+import Foreign.C hiding (charIsRepresentable)
 import Data.Maybe
 import GHC.Base
+import GHC.Foreign (charIsRepresentable)
 import GHC.IO.Buffer
 import GHC.IO.Encoding.Failure
 import GHC.IO.Encoding.Types
@@ -78,13 +79,13 @@ foreign import ccall unsafe "hs_iconv_close"
 
 foreign import ccall unsafe "hs_iconv"
     hs_iconv :: IConv -> Ptr CString -> Ptr CSize -> Ptr CString -> Ptr CSize
-	  -> IO CSize
+          -> IO CSize
 
 foreign import ccall unsafe "localeEncoding"
     c_localeEncoding :: IO CString
 
 haskellChar :: String
-#ifdef WORDS_BIGENDIAN
+#if defined(WORDS_BIGENDIAN)
 haskellChar | charSize == 2 = "UTF-16BE"
             | otherwise     = "UTF-32BE"
 #else
@@ -96,15 +97,27 @@ char_shift :: Int
 char_shift | charSize == 2 = 1
            | otherwise     = 2
 
-iconvEncoding :: String -> IO TextEncoding
+iconvEncoding :: String -> IO (Maybe TextEncoding)
 iconvEncoding = mkIconvEncoding ErrorOnCodingFailure
 
-mkIconvEncoding :: CodingFailureMode -> String -> IO TextEncoding
+-- | Construct an iconv-based 'TextEncoding' for the given character set and
+-- 'CodingFailureMode'.
+--
+-- As iconv is missing in some minimal environments (e.g. #10298), this
+-- checks to ensure that iconv is working properly before returning the
+-- encoding, returning 'Nothing' if not.
+mkIconvEncoding :: CodingFailureMode -> String -> IO (Maybe TextEncoding)
 mkIconvEncoding cfm charset = do
-  return (TextEncoding { 
-                textEncodingName = charset,
-		mkTextDecoder = newIConv raw_charset (haskellChar ++ suffix) (recoverDecode cfm) iconvDecode,
-		mkTextEncoder = newIConv haskellChar charset                 (recoverEncode cfm) iconvEncode})
+    let enc = TextEncoding {
+                  textEncodingName = charset,
+                  mkTextDecoder = newIConv raw_charset (haskellChar ++ suffix)
+                                           (recoverDecode cfm) iconvDecode,
+                  mkTextEncoder = newIConv haskellChar charset
+                                           (recoverEncode cfm) iconvEncode}
+    good <- charIsRepresentable enc 'a'
+    return $ if good
+               then Just enc
+               else Nothing
   where
     -- An annoying feature of GNU iconv is that the //PREFIXES only take
     -- effect when they appear on the tocode parameter to iconv_open:
@@ -135,7 +148,7 @@ iconvDecode iconv_t ibuf obuf = iconvRecode iconv_t ibuf 0 obuf char_shift
 iconvEncode :: IConv -> EncodeBuffer
 iconvEncode iconv_t ibuf obuf = iconvRecode iconv_t ibuf char_shift obuf 0
 
-iconvRecode :: IConv -> Buffer a -> Int -> Buffer b -> Int 
+iconvRecode :: IConv -> Buffer a -> Int -> Buffer b -> Int
             -> IO (CodingProgress, Buffer a, Buffer b)
 iconvRecode iconv_t
   input@Buffer{  bufRaw=iraw, bufL=ir, bufR=iw, bufSize=_  }  iscale
@@ -153,20 +166,20 @@ iconvRecode iconv_t
       res <- hs_iconv iconv_t p_inbuf p_inleft p_outbuf p_outleft
       new_inleft  <- peek p_inleft
       new_outleft <- peek p_outleft
-      let 
-	  new_inleft'  = fromIntegral new_inleft `shiftR` iscale
-	  new_outleft' = fromIntegral new_outleft `shiftR` oscale
-	  new_input  
+      let
+          new_inleft'  = fromIntegral new_inleft `shiftR` iscale
+          new_outleft' = fromIntegral new_outleft `shiftR` oscale
+          new_input
             | new_inleft == 0  = input { bufL = 0, bufR = 0 }
-	    | otherwise        = input { bufL = iw - new_inleft' }
-	  new_output = output{ bufR = os - new_outleft' }
+            | otherwise        = input { bufL = iw - new_inleft' }
+          new_output = output{ bufR = os - new_outleft' }
       iconv_trace ("iconv res=" ++ show res)
       iconv_trace ("iconvRecode after,  input=" ++ show (summaryBuffer new_input))
       iconv_trace ("iconvRecode after,  output=" ++ show (summaryBuffer new_output))
       if (res /= -1)
-	then do -- all input translated
-	   return (InputUnderflow, new_input, new_output)
-	else do
+        then do -- all input translated
+           return (InputUnderflow, new_input, new_output)
+        else do
       errno <- getErrno
       case errno of
         e | e == e2BIG  -> return (OutputUnderflow, new_input, new_output)

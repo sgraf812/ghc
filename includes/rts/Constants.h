@@ -17,8 +17,7 @@
  *
  * -------------------------------------------------------------------------- */
 
-#ifndef RTS_CONSTANTS_H
-#define RTS_CONSTANTS_H
+#pragma once
 
 /* -----------------------------------------------------------------------------
    Minimum closure sizes
@@ -112,10 +111,28 @@
 #define RESERVED_C_STACK_BYTES (2048 * SIZEOF_LONG)
 
 /* -----------------------------------------------------------------------------
+   How large is the stack frame saved by StgRun?
+   world.  Used in StgCRun.c.
+
+   The size has to be enough to save the registers (see StgCRun)
+   plus padding if the result is not 16 byte aligned.
+   See the Note [Stack Alignment on X86] in StgCRun.c for details.
+
+   -------------------------------------------------------------------------- */
+#if defined(x86_64_HOST_ARCH)
+#  if defined(mingw32_HOST_OS)
+#    define STG_RUN_STACK_FRAME_SIZE 144
+#  else
+#    define STG_RUN_STACK_FRAME_SIZE 48
+#  endif
+#endif
+
+
+/* -----------------------------------------------------------------------------
    How much Haskell stack space to reserve for the saving of registers
    etc. in the case of a stack/heap overflow.
 
-   This must be large enough to accomodate the largest stack frame
+   This must be large enough to accommodate the largest stack frame
    pushed in one of the heap check fragments in HeapStackCheck.hc
    (ie. currently the generic heap checks - 3 words for StgRetDyn,
    18 words for the saved registers, see StgMacros.h).
@@ -198,7 +215,7 @@
 
 /*
  * Constants for the why_blocked field of a TSO
- * NB. keep these in sync with GHC/Conc.lhs: threadStatus
+ * NB. keep these in sync with GHC/Conc/Sync.hs: threadStatus
  */
 #define NotBlocked          0
 #define BlockedOnMVar       1
@@ -212,11 +229,6 @@
 /* Win32 only: */
 #define BlockedOnDoProc     7
 
-/* Only relevant for PAR: */
-  /* blocked on a remote closure represented by a Global Address: */
-#define BlockedOnGA         8
-  /* same as above but without sending a Fetch message */
-#define BlockedOnGA_NoSend  9
 /* Only relevant for THREADED_RTS: */
 #define BlockedOnCCall      10
 #define BlockedOnCCall_Interruptible 11
@@ -277,6 +289,12 @@
 #define TSO_SQUEEZED 128
 
 /*
+ * Enables the AllocationLimitExceeded exception when the thread's
+ * allocation limit goes negative.
+ */
+#define TSO_ALLOC_LIMIT 256
+
+/*
  * The number of times we spin in a spin lock before yielding (see
  * #3758).  To tune this value, use the benchmark in #3758: run the
  * server with -N2 and the client both on a dual-core.  Also make sure
@@ -294,4 +312,8 @@
 
 #define MAX_SPARE_WORKERS 6
 
-#endif /* RTS_CONSTANTS_H */
+/*
+ * The maximum number of NUMA nodes we support.  This is a fixed limit so that
+ * we can have static arrays of this size in the RTS for speed.
+ */
+#define MAX_NUMA_NODES 16

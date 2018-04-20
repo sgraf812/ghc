@@ -1,17 +1,17 @@
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP
-           , NoImplicitPrelude
-           , MagicHash
-           , GeneralizedNewtypeDeriving
-  #-}
-{-# LANGUAGE AutoDeriveTypeable, StandaloneDeriving #-}
 
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  System.Posix.Types
 -- Copyright   :  (c) The University of Glasgow 2002
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  provisional
 -- Portability :  non-portable (requires POSIX)
@@ -25,6 +25,12 @@
 module System.Posix.Types (
 
   -- * POSIX data types
+
+  -- ** Platform differences
+  -- | This module contains platform specific information about types.
+  --   __/As such the types presented on this page reflect the platform
+  --   on which the documentation was generated and may not coincide with
+  --   the types on your platform./__
 #if defined(HTYPE_DEV_T)
   CDev(..),
 #endif
@@ -65,8 +71,36 @@ module System.Posix.Types (
 #if defined(HTYPE_RLIM_T)
   CRLim(..),
 #endif
+#if defined(HTYPE_BLKSIZE_T)
+  CBlkSize(..),
+#endif
+#if defined(HTYPE_BLKCNT_T)
+  CBlkCnt(..),
+#endif
+#if defined(HTYPE_CLOCKID_T)
+  CClockId(..),
+#endif
+#if defined(HTYPE_FSBLKCNT_T)
+  CFsBlkCnt(..),
+#endif
+#if defined(HTYPE_FSFILCNT_T)
+  CFsFilCnt(..),
+#endif
+#if defined(HTYPE_ID_T)
+  CId(..),
+#endif
+#if defined(HTYPE_KEY_T)
+  CKey(..),
+#endif
+#if defined(HTYPE_TIMER_T)
+  CTimer(..),
+#endif
 
   Fd(..),
+
+  -- See Note [Exporting constructors of marshallable foreign types]
+  -- in Foreign.Ptr for why the constructors for these newtypes are
+  -- exported.
 
 #if defined(HTYPE_NLINK_T)
   LinkCount,
@@ -92,7 +126,6 @@ module System.Posix.Types (
 
 import Foreign
 import Foreign.C
-import Data.Typeable
 -- import Data.Bits
 
 import GHC.Base
@@ -148,8 +181,38 @@ INTEGRAL_TYPE(CTcflag,HTYPE_TCFLAG_T)
 INTEGRAL_TYPE(CRLim,HTYPE_RLIM_T)
 #endif
 
--- ToDo: blksize_t, clockid_t, blkcnt_t, fsblkcnt_t, fsfilcnt_t, id_t, key_t
--- suseconds_t, timer_t, useconds_t
+#if defined(HTYPE_BLKSIZE_T)
+-- | @since 4.10.0.0
+INTEGRAL_TYPE_WITH_CTYPE(CBlkSize,blksize_t,HTYPE_BLKSIZE_T)
+#endif
+#if defined(HTYPE_BLKCNT_T)
+-- | @since 4.10.0.0
+INTEGRAL_TYPE_WITH_CTYPE(CBlkCnt,blkcnt_t,HTYPE_BLKCNT_T)
+#endif
+#if defined(HTYPE_CLOCKID_T)
+-- | @since 4.10.0.0
+INTEGRAL_TYPE_WITH_CTYPE(CClockId,clockid_t,HTYPE_CLOCKID_T)
+#endif
+#if defined(HTYPE_FSBLKCNT_T)
+-- | @since 4.10.0.0
+INTEGRAL_TYPE_WITH_CTYPE(CFsBlkCnt,fsblkcnt_t,HTYPE_FSBLKCNT_T)
+#endif
+#if defined(HTYPE_FSFILCNT_T)
+-- | @since 4.10.0.0
+INTEGRAL_TYPE_WITH_CTYPE(CFsFilCnt,fsfilcnt_t,HTYPE_FSFILCNT_T)
+#endif
+#if defined(HTYPE_ID_T)
+-- | @since 4.10.0.0
+INTEGRAL_TYPE_WITH_CTYPE(CId,id_t,HTYPE_ID_T)
+#endif
+#if defined(HTYPE_KEY_T)
+-- | @since 4.10.0.0
+INTEGRAL_TYPE_WITH_CTYPE(CKey,key_t,HTYPE_KEY_T)
+#endif
+#if defined(HTYPE_TIMER_T)
+-- | @since 4.10.0.0
+OPAQUE_TYPE_WITH_CTYPE(CTimer,timer_t,HTYPE_TIMER_T)
+#endif
 
 -- Make an Fd type rather than using CInt everywhere
 INTEGRAL_TYPE(Fd,CInt)
@@ -175,4 +238,3 @@ type ProcessID      = CPid
 type FileOffset     = COff
 type ProcessGroupID = CPid
 type Limit          = CLong
-

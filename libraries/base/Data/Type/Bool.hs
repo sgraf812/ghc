@@ -1,5 +1,5 @@
-{-# LANGUAGE TypeFamilies, TypeOperators, DataKinds, NoImplicitPrelude,
-             PolyKinds #-}
+{-# LANGUAGE TypeFamilyDependencies, Safe, PolyKinds #-}
+{-# LANGUAGE TypeFamilies, TypeOperators, DataKinds, NoImplicitPrelude #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -12,7 +12,7 @@
 --
 -- Basic operations on type-level Booleans.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 -----------------------------------------------------------------------------
 
 module Data.Type.Bool (
@@ -27,30 +27,30 @@ import Data.Bool
 
 -- | Type-level "If". @If True a b@ ==> @a@; @If False a b@ ==> @b@
 type family If cond tru fls where
-  If True  tru fls = tru
-  If False tru fls = fls
+  If 'True  tru  fls = tru
+  If 'False tru  fls = fls
 
 -- | Type-level "and"
 type family a && b where
-  False && a     = False
-  True  && a     = a
-  a     && False = False
-  a     && True  = a
-  a     && a     = a
+  'False && a      = 'False
+  'True  && a      = a
+  a      && 'False = 'False
+  a      && 'True  = a
+  a      && a      = a
 infixr 3 &&
 
 -- | Type-level "or"
 type family a || b where
-  False || a     = a
-  True  || a     = True
-  a     || False = a
-  a     || True  = True
-  a     || a     = a
+  'False || a      = a
+  'True  || a      = 'True
+  a      || 'False = a
+  a      || 'True  = 'True
+  a      || a      = a
 infixr 2 ||
 
--- | Type-level "not"
-type family Not a where
-  Not False = True
-  Not True  = False
-
-  
+-- | Type-level "not". An injective type family since @4.10.0.0@.
+--
+-- @since 4.7.0.0
+type family Not a = res | res -> a where
+  Not 'False = 'True
+  Not 'True  = 'False

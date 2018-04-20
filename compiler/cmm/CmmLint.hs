@@ -10,19 +10,21 @@ module CmmLint (
     cmmLint, cmmLintGraph
   ) where
 
-import Hoopl
+import GhcPrelude
+
+import Hoopl.Block
+import Hoopl.Collections
+import Hoopl.Graph
+import Hoopl.Label
 import Cmm
 import CmmUtils
 import CmmLive
+import CmmSwitch (switchTargetsToList)
 import PprCmm ()
-import BlockId
-import FastString
 import Outputable
 import DynFlags
 
-import Data.Maybe
 import Control.Monad (liftM, ap)
-import Control.Applicative (Applicative(..))
 
 -- Things to check:
 --     - invariant on CmmBlock in CmmExpr (see comment there)
@@ -42,9 +44,9 @@ cmmLintGraph dflags g = runCmmLint dflags (lintCmmGraph dflags) g
 runCmmLint :: Outputable a => DynFlags -> (a -> CmmLint b) -> a -> Maybe SDoc
 runCmmLint dflags l p =
    case unCL (l p) dflags of
-     Left err -> Just (vcat [ptext $ sLit ("Cmm lint error:"),
+     Left err -> Just (vcat [text "Cmm lint error:",
                              nest 2 err,
-                             ptext $ sLit ("Program was:"),
+                             text "Program was:",
                              nest 2 (ppr p)])
      Right _  -> Nothing
 
@@ -66,7 +68,7 @@ lintCmmGraph dflags g =
        labels = setFromList (map entryLabel blocks)
 
 
-lintCmmBlock :: BlockSet -> CmmBlock -> CmmLint ()
+lintCmmBlock :: LabelSet -> CmmBlock -> CmmLint ()
 lintCmmBlock labels block
   = addLintInfo (text "in basic block " <> ppr (entryLabel block)) $ do
         let (_, middle, last) = blockSplit block
@@ -138,6 +140,8 @@ notNodeReg _                             = True
 lintCmmMiddle :: CmmNode O O -> CmmLint ()
 lintCmmMiddle node = case node of
   CmmComment _ -> return ()
+  CmmTick _    -> return ()
+  CmmUnwind{}  -> return ()
 
   CmmAssign reg expr -> do
             dflags <- getDynFlags
@@ -157,19 +161,19 @@ lintCmmMiddle node = case node of
             mapM_ lintCmmExpr actuals
 
 
-lintCmmLast :: BlockSet -> CmmNode O C -> CmmLint ()
+lintCmmLast :: LabelSet -> CmmNode O C -> CmmLint ()
 lintCmmLast labels node = case node of
   CmmBranch id -> checkTarget id
 
-  CmmCondBranch e t f -> do
+  CmmCondBranch e t f _ -> do
             dflags <- getDynFlags
             mapM_ checkTarget [t,f]
             _ <- lintCmmExpr e
             checkCond dflags e
 
-  CmmSwitch e branches -> do
+  CmmSwitch e ids -> do
             dflags <- getDynFlags
-            mapM_ checkTarget $ catMaybes branches
+            mapM_ checkTarget $ switchTargetsToList ids
             erep <- lintCmmExpr e
             if (erep `cmmEqType_ignoring_ptrhood` bWord dflags)
               then return ()
@@ -213,7 +217,7 @@ instance Functor CmmLint where
       fmap = liftM
 
 instance Applicative CmmLint where
-      pure = return
+      pure a = CmmLint (\_ -> Right a)
       (<*>) = ap
 
 instance Monad CmmLint where
@@ -221,7 +225,6 @@ instance Monad CmmLint where
                                 case m dflags of
                                 Left e -> Left e
                                 Right a -> unCL (k a) dflags
-  return a = CmmLint (\_ -> Right a)
 
 instance HasDynFlags CmmLint where
     getDynFlags = CmmLint (\dflags -> Right dflags)

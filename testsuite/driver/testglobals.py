@@ -1,4 +1,4 @@
-# 
+#
 # (c) Simon Marlow 2002
 #
 
@@ -9,7 +9,7 @@
 # variable config below.  The fields of the structure are filled in by
 # the appropriate config script(s) for this compiler/platform, in
 # ../config.
-# 
+#
 # Bits of the structure may also be filled in from the command line,
 # via the build system, using the '-e' option to runtests.
 
@@ -23,13 +23,25 @@ class TestConfig:
         self.rootdirs = []
 
         # Run these tests only (run all tests if empty)
-        self.only = []
+        self.run_only_some_tests = False
+        self.only = set()
 
         # Accept new output which differs from the sample?
         self.accept = 0
+        self.accept_platform = 0
+        self.accept_os = 0
 
         # File in which to save the summary
-        self.output_summary = ''
+        self.summary_file = ''
+
+        # Should we print the summary?
+        # Disabling this is useful for Phabricator/Harbormaster
+        # logfiles, which are truncated to 30 lines. TODO. Revise if
+        # this is still true.
+        # Note that we have a separate flag for this, instead of
+        # overloading --verbose, as you might want to see the summary
+        # with --verbose=0.
+        self.no_print_summary = False
 
         # File in which to save the times
         self.times_file = ''
@@ -45,27 +57,22 @@ class TestConfig:
         # Verbosity level
         self.verbose = 3
 
-        # run the "fast" version of the test suite
-        self.fast = 0
+        # See Note [validate and testsuite speed] in toplevel Makefile.
+        self.speed = 1
 
         self.list_broken = False
 
-        # Compiler type (ghc, hugs, nhc, etc.)
-        self.compiler_type = ''
-
-        # Path to the compiler
+        # Path to the compiler (stage2 by default)
         self.compiler = ''
         # and ghc-pkg
         self.ghc_pkg = ''
 
-        # Compiler version info
-        self.compiler_version = ''
-        self.compiler_maj_version = ''
-        self.compiler_tags = []
+        # Is self.compiler a stage 1, 2 or 3 compiler?
+        self.stage = 2
 
         # Flags we always give to this compiler
         self.compiler_always_flags = []
-        
+
         # Which ways to run tests (when compiling and running respectively)
         # Other ways are added from the command line if we have the appropriate
         # libraries.
@@ -104,13 +111,10 @@ class TestConfig:
         # the timeout program
         self.timeout_prog = ''
         self.timeout = 300
-        
+
         # threads
         self.threads = 1
         self.use_threads = 0
-
-        # Should we check for files being written more than once?
-        self.check_files_written = False
 
         # Should we skip performance tests
         self.skip_perf_tests = False
@@ -121,6 +125,12 @@ config = TestConfig()
 def getConfig():
     return config
 
+import os
+# Hold our modified GHC testrunning environment so we don't poison the current
+# python's environment.
+global ghc_env
+ghc_env = os.environ.copy()
+
 # -----------------------------------------------------------------------------
 # Information about the current test run
 
@@ -129,21 +139,20 @@ class TestRun:
        self.start_time = None
        self.total_tests = 0
        self.total_test_cases = 0
-       self.n_framework_failures = 0
-       self.framework_failures = {}
+
        self.n_tests_skipped = 0
-       self.tests_skipped = {}
        self.n_expected_passes = 0
-       self.expected_passes = {}
        self.n_expected_failures = 0
-       self.expected_failures = {}
-       self.n_missing_libs = 0
-       self.missing_libs = {}
-       self.n_unexpected_passes = 0
-       self.unexpected_passes = {}
-       self.n_unexpected_failures = 0
-       self.unexpected_failures = {}
-       
+
+       self.missing_libs = []
+       self.framework_failures = []
+       self.framework_warnings = []
+
+       self.expected_passes = []
+       self.unexpected_passes = []
+       self.unexpected_failures = []
+       self.unexpected_stat_failures = []
+
 global t
 t = TestRun()
 
@@ -155,10 +164,6 @@ def getTestRun():
 
 class TestOptions:
    def __init__(self):
-       # if not None then we look for namebase.stderr etc rather than
-       # using the test name
-       self.with_namebase = None
-
        # skip this test?
        self.skip = 0
 
@@ -181,13 +186,11 @@ class TestOptions:
        self.stdin = ''
 
        # don't compare output
-       self.ignore_output = 0
+       self.ignore_stdout = False
+       self.ignore_stderr = False
 
-       # don't give anything as stdin
-       self.no_stdin = 0
-
-       # compile this test to .hc only
-       self.compile_to_hc = 0
+       # Backpack test
+       self.compile_backpack = 0
 
        # We sometimes want to modify the compiler_always_flags, so
        # they are copied from config.compiler_always_flags when we
@@ -203,11 +206,11 @@ class TestOptions:
        # expected exit code
        self.exit_code = 0
 
-       # should we clean up after ourselves?
-       self.cleanup = ''
-
        # extra files to clean afterward
        self.clean_files = []
+
+       # extra files to copy to the testdir
+       self.extra_files = []
 
        # which -t numeric fields do we want to look at, and what bounds must
        # they fall within?
@@ -257,8 +260,14 @@ class TestOptions:
        # output, and a normaliser function given other test options
        self.check_stdout = None
 
+       # Check .hp file when profiling libraries are available?
+       self.check_hp = True
+
        # Extra normalisation for compiler error messages
        self.extra_errmsg_normaliser = lambda x: x
+
+       # Keep profiling callstacks.
+       self.keep_prof_callstacks = False
 
        # The directory the test is in
        self.testdir = '.'
@@ -267,7 +276,14 @@ class TestOptions:
        self.combined_output = False
 
        # How should the timeout be adjusted on this test?
-       self.timeout_multiplier = 1.0
+       self.compile_timeout_multiplier = 1.0
+       self.run_timeout_multiplier = 1.0
+
+       self.cleanup = True
+
+       # Sould we run tests in a local subdirectory (<testname>-run) or
+       # in temporary directory in /tmp? See Note [Running tests in /tmp].
+       self.local = True
 
 # The default set of options
 global default_testopts

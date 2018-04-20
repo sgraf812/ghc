@@ -51,7 +51,7 @@ boot all :: calibrate.out $(TIMEOUT_PROGRAM)
 
 calibrate.out:
 	$(RM) -f TimeMe.o TimeMe.hi TimeMe TimeMe.exe
-	$(PYTHON) calibrate '$(GHC_STAGE1)' > $@
+	$(PYTHON) calibrate '$(STAGE1_GHC)' > $@
 # We use stage 1 to do the calibration, as stage 2 may not exist.
 # This isn't necessarily the compiler we'll be running the testsuite
 # with, but it's really the performance of the machine that we're
@@ -62,7 +62,7 @@ endif
 endif
 
 clean distclean maintainer-clean:
-	-./Setup clean
+	test ! -f Setup || ./Setup clean
 	$(RM) -rf install-inplace
 	$(RM) -f calibrate.out
 	$(RM) -f Setup Setup.exe Setup.hi Setup.o

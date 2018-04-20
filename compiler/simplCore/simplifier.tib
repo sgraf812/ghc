@@ -75,7 +75,7 @@ a short-hand, not an algorithm.
     (y:ys) -> E1[y,ys]	
     []     -> E2
 @
-Transformations of this kind are almost embarassingly simple.  How could
+Transformations of this kind are almost embarrassingly simple.  How could
 anyone write a paper about them?
 \end{itemize}
 This paper is about humble transformations, and how to implement them. 
@@ -482,7 +482,7 @@ generate code, something like this:
       if (y) {...code for E2...}
   l1: ...code for E1...
 @
-In our setting, here's what will happen.  First we desguar the
+In our setting, here's what will happen.  First we desugar the
 conditional, and inline the definition of @||@:
 @
   case (case x of {True -> True; False -> y}) of

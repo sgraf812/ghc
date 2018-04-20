@@ -2,7 +2,7 @@
  *
  * (c) The GHC Team 1998-2008
  *
- * Functions called from outside the GC need to be separate from GC.c, 
+ * Functions called from outside the GC need to be separate from GC.c,
  * because GC.c is compiled with register variable(s).
  *
  * ---------------------------------------------------------------------------*/
@@ -43,7 +43,7 @@ isAlive(StgClosure *p)
 
     ASSERT(LOOKS_LIKE_CLOSURE_PTR(q));
 
-    // ignore static closures 
+    // ignore static closures
     //
     // ToDo: This means we never look through IND_STATIC, which means
     // isRetainer needs to handle the IND_STATIC case rather than
@@ -51,18 +51,18 @@ isAlive(StgClosure *p)
     //
     // ToDo: for static closures, check the static link field.
     // Problem here is that we sometimes don't set the link field, eg.
-    // for static closures with an empty SRT or CONSTR_STATIC_NOCAFs.
+    // for static closures with an empty SRT or CONSTR_NOCAFs.
     //
     if (!HEAP_ALLOCED_GC(q)) {
-	return p;
+        return p;
     }
 
-    // ignore closures in generations that we're not collecting. 
+    // ignore closures in generations that we're not collecting.
     bd = Bdescr((P_)q);
 
     // if it's a pointer into to-space, then we're done
     if (bd->flags & BF_EVACUATED) {
-	return p;
+        return p;
     }
 
     // large objects use the evacuated flag
@@ -70,15 +70,15 @@ isAlive(StgClosure *p)
         return NULL;
     }
 
-    // check the mark bit for compacted steps
+    // check the mark bit for compacted generations
     if ((bd->flags & BF_MARKED) && is_marked((P_)q,bd)) {
-	return p;
+        return p;
     }
 
     info = q->header.info;
 
     if (IS_FORWARDING_PTR(info)) {
-        // alive! 
+        // alive!
         return TAG_CLOSURE(tag,(StgClosure*)UN_FORWARDING_PTR(info));
     }
 
@@ -88,8 +88,7 @@ isAlive(StgClosure *p)
 
     case IND:
     case IND_STATIC:
-    case IND_PERM:
-      // follow indirections 
+      // follow indirections
       p = ((StgInd *)q)->indirectee;
       continue;
 
@@ -102,7 +101,7 @@ isAlive(StgClosure *p)
         }
 
     default:
-      // dead. 
+      // dead.
       return NULL;
     }
   }
@@ -118,14 +117,15 @@ revertCAFs( void )
     StgIndStatic *c;
 
     for (c = revertible_caf_list;
-         c != (StgIndStatic *)END_OF_STATIC_LIST; 
-	 c = (StgIndStatic *)c->static_link) 
+         c != (StgIndStatic *)END_OF_CAF_LIST;
+         c = (StgIndStatic *)c->static_link)
     {
+        c = (StgIndStatic *)UNTAG_STATIC_LIST_PTR(c);
         SET_INFO((StgClosure *)c, c->saved_info);
-	c->saved_info = NULL;
-	// could, but not necessary: c->static_link = NULL; 
+        c->saved_info = NULL;
+        // could, but not necessary: c->static_link = NULL;
     }
-    revertible_caf_list = (StgIndStatic*)END_OF_STATIC_LIST;
+    revertible_caf_list = (StgIndStatic*)END_OF_CAF_LIST;
 }
 
 void
@@ -134,23 +134,17 @@ markCAFs (evac_fn evac, void *user)
     StgIndStatic *c;
 
     for (c = dyn_caf_list;
-         c != (StgIndStatic*)END_OF_STATIC_LIST; 
-	 c = (StgIndStatic *)c->static_link) 
+         c != (StgIndStatic*)END_OF_CAF_LIST;
+         c = (StgIndStatic *)c->static_link)
     {
-	evac(user, &c->indirectee);
+        c = (StgIndStatic *)UNTAG_STATIC_LIST_PTR(c);
+        evac(user, &c->indirectee);
     }
     for (c = revertible_caf_list;
-         c != (StgIndStatic*)END_OF_STATIC_LIST; 
-	 c = (StgIndStatic *)c->static_link) 
+         c != (StgIndStatic*)END_OF_CAF_LIST;
+         c = (StgIndStatic *)c->static_link)
     {
-	evac(user, &c->indirectee);
+        c = (StgIndStatic *)UNTAG_STATIC_LIST_PTR(c);
+        evac(user, &c->indirectee);
     }
 }
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

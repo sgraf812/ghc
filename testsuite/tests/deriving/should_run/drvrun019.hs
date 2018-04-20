@@ -5,8 +5,8 @@
 
 module Main where
 
-newtype Wrap m a = Wrap { unWrap :: m a } 
-    deriving (Monad, Eq)
+newtype Wrap m a = Wrap { unWrap :: m a }
+    deriving (Functor, Applicative, Monad, Eq)
 
 foo :: Int -> Wrap IO a -> Wrap IO ()
 foo 0 a = return ()

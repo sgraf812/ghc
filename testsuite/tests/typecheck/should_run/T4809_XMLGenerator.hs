@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, TypeFamilies, MultiParamTypeClasses, FunctionalDependencies, 
+{-# LANGUAGE CPP, TypeFamilies, MultiParamTypeClasses, FunctionalDependencies,
       FlexibleContexts, FlexibleInstances, UndecidableInstances, OverlappingInstances,
       TypeSynonymInstances, GeneralizedNewtypeDeriving #-}
 -----------------------------------------------------------------------------
@@ -6,7 +6,7 @@
 -- Module      :  HSX.XMLGenerator
 -- Copyright   :  (c) Niklas Broberg 2008
 -- License     :  BSD-style (see the file LICENSE.txt)
--- 
+--
 -- Maintainer  :  Niklas Broberg, niklas.broberg@chalmers.se
 -- Stability   :  experimental
 -- Portability :  requires newtype deriving and MPTCs with fundeps
@@ -18,6 +18,8 @@
 -----------------------------------------------------------------------------
 module T4809_XMLGenerator where
 
+import Control.Applicative
+import Control.Monad
 import Control.Monad.Trans
 import Control.Monad.Cont  (MonadCont)
 import Control.Monad.Error (MonadError)
@@ -34,6 +36,12 @@ import Control.Monad (MonadPlus(..),liftM)
 newtype XMLGenT m a = XMLGenT (m a)
   deriving (Monad, Functor, MonadIO, MonadPlus, MonadWriter w, MonadReader r,
             MonadState s, MonadRWS r w s, MonadCont, MonadError e)
+
+instance Monad m => Applicative (XMLGenT m) where
+  pure  = return
+  (<*>) = ap
+
+instance Monad m => Alternative (XMLGenT m) where
 
 -- | un-lift.
 unXMLGenT :: XMLGenT m a -> m a
@@ -64,11 +72,11 @@ instance (MonadIO m, EmbedAsChild m c, m ~ n) => EmbedAsChild m (XMLGenT n c) wh
       asChild a
 
 instance (MonadIO m, EmbedAsChild m c) => EmbedAsChild m [c] where
-  asChild cs = 
+  asChild cs =
       do liftIO $ putStrLn "EmbedAsChild m [c]"
          liftM concat . mapM asChild $ cs
 
 instance (MonadIO m, XMLGen m) => EmbedAsChild m (Child m) where
- asChild c = 
+ asChild c =
      do liftIO $ putStrLn "EmbedAsChild m (Child m)"
-        return . return $ c 
+        return . return $ c

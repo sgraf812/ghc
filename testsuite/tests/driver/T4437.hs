@@ -1,3 +1,8 @@
+-- | A test for ensuring that GHC's supporting language extensions remains in
+-- sync with Cabal's own extension list.
+--
+-- If you have ended up here due to a test failure, please see
+-- Note [Adding a language extension] in compiler/main/DynFlags.hs.
 
 module Main (main) where
 
@@ -8,7 +13,7 @@ import Language.Haskell.Extension
 
 main :: IO ()
 main = do
-    let ghcExtensions = [ ext | (ext, _, _) <- xFlags ]
+    let ghcExtensions = map flagSpecName xFlags
         cabalExtensions = map show [ toEnum 0 :: KnownExtension .. ]
         ghcOnlyExtensions = ghcExtensions \\ cabalExtensions
         cabalOnlyExtensions = cabalExtensions \\ ghcExtensions
@@ -29,12 +34,13 @@ check title expected got
          showProblems "Unexpected flags" unexpected
          showProblems "Missing flags" missing
 
+-- See Note [Adding a language extension] in compiler/main/DynFlags.hs.
 expectedGhcOnlyExtensions :: [String]
 expectedGhcOnlyExtensions = ["RelaxedLayout",
                              "AlternativeLayoutRule",
                              "AlternativeLayoutRuleTransitional",
-                             "JavaScriptFFI",
-                             "PatternSynonyms"]
+                             "EmptyDataDeriving",
+                             "GeneralisedNewtypeDeriving"]
 
 expectedCabalOnlyExtensions :: [String]
 expectedCabalOnlyExtensions = ["Generics",
@@ -48,4 +54,3 @@ expectedCabalOnlyExtensions = ["Generics",
                                "Safe",
                                "Unsafe",
                                "Trustworthy"]
-

@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -9,18 +9,20 @@ module CmmExpr
     , CmmReg(..), cmmRegType
     , CmmLit(..), cmmLitType
     , LocalReg(..), localRegType
-    , GlobalReg(..), isArgReg, globalRegType, spReg, hpReg, spLimReg, nodeReg, node, baseReg
-    , VGcPtr(..), vgcFlag       -- Temporary!
+    , GlobalReg(..), isArgReg, globalRegType
+    , spReg, hpReg, spLimReg, hpLimReg, nodeReg
+    , currentTSOReg, currentNurseryReg, hpAllocReg, cccsReg
+    , node, baseReg
+    , VGcPtr(..)
 
     , DefinerOfRegs, UserOfRegs
-    , foldRegsDefd, foldRegsUsed, filterRegsUsed
+    , foldRegsDefd, foldRegsUsed
     , foldLocalRegsDefd, foldLocalRegsUsed
 
     , RegSet, LocalRegSet, GlobalRegSet
     , emptyRegSet, elemRegSet, extendRegSet, deleteFromRegSet, mkRegSet
     , plusRegSet, minusRegSet, timesRegSet, sizeRegSet, nullRegSet
     , regSetToList
-    , regUsedIn
 
     , Area(..)
     , module CmmMachOp
@@ -28,17 +30,18 @@ module CmmExpr
     )
 where
 
-#include "HsVersions.h"
+import GhcPrelude
 
-import CmmType
-import CmmMachOp
 import BlockId
 import CLabel
+import CmmMachOp
+import CmmType
 import DynFlags
-import Unique
 import Outputable (panic)
+import Unique
 
 import Data.Set (Set)
+import Data.List
 import qualified Data.Set as Set
 
 -----------------------------------------------------------------------------
@@ -251,8 +254,11 @@ data LocalReg
 instance Eq LocalReg where
   (LocalReg u1 _) == (LocalReg u2 _) = u1 == u2
 
+-- This is non-deterministic but we do not currently support deterministic
+-- code-generation. See Note [Unique Determinism and code generation]
+-- See Note [No Ord for Unique]
 instance Ord LocalReg where
-  compare (LocalReg u1 _) (LocalReg u2 _) = compare u1 u2
+  compare (LocalReg u1 _) (LocalReg u2 _) = nonDetCmpUnique u1 u2
 
 instance Uniquable LocalReg where
   getUnique (LocalReg uniq _) = uniq
@@ -280,15 +286,15 @@ type RegSet r     = Set r
 type LocalRegSet  = RegSet LocalReg
 type GlobalRegSet = RegSet GlobalReg
 
-emptyRegSet             :: Ord r => RegSet r
-nullRegSet              :: Ord r => RegSet r -> Bool
+emptyRegSet             :: RegSet r
+nullRegSet              :: RegSet r -> Bool
 elemRegSet              :: Ord r => r -> RegSet r -> Bool
 extendRegSet            :: Ord r => RegSet r -> r -> RegSet r
 deleteFromRegSet        :: Ord r => RegSet r -> r -> RegSet r
 mkRegSet                :: Ord r => [r] -> RegSet r
 minusRegSet, plusRegSet, timesRegSet :: Ord r => RegSet r -> RegSet r -> RegSet r
-sizeRegSet              :: Ord r => RegSet r -> Int
-regSetToList            :: Ord r => RegSet r -> [r]
+sizeRegSet              :: RegSet r -> Int
+regSetToList            :: RegSet r -> [r]
 
 emptyRegSet      = Set.empty
 nullRegSet       = Set.null
@@ -316,12 +322,6 @@ foldLocalRegsDefd :: DefinerOfRegs LocalReg a
                   => DynFlags -> (b -> LocalReg -> b) -> b -> a -> b
 foldLocalRegsDefd = foldRegsDefd
 
-filterRegsUsed :: UserOfRegs r e => DynFlags -> (r -> Bool) -> e -> RegSet r
-filterRegsUsed dflags p e =
-    foldRegsUsed dflags
-                 (\regs r -> if p r then extendRegSet regs r else regs)
-                 emptyRegSet e
-
 instance UserOfRegs LocalReg CmmReg where
     foldRegsUsed _ f z (CmmLocal reg) = f z reg
     foldRegsUsed _ _ z (CmmGlobal _)  = z
@@ -344,11 +344,10 @@ instance Ord r => UserOfRegs r r where
 instance Ord r => DefinerOfRegs r r where
     foldRegsDefd _ f z r = f z r
 
-instance Ord r => UserOfRegs r (RegSet r) where
-    foldRegsUsed _ f = Set.fold (flip f)
-
-instance UserOfRegs r CmmReg => UserOfRegs r CmmExpr where
-  foldRegsUsed dflags f z e = expr z e
+instance (Ord r, UserOfRegs r CmmReg) => UserOfRegs r CmmExpr where
+  -- The (Ord r) in the context is necessary here
+  -- See Note [Recursive superclasses] in TcInstDcls
+  foldRegsUsed dflags f !z e = expr z e
     where expr z (CmmLit _)          = z
           expr z (CmmLoad addr _)    = foldRegsUsed dflags f z addr
           expr z (CmmReg r)          = foldRegsUsed dflags f z r
@@ -356,46 +355,47 @@ instance UserOfRegs r CmmReg => UserOfRegs r CmmExpr where
           expr z (CmmRegOff r _)     = foldRegsUsed dflags f z r
           expr z (CmmStackSlot _ _)  = z
 
-instance UserOfRegs r a => UserOfRegs r (Maybe a) where
-    foldRegsUsed dflags f z (Just x) = foldRegsUsed dflags f z x
-    foldRegsUsed _      _ z Nothing = z
-
 instance UserOfRegs r a => UserOfRegs r [a] where
-  foldRegsUsed _      _ set [] = set
-  foldRegsUsed dflags f set (x:xs) = foldRegsUsed dflags f (foldRegsUsed dflags f set x) xs
+  foldRegsUsed dflags f set as = foldl' (foldRegsUsed dflags f) set as
+  {-# INLINABLE foldRegsUsed #-}
 
 instance DefinerOfRegs r a => DefinerOfRegs r [a] where
-  foldRegsDefd _      _ set [] = set
-  foldRegsDefd dflags f set (x:xs) = foldRegsDefd dflags f (foldRegsDefd dflags f set x) xs
-
-instance DefinerOfRegs r a => DefinerOfRegs r (Maybe a) where
-  foldRegsDefd _      _ set Nothing  = set
-  foldRegsDefd dflags f set (Just x) = foldRegsDefd dflags f set x
-
------------------------------------------------------------------------------
--- Another reg utility
-
-regUsedIn :: CmmReg -> CmmExpr -> Bool
-_   `regUsedIn` CmmLit _         = False
-reg `regUsedIn` CmmLoad e  _     = reg `regUsedIn` e
-reg `regUsedIn` CmmReg reg'      = reg == reg'
-reg `regUsedIn` CmmRegOff reg' _ = reg == reg'
-reg `regUsedIn` CmmMachOp _ es   = any (reg `regUsedIn`) es
-_   `regUsedIn` CmmStackSlot _ _ = False
+  foldRegsDefd dflags f set as = foldl' (foldRegsDefd dflags f) set as
+  {-# INLINABLE foldRegsDefd #-}
 
 -----------------------------------------------------------------------------
 --              Global STG registers
 -----------------------------------------------------------------------------
 
 data VGcPtr = VGcPtr | VNonGcPtr deriving( Eq, Show )
-        -- TEMPORARY!!!
 
 -----------------------------------------------------------------------------
 --              Global STG registers
 -----------------------------------------------------------------------------
-vgcFlag :: CmmType -> VGcPtr
-vgcFlag ty | isGcPtrType ty = VGcPtr
-           | otherwise      = VNonGcPtr
+{-
+Note [Overlapping global registers]
+
+The backend might not faithfully implement the abstraction of the STG
+machine with independent registers for different values of type
+GlobalReg. Specifically, certain pairs of registers (r1, r2) may
+overlap in the sense that a store to r1 invalidates the value in r2,
+and vice versa.
+
+Currently this occurs only on the x86_64 architecture where FloatReg n
+and DoubleReg n are assigned the same microarchitectural register, in
+order to allow functions to receive more Float# or Double# arguments
+in registers (as opposed to on the stack).
+
+There are no specific rules about which registers might overlap with
+which other registers, but presumably it's safe to assume that nothing
+will overlap with special registers like Sp or BaseReg.
+
+Use CmmUtils.regsOverlap to determine whether two GlobalRegs overlap
+on a particular platform. The instance Eq GlobalReg is syntactic
+equality of STG registers and does not take overlap into
+account. However it is still used in UserOfRegs/DefinerOfRegs and
+there are likely still bugs there, beware!
+-}
 
 data GlobalReg
   -- Argument and return registers
@@ -415,10 +415,10 @@ data GlobalReg
   | XmmReg                      -- 128-bit SIMD vector register
         {-# UNPACK #-} !Int     -- its number
 
-  | YmmReg                      -- 256-bit SIMD vector register 
+  | YmmReg                      -- 256-bit SIMD vector register
         {-# UNPACK #-} !Int     -- its number
 
-  | ZmmReg                      -- 512-bit SIMD vector register 
+  | ZmmReg                      -- 512-bit SIMD vector register
         {-# UNPACK #-} !Int     -- its number
 
   -- STG registers
@@ -443,6 +443,15 @@ data GlobalReg
   -- will only appear after we have expanded GlobalReg into memory accesses
   -- (where necessary) in the native code generator.
   | BaseReg
+
+  -- The register used by the platform for the C stack pointer. This is
+  -- a break in the STG abstraction used exclusively to setup stack unwinding
+  -- information.
+  | MachSp
+
+  -- The is a dummy register used to indicate to the stack unwinder where
+  -- a routine would return to.
+  | UnwindReturnReg
 
   -- Base Register for PIC (position-independent code) calculations
   -- Only used inside the native code generator. It's exact meaning differs
@@ -471,6 +480,8 @@ instance Eq GlobalReg where
    GCEnter1 == GCEnter1 = True
    GCFun == GCFun = True
    BaseReg == BaseReg = True
+   MachSp == MachSp = True
+   UnwindReturnReg == UnwindReturnReg = True
    PicBaseReg == PicBaseReg = True
    _r1 == _r2 = False
 
@@ -495,6 +506,8 @@ instance Ord GlobalReg where
    compare GCEnter1 GCEnter1 = EQ
    compare GCFun GCFun = EQ
    compare BaseReg BaseReg = EQ
+   compare MachSp MachSp = EQ
+   compare UnwindReturnReg UnwindReturnReg = EQ
    compare PicBaseReg PicBaseReg = EQ
    compare (VanillaReg _ _) _ = LT
    compare _ (VanillaReg _ _) = GT
@@ -532,16 +545,26 @@ instance Ord GlobalReg where
    compare _ GCFun = GT
    compare BaseReg _ = LT
    compare _ BaseReg = GT
+   compare MachSp _ = LT
+   compare _ MachSp = GT
+   compare UnwindReturnReg _ = LT
+   compare _ UnwindReturnReg = GT
    compare EagerBlackholeInfo _ = LT
    compare _ EagerBlackholeInfo = GT
 
 -- convenient aliases
-baseReg, spReg, hpReg, spLimReg, nodeReg :: CmmReg
+baseReg, spReg, hpReg, spLimReg, hpLimReg, nodeReg,
+  currentTSOReg, currentNurseryReg, hpAllocReg, cccsReg  :: CmmReg
 baseReg = CmmGlobal BaseReg
 spReg = CmmGlobal Sp
 hpReg = CmmGlobal Hp
+hpLimReg = CmmGlobal HpLim
 spLimReg = CmmGlobal SpLim
 nodeReg = CmmGlobal node
+currentTSOReg = CmmGlobal CurrentTSO
+currentNurseryReg = CmmGlobal CurrentNursery
+hpAllocReg = CmmGlobal HpAlloc
+cccsReg = CmmGlobal CCCS
 
 node :: GlobalReg
 node = VanillaReg 1 VGcPtr

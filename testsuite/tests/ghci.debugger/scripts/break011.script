@@ -3,7 +3,7 @@ error "foo"
 :set -fbreak-on-exception
 error "foo"
 :abandon
-:l ../Test7.hs
+:l Test7.hs
 :tr main
 :hist
 :back
@@ -15,4 +15,7 @@ error "foo"
 :force _exception
 :show bindings
 :force _result
+-- the exception is caught by the withProg/withArgs wrappers, hence 3 :continues
+:continue
+:continue
 :continue

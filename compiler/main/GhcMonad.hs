@@ -1,4 +1,4 @@
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE CPP, RankNTypes #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 -- -----------------------------------------------------------------------------
 --
@@ -11,10 +11,10 @@
 module GhcMonad (
         -- * 'Ghc' monad stuff
         GhcMonad(..),
-        Ghc(..), 
+        Ghc(..),
         GhcT(..), liftGhcT,
         reflectGhc, reifyGhc,
-        getSessionDynFlags, 
+        getSessionDynFlags,
         liftIO,
         Session(..), withSession, modifySession, withTempSession,
 
@@ -23,12 +23,15 @@ module GhcMonad (
         WarnErrLogger, defaultWarnErrLogger
   ) where
 
+import GhcPrelude
+
 import MonadUtils
 import HscTypes
 import DynFlags
 import Exception
 import ErrUtils
 
+import Control.Monad
 import Data.IORef
 
 -- -----------------------------------------------------------------------------
@@ -93,17 +96,16 @@ newtype Ghc a = Ghc { unGhc :: Session -> IO a }
 -- session.  A compilation session consists of a set of modules
 -- constituting the current program or library, the context for
 -- interactive evaluation, and various caches.
-data Session = Session !(IORef HscEnv) 
+data Session = Session !(IORef HscEnv)
 
 instance Functor Ghc where
   fmap f m = Ghc $ \s -> f `fmap` unGhc m s
 
 instance Applicative Ghc where
-  pure    = return
+  pure a = Ghc $ \_ -> return a
   g <*> m = do f <- g; a <- m; return (f a)
 
 instance Monad Ghc where
-  return a = Ghc $ \_ -> return a
   m >>= g  = Ghc $ \s -> do a <- unGhc m s; unGhc (g a) s
 
 instance MonadIO Ghc where
@@ -156,7 +158,8 @@ reifyGhc act = Ghc $ act
 --
 -- Note that the wrapped monad must support IO and handling of exceptions.
 newtype GhcT m a = GhcT { unGhcT :: Session -> m a }
-liftGhcT :: Monad m => m a -> GhcT m a
+
+liftGhcT :: m a -> GhcT m a
 liftGhcT m = GhcT $ \_ -> m
 
 instance Functor m => Functor (GhcT m) where
@@ -167,7 +170,6 @@ instance Applicative m => Applicative (GhcT m) where
   g <*> m = GhcT $ \s -> unGhcT g s <*> unGhcT m s
 
 instance Monad m => Monad (GhcT m) where
-  return x = GhcT $ \_ -> return x
   m >>= k  = GhcT $ \s -> do a <- unGhcT m s; unGhcT (k a) s
 
 instance MonadIO m => MonadIO (GhcT m) where
@@ -183,10 +185,10 @@ instance ExceptionMonad m => ExceptionMonad (GhcT m) where
                            in
                               unGhcT (f g_restore) s
 
-instance (Functor m, ExceptionMonad m, MonadIO m) => HasDynFlags (GhcT m) where
-  getDynFlags = getSessionDynFlags
+instance MonadIO m => HasDynFlags (GhcT m) where
+  getDynFlags = GhcT $ \(Session r) -> liftM hsc_dflags (liftIO $ readIORef r)
 
-instance (Functor m, ExceptionMonad m, MonadIO m) => GhcMonad (GhcT m) where
+instance ExceptionMonad m => GhcMonad (GhcT m) where
   getSession = GhcT $ \(Session r) -> liftIO $ readIORef r
   setSession s' = GhcT $ \(Session r) -> liftIO $ writeIORef r s'
 
@@ -199,7 +201,7 @@ printException err = do
   liftIO $ printBagOfErrors dflags (srcErrorMessages err)
 
 -- | A function called to log warnings and errors.
-type WarnErrLogger = GhcMonad m => Maybe SourceError -> m ()
+type WarnErrLogger = forall m. GhcMonad m => Maybe SourceError -> m ()
 
 defaultWarnErrLogger :: WarnErrLogger
 defaultWarnErrLogger Nothing  = return ()

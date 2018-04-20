@@ -1,5 +1,3 @@
-{-# LANGUAGE CPP #-}
-
 -----------------------------------------------------------------------------
 --
 -- Code generation for profiling
@@ -16,7 +14,7 @@ module StgCmmProf (
         dynProfHdr, profDynAlloc, profAlloc, staticProfHdr, initUpdFrameProf,
         enterCostCentreThunk, enterCostCentreFun,
         costCentreFrom,
-        curCCS, storeCurCCS,
+        storeCurCCS,
         emitSetCCC,
 
         saveCurrentCostCentre, restoreCurrentCostCentre,
@@ -25,7 +23,7 @@ module StgCmmProf (
         ldvEnter, ldvEnterClosure, ldvRecordCreate
   ) where
 
-#include "HsVersions.h"
+import GhcPrelude
 
 import StgCmmClosure
 import StgCmmUtils
@@ -60,11 +58,8 @@ ccsType = bWord
 ccType :: DynFlags -> CmmType -- Type of a cost centre
 ccType = bWord
 
-curCCS :: CmmExpr
-curCCS = CmmReg (CmmGlobal CCCS)
-
 storeCurCCS :: CmmExpr -> CmmAGraph
-storeCurCCS e = mkAssign (CmmGlobal CCCS) e
+storeCurCCS e = mkAssign cccsReg e
 
 mkCCostCentre :: CostCentre -> CmmLit
 mkCCostCentre cc = CmmLabel (mkCCLabel cc)
@@ -91,7 +86,7 @@ initUpdFrameProf :: CmmExpr -> FCode ()
 initUpdFrameProf frame
   = ifProfiling $        -- frame->header.prof.ccs = CCCS
     do dflags <- getDynFlags
-       emitStore (cmmOffset dflags frame (oFFSET_StgHeader_ccs dflags)) curCCS
+       emitStore (cmmOffset dflags frame (oFFSET_StgHeader_ccs dflags)) cccsExpr
         -- frame->header.prof.hp.rs = NULL (or frame-header.prof.hp.ldvw = 0)
         -- is unnecessary because it is not used anyhow.
 
@@ -131,7 +126,7 @@ saveCurrentCostCentre
        if not (gopt Opt_SccProfilingOn dflags)
            then return Nothing
            else do local_cc <- newTemp (ccType dflags)
-                   emitAssign (CmmLocal local_cc) curCCS
+                   emitAssign (CmmLocal local_cc) cccsExpr
                    return (Just local_cc)
 
 restoreCurrentCostCentre :: Maybe LocalReg -> FCode ()
@@ -183,8 +178,8 @@ enterCostCentreFun ccs closure =
   ifProfiling $ do
     if isCurrentCCS ccs
        then do dflags <- getDynFlags
-               emitRtsCall rtsPackageKey (fsLit "enterFunCCS")
-                   [(CmmReg (CmmGlobal BaseReg), AddrHint),
+               emitRtsCall rtsUnitId (fsLit "enterFunCCS")
+                   [(baseExpr, AddrHint),
                     (costCentreFrom dflags closure, AddrHint)] False
        else return () -- top-level function, nothing to do
 
@@ -207,7 +202,7 @@ ifProfilingL dflags xs
 
 initCostCentres :: CollectedCCs -> FCode ()
 -- Emit the declarations
-initCostCentres (local_CCs, ___extern_CCs, singleton_CCSs)
+initCostCentres (local_CCs, singleton_CCSs)
   = do dflags <- getDynFlags
        when (gopt Opt_SccProfilingOn dflags) $
            do mapM_ emitCostCentreDecl local_CCs
@@ -277,15 +272,15 @@ emitSetCCC cc tick push
  = do dflags <- getDynFlags
       if not (gopt Opt_SccProfilingOn dflags)
           then return ()
-          else do tmp <- newTemp (ccsType dflags) -- TODO FIXME NOW
-                  pushCostCentre tmp curCCS cc
+          else do tmp <- newTemp (ccsType dflags)
+                  pushCostCentre tmp cccsExpr cc
                   when tick $ emit (bumpSccCount dflags (CmmReg (CmmLocal tmp)))
                   when push $ emit (storeCurCCS (CmmReg (CmmLocal tmp)))
 
 pushCostCentre :: LocalReg -> CmmExpr -> CostCentre -> FCode ()
 pushCostCentre result ccs cc
   = emitRtsCallWithResult result AddrHint
-        rtsPackageKey
+        rtsUnitId
         (fsLit "pushCostCentre") [(ccs,AddrHint),
                                 (CmmLit (mkCCostCentre cc), AddrHint)]
         False
@@ -321,14 +316,14 @@ dynLdvInit dflags =     -- (era << LDV_SHIFT) | LDV_STATE_CREATE
 -- Initialise the LDV word of a new closure
 --
 ldvRecordCreate :: CmmExpr -> FCode ()
-ldvRecordCreate closure = do dflags <- getDynFlags
-                             emit $ mkStore (ldvWord dflags closure) (dynLdvInit dflags)
+ldvRecordCreate closure = do
+  dflags <- getDynFlags
+  emit $ mkStore (ldvWord dflags closure) (dynLdvInit dflags)
 
 --
--- Called when a closure is entered, marks the closure as having been "used".
--- The closure is not an 'inherently used' one.
--- The closure is not IND or IND_OLDGEN because neither is considered for LDV
--- profiling.
+-- | Called when a closure is entered, marks the closure as having
+-- been "used".  The closure is not an "inherently used" one.  The
+-- closure is not @IND@ because that is not considered for LDV profiling.
 --
 ldvEnterClosure :: ClosureInfo -> CmmReg -> FCode ()
 ldvEnterClosure closure_info node_reg = do
@@ -356,7 +351,7 @@ ldvEnter cl_ptr = do
 
 loadEra :: DynFlags -> CmmExpr
 loadEra dflags = CmmMachOp (MO_UU_Conv (cIntWidth dflags) (wordWidth dflags))
-    [CmmLoad (mkLblExpr (mkCmmDataLabel rtsPackageKey (fsLit "era")))
+    [CmmLoad (mkLblExpr (mkCmmDataLabel rtsUnitId (fsLit "era")))
              (cInt dflags)]
 
 ldvWord :: DynFlags -> CmmExpr -> CmmExpr

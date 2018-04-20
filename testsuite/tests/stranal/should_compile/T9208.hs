@@ -1,6 +1,16 @@
 {-# LANGUAGE CPP, LambdaCase, BangPatterns, MagicHash, TupleSections, ScopedTypeVariables #-}
 {-# OPTIONS_GHC -w #-}  -- Suppress warnings for unimplemented methods
 
+------------- WARNING ---------------------
+--
+-- This program is utterly bogus. It takes a value of type ()
+-- and unsafe-coerces it to a function, and applies it.
+-- This is caught by an ASSERT with a debug compiler.
+--
+-- See Trac #9208 for discussion
+--
+--------------------------------------------
+
 {- | Evaluate Template Haskell splices on node.js,
      using pipes to communicate with GHCJS
  -}
@@ -12,6 +22,10 @@ module Eval (
 
 import           Control.Applicative
 import           Control.Monad
+#if __GLASGOW_HASKELL__ >= 800
+import           Control.Monad.Fail (MonadFail(fail))
+#endif
+import           Control.Monad.IO.Class (MonadIO (..))
 
 import           Data.Binary
 import           Data.Binary.Get
@@ -19,7 +33,7 @@ import           Data.ByteString          (ByteString)
 import qualified Data.ByteString          as B
 import qualified Data.ByteString.Lazy     as BL
 
-import           GHC.Prim
+import           GHC.Base                 (Any)
 
 import qualified Language.Haskell.TH        as TH
 import qualified Language.Haskell.TH.Syntax as TH
@@ -63,7 +77,13 @@ instance Monad GHCJSQ where
        return (a, s'')
   return    = pure
 
-instance TH.Quasi GHCJSQ where qRunIO m = GHCJSQ $ \s -> fmap (,s) m
+#if __GLASGOW_HASKELL__ >= 800
+instance MonadFail GHCJSQ where
+  fail = undefined
+#endif
+
+instance MonadIO GHCJSQ where liftIO m = GHCJSQ $ \s -> fmap (,s) m
+instance TH.Quasi GHCJSQ
 
 -- | the Template Haskell server
 runTHServer :: IO ()

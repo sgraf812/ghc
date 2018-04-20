@@ -3,8 +3,8 @@
  * (c) The GHC Team, 2001-2009
  *
  * Accessing OS threads functionality in a (mostly) OS-independent
- * manner. 
- * 
+ * manner.
+ *
  * Do not #include this file directly: #include "Rts.h" instead.
  *
  * To understand the structure of the RTS headers, see the wiki:
@@ -12,18 +12,15 @@
  *
  * --------------------------------------------------------------------------*/
 
-#ifndef RTS_OSTHREADS_H
-#define RTS_OSTHREADS_H
-
-#if defined(THREADED_RTS) /* to near the end */
+#pragma once
 
 #if defined(HAVE_PTHREAD_H) && !defined(mingw32_HOST_OS)
 
-#if CMINUSMINUS
+#if defined(CMINUSMINUS)
 
-#define ACQUIRE_LOCK(mutex) foreign "C" pthread_mutex_lock(mutex)
-#define RELEASE_LOCK(mutex) foreign "C" pthread_mutex_unlock(mutex)
-#define ASSERT_LOCK_HELD(mutex) /* nothing */
+#define OS_ACQUIRE_LOCK(mutex) foreign "C" pthread_mutex_lock(mutex)
+#define OS_RELEASE_LOCK(mutex) foreign "C" pthread_mutex_unlock(mutex)
+#define OS_ASSERT_LOCK_HELD(mutex) /* nothing */
 
 #else
 
@@ -39,7 +36,7 @@ typedef pthread_key_t   ThreadLocalKey;
 
 #define INIT_COND_VAR       PTHREAD_COND_INITIALIZER
 
-#ifdef LOCK_DEBUG
+#if defined(LOCK_DEBUG)
 #define LOCK_DEBUG_BELCH(what, mutex) \
   debugBelch("%s(0x%p) %s %d\n", what, mutex, __FILE__, __LINE__)
 #else
@@ -47,7 +44,7 @@ typedef pthread_key_t   ThreadLocalKey;
 #endif
 
 /* Always check the result of lock and unlock. */
-#define ACQUIRE_LOCK(mutex) \
+#define OS_ACQUIRE_LOCK(mutex) \
   LOCK_DEBUG_BELCH("ACQUIRE_LOCK", mutex); \
   if (pthread_mutex_lock(mutex) == EDEADLK) { \
     barf("multiple ACQUIRE_LOCK: %s %d", __FILE__,__LINE__); \
@@ -61,7 +58,7 @@ EXTERN_INLINE int TRY_ACQUIRE_LOCK(pthread_mutex_t *mutex)
     return pthread_mutex_trylock(mutex);
 }
 
-#define RELEASE_LOCK(mutex) \
+#define OS_RELEASE_LOCK(mutex) \
   LOCK_DEBUG_BELCH("RELEASE_LOCK", mutex); \
   if (pthread_mutex_unlock(mutex) != 0) { \
     barf("RELEASE_LOCK: I do not own this lock: %s %d", __FILE__,__LINE__); \
@@ -72,20 +69,20 @@ EXTERN_INLINE int TRY_ACQUIRE_LOCK(pthread_mutex_t *mutex)
 // have been created with PTHREAD_MUTEX_ERRORCHECK, otherwise this
 // assertion will hang.  We always initialise mutexes with
 // PTHREAD_MUTEX_ERRORCHECK when DEBUG is on (see rts/posix/OSThreads.h).
-#define ASSERT_LOCK_HELD(mutex) ASSERT(pthread_mutex_lock(mutex) == EDEADLK)
+#define OS_ASSERT_LOCK_HELD(mutex) ASSERT(pthread_mutex_lock(mutex) == EDEADLK)
 
 #endif // CMINUSMINUS
 
 # elif defined(HAVE_WINDOWS_H)
 
-#if CMINUSMINUS
+#if defined(CMINUSMINUS)
 
 /* We jump through a hoop here to get a CCall EnterCriticalSection
    and LeaveCriticalSection, as that's what C-- wants. */
 
-#define ACQUIRE_LOCK(mutex) foreign "stdcall" EnterCriticalSection(mutex)
-#define RELEASE_LOCK(mutex) foreign "stdcall" LeaveCriticalSection(mutex)
-#define ASSERT_LOCK_HELD(mutex) /* nothing */
+#define OS_ACQUIRE_LOCK(mutex) foreign "stdcall" EnterCriticalSection(mutex)
+#define OS_RELEASE_LOCK(mutex) foreign "stdcall" LeaveCriticalSection(mutex)
+#define OS_ASSERT_LOCK_HELD(mutex) /* nothing */
 
 #else
 
@@ -93,7 +90,7 @@ EXTERN_INLINE int TRY_ACQUIRE_LOCK(pthread_mutex_t *mutex)
 
 typedef HANDLE Condition;
 typedef DWORD OSThreadId;
-// don't be tempted to use HANDLE as the OSThreadId: there can be 
+// don't be tempted to use HANDLE as the OSThreadId: there can be
 // many HANDLES to a given thread, so comparison would not work.
 typedef DWORD ThreadLocalKey;
 
@@ -113,25 +110,25 @@ typedef DWORD ThreadLocalKey;
 
 typedef CRITICAL_SECTION Mutex;
 
-#ifdef LOCK_DEBUG
+#if defined(LOCK_DEBUG)
 
-#define ACQUIRE_LOCK(mutex) \
+#define OS_ACQUIRE_LOCK(mutex) \
   debugBelch("ACQUIRE_LOCK(0x%p) %s %d\n", mutex,__FILE__,__LINE__); \
   EnterCriticalSection(mutex)
-#define RELEASE_LOCK(mutex) \
+#define OS_RELEASE_LOCK(mutex) \
   debugBelch("RELEASE_LOCK(0x%p) %s %d\n", mutex,__FILE__,__LINE__); \
   LeaveCriticalSection(mutex)
-#define ASSERT_LOCK_HELD(mutex) /* nothing */
+#define OS_ASSERT_LOCK_HELD(mutex) /* nothing */
 
 #else
 
-#define ACQUIRE_LOCK(mutex)      EnterCriticalSection(mutex)
+#define OS_ACQUIRE_LOCK(mutex)      EnterCriticalSection(mutex)
 #define TRY_ACQUIRE_LOCK(mutex)  (TryEnterCriticalSection(mutex) == 0)
-#define RELEASE_LOCK(mutex)      LeaveCriticalSection(mutex)
+#define OS_RELEASE_LOCK(mutex)      LeaveCriticalSection(mutex)
 
 // I don't know how to do this.  TryEnterCriticalSection() doesn't do
 // the right thing.
-#define ASSERT_LOCK_HELD(mutex) /* nothing */
+#define OS_ASSERT_LOCK_HELD(mutex) /* nothing */
 
 #endif
 
@@ -141,27 +138,27 @@ typedef HANDLE Mutex;
 
 // casting to (Mutex *) here required due to use in .cmm files where
 // the argument has (void *) type.
-#define ACQUIRE_LOCK(mutex)					\
+#define OS_ACQUIRE_LOCK(mutex)                                     \
     if (WaitForSingleObject(*((Mutex *)mutex),INFINITE) == WAIT_FAILED) { \
-	barf("WaitForSingleObject: %d", GetLastError());	\
+        barf("WaitForSingleObject: %d", GetLastError());        \
     }
 
-#define RELEASE_LOCK(mutex)				\
-    if (ReleaseMutex(*((Mutex *)mutex)) == 0) {		\
-	barf("ReleaseMutex: %d", GetLastError());	\
+#define OS_RELEASE_LOCK(mutex)                             \
+    if (ReleaseMutex(*((Mutex *)mutex)) == 0) {         \
+        barf("ReleaseMutex: %d", GetLastError());       \
     }
 
-#define ASSERT_LOCK_HELD(mutex) /* nothing */
+#define OS_ASSERT_LOCK_HELD(mutex) /* nothing */
 #endif
 
 #endif // CMINUSMINUS
 
-# else
+# elif defined(THREADED_RTS)
 #  error "Threads not supported"
 # endif
 
 
-#ifndef CMINUSMINUS
+#if !defined(CMINUSMINUS)
 //
 // General thread operations
 //
@@ -171,19 +168,19 @@ extern void yieldThread           ( void );
 
 typedef void OSThreadProcAttr OSThreadProc(void *);
 
-extern int  createOSThread        ( OSThreadId* tid, 
-				    OSThreadProc *startProc, void *param);
-extern rtsBool osThreadIsAlive    ( OSThreadId id );
-extern void interruptOSThread (OSThreadId id);
+extern int  createOSThread        ( OSThreadId* tid, char *name,
+                                    OSThreadProc *startProc, void *param);
+extern bool osThreadIsAlive       ( OSThreadId id );
+extern void interruptOSThread     (OSThreadId id);
 
 //
 // Condition Variables
 //
 extern void initCondition         ( Condition* pCond );
 extern void closeCondition        ( Condition* pCond );
-extern rtsBool broadcastCondition ( Condition* pCond );
-extern rtsBool signalCondition    ( Condition* pCond );
-extern rtsBool waitCondition      ( Condition* pCond, Mutex* pMut );
+extern bool broadcastCondition    ( Condition* pCond );
+extern bool signalCondition       ( Condition* pCond );
+extern bool waitCondition         ( Condition* pCond, Mutex* pMut );
 
 //
 // Mutexes
@@ -200,8 +197,16 @@ void  setThreadLocalVar (ThreadLocalKey *key, void *value);
 void  freeThreadLocalKey (ThreadLocalKey *key);
 
 // Processors and affinity
-void setThreadAffinity     (nat n, nat m);
+void setThreadAffinity (uint32_t n, uint32_t m);
+void setThreadNode (uint32_t node);
+void releaseThreadNode (void);
 #endif // !CMINUSMINUS
+
+#if defined(THREADED_RTS)
+
+#define ACQUIRE_LOCK(l) OS_ACQUIRE_LOCK(l)
+#define RELEASE_LOCK(l) OS_RELEASE_LOCK(l)
+#define ASSERT_LOCK_HELD(l) OS_ASSERT_LOCK_HELD(l)
 
 #else
 
@@ -211,7 +216,7 @@ void setThreadAffinity     (nat n, nat m);
 
 #endif /* defined(THREADED_RTS) */
 
-#ifndef CMINUSMINUS
+#if !defined(CMINUSMINUS)
 //
 // Support for forkOS (defined regardless of THREADED_RTS, but does
 // nothing when !THREADED_RTS).
@@ -219,9 +224,14 @@ void setThreadAffinity     (nat n, nat m);
 int forkOS_createThread ( HsStablePtr entry );
 
 //
+// Free any global resources created in OSThreads.
+//
+void freeThreadingResources(void);
+
+//
 // Returns the number of processor cores in the machine
 //
-nat getNumberOfProcessors (void);
+uint32_t getNumberOfProcessors (void);
 
 //
 // Support for getting at the kernel thread Id for tracing/profiling.
@@ -246,5 +256,3 @@ typedef StgWord64 KernelThreadId;
 KernelThreadId kernelThreadId (void);
 
 #endif /* CMINUSMINUS */
-
-#endif /* RTS_OSTHREADS_H */

@@ -1,8 +1,12 @@
 
-T9196.hs:4:7:
-    Illegal constraint: forall a. Eq a
-    In the type signature for ‘f’: f :: (forall a. Eq a) => a -> a
+T9196.hs:4:6: error:
+    • Illegal polymorphic type: forall a1. Eq a1
+      A constraint must be a monotype
+    • In the type signature:
+        f :: (forall a. Eq a) => a -> a
 
-T9196.hs:7:7:
-    Illegal constraint: Eq a => Ord a
-    In the type signature for ‘g’: g :: (Eq a => Ord a) => a -> a
+T9196.hs:7:6: error:
+    • Illegal qualified type: Eq a => Ord a
+      A constraint must be a monotype
+    • In the type signature:
+        g :: (Eq a => Ord a) => a -> a

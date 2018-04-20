@@ -1,4 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
 module Main where
 
 import Prelude hiding ( mod, id, mapM )
@@ -11,6 +12,7 @@ import HscTypes         ( msHsFilePath )
 import Name             ( getOccString )
 --import ErrUtils         ( printBagOfErrors )
 import Panic            ( panic )
+import CmdLineParser    (warnMsg)
 import DynFlags         ( defaultFatalMessager, defaultFlushOut )
 import Bag
 import Exception
@@ -21,8 +23,10 @@ import SrcLoc
 import Distribution.Simple.GHC ( componentGhcOptions )
 import Distribution.Simple.Configure ( getPersistBuildConfig )
 import Distribution.Simple.Program.GHC ( renderGhcOptions )
-import Distribution.PackageDescription ( library, libBuildInfo )
+import Distribution.PackageDescription ( libBuildInfo )
 import Distribution.Simple.LocalBuildInfo
+import Distribution.Types.LocalBuildInfo ( componentNameTargets' )
+import Distribution.Types.TargetInfo
 import qualified Distribution.Verbosity as V
 
 import Control.Monad hiding (mapM)
@@ -38,7 +42,7 @@ import qualified Data.Map as M
 --import UniqFM
 --import Debug.Trace
 
--- search for definitions of things 
+-- search for definitions of things
 -- we do this by parsing the source and grabbing top-level definitions
 
 -- We generate both CTAGS and ETAGS format tags files
@@ -111,17 +115,15 @@ main = do
                                           (map noLoc ghcArgs)
       unless (null unrec) $
         liftIO $ putStrLn $ "Unrecognised options:\n" ++ show (map unLoc unrec)
-      liftIO $ mapM_ putStrLn (map unLoc warns)
+      liftIO $ mapM_ putStrLn (map (unLoc . warnMsg) warns)
       let dflags2 = pflags { hscTarget = HscNothing } -- don't generate anything
       -- liftIO $ print ("pkgDB", case (pkgDatabase dflags2) of Nothing -> 0
       --                                                        Just m -> sizeUFM m)
       _ <- setSessionDynFlags dflags2
       --liftIO $ print (length pkgs)
 
-      GHC.defaultCleanupHandler dflags2 $ do
-
-        targetsAtOneGo hsfiles (ctags_hdl,etags_hdl)
-        mapM_ (mapM (liftIO . hClose)) [ctags_hdl, etags_hdl]
+      targetsAtOneGo hsfiles (ctags_hdl,etags_hdl)
+      mapM_ (mapM (liftIO . hClose)) [ctags_hdl, etags_hdl]
 
 ----------------------------------------------
 ----------  ARGUMENT PROCESSING --------------
@@ -181,17 +183,16 @@ flagsFromCabal :: FilePath -> IO [String]
 flagsFromCabal distPref = do
   lbi <- getPersistBuildConfig distPref
   let pd = localPkgDescr lbi
-      findLibraryConfig []                         = Nothing
-      findLibraryConfig ((CLibName, clbi, _) :  _) = Just clbi
-      findLibraryConfig (_                   : xs) = findLibraryConfig xs
-      mLibraryConfig = findLibraryConfig (componentsConfigs lbi)
-  case (library pd, mLibraryConfig) of
-    (Just lib, Just clbi) ->
-      let bi = libBuildInfo lib
+  case componentNameTargets' pd lbi CLibName of
+    [target] ->
+      let clbi = targetCLBI target
+          CLib lib = getComponent pd (componentLocalName clbi)
+          bi = libBuildInfo lib
           odir = buildDir lbi
           opts = componentGhcOptions V.normal lbi bi clbi odir
-      in return $ renderGhcOptions (compiler lbi) opts
-    _ -> error "no library"
+      in return $ renderGhcOptions (compiler lbi) (hostPlatform lbi) opts
+    [] -> error "no library"
+    _ -> error "more libraries than we know how to handle"
 
 ----------------------------------------------------------------
 --- LOADING HASKELL SOURCE
@@ -221,9 +222,9 @@ fileTarget filename = Target (TargetFile filename Nothing) True Nothing
 ---------------------------------------------------------------
 ----- CRAWLING ABSTRACT SYNTAX TO SNAFFLE THE DEFINITIONS -----
 
-graphData :: ModuleGraph -> (Maybe Handle, Maybe Handle) -> Ghc ()
-graphData graph handles = do
-    mapM_ foundthings graph
+graphData :: [ModSummary] -> (Maybe Handle, Maybe Handle) -> Ghc ()
+graphData mss handles = do
+    mapM_ foundthings mss
     where foundthings ms =
               let filename = msHsFilePath ms
                   modname = moduleName $ ms_mod ms
@@ -249,16 +250,17 @@ fileData filename modname (group, _imports, _lie, _doc) = do
     line_map' <- evaluate line_map
     return $ FileData filename (boundValues modname group) line_map'
 
-boundValues :: ModuleName -> HsGroup Name -> [FoundThing]
+boundValues :: ModuleName -> HsGroup GhcRn -> [FoundThing]
 -- ^Finds all the top-level definitions in a module
 boundValues mod group =
   let vals = case hs_valds group of
-               ValBindsOut nest _sigs ->
+               XValBindsLR (NValBinds nest _sigs) ->
                    [ x | (_rec, binds) <- nest
                        , bind <- bagToList binds
                        , x <- boundThings mod bind ]
                _other -> error "boundValues"
-      tys = [ n | ns <- map hsLTyClDeclBinders (tyClGroupConcat (hs_tyclds group))
+      tys = [ n | ns <- map (fst . hsLTyClDeclBinders)
+                            (hs_tyclds group >>= group_tyclds)
                 , n <- map found ns ]
       fors = concat $ map forBound (hs_fords group)
              where forBound lford = case unLoc lford of
@@ -275,39 +277,40 @@ startOfLocated lHs = case getLoc lHs of
 foundOfLName :: ModuleName -> Located Name -> FoundThing
 foundOfLName mod id = FoundThing mod (getOccString $ unLoc id) (startOfLocated id)
 
-boundThings :: ModuleName -> LHsBind Name -> [FoundThing]
+boundThings :: ModuleName -> LHsBind GhcRn -> [FoundThing]
 boundThings modname lbinding =
   case unLoc lbinding of
     FunBind { fun_id = id } -> [thing id]
     PatBind { pat_lhs = lhs } -> patThings lhs []
     VarBind { var_id = id } -> [FoundThing modname (getOccString id) (startOfLocated lbinding)]
-    AbsBinds { } -> [] -- nothing interesting in a type abstraction
-    PatSynBind PSB{ psb_id = id } -> [thing id]
+    AbsBinds { }    -> [] -- nothing interesting in a type abstraction
+    PatSynBind _ PSB{ psb_id = id } -> [thing id]
+    PatSynBind _ (XPatSynBind _) -> []
+    XHsBindsLR _    -> []
   where thing = foundOfLName modname
         patThings lpat tl =
           let loc = startOfLocated lpat
               lid id = FoundThing modname (getOccString id) loc
           in case unLoc lpat of
                WildPat _ -> tl
-               VarPat name -> lid name : tl
-               LazyPat p -> patThings p tl
-               AsPat id p -> patThings p (thing id : tl)
-               ParPat p -> patThings p tl
-               BangPat p -> patThings p tl
-               ListPat ps _ _ -> foldr patThings tl ps
-               TuplePat ps _ _ -> foldr patThings tl ps
-               PArrPat ps _ -> foldr patThings tl ps
+               VarPat _ (L _ name) -> lid name : tl
+               LazyPat _ p -> patThings p tl
+               AsPat _ id p -> patThings p (thing id : tl)
+               ParPat _ p -> patThings p tl
+               BangPat _ p -> patThings p tl
+               ListPat _ ps _ _ -> foldr patThings tl ps
+               TuplePat _ ps _  -> foldr patThings tl ps
+               PArrPat _ ps -> foldr patThings tl ps
                ConPatIn _ conargs -> conArgs conargs tl
                ConPatOut{ pat_args = conargs } -> conArgs conargs tl
-               LitPat _ -> tl
-               NPat _ _ _ -> tl -- form of literal pattern?
-               NPlusKPat id _ _ _ -> thing id : tl
-               SigPatIn p _ -> patThings p tl
-               SigPatOut p _ -> patThings p tl
+               LitPat _ _ -> tl
+               NPat {} -> tl -- form of literal pattern?
+               NPlusKPat _ id _ _ _ _ -> thing id : tl
+               SigPat _ p -> patThings p tl
                _ -> error "boundThings"
         conArgs (PrefixCon ps) tl = foldr patThings tl ps
         conArgs (RecCon (HsRecFields { rec_flds = flds })) tl
-             = foldr (\f tl' -> patThings (hsRecFieldArg f) tl') tl flds
+             = foldr (\(L _ f) tl' -> patThings (hsRecFieldArg f) tl') tl flds
         conArgs (InfixCon p1 p2) tl = patThings p1 $ patThings p2 tl
 
 

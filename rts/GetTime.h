@@ -6,16 +6,13 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef GETTIME_H
-#define GETTIME_H
+#pragma once
 
 #include "BeginPrivate.h"
 
 void initializeTimer       (void);
 
 Time getProcessCPUTime     (void);
-Time getThreadCPUTime      (void);
-Time getProcessElapsedTime (void);
 void getProcessTimes       (Time *user, Time *elapsed);
 
 /* Get the current date and time.
@@ -27,13 +24,3 @@ void  getUnixEpochTime      (StgWord64 *sec, StgWord32 *nsec);
 W_    getPageFaults         (void);
 
 #include "EndPrivate.h"
-
-#endif /* GETTIME_H */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

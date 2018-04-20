@@ -13,21 +13,22 @@
 -- types.  As '([::])' is being vectorised, any type constructor whose definition involves
 -- '([::])', either directly or indirectly, will be vectorised.
 
-module Vectorise.Type.Classify 
+module Vectorise.Type.Classify
   ( classifyTyCons
-  ) 
+  )
 where
+
+import GhcPrelude
 
 import NameSet
 import UniqSet
 import UniqFM
-import DataCon hiding (tyConsOfTyCon)
+import DataCon
 import TyCon
-import TypeRep
-import Type hiding (tyConsOfType)
+import TyCoRep
+import qualified Type
 import PrelNames
 import Digraph
-
 
 -- |From a list of type constructors, extract those that can be vectorised, returning them in two
 -- sets, where the first result list /must be/ vectorised and the second result list /need not be/
@@ -66,25 +67,25 @@ classifyTyCons convStatus parTyCons tcs = classify [] [] [] [] convStatus parTyC
       = classify conv keep (par ++ tcs_par) (tcs ++ novect) cs pts' rs
       where
         refs = ds `delListFromUniqSet` tcs
-        
+
           -- the tycons that directly or indirectly depend on parallel arrays
-        tcs_par | any ((`elemNameSet` parTyCons) . tyConName) . eltsUFM $ refs = tcs
-                | otherwise                                                    = []
+        tcs_par | uniqSetAny ((`elemNameSet` parTyCons) . tyConName) refs = tcs
+                | otherwise = []
 
-        pts' = pts `addListToNameSet` map tyConName tcs_par
+        pts' = pts `extendNameSetList` map tyConName tcs_par
 
-        can_convert  = (isNullUFM (filterUniqSet ((`elemNameSet` pts) . tyConName) (refs `minusUFM` cs)) 
+        can_convert  = (isEmptyUniqSet (filterUniqSet ((`elemNameSet` pts) . tyConName) (refs `uniqSetMinusUFM` cs))
                         && all convertable tcs)
                        || isShowClass tcs
-        must_convert = foldUFM (||) False (intersectUFM_C const cs refs)
+        must_convert = anyUFM id (intersectUFM_C const cs (getUniqSet refs))
                        && (not . isShowClass $ tcs)
 
         -- We currently admit Haskell 2011-style data and newtype declarations as well as type
         -- constructors representing classes.
-        convertable tc 
+        convertable tc
           = (isDataTyCon tc || isNewTyCon tc) && all isVanillaDataCon (tyConDataCons tc)
             || isClassTyCon tc
-            
+
         -- !!!FIXME: currently we allow 'Show' in vectorised code without actually providing a
         --   vectorised definition (to be able to vectorise 'Num')
         isShowClass [tc] = tyConName tc == showClassName
@@ -97,10 +98,15 @@ type TyConGroup = ([TyCon], UniqSet TyCon)
 -- Compute mutually recursive groups of tycons in topological order.
 --
 tyConGroups :: [TyCon] -> [TyConGroup]
-tyConGroups tcs = map mk_grp (stronglyConnCompFromEdgedVertices edges)
+tyConGroups tcs = map mk_grp (stronglyConnCompFromEdgedVerticesUniq edges)
   where
-    edges = [((tc, ds), tc, uniqSetToList ds) | tc <- tcs
+    edges :: [ Node TyCon (TyCon, UniqSet TyCon) ]
+    edges = [DigraphNode (tc, ds) tc (nonDetEltsUniqSet ds) | tc <- tcs
                                 , let ds = tyConsOfTyCon tc]
+            -- It's OK to use nonDetEltsUniqSet here as
+            -- stronglyConnCompFromEdgedVertices is still deterministic even
+            -- if the edges are in nondeterministic order as explained in
+            -- Note [Deterministic SCC] in Digraph.
 
     mk_grp (AcyclicSCC (tc, ds)) = ([tc], ds)
     mk_grp (CyclicSCC els)       = (tcs, unionManyUniqSets dss)
@@ -120,18 +126,6 @@ tyConsOfTypes = unionManyUniqSets . map tyConsOfType
 -- |Collect the set of TyCons that occur in this type.
 --
 tyConsOfType :: Type -> UniqSet TyCon
-tyConsOfType ty
-  | Just ty' <- coreView ty    = tyConsOfType ty'
-tyConsOfType (TyVarTy _)       = emptyUniqSet
-tyConsOfType (TyConApp tc tys) = extend (tyConsOfTypes tys)
-  where
-    extend |  isUnLiftedTyCon tc
-           || isTupleTyCon   tc = id
+tyConsOfType ty = filterUniqSet not_tuple_or_unlifted $ Type.tyConsOfType ty
+  where not_tuple_or_unlifted tc = not (isUnliftedTyCon tc || isTupleTyCon tc)
 
-           | otherwise          = (`addOneToUniqSet` tc)
-
-tyConsOfType (AppTy a b)       = tyConsOfType a `unionUniqSets` tyConsOfType b
-tyConsOfType (FunTy a b)       = (tyConsOfType a `unionUniqSets` tyConsOfType b)
-                                 `addOneToUniqSet` funTyCon
-tyConsOfType (LitTy _)         = emptyUniqSet
-tyConsOfType (ForAllTy _ ty)   = tyConsOfType ty

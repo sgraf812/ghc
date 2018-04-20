@@ -1,6 +1,6 @@
 /*
  * (c)2006 Galois Connections, Inc.
- */ 
+ */
 
 #include "PosixSource.h"
 #include "Rts.h"
@@ -13,16 +13,17 @@
 #include <ctype.h>
 #include <string.h>
 #include <assert.h>
+#include <fs_rts.h>
 
-#ifdef HAVE_SYS_TYPES_H
+#if defined(HAVE_SYS_TYPES_H)
 #include <sys/types.h>
 #endif
 
-#ifdef HAVE_SYS_STAT_H
+#if defined(HAVE_SYS_STAT_H)
 #include <sys/stat.h>
 #endif
 
-#ifdef HAVE_UNISTD_H
+#if defined(HAVE_UNISTD_H)
 #include <unistd.h>
 #endif
 
@@ -32,11 +33,11 @@
  *
  */
 
-static int hpc_inited = 0;		// Have you started this component?
-static pid_t hpc_pid = 0;		// pid of this process at hpc-boot time.
-					// Only this pid will read or write .tix file(s).
-static FILE *tixFile;			// file being read/written
-static int tix_ch;			// current char
+static int hpc_inited = 0;              // Have you started this component?
+static pid_t hpc_pid = 0;               // pid of this process at hpc-boot time.
+                                        // Only this pid will read or write .tix file(s).
+static FILE *tixFile;                   // file being read/written
+static int tix_ch;                      // current char
 
 static HashTable * moduleHash = NULL;   // module name -> HpcModuleInfo
 
@@ -106,7 +107,8 @@ static StgWord64 expectWord64(void) {
 static void
 readTix(void) {
   unsigned int i;
-  HpcModuleInfo *tmpModule, *lookup;
+  HpcModuleInfo *tmpModule;
+  const HpcModuleInfo *lookup;
 
   ws();
   expect('T');
@@ -115,11 +117,11 @@ readTix(void) {
   ws();
   expect('[');
   ws();
-  
+
   while(tix_ch != ']') {
     tmpModule = (HpcModuleInfo *)stgMallocBytes(sizeof(HpcModuleInfo),
                                                 "Hpc.readTix");
-    tmpModule->from_file = rtsTrue;
+    tmpModule->from_file = true;
     expect('T');
     expect('i');
     expect('x');
@@ -143,13 +145,13 @@ readTix(void) {
       tmpModule->tixArr[i] = expectWord64();
       ws();
       if (tix_ch == ',') {
-	expect(',');
-	ws();
+        expect(',');
+        ws();
       }
     }
     expect(']');
     ws();
-    
+
     lookup = lookupHashTable(moduleHash, (StgWord)tmpModule->modName);
     if (lookup == NULL) {
         debugTrace(DEBUG_hpc,"readTix: new HpcModuleInfo for %s",
@@ -215,7 +217,7 @@ startupHpc(void)
     /* Make sure the directory is present;
      * conditional code for mkdir lifted from lndir.c
      */
-#ifdef WIN32
+#if defined(WIN32)
     mkdir(hpc_tixdir);
 #else
     mkdir(hpc_tixdir,0777);
@@ -232,7 +234,7 @@ startupHpc(void)
     sprintf(tixFilename, "%s.tix", prog_name);
   }
 
-  if (init_open(fopen(tixFilename,"r"))) {
+  if (init_open(__rts_fopen(tixFilename,"r"))) {
     readTix();
   }
 }
@@ -252,12 +254,12 @@ startupHpc(void)
 
 void
 hs_hpc_module(char *modName,
-	      StgWord32 modCount,
-	      StgWord32 modHashNo,
+              StgWord32 modCount,
+              StgWord32 modHashNo,
               StgWord64 *tixArr)
 {
   HpcModuleInfo *tmpModule;
-  nat i;
+  uint32_t i;
 
   if (moduleHash == NULL) {
       moduleHash = allocStrHashTable();
@@ -278,7 +280,7 @@ hs_hpc_module(char *modName,
           tixArr[i] = 0;
       }
       tmpModule->next = modules;
-      tmpModule->from_file = rtsFalse;
+      tmpModule->from_file = false;
       modules = tmpModule;
       insertHashTable(moduleHash, (StgWord)modName, tmpModule);
   }
@@ -307,13 +309,13 @@ hs_hpc_module(char *modName,
           stgFree(tmpModule->modName);
           stgFree(tmpModule->tixArr);
       }
-      tmpModule->from_file = rtsFalse;
+      tmpModule->from_file = false;
   }
 }
 
 static void
 writeTix(FILE *f) {
-  HpcModuleInfo *tmpModule;  
+  HpcModuleInfo *tmpModule;
   unsigned int i, inner_comma, outer_comma;
 
   outer_comma = 0;
@@ -331,32 +333,32 @@ writeTix(FILE *f) {
       outer_comma = 1;
     }
     fprintf(f," TixModule \"%s\" %u %u [",
-	   tmpModule->modName,
-	    (nat)tmpModule->hashNo,
-	    (nat)tmpModule->tickCount);
+           tmpModule->modName,
+            (uint32_t)tmpModule->hashNo,
+            (uint32_t)tmpModule->tickCount);
     debugTrace(DEBUG_hpc,"%s: %u (hash=%u)\n",
-	       tmpModule->modName,
-	       (nat)tmpModule->tickCount,
-               (nat)tmpModule->hashNo);
+               tmpModule->modName,
+               (uint32_t)tmpModule->tickCount,
+               (uint32_t)tmpModule->hashNo);
 
     inner_comma = 0;
     for(i = 0;i < tmpModule->tickCount;i++) {
       if (inner_comma) {
-	fprintf(f,",");
+        fprintf(f,",");
       } else {
-	inner_comma = 1;
+        inner_comma = 1;
       }
 
       if (tmpModule->tixArr) {
-	fprintf(f,"%" FMT_Word64,tmpModule->tixArr[i]);
+        fprintf(f,"%" FMT_Word64,tmpModule->tixArr[i]);
       } else {
-	fprintf(f,"0");
+        fprintf(f,"0");
       }
     }
     fprintf(f,"]");
   }
   fprintf(f,"]\n");
-  
+
   fclose(f);
 }
 
@@ -386,7 +388,7 @@ exitHpc(void) {
   // not clober the .tix file.
 
   if (hpc_pid == getpid()) {
-    FILE *f = fopen(tixFilename,"w");
+    FILE *f = __rts_fopen(tixFilename,"w");
     writeTix(f);
   }
 
@@ -404,11 +406,3 @@ exitHpc(void) {
 HpcModuleInfo *hs_hpc_rootModule(void) {
   return modules;
 }
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

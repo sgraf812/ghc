@@ -12,10 +12,10 @@ module Vectorise.Monad.Base (
   cantVectorise,
   maybeCantVectorise,
   maybeCantVectoriseM,
-  
+
   -- * Debugging
   emitVt, traceVt, dumpOptVt, dumpVt,
-  
+
   -- * Control
   noV, traceNoV,
   ensureV, traceEnsureV,
@@ -25,6 +25,8 @@ module Vectorise.Monad.Base (
   orElseV, orElseErrV,
   fixV,
 ) where
+
+import GhcPrelude
 
 import Vectorise.Builtins
 import Vectorise.Env
@@ -43,15 +45,14 @@ import Control.Monad
 -- |Vectorisation can either succeed with new envionment and a value, or return with failure
 -- (including a description of the reason for failure).
 --
-data VResult a 
-  = Yes GlobalEnv LocalEnv a 
+data VResult a
+  = Yes GlobalEnv LocalEnv a
   | No  SDoc
 
-newtype VM a 
+newtype VM a
   = VM { runVM :: Builtins -> GlobalEnv -> LocalEnv -> DsM (VResult a) }
 
 instance Monad VM where
-  return x   = VM $ \_  genv lenv -> return (Yes genv lenv x)
   VM p >>= f = VM $ \bi genv lenv -> do
                                        r <- p bi genv lenv
                                        case r of
@@ -59,12 +60,12 @@ instance Monad VM where
                                          No reason         -> return $ No reason
 
 instance Applicative VM where
-  pure  = return
+  pure x = VM $ \_ genv lenv -> return (Yes genv lenv x)
   (<*>) = ap
-  
+
 instance Functor VM where
   fmap = liftM
-  
+
 instance MonadIO VM where
   liftIO = liftDs . liftIO
 
@@ -113,38 +114,36 @@ maybeCantVectoriseM s d p
 
 -- |Output a trace message if -ddump-vt-trace is active.
 --
-emitVt :: String -> SDoc -> VM () 
+emitVt :: String -> SDoc -> VM ()
 emitVt herald doc
   = liftDs $ do
       dflags <- getDynFlags
-      liftIO . printInfoForUser dflags alwaysQualify $
+      liftIO . printOutputForUser dflags alwaysQualify $
         hang (text herald) 2 doc
 
 -- |Output a trace message if -ddump-vt-trace is active.
 --
-traceVt :: String -> SDoc -> VM () 
+traceVt :: String -> SDoc -> VM ()
 traceVt herald doc
-  = do dflags <- getDynFlags
-       when (1 <= traceLevel dflags) $
-           liftDs $ traceOptIf Opt_D_dump_vt_trace $ hang (text herald) 2 doc
+  = liftDs $ traceOptIf Opt_D_dump_vt_trace $ hang (text herald) 2 doc
 
 -- |Dump the given program conditionally.
 --
 dumpOptVt :: DumpFlag -> String -> SDoc -> VM ()
-dumpOptVt flag header doc 
+dumpOptVt flag header doc
   = do { b <- liftDs $ doptM flag
-       ; if b 
-         then dumpVt header doc 
-         else return () 
+       ; if b
+         then dumpVt header doc
+         else return ()
        }
 
 -- |Dump the given program unconditionally.
 --
 dumpVt :: String -> SDoc -> VM ()
-dumpVt header doc 
+dumpVt header doc
   = do { unqual <- liftDs mkPrintUnqualifiedDs
        ; dflags <- liftDs getDynFlags
-       ; liftIO $ printInfoForUser dflags unqual (mkDumpDoc header doc)
+       ; liftIO $ printOutputForUser dflags unqual (mkDumpDoc header doc)
        }
 
 
@@ -190,7 +189,7 @@ tryErrV (VM p) = VM $ \bi genv lenv ->
       Yes genv' lenv' x -> return (Yes genv' lenv' (Just x))
       No reason         -> do { unqual <- mkPrintUnqualifiedDs
                               ; dflags <- getDynFlags
-                              ; liftIO $ 
+                              ; liftIO $
                                   printInfoForUser dflags unqual $
                                     text "Warning: vectorisation failure:" <+> reason
                               ; return (Yes genv  lenv  Nothing)

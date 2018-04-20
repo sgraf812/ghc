@@ -4,6 +4,8 @@ module SPARC.CodeGen.Amode (
 
 where
 
+import GhcPrelude
+
 import {-# SOURCE #-} SPARC.CodeGen.Gen32
 import SPARC.CodeGen.Base
 import SPARC.AddrMode
@@ -12,7 +14,7 @@ import SPARC.Instr
 import SPARC.Regs
 import SPARC.Base
 import NCGMonad
-import Size
+import Format
 
 import Cmm
 

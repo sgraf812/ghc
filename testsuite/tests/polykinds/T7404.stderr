@@ -1,4 +1,4 @@
 
-T7404.hs:4:1:
-    Kind variable also used as type variable: ‘x’
-    In the declaration for type family ‘Foo’
+T7404.hs:4:32: error:
+    Variable ‘x’ used as both a kind and a type
+    Did you intend to use TypeInType?

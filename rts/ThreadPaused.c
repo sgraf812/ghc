@@ -26,15 +26,16 @@
  *
  * -------------------------------------------------------------------------- */
 
+
 struct stack_gap { StgWord gap_size; struct stack_gap *next_gap; };
 
 static struct stack_gap *
-updateAdjacentFrames (Capability *cap, StgTSO *tso,
-                      StgUpdateFrame *upd, nat count, struct stack_gap *next)
+updateAdjacentFrames (Capability *cap, StgTSO *tso, StgUpdateFrame *upd,
+                      uint32_t count, struct stack_gap *next)
 {
     StgClosure *updatee;
     struct stack_gap *gap;
-    nat i;
+    uint32_t i;
 
     // The first one (highest address) is the frame we take the
     // "master" updatee from; all the others will be made indirections
@@ -79,7 +80,7 @@ static void
 stackSqueeze(Capability *cap, StgTSO *tso, StgPtr bottom)
 {
     StgPtr frame;
-    nat adjacent_update_frames;
+    uint32_t adjacent_update_frames;
     struct stack_gap *gap;
 
     // Stage 1:
@@ -131,7 +132,7 @@ stackSqueeze(Capability *cap, StgTSO *tso, StgPtr bottom)
                                    adjacent_update_frames, gap);
     }
 
-    // Now we have a stack with gaps in it, and we have to walk down
+    // Now we have a stack with gap-structs in it, and we have to walk down
     // shoving the stack up to fill in the gaps.  A diagram might
     // help:
     //
@@ -148,7 +149,7 @@ stackSqueeze(Capability *cap, StgTSO *tso, StgPtr bottom)
     //     | ********* |
     //    -| ********* |
     //
-    // 'sp'  points the the current top-of-stack
+    // 'sp'  points the current top-of-stack
     // 'gap' points to the stack_gap structure inside the gap
     // *****   indicates real stack data
     // .....   indicates gap
@@ -157,7 +158,7 @@ stackSqueeze(Capability *cap, StgTSO *tso, StgPtr bottom)
     {
         StgWord8 *sp;
         StgWord8 *gap_start, *next_gap_start, *gap_end;
-        nat chunk_size;
+        uint32_t chunk_size;
 
         next_gap_start = (StgWord8*)gap + sizeof(StgUpdateFrame);
         sp = next_gap_start;
@@ -191,15 +192,16 @@ void
 threadPaused(Capability *cap, StgTSO *tso)
 {
     StgClosure *frame;
-    StgRetInfoTable *info;
+    const StgRetInfoTable *info;
     const StgInfoTable *bh_info;
     const StgInfoTable *cur_bh_info USED_IF_THREADS;
     StgClosure *bh;
     StgPtr stack_end;
-    nat words_to_squeeze = 0;
-    nat weight           = 0;
-    nat weight_pending   = 0;
-    rtsBool prev_was_update_frame = rtsFalse;
+    uint32_t words_to_squeeze = 0;
+    uint32_t weight           = 0;
+    uint32_t weight_pending   = 0;
+    bool prev_was_update_frame = false;
+    StgWord heuristic_says_squeeze;
 
     // Check to see whether we have threads waiting to raise
     // exceptions, and we're not blocking exceptions, or are blocked
@@ -209,9 +211,8 @@ threadPaused(Capability *cap, StgTSO *tso)
     maybePerformBlockedException (cap, tso);
     if (tso->what_next == ThreadKilled) { return; }
 
-    // NB. Blackholing is *compulsory*, we must either do lazy
-    // blackholing, or eager blackholing consistently.  See Note
-    // [upd-black-hole] in sm/Scav.c.
+    // NB. Updatable thunks *must* be blackholed, either by eager blackholing or
+    // lazy blackholing.  See Note [upd-black-hole] in sm/Scav.c.
 
     stack_end = tso->stackobj->stack + tso->stackobj->stack_size;
 
@@ -239,9 +240,11 @@ threadPaused(Capability *cap, StgTSO *tso)
             bh = ((StgUpdateFrame *)frame)->updatee;
             bh_info = bh->header.info;
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
         retry:
 #endif
+            // Note [suspend duplicate work]
+            //
             // If the info table is a WHITEHOLE or a BLACKHOLE, then
             // another thread has claimed it (via the SET_INFO()
             // below), or is in the process of doing so.  In that case
@@ -272,10 +275,12 @@ threadPaused(Capability *cap, StgTSO *tso)
             // deadlocked on itself.  See #5226 for an instance of
             // this bug.
             //
-            if ((bh_info == &stg_WHITEHOLE_info ||
-                 bh_info == &stg_BLACKHOLE_info)
-                &&
-                ((StgInd*)bh)->indirectee != (StgClosure*)tso)
+            // Note that great care is required when entering computations
+            // suspended by this mechanism. See Note [AP_STACKs must be eagerly
+            // blackholed] for details.
+            if (((bh_info == &stg_BLACKHOLE_info)
+                 && ((StgInd*)bh)->indirectee != (StgClosure*)tso)
+                || (bh_info == &stg_WHITEHOLE_info))
             {
                 debugTrace(DEBUG_squeeze,
                            "suspending duplicate work: %ld words of stack",
@@ -297,10 +302,16 @@ threadPaused(Capability *cap, StgTSO *tso)
                 // And continue with threadPaused; there might be
                 // yet more computation to suspend.
                 frame = (StgClosure *)(tso->stackobj->sp + 2);
-                prev_was_update_frame = rtsFalse;
+                prev_was_update_frame = false;
                 continue;
             }
 
+            // We should never have made it here in the event of blackholes that
+            // we already own; they should have been marked when we blackholed
+            // them and consequently we should have stopped our stack walk
+            // above.
+            ASSERT(!((bh_info == &stg_BLACKHOLE_info)
+                     && (((StgInd*)bh)->indirectee == (StgClosure*)tso)));
 
             // zero out the slop so that the sanity checker can tell
             // where the next closure is.
@@ -308,7 +319,7 @@ threadPaused(Capability *cap, StgTSO *tso)
 
             // an EAGER_BLACKHOLE or CAF_BLACKHOLE gets turned into a
             // BLACKHOLE here.
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
             // first we turn it into a WHITEHOLE to claim it, and if
             // successful we write our TSO and then the BLACKHOLE info pointer.
             cur_bh_info = (const StgInfoTable *)
@@ -318,6 +329,10 @@ threadPaused(Capability *cap, StgTSO *tso)
 
             if (cur_bh_info != bh_info) {
                 bh_info = cur_bh_info;
+#if defined(PROF_SPIN)
+                ++whitehole_threadPaused_spin;
+#endif
+                busy_wait_nop();
                 goto retry;
             }
 #endif
@@ -339,7 +354,7 @@ threadPaused(Capability *cap, StgTSO *tso)
                 weight += weight_pending;
                 weight_pending = 0;
             }
-            prev_was_update_frame = rtsTrue;
+            prev_was_update_frame = true;
             break;
 
         case UNDERFLOW_FRAME:
@@ -349,26 +364,29 @@ threadPaused(Capability *cap, StgTSO *tso)
             // normal stack frames; do nothing except advance the pointer
         default:
         {
-            nat frame_size = stack_frame_sizeW(frame);
+            uint32_t frame_size = stack_frame_sizeW(frame);
             weight_pending += frame_size;
             frame = (StgClosure *)((StgPtr)frame + frame_size);
-            prev_was_update_frame = rtsFalse;
+            prev_was_update_frame = false;
         }
         }
     }
 
 end:
-    debugTrace(DEBUG_squeeze,
-               "words_to_squeeze: %d, weight: %d, squeeze: %s",
-               words_to_squeeze, weight,
-               ((weight <= 8 && words_to_squeeze > 0) || weight < words_to_squeeze) ? "YES" : "NO");
-
     // Should we squeeze or not?  Arbitrary heuristic: we squeeze if
     // the number of words we have to shift down is less than the
     // number of stack words we squeeze away by doing so.
-    if (RtsFlags.GcFlags.squeezeUpdFrames == rtsTrue &&
-        ((weight <= 8 && words_to_squeeze > 0) || weight < words_to_squeeze)) {
-        // threshold above bumped from 5 to 8 as a result of #2797
+    // The threshold was bumped from 5 to 8 as a result of #2797
+    heuristic_says_squeeze = ((weight <= 8 && words_to_squeeze > 0)
+                            || weight < words_to_squeeze);
+
+    debugTrace(DEBUG_squeeze,
+        "words_to_squeeze: %d, weight: %d, squeeze: %s",
+        words_to_squeeze, weight,
+        heuristic_says_squeeze ? "YES" : "NO");
+
+    if (RtsFlags.GcFlags.squeezeUpdFrames == true &&
+        heuristic_says_squeeze) {
         stackSqueeze(cap, tso, (StgPtr)frame);
         tso->flags |= TSO_SQUEEZED;
         // This flag tells threadStackOverflow() that the stack was
@@ -377,11 +395,3 @@ end:
         tso->flags &= ~TSO_SQUEEZED;
     }
 }
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

@@ -1,6 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude, ScopedTypeVariables #-}
-{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE CPP, NoImplicitPrelude, ScopedTypeVariables, BangPatterns #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -31,8 +30,6 @@ module Foreign.Storable
              poke)
         ) where
 
-
-import Control.Monad            ( liftM )
 
 #include "MachDeps.h"
 #include "HsBaseConfig.h"
@@ -73,13 +70,12 @@ types of Haskell, the fixed size @Int@ types ('Int8', 'Int16',
 'Int32', 'Int64'), the fixed size @Word@ types ('Word8', 'Word16',
 'Word32', 'Word64'), 'StablePtr', all types from "Foreign.C.Types",
 as well as 'Ptr'.
-
-Minimal complete definition: 'sizeOf', 'alignment', one of 'peek',
-'peekElemOff' and 'peekByteOff', and one of 'poke', 'pokeElemOff' and
-'pokeByteOff'.
 -}
 
 class Storable a where
+   {-# MINIMAL sizeOf, alignment,
+               (peek | peekElemOff | peekByteOff),
+               (poke | pokeElemOff | pokeByteOff) #-}
 
    sizeOf      :: a -> Int
    -- ^ Computes the storage requirements (in bytes) of the argument.
@@ -149,12 +145,16 @@ class Storable a where
    peek ptr = peekElemOff ptr 0
    poke ptr = pokeElemOff ptr 0
 
-   {-# MINIMAL sizeOf, alignment,
-               (peek | peekElemOff | peekByteOff),
-               (poke | pokeElemOff | pokeByteOff) #-}
+-- | @since 4.9.0.0
+instance Storable () where
+  sizeOf _ = 0
+  alignment _ = 1
+  peek _ = return ()
+  poke _ _ = return ()
 
 -- System-dependent, but rather obvious instances
 
+-- | @since 2.01
 instance Storable Bool where
    sizeOf _          = sizeOf (undefined::HTYPE_INT)
    alignment _       = alignment (undefined::HTYPE_INT)
@@ -168,55 +168,86 @@ instance Storable (T) where {                   \
     peekElemOff = read;                         \
     pokeElemOff = write }
 
+-- | @since 2.01
 STORABLE(Char,SIZEOF_INT32,ALIGNMENT_INT32,
          readWideCharOffPtr,writeWideCharOffPtr)
 
+-- | @since 2.01
 STORABLE(Int,SIZEOF_HSINT,ALIGNMENT_HSINT,
          readIntOffPtr,writeIntOffPtr)
 
+-- | @since 2.01
 STORABLE(Word,SIZEOF_HSWORD,ALIGNMENT_HSWORD,
          readWordOffPtr,writeWordOffPtr)
 
+-- | @since 2.01
 STORABLE((Ptr a),SIZEOF_HSPTR,ALIGNMENT_HSPTR,
          readPtrOffPtr,writePtrOffPtr)
 
+-- | @since 2.01
 STORABLE((FunPtr a),SIZEOF_HSFUNPTR,ALIGNMENT_HSFUNPTR,
          readFunPtrOffPtr,writeFunPtrOffPtr)
 
+-- | @since 2.01
 STORABLE((StablePtr a),SIZEOF_HSSTABLEPTR,ALIGNMENT_HSSTABLEPTR,
          readStablePtrOffPtr,writeStablePtrOffPtr)
 
+-- | @since 2.01
 STORABLE(Float,SIZEOF_HSFLOAT,ALIGNMENT_HSFLOAT,
          readFloatOffPtr,writeFloatOffPtr)
 
+-- | @since 2.01
 STORABLE(Double,SIZEOF_HSDOUBLE,ALIGNMENT_HSDOUBLE,
          readDoubleOffPtr,writeDoubleOffPtr)
 
+-- | @since 2.01
 STORABLE(Word8,SIZEOF_WORD8,ALIGNMENT_WORD8,
          readWord8OffPtr,writeWord8OffPtr)
 
+-- | @since 2.01
 STORABLE(Word16,SIZEOF_WORD16,ALIGNMENT_WORD16,
          readWord16OffPtr,writeWord16OffPtr)
 
+-- | @since 2.01
 STORABLE(Word32,SIZEOF_WORD32,ALIGNMENT_WORD32,
          readWord32OffPtr,writeWord32OffPtr)
 
+-- | @since 2.01
 STORABLE(Word64,SIZEOF_WORD64,ALIGNMENT_WORD64,
          readWord64OffPtr,writeWord64OffPtr)
 
+-- | @since 2.01
 STORABLE(Int8,SIZEOF_INT8,ALIGNMENT_INT8,
          readInt8OffPtr,writeInt8OffPtr)
 
+-- | @since 2.01
 STORABLE(Int16,SIZEOF_INT16,ALIGNMENT_INT16,
          readInt16OffPtr,writeInt16OffPtr)
 
+-- | @since 2.01
 STORABLE(Int32,SIZEOF_INT32,ALIGNMENT_INT32,
          readInt32OffPtr,writeInt32OffPtr)
 
+-- | @since 2.01
 STORABLE(Int64,SIZEOF_INT64,ALIGNMENT_INT64,
          readInt64OffPtr,writeInt64OffPtr)
 
+-- | @since 4.8.0.0
+instance (Storable a, Integral a) => Storable (Ratio a) where
+    sizeOf _    = 2 * sizeOf (undefined :: a)
+    alignment _ = alignment (undefined :: a )
+    peek p           = do
+                        q <- return $ castPtr p
+                        r <- peek q
+                        i <- peekElemOff q 1
+                        return (r % i)
+    poke p (r :% i)  = do
+                        q <-return $  (castPtr p)
+                        poke q r
+                        pokeElemOff q 1 i
+
 -- XXX: here to avoid orphan instance in GHC.Fingerprint
+-- | @since 4.4.0.0
 instance Storable Fingerprint where
   sizeOf _ = 16
   alignment _ = 8

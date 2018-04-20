@@ -6,10 +6,11 @@
 
 #include "PosixSource.h"
 #include "Rts.h"
+#include "Hooks.h"
 
 void
-defaultsHook (void)
-{ /* this is called *after* RTSflags has had
+FlagDefaultsHook (void)
+{ /* this is called *after* RtsFlags has had
      its defaults set, but *before* we start
      processing the RTS command-line options.
 
@@ -19,11 +20,3 @@ defaultsHook (void)
   */
 }
 
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

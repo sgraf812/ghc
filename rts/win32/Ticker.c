@@ -2,7 +2,6 @@
  * RTS periodic timers.
  *
  */
-#define _WIN32_WINNT 0x0501
 
 #include "Rts.h"
 #include "Ticker.h"
@@ -72,18 +71,11 @@ stopTicker(void)
 }
 
 void
-exitTicker (rtsBool wait)
+exitTicker (bool wait)
 {
+    stopTicker();
     if (timer_queue != NULL) {
         DeleteTimerQueueEx(timer_queue, wait ? INVALID_HANDLE_VALUE : NULL);
         timer_queue = NULL;
     }
 }
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

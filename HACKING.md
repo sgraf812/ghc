@@ -30,9 +30,14 @@ find an overview here:
 Next, clone the repository and all the associated libraries:
 
 ```
-$ git clone http://git.haskell.org/ghc.git
-$ cd ghc
-$ ./sync-all get
+$ git clone --recursive git://git.haskell.org/ghc.git
+```
+
+On Windows, you need an extra repository containing some build tools.
+These can be downloaded for you by configure. This only needs to be done once by running:
+
+```
+$ ./configure --enable-tarballs-autodownload
 ```
 
 First copy `mk/build.mk.sample` to `mk/build.mk` and ensure it has
@@ -44,13 +49,11 @@ $ cp mk/build.mk.sample mk/build.mk
 $ ... double-check mk/build.mk ...
 ```
 
-Now build. If you have multiple cores, **you should always use them to
-speed up compilation**:
+Now build. The convenient `validate` script will build the tree in a way which
+is both quick to build and consistent with our testsuite,
 
 ```
-$ ./boot
-$ ./configure
-$ make -jN # <N> is the number of cores you have.
+$ ./validate --build-only
 ```
 
 You can use the `./inplace/bin/ghc-stage2` binary to play with the
@@ -58,26 +61,13 @@ newly built compiler.
 
 Now, hack on your copy and rebuild (with `make`) as necessary.
 
-Then start by making your commits however you want. When you're done, you
-can use `git format-patch` to create a series of `.patch` files you
-can give to us. In this example, we'll assume I'm on a `bugfix` branch
-and want to submit my patches:
+Then start by making your commits however you want. When you're done, you can submit
+ a pull request on Github for small changes. For larger changes the patch needs to be
+ submitted to [Phabricator](https://phabricator.haskell.org/) for code review.
+ The GHC Trac Wiki has a good summary for the [overall process](https://ghc.haskell.org/trac/ghc/wiki/WorkingConventions/FixingBugs)
+ as well as a guide on 
+ [how to use Phabricator/arcanist](https://ghc.haskell.org/trac/ghc/wiki/Phabricator).
 
-```
-$ git branch
-* bugfix
-  master
-$ git format-patch master -o patches
-...
-$
-```
-
-Now create a trac ticket:
-
-<http://ghc.haskell.org/trac/ghc/newticket?type=bug>
-
-And attach the files in your `patches/` directory. Set the status from
-*new* to *patch* and we'll review it as soon as we can!
 
 Useful links:
 =============

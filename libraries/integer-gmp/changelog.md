@@ -1,5 +1,39 @@
 # Changelog for [`integer-gmp` package](http://hackage.haskell.org/package/integer-gmp)
 
+## 1.0.2.0 *TBA*
+
+  * Bundled with GHC 8.4.2
+
+  * Define `powModSecInteger`, a "secure" version of `powModInteger` using the
+    `mpz_powm_sec` function.
+
+## 1.0.1.0 *July 2017*
+
+  * Bundled with GHC 8.2.1
+
+  * Optimize `minusInteger`
+
+  * Fix the right-shift operation for negative big integers (fixes GHC #12136)
+
+  * Make operations more strict
+
+## 1.0.0.1  *Feb 2016*
+
+  * Bundled with GHC 8.0.1
+
+  * Optimise `bitBigNat`/`bigInteger`
+
+  * Fix minor issue in `eqBigNatWord#`
+
+  * Various minor optimisations
+
+## 1.0.0.0  *Mar 2015*
+
+  * Bundled with GHC 7.10.1
+
+  * Complete rewrite of `integer-gmp`. For more details, see
+    https://ghc.haskell.org/trac/ghc/wiki/Design/IntegerGmp2
+
 ## 0.5.1.0  *Feb 2014*
 
   * Bundled with GHC 7.8.1

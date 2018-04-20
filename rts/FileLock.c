@@ -30,7 +30,7 @@ typedef struct {
 static HashTable *obj_hash;
 static HashTable *fd_hash;
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
 static Mutex file_lock_mutex;
 #endif
 
@@ -41,7 +41,7 @@ static int cmpLocks(StgWord w1, StgWord w2)
     return (l1->device == l2->device && l1->inode == l2->inode);
 }
 
-static int hashLock(HashTable *table, StgWord w)
+static int hashLock(const HashTable *table, StgWord w)
 {
     Lock *l = (Lock *)w;
     StgWord key = l->inode ^ (l->inode >> 32) ^ l->device ^ (l->device >> 32);
@@ -54,7 +54,7 @@ initFileLocking(void)
 {
     obj_hash = allocHashTable_(hashLock, cmpLocks);
     fd_hash  = allocHashTable(); /* ordinary word-based table */
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     initMutex(&file_lock_mutex);
 #endif
 }
@@ -70,7 +70,7 @@ freeFileLocking(void)
 {
     freeHashTable(obj_hash, freeLock);
     freeHashTable(fd_hash,  NULL);
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     closeMutex(&file_lock_mutex);
 #endif
 }
@@ -143,11 +143,3 @@ unlockFile(int fd)
     RELEASE_LOCK(&file_lock_mutex);
     return 0;
 }
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

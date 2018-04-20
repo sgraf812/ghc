@@ -6,20 +6,35 @@
  *
  * -------------------------------------------------------------------------- */
 
-#ifndef HASH_H
-#define HASH_H
+#pragma once
 
 #include "BeginPrivate.h"
 
 typedef struct hashtable HashTable; /* abstract */
 
-/* Hash table access where the keys are StgWords */
+/* Hash table access where the keys are StgWords.
+ * Values are passed into the hash table and stored as `const void *` values,
+ * but when the value is looked up or removed, the value is returned without the
+ * `const` so that calling function can mutate what the pointer points to if it
+ * needs to.
+ */
 HashTable * allocHashTable    ( void );
-void *      lookupHashTable ( HashTable *table, StgWord key );
-void        insertHashTable ( HashTable *table, StgWord key, void *data );
-void *      removeHashTable ( HashTable *table, StgWord key, void *data );
+void        insertHashTable ( HashTable *table, StgWord key, const void *data );
+void *      lookupHashTable ( const HashTable *table, StgWord key );
+void *      removeHashTable ( HashTable *table, StgWord key, const void *data );
 
 int keyCountHashTable (HashTable *table);
+
+// Puts up to szKeys keys of the hash table into the given array. Returns the
+// actual amount of keys that have been retrieved.
+//
+// If the table is modified concurrently, the function behavior is undefined.
+//
+int keysHashTable(HashTable *table, StgWord keys[], int szKeys);
+
+typedef void (*MapHashFn)(void *data, StgWord key, const void *value);
+
+void mapHashTable(HashTable *table, void *data, MapHashFn fn);
 
 /* Hash table access where the keys are C strings (the strings are
  * assumed to be allocated by the caller, and mustn't be deallocated
@@ -37,11 +52,11 @@ HashTable * allocStrHashTable ( void );
    (removeHashTable(table, (StgWord)key, data))
 
 /* Hash tables for arbitrary keys */
-typedef int HashFunction(HashTable *table, StgWord key);
+typedef int HashFunction(const HashTable *table, StgWord key);
 typedef int CompareFunction(StgWord key1, StgWord key2);
 HashTable * allocHashTable_(HashFunction *hash, CompareFunction *compare);
-int hashWord(HashTable *table, StgWord key);
-int hashStr(HashTable *table, char *key);
+int hashWord(const HashTable *table, StgWord key);
+int hashStr(const HashTable *table, char *key);
 
 /* Freeing hash tables
  */
@@ -50,13 +65,3 @@ void freeHashTable ( HashTable *table, void (*freeDataFun)(void *) );
 void exitHashTable ( void );
 
 #include "EndPrivate.h"
-
-#endif /* HASH_H */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

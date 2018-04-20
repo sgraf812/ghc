@@ -1,11 +1,13 @@
 {-# LANGUAGE CPP #-}
 
-module Vectorise.Monad.InstEnv 
+module Vectorise.Monad.InstEnv
   ( existsInst
   , lookupInst
   , lookupFamInst
-  ) 
+  )
 where
+
+import GhcPrelude
 
 import Vectorise.Monad.Global
 import Vectorise.Monad.Base
@@ -34,8 +36,8 @@ existsInst cls tys
 
 -- Look up the dfun of a class instance.
 --
--- The match must be unique —i.e., match exactly one instance— but the 
--- type arguments used for matching may be more specific than those of 
+-- The match must be unique —i.e., match exactly one instance— but the
+-- type arguments used for matching may be more specific than those of
 -- the class instance declaration.  The found class instances must not have
 -- any type variables in the instance context that do not appear in the
 -- instances head (i.e., no flexi vars); for details for what this means,
@@ -53,8 +55,8 @@ lookupInst cls tys
 
 -- Look up a family instance.
 --
--- The match must be unique - ie, match exactly one instance - but the 
--- type arguments used for matching may be more specific than those of 
+-- The match must be unique - ie, match exactly one instance - but the
+-- type arguments used for matching may be more specific than those of
 -- the family instance declaration.
 --
 -- Return the family instance and its type instance.  For example, if we have
@@ -73,7 +75,7 @@ lookupFamInst tycon tys
     do { instEnv <- readGEnv global_fam_inst_env
        ; case lookupFamInstEnv instEnv tycon tys of
            [match] -> return match
-           _other                -> 
+           _other                ->
              do dflags <- getDynFlags
                 cantVectorise dflags "Vectorise.Monad.InstEnv.lookupFamInst: not found: "
                            (ppr $ mkTyConApp tycon tys)

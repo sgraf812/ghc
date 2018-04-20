@@ -6,7 +6,7 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifdef PROFILING
+#if defined(PROFILING)
 
 #include "PosixSource.h"
 #include "Rts.h"
@@ -17,39 +17,37 @@
 #include "ProfHeap.h"
 #include "Arena.h"
 #include "RetainerProfile.h"
+#include "ProfilerReport.h"
+#include "ProfilerReportJson.h"
 #include "Printer.h"
 #include "Capability.h"
 
+#include <fs_rts.h>
 #include <string.h>
 
-#ifdef DEBUG
+#if defined(DEBUG)
 #include "Trace.h"
 #endif
 
 /*
  * Profiling allocation arena.
  */
-Arena *prof_arena;
+static Arena *prof_arena;
 
 /*
- * Global variables used to assign unique IDs to cc's, ccs's, and 
+ * Global variables used to assign unique IDs to cc's, ccs's, and
  * closure_cats
  */
 
 unsigned int CC_ID  = 1;
 unsigned int CCS_ID = 1;
 
-/* figures for the profiling report.
- */
-static StgWord64 total_alloc;
-static W_      total_prof_ticks;
-
 /* Globals for opening the profiling log file(s)
  */
 static char *prof_filename; /* prof report file name = <program>.prof */
 FILE *prof_file;
 
-static char *hp_filename;	/* heap profile (hp2ps style) log file */
+static char *hp_filename;       /* heap profile (hp2ps style) log file */
 FILE *hp_file;
 
 /* Linked lists to keep track of CCs and CCSs that haven't
@@ -58,8 +56,8 @@ FILE *hp_file;
 CostCentre      *CC_LIST  = NULL;
 CostCentreStack *CCS_LIST = NULL;
 
-#ifdef THREADED_RTS
-Mutex ccs_mutex;
+#if defined(THREADED_RTS)
+static Mutex ccs_mutex;
 #endif
 
 /*
@@ -95,8 +93,8 @@ CC_DECLARE(CC_DONT_CARE, "DONT_CARE",   "MAIN",      "<built-in>", CC_NOT_CAF, )
 CC_DECLARE(CC_PINNED,    "PINNED",      "SYSTEM",    "<built-in>", CC_NOT_CAF, );
 CC_DECLARE(CC_IDLE,      "IDLE",        "IDLE",      "<built-in>", CC_NOT_CAF, );
 
-CCS_DECLARE(CCS_MAIN, 	    CC_MAIN,       );
-CCS_DECLARE(CCS_SYSTEM,	    CC_SYSTEM,     );
+CCS_DECLARE(CCS_MAIN,       CC_MAIN,       );
+CCS_DECLARE(CCS_SYSTEM,     CC_SYSTEM,     );
 CCS_DECLARE(CCS_GC,         CC_GC,         );
 CCS_DECLARE(CCS_OVERHEAD,   CC_OVERHEAD,   );
 CCS_DECLARE(CCS_DONT_CARE,  CC_DONT_CARE,  );
@@ -111,26 +109,18 @@ static  CostCentreStack * appendCCS       ( CostCentreStack *ccs1,
                                             CostCentreStack *ccs2 );
 static  CostCentreStack * actualPush_     ( CostCentreStack *ccs, CostCentre *cc,
                                             CostCentreStack *new_ccs );
-static  rtsBool           ignoreCCS       ( CostCentreStack *ccs );
-static  void              countTickss     ( CostCentreStack *ccs );
 static  void              inheritCosts    ( CostCentreStack *ccs );
-static  void              findCCSMaxLens  ( CostCentreStack *ccs,
-                                            nat indent,
-                                            nat *max_label_len,
-                                            nat *max_module_len );
-static  void              logCCS          ( CostCentreStack *ccs,
-                                            nat indent,
-                                            nat max_label_len,
-                                            nat max_module_len );
-static  void              reportCCS       ( CostCentreStack *ccs );
+static  ProfilerTotals    countTickss     ( CostCentreStack const *ccs );
 static  CostCentreStack * checkLoop       ( CostCentreStack *ccs,
                                             CostCentre *cc );
+static  void              sortCCSTree     ( CostCentreStack *ccs );
 static  CostCentreStack * pruneCCSTree    ( CostCentreStack *ccs );
 static  CostCentreStack * actualPush      ( CostCentreStack *, CostCentre * );
 static  CostCentreStack * isInIndexTable  ( IndexTable *, CostCentre * );
 static  IndexTable *      addToIndexTable ( IndexTable *, CostCentreStack *,
-					    CostCentre *, unsigned int );
+                                            CostCentre *, unsigned int );
 static  void              ccsSetSelected  ( CostCentreStack *ccs );
+static  void              aggregateCCCosts( CostCentreStack *ccs );
 
 static  void              initTimeProfiling    ( void );
 static  void              initProfilingLogFile ( void );
@@ -139,35 +129,22 @@ static  void              initProfilingLogFile ( void );
    Initialise the profiling environment
    -------------------------------------------------------------------------- */
 
-void
-initProfiling1 (void)
+void initProfiling (void)
 {
     // initialise our arena
     prof_arena = newArena();
 
     /* for the benefit of allocate()... */
     {
-        nat n;
+        uint32_t n;
         for (n=0; n < n_capabilities; n++) {
             capabilities[n]->r.rCCCS = CCS_SYSTEM;
         }
     }
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     initMutex(&ccs_mutex);
 #endif
-}
-
-void
-freeProfiling (void)
-{
-    arenaFree(prof_arena);
-}
-
-void
-initProfiling2 (void)
-{
-    CostCentreStack *ccs, *next;
 
     /* Set up the log file, and dump the header and cost centre
      * information into it.
@@ -202,14 +179,7 @@ initProfiling2 (void)
     CCS_MAIN->root = CCS_MAIN;
     ccsSetSelected(CCS_MAIN);
 
-    // make CCS_MAIN the parent of all the pre-defined CCSs.
-    for (ccs = CCS_LIST; ccs != NULL; ) {
-        next = ccs->prevStack;
-        ccs->prevStack = NULL;
-        actualPush_(CCS_MAIN,ccs->cc,ccs);
-        ccs->root = ccs;
-        ccs = next;
-    }
+    initProfiling2();
 
     if (RtsFlags.CcFlags.doCostCentres) {
         initTimeProfiling();
@@ -220,63 +190,103 @@ initProfiling2 (void)
     }
 }
 
+//
+// Should be called after loading any new Haskell code.
+//
+void initProfiling2 (void)
+{
+    CostCentreStack *ccs, *next;
+
+    // make CCS_MAIN the parent of all the pre-defined CCSs.
+    for (ccs = CCS_LIST; ccs != NULL; ) {
+        next = ccs->prevStack;
+        ccs->prevStack = NULL;
+        actualPush_(CCS_MAIN,ccs->cc,ccs);
+        ccs->root = ccs;
+        ccs = next;
+    }
+    CCS_LIST = NULL;
+}
+
+void
+freeProfiling (void)
+{
+    arenaFree(prof_arena);
+}
+
+CostCentre *mkCostCentre (char *label, char *module, char *srcloc)
+{
+    CostCentre *cc = stgMallocBytes (sizeof(CostCentre), "mkCostCentre");
+    cc->label = label;
+    cc->module = module;
+    cc->srcloc = srcloc;
+    cc->is_caf = 0;
+    cc->mem_alloc = 0;
+    cc->time_ticks = 0;
+    cc->link = NULL;
+    return cc;
+}
 
 static void
 initProfilingLogFile(void)
 {
-    char *prog;
+    // Figure out output file name stem.
+    char const *stem;
+    if (RtsFlags.CcFlags.outputFileNameStem) {
+        stem = RtsFlags.CcFlags.outputFileNameStem;
+    } else {
+        char *prog;
 
-    prog = arenaAlloc(prof_arena, strlen(prog_name) + 1);
-    strcpy(prog, prog_name);
-#ifdef mingw32_HOST_OS
-    // on Windows, drop the .exe suffix if there is one
-    {
-        char *suff;
-        suff = strrchr(prog,'.');
-        if (suff != NULL && !strcmp(suff,".exe")) {
-            *suff = '\0';
+        prog = arenaAlloc(prof_arena, strlen(prog_name) + 1);
+        strcpy(prog, prog_name);
+#if defined(mingw32_HOST_OS)
+        // on Windows, drop the .exe suffix if there is one
+        {
+            char *suff;
+            suff = strrchr(prog,'.');
+            if (suff != NULL && !strcmp(suff,".exe")) {
+                *suff = '\0';
+            }
         }
-    }
 #endif
+        stem = prog;
+    }
 
-    if (RtsFlags.CcFlags.doCostCentres == 0 && 
-        RtsFlags.ProfFlags.doHeapProfile != HEAP_BY_RETAINER &&
-        RtsFlags.ProfFlags.retainerSelector == NULL)
+    if (RtsFlags.CcFlags.doCostCentres == 0 && !doingRetainerProfiling())
     {
-        /* No need for the <prog>.prof file */
+        /* No need for the <stem>.prof file */
         prof_filename = NULL;
         prof_file = NULL;
     }
     else
     {
         /* Initialise the log file name */
-        prof_filename = arenaAlloc(prof_arena, strlen(prog) + 6);
-        sprintf(prof_filename, "%s.prof", prog);
+        prof_filename = arenaAlloc(prof_arena, strlen(stem) + 6);
+        sprintf(prof_filename, "%s.prof", stem);
 
         /* open the log file */
-        if ((prof_file = fopen(prof_filename, "w")) == NULL) {
+        if ((prof_file = __rts_fopen(prof_filename, "w")) == NULL) {
             debugBelch("Can't open profiling report file %s\n", prof_filename);
             RtsFlags.CcFlags.doCostCentres = 0;
-            // The following line was added by Sung; retainer/LDV profiling may need
-            // two output files, i.e., <program>.prof/hp.
-            if (RtsFlags.ProfFlags.doHeapProfile == HEAP_BY_RETAINER)
+            // Retainer profiling (`-hr` or `-hr<cc> -h<x>`) writes to
+            // both <program>.hp as <program>.prof.
+            if (doingRetainerProfiling()) {
                 RtsFlags.ProfFlags.doHeapProfile = 0;
-            return;
+            }
         }
     }
-    
-    if (RtsFlags.ProfFlags.doHeapProfile) {
-	/* Initialise the log file name */
-	hp_filename = arenaAlloc(prof_arena, strlen(prog) + 6);
-	sprintf(hp_filename, "%s.hp", prog);
 
-	/* open the log file */
-	if ((hp_file = fopen(hp_filename, "w")) == NULL) {
-	    debugBelch("Can't open profiling report file %s\n", 
-		    hp_filename);
-	    RtsFlags.ProfFlags.doHeapProfile = 0;
-	    return;
-	}
+    if (RtsFlags.ProfFlags.doHeapProfile) {
+        /* Initialise the log file name */
+        hp_filename = arenaAlloc(prof_arena, strlen(stem) + 6);
+        sprintf(hp_filename, "%s.hp", stem);
+
+        /* open the log file */
+        if ((hp_file = __rts_fopen(hp_filename, "w")) == NULL) {
+            debugBelch("Can't open profiling report file %s\n",
+                       hp_filename);
+            RtsFlags.ProfFlags.doHeapProfile = 0;
+        }
     }
 }
 
@@ -287,7 +297,7 @@ initTimeProfiling(void)
     startProfTimer();
 };
 
-void 
+void
 endProfiling ( void )
 {
     if (RtsFlags.CcFlags.doCostCentres) {
@@ -295,6 +305,25 @@ endProfiling ( void )
     }
     if (RtsFlags.ProfFlags.doHeapProfile) {
         endHeapProfiling();
+    }
+}
+
+
+/*
+  These are used in the C stubs produced by the code generator
+  to register code.
+ */
+void registerCcList(CostCentre **cc_list)
+{
+    for (CostCentre **i = cc_list; *i != NULL; i++) {
+        REGISTER_CC(*i);
+    }
+}
+
+void registerCcsList(CostCentreStack **cc_list)
+{
+    for (CostCentreStack **i = cc_list; *i != NULL; i++) {
+        REGISTER_CCS(*i);
     }
 }
 
@@ -364,7 +393,7 @@ void enterFunCCS (StgRegTable *reg, CostCentreStack *ccsfn)
     }
 
     // common case 2: the function stack is empty, or just CAF
-    if (ccsfn->prevStack == CCS_MAIN) {
+    if (ccsfn->cc->is_caf) {
         return;
     }
 
@@ -381,7 +410,7 @@ void enterFunCCS (StgRegTable *reg, CostCentreStack *ccsfn)
 
     // uncommon case 4: ccsapp is deeper than ccsfn
     if (ccsapp->depth > ccsfn->depth) {
-        nat i, n;
+        uint32_t i, n;
         CostCentreStack *tmp = ccsapp;
         n = ccsapp->depth - ccsfn->depth;
         for (i = 0; i < n; i++) {
@@ -413,26 +442,26 @@ ccsSetSelected (CostCentreStack *ccs)
     if (RtsFlags.ProfFlags.modSelector) {
         if (! strMatchesSelector (ccs->cc->module,
                                   RtsFlags.ProfFlags.modSelector) ) {
-	    ccs->selected = 0;
+            ccs->selected = 0;
             return;
         }
     }
     if (RtsFlags.ProfFlags.ccSelector) {
         if (! strMatchesSelector (ccs->cc->label,
                                   RtsFlags.ProfFlags.ccSelector) ) {
-	    ccs->selected = 0;
+            ccs->selected = 0;
             return;
         }
     }
     if (RtsFlags.ProfFlags.ccsSelector) {
-	CostCentreStack *c;
+        CostCentreStack *c;
         for (c = ccs; c != NULL; c = c->prevStack)
         {
             if ( strMatchesSelector (c->cc->label,
                                      RtsFlags.ProfFlags.ccsSelector) ) {
-		break; 
-	    }
-	}
+                break;
+            }
+        }
         if (c == NULL) {
             ccs->selected = 0;
             return;
@@ -447,24 +476,24 @@ ccsSetSelected (CostCentreStack *ccs)
    Cost-centre stack manipulation
    -------------------------------------------------------------------------- */
 
-#ifdef DEBUG
+#if defined(DEBUG)
 CostCentreStack * _pushCostCentre ( CostCentreStack *ccs, CostCentre *cc );
 CostCentreStack *
 pushCostCentre ( CostCentreStack *ccs, CostCentre *cc )
 #define pushCostCentre _pushCostCentre
 {
     IF_DEBUG(prof,
-	     traceBegin("pushing %s on ", cc->label);
-	     debugCCS(ccs);
-	     traceEnd(););
-	     
+             traceBegin("pushing %s on ", cc->label);
+             debugCCS(ccs);
+             traceEnd(););
+
     return pushCostCentre(ccs,cc);
 }
 #endif
 
 /* Append ccs1 to ccs2 (ignoring any CAF cost centre at the root of ccs1 */
 
-#ifdef DEBUG
+#if defined(DEBUG)
 CostCentreStack *_appendCCS ( CostCentreStack *ccs1, CostCentreStack *ccs2 );
 CostCentreStack *
 appendCCS ( CostCentreStack *ccs1, CostCentreStack *ccs2 )
@@ -518,7 +547,7 @@ pushCostCentre (CostCentreStack *ccs, CostCentre *cc)
             // check if we've already memoized this stack
             ixtable = ccs->indexTable;
             temp_ccs = isInIndexTable(ixtable,cc);
-      
+
             if (temp_ccs != EMPTY_STACK) {
                 return temp_ccs;
             } else {
@@ -637,7 +666,7 @@ isInIndexTable(IndexTable *it, CostCentre *cc)
         else
             it = it->next;
     }
-  
+
     /* otherwise we never found it so return EMPTY_TABLE */
     return EMPTY_TABLE;
 }
@@ -665,303 +694,75 @@ addToIndexTable (IndexTable *it, CostCentreStack *new_ccs,
 /* We omit certain system-related CCs and CCSs from the default
  * reports, so as not to cause confusion.
  */
-static rtsBool
-ignoreCC (CostCentre *cc)
+bool
+ignoreCC (CostCentre const *cc)
 {
-    if (RtsFlags.CcFlags.doCostCentres < COST_CENTRES_ALL &&
+    return RtsFlags.CcFlags.doCostCentres < COST_CENTRES_ALL &&
         (   cc == CC_OVERHEAD
-	 || cc == CC_DONT_CARE
-	 || cc == CC_GC 
+         || cc == CC_DONT_CARE
+         || cc == CC_GC
          || cc == CC_SYSTEM
-         || cc == CC_IDLE)) {
-	return rtsTrue;
-    } else {
-	return rtsFalse;
-    }
+         || cc == CC_IDLE);
 }
 
-static rtsBool
-ignoreCCS (CostCentreStack *ccs)
+bool
+ignoreCCS (CostCentreStack const *ccs)
 {
-    if (RtsFlags.CcFlags.doCostCentres < COST_CENTRES_ALL &&
+    return RtsFlags.CcFlags.doCostCentres < COST_CENTRES_ALL &&
         (   ccs == CCS_OVERHEAD
          || ccs == CCS_DONT_CARE
          || ccs == CCS_GC
          || ccs == CCS_SYSTEM
-         || ccs == CCS_IDLE)) {
-        return rtsTrue;
-    } else {
-	return rtsFalse;
-    }
-}
-
-/* -----------------------------------------------------------------------------
-   Generating the aggregated per-cost-centre time/alloc report.
-   -------------------------------------------------------------------------- */
-
-static CostCentre *sorted_cc_list;
-
-static void
-aggregateCCCosts( CostCentreStack *ccs )
-{
-    IndexTable *i;
-
-    ccs->cc->mem_alloc += ccs->mem_alloc;
-    ccs->cc->time_ticks += ccs->time_ticks;
-
-    for (i = ccs->indexTable; i != 0; i = i->next) {
-        if (!i->back_edge) {
-            aggregateCCCosts(i->ccs);
-        }
-    }
-}
-
-static void
-insertCCInSortedList( CostCentre *new_cc )
-{
-    CostCentre **prev, *cc;
-
-    prev = &sorted_cc_list;
-    for (cc = sorted_cc_list; cc != NULL; cc = cc->link) {
-        if (new_cc->time_ticks > cc->time_ticks) {
-            new_cc->link = cc;
-            *prev = new_cc;
-            return;
-        } else {
-            prev = &(cc->link);
-        }
-    }
-    new_cc->link = NULL;
-    *prev = new_cc;
-}
-
-static nat
-strlen_utf8 (char *s)
-{
-    nat n = 0;
-    unsigned char c;
-
-    for (; *s != '\0'; s++) {
-        c = *s;
-        if (c < 0x80 || c > 0xBF) n++;
-    }
-    return n;
-}
-
-static void
-reportPerCCCosts( void )
-{
-    CostCentre *cc, *next;
-    nat max_label_len, max_module_len;
-
-    aggregateCCCosts(CCS_MAIN);
-    sorted_cc_list = NULL;
-
-    max_label_len  = 11; // no shorter than the "COST CENTRE" header
-    max_module_len = 7;  // no shorter than the "MODULE" header
-
-    for (cc = CC_LIST; cc != NULL; cc = next) {
-        next = cc->link;
-        if (cc->time_ticks > total_prof_ticks/100
-            || cc->mem_alloc > total_alloc/100
-            || RtsFlags.CcFlags.doCostCentres >= COST_CENTRES_ALL) {
-            insertCCInSortedList(cc);
-
-            max_label_len = stg_max(strlen_utf8(cc->label), max_label_len);
-            max_module_len = stg_max(strlen_utf8(cc->module), max_module_len);
-        }
-    }
-
-    fprintf(prof_file, "%-*s %-*s", max_label_len, "COST CENTRE", max_module_len, "MODULE");
-    fprintf(prof_file, "%6s %6s", "%time", "%alloc");
-    if (RtsFlags.CcFlags.doCostCentres >= COST_CENTRES_VERBOSE) {
-        fprintf(prof_file, "  %5s %9s", "ticks", "bytes");
-    }
-    fprintf(prof_file, "\n\n");
-
-    for (cc = sorted_cc_list; cc != NULL; cc = cc->link) {
-        if (ignoreCC(cc)) {
-            continue;
-        }
-        fprintf(prof_file, "%s%*s %s%*s",
-                cc->label,
-                max_label_len - strlen_utf8(cc->label), "",
-                cc->module,
-                max_module_len - strlen_utf8(cc->module), "");
-
-        fprintf(prof_file, "%6.1f %6.1f",
-                total_prof_ticks == 0 ? 0.0 : (cc->time_ticks / (StgFloat) total_prof_ticks * 100),
-                total_alloc == 0 ? 0.0 : (cc->mem_alloc / (StgFloat)
-                                          total_alloc * 100)
-            );
-
-        if (RtsFlags.CcFlags.doCostCentres >= COST_CENTRES_VERBOSE) {
-            fprintf(prof_file, "  %5" FMT_Word64 " %9" FMT_Word64,
-                    (StgWord64)(cc->time_ticks), cc->mem_alloc*sizeof(W_));
-        }
-        fprintf(prof_file, "\n");
-    }
-
-    fprintf(prof_file,"\n\n");
-}
-
-/* -----------------------------------------------------------------------------
-   Generate the cost-centre-stack time/alloc report
-   -------------------------------------------------------------------------- */
-
-static void 
-fprintHeader( nat max_label_len, nat max_module_len )
-{
-    fprintf(prof_file, "%-*s %-*s%6s %11s  %11s   %11s\n", max_label_len, "", max_module_len, "", "", "", "individual", "inherited");
-
-    fprintf(prof_file, "%-*s %-*s", max_label_len, "COST CENTRE", max_module_len, "MODULE");
-    fprintf(prof_file, "%6s %11s  %5s %5s   %5s %5s", "no.", "entries", "%time", "%alloc", "%time", "%alloc");
-
-    if (RtsFlags.CcFlags.doCostCentres >= COST_CENTRES_VERBOSE) {
-        fprintf(prof_file, "  %5s %9s", "ticks", "bytes");
-    }
-
-    fprintf(prof_file, "\n\n");
+         || ccs == CCS_IDLE);
 }
 
 void
 reportCCSProfiling( void )
 {
-    nat count;
-    char temp[128]; /* sigh: magic constant */
-    
     stopProfTimer();
-
-    total_prof_ticks = 0;
-    total_alloc = 0;
-    countTickss(CCS_MAIN);
-    
     if (RtsFlags.CcFlags.doCostCentres == 0) return;
 
-    fprintf(prof_file, "\t%s Time and Allocation Profiling Report  (%s)\n", 
-	    time_str(), "Final");
-
-    fprintf(prof_file, "\n\t  ");
-    fprintf(prof_file, " %s", prog_name);
-    fprintf(prof_file, " +RTS");
-    for (count = 0; rts_argv[count]; count++)
-	fprintf(prof_file, " %s", rts_argv[count]);
-    fprintf(prof_file, " -RTS");
-    for (count = 1; prog_argv[count]; count++)
-	fprintf(prof_file, " %s", prog_argv[count]);
-    fprintf(prof_file, "\n\n");
-
-    fprintf(prof_file, "\ttotal time  = %11.2f secs   (%lu ticks @ %d us, %d processor%s)\n",
-            ((double) total_prof_ticks *
-             (double) RtsFlags.MiscFlags.tickInterval) / (TIME_RESOLUTION * n_capabilities),
-	    (unsigned long) total_prof_ticks,
-            (int) TimeToUS(RtsFlags.MiscFlags.tickInterval),
-            n_capabilities, n_capabilities > 1 ? "s" : "");
-
-    fprintf(prof_file, "\ttotal alloc = %11s bytes",
-	    showStgWord64(total_alloc * sizeof(W_),
-				 temp, rtsTrue/*commas*/));
-
-    fprintf(prof_file, "  (excludes profiling overheads)\n\n");
-
-    reportPerCCCosts();
-
+    ProfilerTotals totals = countTickss(CCS_MAIN);
+    aggregateCCCosts(CCS_MAIN);
     inheritCosts(CCS_MAIN);
+    CostCentreStack *stack = pruneCCSTree(CCS_MAIN);
+    sortCCSTree(stack);
 
-    reportCCS(pruneCCSTree(CCS_MAIN));
-}
-
-static void 
-findCCSMaxLens(CostCentreStack *ccs, nat indent, nat *max_label_len, nat *max_module_len) {
-    CostCentre *cc;
-    IndexTable *i;
-
-    cc = ccs->cc;
-
-    *max_label_len = stg_max(*max_label_len, indent + strlen_utf8(cc->label));
-    *max_module_len = stg_max(*max_module_len, strlen_utf8(cc->module));
-
-    for (i = ccs->indexTable; i != 0; i = i->next) {
-        if (!i->back_edge) {
-            findCCSMaxLens(i->ccs, indent+1, max_label_len, max_module_len);
-        }
+    if (RtsFlags.CcFlags.doCostCentres == COST_CENTRES_JSON) {
+        writeCCSReportJson(prof_file, stack, totals);
+    } else {
+        writeCCSReport(prof_file, stack, totals);
     }
 }
 
-static void 
-logCCS(CostCentreStack *ccs, nat indent, nat max_label_len, nat max_module_len)
-{
-    CostCentre *cc;
-    IndexTable *i;
+/* -----------------------------------------------------------------------------
+ * Accumulating total allocatinos and tick count
+   -------------------------------------------------------------------------- */
 
-    cc = ccs->cc;
-
-    /* Only print cost centres with non 0 data ! */
-
-    if (!ignoreCCS(ccs))
-        /* force printing of *all* cost centres if -Pa */
-    {
-
-        fprintf(prof_file, "%-*s%s%*s %s%*s",
-                indent, "",
-                cc->label,
-                max_label_len-indent - strlen_utf8(cc->label), "",
-                cc->module,
-                max_module_len - strlen_utf8(cc->module), "");
-
-        fprintf(prof_file, "%6ld %11" FMT_Word64 "  %5.1f  %5.1f   %5.1f  %5.1f",
-            ccs->ccsID, ccs->scc_count,
-                total_prof_ticks == 0 ? 0.0 : ((double)ccs->time_ticks / (double)total_prof_ticks * 100.0),
-                total_alloc == 0 ? 0.0 : ((double)ccs->mem_alloc / (double)total_alloc * 100.0),
-                total_prof_ticks == 0 ? 0.0 : ((double)ccs->inherited_ticks / (double)total_prof_ticks * 100.0),
-                total_alloc == 0 ? 0.0 : ((double)ccs->inherited_alloc / (double)total_alloc * 100.0)
-	    );
-
-        if (RtsFlags.CcFlags.doCostCentres >= COST_CENTRES_VERBOSE) {
-            fprintf(prof_file, "  %5" FMT_Word64 " %9" FMT_Word64,
-                    (StgWord64)(ccs->time_ticks), ccs->mem_alloc*sizeof(W_));
-        }
-        fprintf(prof_file, "\n");
-    }
-
-    for (i = ccs->indexTable; i != 0; i = i->next) {
-        if (!i->back_edge) {
-            logCCS(i->ccs, indent+1, max_label_len, max_module_len);
-        }
-    }
-}
-
+/* Helper */
 static void
-reportCCS(CostCentreStack *ccs)
+countTickss_(CostCentreStack const *ccs, ProfilerTotals *totals)
 {
-    nat max_label_len, max_module_len;
-
-    max_label_len = 11; // no shorter than "COST CENTRE" header
-    max_module_len = 7; // no shorter than "MODULE" header
-
-    findCCSMaxLens(ccs, 0, &max_label_len, &max_module_len);
-
-    fprintHeader(max_label_len, max_module_len);
-    logCCS(ccs, 0, max_label_len, max_module_len);
+    if (!ignoreCCS(ccs)) {
+        totals->total_alloc += ccs->mem_alloc;
+        totals->total_prof_ticks += ccs->time_ticks;
+    }
+    for (IndexTable *i = ccs->indexTable; i != NULL; i = i->next) {
+        if (!i->back_edge) {
+            countTickss_(i->ccs, totals);
+        }
+    }
 }
-
 
 /* Traverse the cost centre stack tree and accumulate
- * ticks/allocations.
+ * total ticks/allocations.
  */
-static void
-countTickss(CostCentreStack *ccs)
+static ProfilerTotals
+countTickss(CostCentreStack const *ccs)
 {
-    IndexTable *i;
-
-    if (!ignoreCCS(ccs)) {
-        total_alloc += ccs->mem_alloc;
-        total_prof_ticks += ccs->time_ticks;
-    }
-    for (i = ccs->indexTable; i != NULL; i = i->next)
-        if (!i->back_edge) {
-            countTickss(i->ccs);
-        }
+    ProfilerTotals totals = {0,0};
+    countTickss_(ccs, &totals);
+    return totals;
 }
 
 /* Traverse the cost centre stack tree and inherit ticks & allocs.
@@ -984,6 +785,21 @@ inheritCosts(CostCentreStack *ccs)
         }
 
     return;
+}
+
+static void
+aggregateCCCosts( CostCentreStack *ccs )
+{
+    IndexTable *i;
+
+    ccs->cc->mem_alloc += ccs->mem_alloc;
+    ccs->cc->time_ticks += ccs->time_ticks;
+
+    for (i = ccs->indexTable; i != 0; i = i->next) {
+        if (!i->back_edge) {
+            aggregateCCCosts(i->ccs);
+        }
+    }
 }
 
 //
@@ -1020,6 +836,63 @@ pruneCCSTree (CostCentreStack *ccs)
     }
 }
 
+static IndexTable*
+insertIndexTableInSortedList(IndexTable* tbl, IndexTable* sortedList)
+{
+    StgWord tbl_ticks = tbl->ccs->scc_count;
+    char*   tbl_label = tbl->ccs->cc->label;
+
+    IndexTable *prev   = NULL;
+    IndexTable *cursor = sortedList;
+
+    while (cursor != NULL) {
+        StgWord cursor_ticks = cursor->ccs->scc_count;
+        char*   cursor_label = cursor->ccs->cc->label;
+
+        if (tbl_ticks > cursor_ticks ||
+                (tbl_ticks == cursor_ticks && strcmp(tbl_label, cursor_label) < 0)) {
+            if (prev == NULL) {
+                tbl->next = sortedList;
+                return tbl;
+            } else {
+                prev->next = tbl;
+                tbl->next = cursor;
+                return sortedList;
+            }
+        } else {
+            prev   = cursor;
+            cursor = cursor->next;
+        }
+    }
+
+    prev->next = tbl;
+    return sortedList;
+}
+
+static void
+sortCCSTree(CostCentreStack *ccs)
+{
+    if (ccs->indexTable == NULL) return;
+
+    for (IndexTable *tbl = ccs->indexTable; tbl != NULL; tbl = tbl->next)
+        if (!tbl->back_edge)
+            sortCCSTree(tbl->ccs);
+
+    IndexTable *sortedList    = ccs->indexTable;
+    IndexTable *nonSortedList = sortedList->next;
+    sortedList->next = NULL;
+
+    while (nonSortedList != NULL)
+    {
+        IndexTable *nonSortedTail = nonSortedList->next;
+        nonSortedList->next = NULL;
+        sortedList = insertIndexTableInSortedList(nonSortedList, sortedList);
+        nonSortedList = nonSortedTail;
+    }
+
+    ccs->indexTable = sortedList;
+}
+
 void
 fprintCCS( FILE *f, CostCentreStack *ccs )
 {
@@ -1034,7 +907,7 @@ fprintCCS( FILE *f, CostCentreStack *ccs )
 }
 
 // Returns: True if the call stack ended with CAF
-static rtsBool fprintCallStack (CostCentreStack *ccs)
+static bool fprintCallStack (CostCentreStack *ccs)
 {
     CostCentreStack *prev;
 
@@ -1055,17 +928,17 @@ static rtsBool fprintCallStack (CostCentreStack *ccs)
 void
 fprintCCS_stderr (CostCentreStack *ccs, StgClosure *exception, StgTSO *tso)
 {
-    rtsBool is_caf;
+    bool is_caf;
     StgPtr frame;
     StgStack *stack;
     CostCentreStack *prev_ccs;
-    nat depth = 0;
-    const nat MAX_DEPTH = 10; // don't print gigantic chains of stacks
+    uint32_t depth = 0;
+    const uint32_t MAX_DEPTH = 10; // don't print gigantic chains of stacks
 
     {
-        char *desc;
-        StgInfoTable *info;
-        info = get_itbl(UNTAG_CLOSURE(exception));
+        const char *desc;
+        const StgInfoTable *info;
+        info = get_itbl(UNTAG_CONST_CLOSURE(exception));
         switch (info->type) {
         case CONSTR:
         case CONSTR_1_0:
@@ -1073,8 +946,7 @@ fprintCCS_stderr (CostCentreStack *ccs, StgClosure *exception, StgTSO *tso)
         case CONSTR_2_0:
         case CONSTR_1_1:
         case CONSTR_0_2:
-        case CONSTR_STATIC:
-        case CONSTR_NOCAF_STATIC:
+        case CONSTR_NOCAF:
             desc = GET_CON_DESC(itbl_to_con_itbl(info));
             break;
        default:
@@ -1129,7 +1001,7 @@ done:
     return;
 }
 
-#ifdef DEBUG
+#if defined(DEBUG)
 void
 debugCCS( CostCentreStack *ccs )
 {
@@ -1145,11 +1017,3 @@ debugCCS( CostCentreStack *ccs )
 #endif /* DEBUG */
 
 #endif /* PROFILING */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

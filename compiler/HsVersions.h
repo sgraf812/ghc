@@ -1,5 +1,4 @@
-#ifndef HSVERSIONS_H
-#define HSVERSIONS_H
+#pragma once
 
 #if 0
 
@@ -20,11 +19,8 @@ you will screw up the layout where they are used in case expressions!
  * ghcconfig.h, because that will include ghcplatform.h which has the
  * wrong platform settings for the compiler (it has the platform
  * settings for the target plat instead). */
-#include "../includes/ghcautoconf.h"
+#include "ghcautoconf.h"
 
-/* Global variables may not work in other Haskell implementations,
- * but we need them currently! so the conditional on GLASGOW won't do. */
-#if defined(__GLASGOW_HASKELL__) || !defined(__GLASGOW_HASKELL__)
 #define GLOBAL_VAR(name,value,ty)  \
 {-# NOINLINE name #-};             \
 name :: IORef (ty);                \
@@ -34,14 +30,29 @@ name = Util.global (value);
 {-# NOINLINE name #-};              \
 name :: IORef (ty);                 \
 name = Util.globalM (value);
-#endif
+
+
+#define SHARED_GLOBAL_VAR(name,accessor,saccessor,value,ty) \
+{-# NOINLINE name #-};                                      \
+name :: IORef (ty);                                         \
+name = Util.sharedGlobal (value) (accessor);                \
+foreign import ccall unsafe saccessor                       \
+  accessor :: Ptr (IORef a) -> IO (Ptr (IORef a));
+
+#define SHARED_GLOBAL_VAR_M(name,accessor,saccessor,value,ty)  \
+{-# NOINLINE name #-};                                         \
+name :: IORef (ty);                                            \
+name = Util.sharedGlobalM (value) (accessor);                  \
+foreign import ccall unsafe saccessor                          \
+  accessor :: Ptr (IORef a) -> IO (Ptr (IORef a));
+
 
 #define ASSERT(e)      if debugIsOn && not (e) then (assertPanic __FILE__ __LINE__) else
 #define ASSERT2(e,msg) if debugIsOn && not (e) then (assertPprPanic __FILE__ __LINE__ (msg)) else
 #define WARN( e, msg ) (warnPprTrace (e) __FILE__ __LINE__ (msg)) $
 
 -- Examples:   Assuming   flagSet :: String -> m Bool
--- 
+--
 --    do { c   <- getChar; MASSERT( isUpper c ); ... }
 --    do { c   <- getChar; MASSERT2( isUpper c, text "Bad" ); ... }
 --    do { str <- getStr;  ASSERTM( flagSet str ); .. }
@@ -52,14 +63,3 @@ name = Util.globalM (value);
 #define ASSERTM(e)      do { bool <- e; MASSERT(bool) }
 #define ASSERTM2(e,msg) do { bool <- e; MASSERT2(bool,msg) }
 #define WARNM2(e,msg)   do { bool <- e; WARN(bool, msg) return () }
-
--- Useful for declaring arguments to be strict
-#define STRICT1(f) f a | a `seq` False = undefined
-#define STRICT2(f) f a b | a `seq` b `seq` False = undefined
-#define STRICT3(f) f a b c | a `seq` b `seq` c `seq` False = undefined
-#define STRICT4(f) f a b c d | a `seq` b `seq` c `seq` d `seq` False = undefined
-#define STRICT5(f) f a b c d e | a `seq` b `seq` c `seq` d `seq` e `seq` False = undefined
-#define STRICT6(f) f a b c d e f | a `seq` b `seq` c `seq` d `seq` e `seq` f `seq` False = undefined
-
-#endif /* HsVersions.h */
-

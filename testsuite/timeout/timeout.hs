@@ -33,9 +33,6 @@ main = do
           _ -> die ("Can't parse " ++ show secs ++ " as a number of seconds")
       _ -> die ("Bad arguments " ++ show args)
 
-timeoutMsg :: String
-timeoutMsg = "Timeout happened...killing process..."
-
 run :: Int -> String -> IO ()
 #if !defined(mingw32_HOST_OS)
 run secs cmd = do
@@ -61,7 +58,6 @@ run secs cmd = do
                 r <- takeMVar m
                 case r of
                   Nothing -> do
-                        hPutStrLn stderr timeoutMsg
                         killProcess pid
                         exitWith (ExitFailure 99)
                   Just (Exited r) -> exitWith r
@@ -107,31 +103,54 @@ run secs cmd =
     alloca $ \p_pi ->
     withTString cmd' $ \cmd'' ->
     do job <- createJobObjectW nullPtr nullPtr
-       let creationflags = 0
+       b_info <- setJobParameters job
+       unless b_info $ errorWin "setJobParameters"
+
+       ioPort <- createCompletionPort job
+       when (ioPort == nullPtr) $ errorWin "createCompletionPort, cannot continue."
+
+       -- We're explicitly turning off handle inheritance to prevent misc handles
+       -- from being inherited by the child. Notable we don't want the I/O Completion
+       -- Ports and Job handles to be inherited. So we mark them as non-inheritable.
+       setHandleInformation job    cHANDLE_FLAG_INHERIT 0
+       setHandleInformation ioPort cHANDLE_FLAG_INHERIT 0
+
+       -- Now create the process suspended so we can add it to the job and then resume.
+       -- This is so we don't miss any events on the receiving end of the I/O port.
+       let creationflags = cCREATE_SUSPENDED
        b <- createProcessW nullPtr cmd'' nullPtr nullPtr True
                            creationflags
                            nullPtr nullPtr p_startupinfo p_pi
        unless b $ errorWin "createProcessW"
+
        pi <- peek p_pi
-       assignProcessToJobObject job (piProcess pi)
-       resumeThread (piThread pi)
+       b_assign <- assignProcessToJobObject job (piProcess pi)
+       unless b_assign $ errorWin "assignProcessToJobObject, cannot continue."
 
-       -- The program is now running
+       let handleInterrupt action =
+               action `onException` terminateJobObject job 99
 
-       let handle = piProcess pi
-       let millisecs = secs * 1000
-       rc <- waitForSingleObject handle (fromIntegral millisecs)
-       if rc == cWAIT_TIMEOUT
-           then do hPutStrLn stderr timeoutMsg
-                   terminateJobObject job 99
-                   exitWith (ExitFailure 99)
-           else alloca $ \p_exitCode ->
-                do r <- getExitCodeProcess handle p_exitCode
-                   if r then do ec <- peek p_exitCode
-                                let ec' = if ec == 0
-                                          then ExitSuccess
-                                          else ExitFailure $ fromIntegral ec
-                                exitWith ec'
-                        else errorWin "getExitCodeProcess"
+       handleInterrupt $ do
+          resumeThread (piThread pi)
+          -- The program is now running
+          let handle = piProcess pi
+          let millisecs = secs * 1000
+          rc <- waitForJobCompletion job ioPort (fromIntegral millisecs)
+          closeHandle ioPort
+
+          if not rc
+              then do terminateJobObject job 99
+                      closeHandle job
+                      exitWith (ExitFailure 99)
+              else alloca $ \p_exitCode ->
+                    do terminateJobObject job 0 -- Ensure it's all really dead.
+                       closeHandle job
+                       r <- getExitCodeProcess handle p_exitCode
+                       if r then do ec <- peek p_exitCode
+                                    let ec' = if ec == 0
+                                              then ExitSuccess
+                                              else ExitFailure $ fromIntegral ec
+                                    exitWith ec'
+                            else errorWin "getExitCodeProcess"
 #endif
 

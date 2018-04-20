@@ -1,12 +1,14 @@
 {-# LANGUAGE Unsafe #-}
-{-# LANGUAGE MagicHash, UnboxedTuples #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE UnboxedTuples #-}
 
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Debug.Trace
 -- Copyright   :  (c) The University of Glasgow 2001
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  provisional
 -- Portability :  portable
@@ -35,31 +37,37 @@ module Debug.Trace (
         -- $eventlog_tracing
         traceEvent,
         traceEventIO,
-        
+
         -- * Execution phase markers
         -- $markers
         traceMarker,
         traceMarkerIO,
   ) where
 
-import Prelude
 import System.IO.Unsafe
-import Control.Monad
 
 import Foreign.C.String
 import GHC.Base
 import qualified GHC.Foreign
 import GHC.IO.Encoding
 import GHC.Ptr
+import GHC.Show
 import GHC.Stack
 import Data.List
+
+-- $setup
+-- >>> import Prelude
 
 -- $tracing
 --
 -- The 'trace', 'traceShow' and 'traceIO' functions print messages to an output
 -- stream. They are intended for \"printf debugging\", that is: tracing the flow
 -- of execution and printing interesting values.
-
+--
+-- All these functions evaluate the message completely before printing
+-- it; so if the message is not fully defined, none of it will be
+-- printed.
+--
 -- The usual output stream is 'System.IO.stderr'. For Windows GUI applications
 -- (that have no stderr) the output is directed to the Windows debug console.
 -- Some implementations of these functions may decorate the string that\'s
@@ -68,7 +76,7 @@ import Data.List
 -- | The 'traceIO' function outputs the trace message from the IO monad.
 -- This sequences the output with respect to other IO actions.
 --
--- /Since: 4.5.0.0/
+-- @since 4.5.0.0
 traceIO :: String -> IO ()
 traceIO msg = do
     withCString "%s\n" $ \cfmt -> do
@@ -99,7 +107,10 @@ before returning the second argument as its result.
 
 For example, this returns the value of @f x@ but first outputs the message.
 
-> trace ("calling f with x = " ++ show x) (f x)
+>>> let x = 123; f = show
+>>> trace ("calling f with x = " ++ show x) (f x)
+"calling f with x = 123
+123"
 
 The 'trace' function should /only/ be used for debugging, or for monitoring
 execution. The function is not referentially transparent: its type indicates
@@ -114,7 +125,11 @@ trace string expr = unsafePerformIO $ do
 {-|
 Like 'trace' but returns the message instead of a third value.
 
-/Since: 4.7.0.0/
+>>> traceId "hello"
+"hello
+hello"
+
+@since 4.7.0.0
 -}
 traceId :: String -> String
 traceId a = trace a a
@@ -124,65 +139,86 @@ Like 'trace', but uses 'show' on the argument to convert it to a 'String'.
 
 This makes it convenient for printing the values of interesting variables or
 expressions inside a function. For example here we print the value of the
-variables @x@ and @z@:
+variables @x@ and @y@:
 
-> f x y =
->     traceShow (x, z) $ result
->   where
->     z = ...
->     ...
+>>> let f x y = traceShow (x,y) (x + y) in f (1+2) 5
+(3,5)
+8
+
 -}
-traceShow :: (Show a) => a -> b -> b
+traceShow :: Show a => a -> b -> b
 traceShow = trace . show
 
 {-|
 Like 'traceShow' but returns the shown value instead of a third value.
 
-/Since: 4.7.0.0/
+>>> traceShowId (1+2+3, "hello" ++ "world")
+(6,"helloworld")
+(6,"helloworld")
+
+@since 4.7.0.0
 -}
-traceShowId :: (Show a) => a -> a
+traceShowId :: Show a => a -> a
 traceShowId a = trace (show a) a
 
 {-|
-Like 'trace' but returning unit in an arbitrary monad. Allows for convenient
-use in do-notation. Note that the application of 'trace' is not an action in the
-monad, as 'traceIO' is in the 'IO' monad.
+Like 'trace' but returning unit in an arbitrary 'Applicative' context. Allows
+for convenient use in do-notation.
 
-> ... = do
->   x <- ...
->   traceM $ "x: " ++ show x
->   y <- ...
->   traceM $ "y: " ++ show y
+Note that the application of 'traceM' is not an action in the 'Applicative'
+context, as 'traceIO' is in the 'IO' type. While the fresh bindings in the
+following example will force the 'traceM' expressions to be reduced every time
+the @do@-block is executed, @traceM "not crashed"@ would only be reduced once,
+and the message would only be printed once.  If your monad is in 'MonadIO',
+@liftIO . traceIO@ may be a better option.
 
-/Since: 4.7.0.0/
+>>> :{
+do
+    x <- Just 3
+    traceM ("x: " ++ show x)
+    y <- pure 12
+    traceM ("y: " ++ show y)
+    pure (x*2 + y)
+:}
+x: 3
+y: 12
+Just 18
+
+@since 4.7.0.0
 -}
-traceM :: (Monad m) => String -> m ()
-traceM string = trace string $ return ()
+traceM :: Applicative f => String -> f ()
+traceM string = trace string $ pure ()
 
 {-|
 Like 'traceM', but uses 'show' on the argument to convert it to a 'String'.
 
-> ... = do
->   x <- ...
->   traceMShow $ x
->   y <- ...
->   traceMShow $ x + y
+>>> :{
+do
+    x <- Just 3
+    traceShowM x
+    y <- pure 12
+    traceShowM y
+    pure (x*2 + y)
+:}
+3
+12
+Just 18
 
-/Since: 4.7.0.0/
+@since 4.7.0.0
 -}
-traceShowM :: (Show a, Monad m) => a -> m ()
+traceShowM :: (Show a, Applicative f) => a -> f ()
 traceShowM = traceM . show
 
 -- | like 'trace', but additionally prints a call stack if one is
 -- available.
 --
 -- In the current GHC implementation, the call stack is only
--- availble if the program was compiled with @-prof@; otherwise
+-- available if the program was compiled with @-prof@; otherwise
 -- 'traceStack' behaves exactly like 'trace'.  Entries in the call
 -- stack correspond to @SCC@ annotations, so it is a good idea to use
 -- @-fprof-auto@ or @-fprof-auto-calls@ to add SCC annotations automatically.
 --
--- /Since: 4.5.0.0/
+-- @since 4.5.0.0
 traceStack :: String -> a -> a
 traceStack str expr = unsafePerformIO $ do
    traceIO str
@@ -215,7 +251,7 @@ traceStack str expr = unsafePerformIO $ do
 -- duplicate events emitted if two CPUs simultaneously evaluate the same thunk
 -- that uses 'traceEvent'.
 --
--- /Since: 4.5.0.0/
+-- @since 4.5.0.0
 traceEvent :: String -> a -> a
 traceEvent msg expr = unsafeDupablePerformIO $ do
     traceEventIO msg
@@ -227,7 +263,7 @@ traceEvent msg expr = unsafeDupablePerformIO $ do
 -- Compared to 'traceEvent', 'traceEventIO' sequences the event with respect to
 -- other IO actions.
 --
--- /Since: 4.5.0.0/
+-- @since 4.5.0.0
 traceEventIO :: String -> IO ()
 traceEventIO msg =
   GHC.Foreign.withCString utf8 msg $ \(Ptr p) -> IO $ \s ->
@@ -245,7 +281,7 @@ traceEventIO msg =
 --
 -- Markers let us do this: we can annotate the program to emit a marker at
 -- an appropriate point during execution and then see that in a profile.
--- 
+--
 -- Currently this feature is only supported in GHC by the eventlog tracing
 -- system, but in future it may also be supported by the heap profiling or
 -- other profiling tools. These function exists for other Haskell
@@ -265,7 +301,7 @@ traceEventIO msg =
 -- duplicate events emitted if two CPUs simultaneously evaluate the same thunk
 -- that uses 'traceMarker'.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 traceMarker :: String -> a -> a
 traceMarker msg expr = unsafeDupablePerformIO $ do
     traceMarkerIO msg
@@ -277,7 +313,7 @@ traceMarker msg expr = unsafeDupablePerformIO $ do
 -- Compared to 'traceMarker', 'traceMarkerIO' sequences the event with respect to
 -- other IO actions.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 traceMarkerIO :: String -> IO ()
 traceMarkerIO msg =
   GHC.Foreign.withCString utf8 msg $ \(Ptr p) -> IO $ \s ->

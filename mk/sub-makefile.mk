@@ -9,7 +9,12 @@
 #  make clean  ==>  make -C $(TOP) clean_dir
 #
 
-# Important, otherwise we get silly built-in rules:
+# Eliminate use of the built-in implicit rules, and clear out the default list
+# of suffixes for suffix rules. Speeds up make quite a bit. Both are needed
+# for the shortest `make -d` output.
+# Don't set --no-builtin-variables; some rules might stop working if you do
+# (e.g. 'make clean' in testsuite/ currently relies on an implicit $RM).
+MAKEFLAGS += --no-builtin-rules
 .SUFFIXES:
 
 TOPMAKE = $(MAKE) -C $(TOP)
@@ -37,7 +42,7 @@ endif
 .NOTPARALLEL:
 
 STD_TARGETS = all clean distclean maintainer_clean install html ps pdf
-DIRECTORY_INDEPENDENT_TARGETS = show
+DIRECTORY_INDEPENDENT_TARGETS = show show!
 
 # The + tells make that we're recursively invoking make, otherwise 'make -j2'
 # goes wrong.
@@ -47,7 +52,7 @@ $(STD_TARGETS):
 $(DIRECTORY_INDEPENDENT_TARGETS):
 	+$(TOPMAKE) $@ $(EXTRA_MAKE_OPTS)
 
-OTHERTARGETS=$(filter-out fast help show $(STD_TARGETS) $(SPEC_TARGETS),$(MAKECMDGOALS))
+OTHERTARGETS=$(filter-out fast help $(DIRECTORY_INDEPENDENT_TARGETS) $(STD_TARGETS) $(SPEC_TARGETS),$(MAKECMDGOALS))
 .PHONY: $(OTHERTARGETS)
 $(OTHERTARGETS):
 	+$(TOPMAKE) $(dir)/$@ $(EXTRA_MAKE_OPTS)
@@ -59,4 +64,4 @@ help : sub-help
 sub-help :
 	@echo "You are in subdirectory \"$(dir)\"."
 	@echo "Useful targets in this directory:"
-	@cat $(TOP)/SUBMAKEHELP
+	@sed '1,/Using `make` in subdirectories/d' $(TOP)/MAKEHELP.md

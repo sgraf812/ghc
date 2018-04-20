@@ -59,11 +59,26 @@ e17 = id
 e18 :: Proxy (a - 0) -> Proxy a
 e18 = id
 
+e19 :: Proxy (Div 10 3) -> Proxy 3
+e19 = id
+
+e20 :: Proxy (Div x 1) -> Proxy x
+e20 = id
+
+e21 :: Proxy (Mod 10 3) -> Proxy 1
+e21 = id
+
+e22 :: Proxy (Mod x 1) -> Proxy 0
+e22 = id
+
+e23 :: Proxy (Log2 10) -> Proxy 3
+e23 = id
+
 --------------------------------------------------------------------------------
 -- Test interactions with inerts
 
-ti1 :: Proxy (x + y) -> Proxy x -> ()
-ti1 _ _ = ()
+-- ti1 :: Proxy (x + y) -> Proxy x -> ()
+-- ti1 _ _ = ()
 
 ti2 :: Proxy (y + x) -> Proxy x -> ()
 ti2 _ _ = ()
@@ -80,15 +95,8 @@ ti5 _ = ()
 ti6 :: Proxy (y ^ 2) -> ()
 ti6 _ = ()
 
-type family SomeFun (n :: Nat)
-
-ti7 :: (x <= y, y <= x) => Proxy (SomeFun x) -> Proxy y -> ()
-ti7 _ _ = ()
-
 ti8 :: Proxy (x - y) -> Proxy x -> ()
 ti8 _ _ = ()
 
 ti9 :: Proxy (y - x) -> Proxy x -> ()
 ti9 _ _ = ()
-
-

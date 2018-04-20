@@ -6,6 +6,7 @@
 
 #include "PosixSource.h"
 #include "Rts.h"
+#include "Hooks.h"
 
 /* Note: by the time this hook has been called, Haskell land
  * will have been shut down completely.
@@ -18,11 +19,3 @@ void
 OnExitHook (void)
 {
 }
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

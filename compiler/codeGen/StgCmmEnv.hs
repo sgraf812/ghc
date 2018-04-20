@@ -13,8 +13,6 @@ module StgCmmEnv (
         litIdInfo, lneIdInfo, rhsIdInfo, mkRhsInit,
         idInfoToAmode,
 
-        NonVoid(..), unsafe_stripNV, nonVoidIds,
-
         addBindC, addBindsC,
 
         bindArgsToRegs, bindToReg, rebindToReg,
@@ -26,6 +24,8 @@ module StgCmmEnv (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import TyCon
 import StgCmmMonad
 import StgCmmUtils
@@ -33,37 +33,20 @@ import StgCmmClosure
 
 import CLabel
 
-import DynFlags
-import MkGraph
 import BlockId
 import CmmExpr
 import CmmUtils
-import FastString
+import DynFlags
 import Id
-import VarEnv
-import Control.Monad
+import MkGraph
 import Name
-import StgSyn
 import Outputable
-
--------------------------------------
---        Non-void types
--------------------------------------
--- We frequently need the invariant that an Id or a an argument
--- is of a non-void type. This type is a witness to the invariant.
-
-newtype NonVoid a = NonVoid a
-  deriving (Eq, Show)
-
--- Use with care; if used inappropriately, it could break invariants.
-unsafe_stripNV :: NonVoid a -> a
-unsafe_stripNV (NonVoid a) = a
-
-instance (Outputable a) => Outputable (NonVoid a) where
-  ppr (NonVoid a) = ppr a
-
-nonVoidIds :: [Id] -> [NonVoid Id]
-nonVoidIds ids = [NonVoid id | id <- ids, not (isVoidRep (idPrimRep id))]
+import StgSyn
+import Type
+import TysPrim
+import UniqFM
+import Util
+import VarEnv
 
 -------------------------------------
 --        Manipulating CgIdInfo
@@ -147,8 +130,15 @@ getCgIdInfo id
                 -- Should be imported; make up a CgIdInfo for it
           let name = idName id
         ; if isExternalName name then
-              let ext_lbl = CmmLabel (mkClosureLabel name $ idCafInfo id)
-              in return (litIdInfo dflags id (mkLFImported id) ext_lbl)
+              let ext_lbl
+                      | isUnliftedType (idType id) =
+                          -- An unlifted external Id must refer to a top-level
+                          -- string literal. See Note [Bytes label] in CLabel.
+                          ASSERT( idType id `eqType` addrPrimTy )
+                          mkBytesLabel name
+                      | otherwise = mkClosureLabel name $ idCafInfo id
+              in return $
+                  litIdInfo dflags id (mkLFImported id) (CmmLabel ext_lbl)
           else
               cgLookupPanic id -- Bug
         }}}
@@ -158,16 +148,16 @@ cgLookupPanic id
   = do  local_binds <- getBinds
         pprPanic "StgCmmEnv: variable not found"
                 (vcat [ppr id,
-                ptext (sLit "local binds for:"),
-                vcat [ ppr (cg_id info) | info <- varEnvElts local_binds ]
+                text "local binds for:",
+                pprUFM local_binds $ \infos ->
+                  vcat [ ppr (cg_id info) | info <- infos ]
               ])
 
 
 --------------------
 getArgAmode :: NonVoid StgArg -> FCode CmmExpr
-getArgAmode (NonVoid (StgVarArg var))  =
-  do { info  <- getCgIdInfo var; return (idInfoToAmode info) }
-getArgAmode (NonVoid (StgLitArg lit))  = liftM CmmLit $ cgLit lit
+getArgAmode (NonVoid (StgVarArg var)) = idInfoToAmode <$> getCgIdInfo var
+getArgAmode (NonVoid (StgLitArg lit)) = CmmLit <$> cgLit lit
 
 getNonVoidArgAmodes :: [StgArg] -> FCode [CmmExpr]
 -- NB: Filters out void args,
@@ -176,8 +166,9 @@ getNonVoidArgAmodes [] = return []
 getNonVoidArgAmodes (arg:args)
   | isVoidRep (argPrimRep arg) = getNonVoidArgAmodes args
   | otherwise = do { amode  <- getArgAmode (NonVoid arg)
-                    ; amodes <- getNonVoidArgAmodes args
-                    ; return ( amode : amodes ) }
+                   ; amodes <- getNonVoidArgAmodes args
+                   ; return ( amode : amodes ) }
+
 
 ------------------------------------------------------------------------
 --        Interface functions for binding and re-binding names
@@ -214,7 +205,4 @@ idToReg :: DynFlags -> NonVoid Id -> LocalReg
 -- about accidental collision
 idToReg dflags (NonVoid id)
              = LocalReg (idUnique id)
-                        (case idPrimRep id of VoidRep -> pprPanic "idToReg" (ppr id)
-                                              _ -> primRepCmmType dflags (idPrimRep id))
-
-
+                        (primRepCmmType dflags (idPrimRep id))

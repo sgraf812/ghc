@@ -13,6 +13,8 @@ module RegAlloc.Graph.SpillCost (
 
         lifeMapFromSpillCostInfo
 ) where
+import GhcPrelude
+
 import RegAlloc.Liveness
 import Instruction
 import RegClass
@@ -20,7 +22,7 @@ import Reg
 
 import GraphBase
 
-import BlockId
+import Hoopl.Collections (mapLookup)
 import Cmm
 import UniqFM
 import UniqSet
@@ -108,7 +110,10 @@ slurpSpillCostInfo platform cmm
         countLIs rsLiveEntry (LiveInstr instr (Just live) : lis)
          = do
                 -- Increment the lifetime counts for regs live on entry to this instr.
-                mapM_ incLifetime $ uniqSetToList rsLiveEntry
+                mapM_ incLifetime $ nonDetEltsUniqSet rsLiveEntry
+                    -- This is non-deterministic but we do not
+                    -- currently support deterministic code-generation.
+                    -- See Note [Unique Determinism and code generation]
 
                 -- Increment counts for what regs were read/written from.
                 let (RU read written)   = regUsageOfInstr platform instr
@@ -136,12 +141,9 @@ slurpSpillCostInfo platform cmm
 
 -- | Take all the virtual registers from this set.
 takeVirtuals :: UniqSet Reg -> UniqSet VirtualReg
-takeVirtuals set 
-        = mapUniqSet get_virtual
-        $ filterUniqSet isVirtualReg set
-        where
-                get_virtual (RegVirtual vr) = vr 
-                get_virtual _ = panic "getVirt" 
+takeVirtuals set = mkUniqSet
+  [ vr | RegVirtual vr <- nonDetEltsUniqSet set ]
+  -- See Note [Unique Determinism and code generation]
 
 
 -- | Choose a node to spill from this graph
@@ -153,7 +155,8 @@ chooseSpill
 chooseSpill info graph
  = let  cost    = spillCost_length info graph
         node    = minimumBy (\n1 n2 -> compare (cost $ nodeId n1) (cost $ nodeId n2))
-                $ eltsUFM $ graphMap graph
+                $ nonDetEltsUFM $ graphMap graph
+                -- See Note [Unique Determinism and code generation]
 
    in   nodeId node
 
@@ -164,7 +167,7 @@ chooseSpill info graph
 --   cost =     sum         loadCost * freq (u)  +    sum        storeCost * freq (d)
 --          u <- uses (v)                         d <- defs (v)
 --
---   There are no loops in our code at the momemnt, so we can set the freq's to 1.
+--   There are no loops in our code at the moment, so we can set the freq's to 1.
 --
 --  If we don't have live range splitting then Chaitins function performs badly
 --  if we have lots of nested live ranges and very few registers.
@@ -215,7 +218,7 @@ spillCost_chaitin info graph reg
         = 0
 
         -- Otherwise revert to chaitin's regular cost function.
-        | otherwise     = fromIntegral (uses + defs) 
+        | otherwise     = fromIntegral (uses + defs)
                         / fromIntegral (nodeDegree graph reg)
         where (_, defs, uses, lifetime)
                 = fromMaybe (reg, 0, 0, 0) $ lookupUFM info reg
@@ -232,7 +235,7 @@ spillCost_length info _ reg
         | lifetime <= 1         = 1/0
         | otherwise             = 1 / fromIntegral lifetime
         where (_, _, _, lifetime)
-                = fromMaybe (reg, 0, 0, 0) 
+                = fromMaybe (reg, 0, 0, 0)
                 $ lookupUFM info reg
 
 
@@ -241,24 +244,26 @@ lifeMapFromSpillCostInfo :: SpillCostInfo -> UniqFM (VirtualReg, Int)
 lifeMapFromSpillCostInfo info
         = listToUFM
         $ map (\(r, _, _, life) -> (r, (r, life)))
-        $ eltsUFM info
+        $ nonDetEltsUFM info
+        -- See Note [Unique Determinism and code generation]
 
 
 -- | Determine the degree (number of neighbors) of this node which
 --   have the same class.
-nodeDegree 
+nodeDegree
         :: (VirtualReg -> RegClass)
-        -> Graph VirtualReg RegClass RealReg 
-        -> VirtualReg 
+        -> Graph VirtualReg RegClass RealReg
+        -> VirtualReg
         -> Int
 
 nodeDegree classOfVirtualReg graph reg
         | Just node     <- lookupUFM (graphMap graph) reg
 
-        , virtConflicts 
-           <- length       
+        , virtConflicts
+           <- length
            $ filter (\r -> classOfVirtualReg r == classOfVirtualReg reg)
-           $ uniqSetToList 
+           $ nonDetEltsUniqSet
+           -- See Note [Unique Determinism and code generation]
            $ nodeConflicts node
 
         = virtConflicts + sizeUniqSet (nodeExclusions node)
@@ -269,11 +274,11 @@ nodeDegree classOfVirtualReg graph reg
 
 -- | Show a spill cost record, including the degree from the graph
 --   and final calulated spill cost.
-pprSpillCostRecord 
+pprSpillCostRecord
         :: (VirtualReg -> RegClass)
         -> (Reg -> SDoc)
-        -> Graph VirtualReg RegClass RealReg 
-        -> SpillCostRecord 
+        -> Graph VirtualReg RegClass RealReg
+        -> SpillCostRecord
         -> SDoc
 
 pprSpillCostRecord regClass pprReg graph (reg, uses, defs, life)
@@ -283,6 +288,6 @@ pprSpillCostRecord regClass pprReg graph (reg, uses, defs, life)
         , ppr defs
         , ppr life
         , ppr $ nodeDegree regClass graph reg
-        , text $ show $ (fromIntegral (uses + defs) 
+        , text $ show $ (fromIntegral (uses + defs)
                        / fromIntegral (nodeDegree regClass graph reg) :: Float) ]
 

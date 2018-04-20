@@ -1,5 +1,3 @@
-{-# LANGUAGE Safe #-}
-
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  System.Mem
@@ -14,23 +12,35 @@
 --
 -----------------------------------------------------------------------------
 
+{-# LANGUAGE Trustworthy #-}
+-- allocation counter stuff is safe, but GHC.Conc.Sync is Unsafe
+
 module System.Mem
-       ( performGC
+       (
+       -- * Garbage collection
+         performGC
        , performMajorGC
        , performMinorGC
-       ) where
-import Prelude
 
--- | Triggers an immediate garbage collection.
+        -- * Allocation counter and limits
+        , setAllocationCounter
+        , getAllocationCounter
+        , enableAllocationLimit
+        , disableAllocationLimit
+       ) where
+
+import GHC.Conc.Sync
+
+-- | Triggers an immediate major garbage collection.
 performGC :: IO ()
 performGC = performMajorGC
 
--- | Triggers an immediate garbage collection.
+-- | Triggers an immediate major garbage collection.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 foreign import ccall "performMajorGC" performMajorGC :: IO ()
 
 -- | Triggers an immediate minor garbage collection.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 foreign import ccall "performGC" performMinorGC :: IO ()

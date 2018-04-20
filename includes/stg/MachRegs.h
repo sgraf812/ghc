@@ -12,8 +12,7 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef MACHREGS_H
-#define MACHREGS_H
+#pragma once
 
 /* This file is #included into Haskell code in the compiler: #defines
  * only in here please.
@@ -82,16 +81,16 @@
    Leaving SpLim out of the picture.
    -------------------------------------------------------------------------- */
 
-#if MACHREGS_i386
+#if defined(MACHREGS_i386)
 
 #define REG(x) __asm__("%" #x)
 
-#ifndef not_doing_dynamic_linking
+#if !defined(not_doing_dynamic_linking)
 #define REG_Base    ebx
 #endif
 #define REG_Sp      ebp
 
-#ifndef STOLEN_X86_REGS
+#if !defined(STOLEN_X86_REGS)
 #define STOLEN_X86_REGS 4
 #endif
 
@@ -102,6 +101,7 @@
 #if STOLEN_X86_REGS >= 4
 # define REG_Hp     edi
 #endif
+#define REG_MachSp  esp
 
 #define REG_XMM1    xmm0
 #define REG_XMM2    xmm1
@@ -155,7 +155,7 @@
 
   --------------------------------------------------------------------------- */
 
-#elif MACHREGS_x86_64
+#elif defined(MACHREGS_x86_64)
 
 #define REG(x) __asm__("%" #x)
 
@@ -169,6 +169,13 @@
 #define REG_R5    r8
 #define REG_R6    r9
 #define REG_SpLim r15
+#define REG_MachSp  rsp
+
+/*
+Map both Fn and Dn to register xmmn so that we can pass a function any
+combination of up to six Float# or Double# arguments without touching
+the stack. See Note [Overlapping global registers] for implications.
+*/
 
 #define REG_F1    xmm1
 #define REG_F2    xmm2
@@ -295,7 +302,7 @@
    We can do the Whole Business with callee-save registers only!
    -------------------------------------------------------------------------- */
 
-#elif MACHREGS_powerpc
+#elif defined(MACHREGS_powerpc)
 
 #define REG(x) __asm__(#x)
 
@@ -308,7 +315,7 @@
 #define REG_R7          r20
 #define REG_R8          r21
 
-#if MACHREGS_darwin
+#if defined(MACHREGS_darwin)
 
 #define REG_F1          f14
 #define REG_F2          f15
@@ -324,9 +331,15 @@
 #define REG_F2          fr15
 #define REG_F3          fr16
 #define REG_F4          fr17
+#define REG_F5          fr18
+#define REG_F6          fr19
 
-#define REG_D1          fr18
-#define REG_D2          fr19
+#define REG_D1          fr20
+#define REG_D2          fr21
+#define REG_D3          fr22
+#define REG_D4          fr23
+#define REG_D5          fr24
+#define REG_D6          fr25
 
 #endif
 
@@ -428,7 +441,7 @@
 
    -------------------------------------------------------------------------- */
 
-#elif MACHREGS_sparc
+#elif defined(MACHREGS_sparc)
 
 #define REG(x) __asm__("%" #x)
 
@@ -477,14 +490,15 @@
    Here we consider ARM mode (i.e. 32bit isns)
    and also CPU with full VFPv3 implementation
 
-   ARM registers (see Chapter 5.1 in ARM IHI 0042D)
+   ARM registers (see Chapter 5.1 in ARM IHI 0042D and
+   Section 9.2.2 in ARM Software Development Toolkit Reference Guide)
 
    r15  PC         The Program Counter.
    r14  LR         The Link Register.
    r13  SP         The Stack Pointer.
    r12  IP         The Intra-Procedure-call scratch register.
-   r11  v8         Variable-register 8.
-   r10  v7         Variable-register 7.
+   r11  v8/fp      Variable-register 8.
+   r10  v7/sl      Variable-register 7.
    r9   v6/SB/TR   Platform register. The meaning of this register is
                    defined by the platform standard.
    r8   v5         Variable-register 5.
@@ -500,13 +514,13 @@
    VFPv2/VFPv3/NEON registers
    s0-s15/d0-d7/q0-q3    Argument / result/ scratch registers
    s16-s31/d8-d15/q4-q7  callee-saved registers (must be preserved across
-                         subrutine calls)
+                         subroutine calls)
 
    VFPv3/NEON registers (added to the VFPv2 registers set)
    d16-d31/q8-q15        Argument / result/ scratch registers
    ----------------------------------------------------------------------------- */
 
-#elif MACHREGS_arm
+#elif defined(MACHREGS_arm)
 
 #define REG(x) __asm__(#x)
 
@@ -557,13 +571,13 @@
    FPU/SIMD registers
 
    s/d/q/v0-v7    Argument / result/ scratch registers
-   s/d/q/v8-v15   callee-saved registers (must be preserved across subrutine calls,
+   s/d/q/v8-v15   callee-saved registers (must be preserved across subroutine calls,
                   but only bottom 64-bit value needs to be preserved)
    s/d/q/v16-v31  temporary registers
 
    ----------------------------------------------------------------------------- */
 
-#elif MACHREGS_aarch64
+#elif defined(MACHREGS_aarch64)
 
 #define REG(x) __asm__(#x)
 
@@ -585,6 +599,8 @@
 
 #define REG_D1          d12
 #define REG_D2          d13
+#define REG_D3          d14
+#define REG_D4          d15
 
 #else
 
@@ -613,7 +629,7 @@
  * communicate with PrimOps and RTS functions.
  */
 
-#ifndef MAX_REAL_VANILLA_REG
+#if !defined(MAX_REAL_VANILLA_REG)
 #  if   defined(REG_R10)
 #  define MAX_REAL_VANILLA_REG 10
 #  elif   defined(REG_R9)
@@ -639,7 +655,7 @@
 #  endif
 #endif
 
-#ifndef MAX_REAL_FLOAT_REG
+#if !defined(MAX_REAL_FLOAT_REG)
 #  if   defined(REG_F4)
 #  define MAX_REAL_FLOAT_REG 4
 #  elif defined(REG_F3)
@@ -653,7 +669,7 @@
 #  endif
 #endif
 
-#ifndef MAX_REAL_DOUBLE_REG
+#if !defined(MAX_REAL_DOUBLE_REG)
 #  if   defined(REG_D2)
 #  define MAX_REAL_DOUBLE_REG 2
 #  elif defined(REG_D1)
@@ -663,7 +679,7 @@
 #  endif
 #endif
 
-#ifndef MAX_REAL_LONG_REG
+#if !defined(MAX_REAL_LONG_REG)
 #  if   defined(REG_L1)
 #  define MAX_REAL_LONG_REG 1
 #  else
@@ -671,7 +687,7 @@
 #  endif
 #endif
 
-#ifndef MAX_REAL_XMM_REG
+#if !defined(MAX_REAL_XMM_REG)
 #  if   defined(REG_XMM6)
 #  define MAX_REAL_XMM_REG 6
 #  elif defined(REG_XMM5)
@@ -697,5 +713,3 @@
 #else
 #undef NO_ARG_REGS
 #endif
-
-#endif /* MACHREGS_H */

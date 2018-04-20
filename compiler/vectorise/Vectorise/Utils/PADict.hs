@@ -6,6 +6,8 @@ module Vectorise.Utils.PADict (
   prDictOfPReprInstTyCon
 ) where
 
+import GhcPrelude
+
 import Vectorise.Monad
 import Vectorise.Builtins
 import Vectorise.Utils.Base
@@ -15,13 +17,14 @@ import CoreUtils
 import FamInstEnv
 import Coercion
 import Type
-import TypeRep
+import TyCoRep
 import TyCon
 import CoAxiom
 import Var
 import Outputable
 import DynFlags
 import FastString
+import Util
 import Control.Monad
 
 
@@ -31,16 +34,18 @@ import Control.Monad
 -- > forall (a :: * -> *). (forall (b :: *). PA b -> PA (a b)) -> PA (v a)
 --
 paDictArgType :: TyVar -> VM (Maybe Type)
-paDictArgType tv = go (TyVarTy tv) (tyVarKind tv)
+paDictArgType tv = go (mkTyVarTy tv) (tyVarKind tv)
   where
     go ty (FunTy k1 k2)
       = do
-          tv   <- newTyVar (fsLit "a") k1
-          mty1 <- go (TyVarTy tv) k1
+          tv   <- if isCoercionType k1
+                  then newCoVar (fsLit "c") k1
+                  else newTyVar (fsLit "a") k1
+          mty1 <- go (mkTyVarTy tv) k1
           case mty1 of
             Just ty1 -> do
-                          mty2 <- go (AppTy ty (TyVarTy tv)) k2
-                          return $ fmap (ForAllTy tv . FunTy ty1) mty2
+                          mty2 <- go (mkAppTy ty (mkTyVarTy tv)) k2
+                          return $ fmap (mkInvForAllTy tv . mkFunTy ty1) mty2
             Nothing  -> go ty k2
 
     go ty k
@@ -55,20 +60,20 @@ paDictArgType tv = go (TyVarTy tv) (tyVarKind tv)
 -- |Get the PA dictionary for some type
 --
 paDictOfType :: Type -> VM CoreExpr
-paDictOfType ty 
+paDictOfType ty
   = paDictOfTyApp ty_fn ty_args
   where
     (ty_fn, ty_args) = splitAppTys ty
 
     paDictOfTyApp :: Type -> [Type] -> VM CoreExpr
     paDictOfTyApp ty_fn ty_args
-        | Just ty_fn' <- coreView ty_fn 
+        | Just ty_fn' <- coreView ty_fn
         = paDictOfTyApp ty_fn' ty_args
 
     -- for type variables, look up the dfun and apply to the PA dictionaries
     -- of the type arguments
     paDictOfTyApp (TyVarTy tv) ty_args
-      = do 
+      = do
         { dfun <- maybeCantVectoriseM "No PA dictionary for type variable"
                                       (ppr tv <+> text "in" <+> ppr ty)
                 $ lookupTyVarPA tv
@@ -79,7 +84,7 @@ paDictOfType ty
     -- for tycons, we also need to apply the dfun to the PR dictionary of
     -- the representation type if the tycon is polymorphic
     paDictOfTyApp (TyConApp tc []) ty_args
-      = do 
+      = do
         { dfun <- maybeCantVectoriseM noPADictErr (ppr tc <+> text "in" <+> ppr ty)
                 $ lookupTyConPA tc
         ; super <- super_dict tc ty_args
@@ -95,7 +100,7 @@ paDictOfType ty
             { pr <- prDictOfPReprInst (TyConApp tycon ty_args)
             ; return [pr]
             }
-    
+
     paDictOfTyApp _ _ = getDynFlags >>= failure
 
     failure dflags = cantVectorise dflags "Can't construct PA dictionary for type" (ppr ty)
@@ -118,7 +123,8 @@ paMethod method _ ty
 prDictOfPReprInst :: Type -> VM CoreExpr
 prDictOfPReprInst ty
   = do
-    { (FamInstMatch { fim_instance = prepr_fam, fim_tys = prepr_args }) <- preprSynTyCon ty
+    { (FamInstMatch { fim_instance = prepr_fam, fim_tys = prepr_args })
+          <- preprFamInst ty
     ; prDictOfPReprInstTyCon ty (famInstAxiom prepr_fam) prepr_args
     }
 
@@ -140,12 +146,12 @@ prDictOfPReprInst ty
 prDictOfPReprInstTyCon :: Type -> CoAxiom Unbranched -> [Type] -> VM CoreExpr
 prDictOfPReprInstTyCon _ty prepr_ax prepr_args
   = do
-      let rhs = mkUnbranchedAxInstRHS prepr_ax prepr_args
+      let rhs = mkUnbranchedAxInstRHS prepr_ax prepr_args []
       dict <- prDictOfReprType' rhs
       pr_co <- mkBuiltinCo prTyCon
       let co = mkAppCo pr_co
              $ mkSymCo
-             $ mkUnbranchedAxInstCo Nominal prepr_ax prepr_args
+             $ mkUnbranchedAxInstCo Nominal prepr_ax prepr_args []
       return $ mkCast dict co
 
 -- |Get the PR dictionary for a type. The argument must be a representation
@@ -162,9 +168,9 @@ prDictOfReprType ty
                  pa <- paDictOfType ty'
                  sel <- builtin paPRSel
                  return $ Var sel `App` Type ty' `App` pa
-          else do 
+          else do
                  -- a representation tycon must have a PR instance
-                 dfun <- maybeV (text "look up PR dictionary for" <+> ppr tycon) $ 
+                 dfun <- maybeV (text "look up PR dictionary for" <+> ppr tycon) $
                            lookupTyConPR tycon
                  prDFunApply dfun tyargs
 
@@ -196,10 +202,10 @@ prDFunApply dfun tys
   = return $ Var dfun `mkTyApps` tys
 
   | Just tycons <- ctxs
-  , length tycons == length tys
+  , tycons `equalLength` tys
   = do
       pa <- builtin paTyCon
-      pr <- builtin prTyCon 
+      pr <- builtin prTyCon
       dflags <- getDynFlags
       args <- zipWithM (dictionary dflags pa pr) tys tycons
       return $ Var dfun `mkTyApps` tys `mkApps` args
@@ -224,4 +230,3 @@ prDFunApply dfun tys
       | otherwise   = invalid dflags
 
     invalid dflags = cantVectorise dflags "Invalid PR dfun type" (ppr (varType dfun) <+> ppr tys)
- 

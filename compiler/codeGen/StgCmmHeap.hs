@@ -1,5 +1,3 @@
-{-# LANGUAGE CPP #-}
-
 -----------------------------------------------------------------------------
 --
 -- Stg to C--: heap management functions
@@ -22,7 +20,7 @@ module StgCmmHeap (
         emitSetDynHdr
     ) where
 
-#include "HsVersions.h"
+import GhcPrelude hiding ((<*>))
 
 import StgSyn
 import CLabel
@@ -36,8 +34,9 @@ import StgCmmEnv
 
 import MkGraph
 
-import Hoopl
+import Hoopl.Label
 import SMRep
+import BlockId
 import Cmm
 import CmmUtils
 import CostCentre
@@ -46,6 +45,7 @@ import Id ( Id )
 import Module
 import DynFlags
 import FastString( mkFastString, fsLit )
+import Panic( sorry )
 
 import Control.Monad (when)
 import Data.Maybe (isJust)
@@ -145,7 +145,7 @@ emitSetDynHdr base info_ptr ccs
   where
     header :: DynFlags -> [CmmExpr]
     header dflags = [info_ptr] ++ dynProfHdr dflags ccs
-        -- ToDof: Parallel stuff
+        -- ToDo: Parallel stuff
         -- No ticky header
 
 -- Store the item (expr,off) in base[off]
@@ -208,31 +208,19 @@ mkStaticClosureFields dflags info_tbl ccs caf_refs payload
         -- collector will ignore it.
     static_link_value
         | mayHaveCafRefs caf_refs  = mkIntCLit dflags 0
-        | otherwise                = mkIntCLit dflags 1  -- No CAF refs
-
+        | otherwise                = mkIntCLit dflags 3  -- No CAF refs
+                                      -- See Note [STATIC_LINK fields]
+                                      -- in rts/sm/Storage.h
 
 mkStaticClosure :: DynFlags -> CLabel -> CostCentreStack -> [CmmLit]
   -> [CmmLit] -> [CmmLit] -> [CmmLit] -> [CmmLit]
 mkStaticClosure dflags info_lbl ccs payload padding static_link_field saved_info_field
   =  [CmmLabel info_lbl]
   ++ staticProfHdr dflags ccs
-  ++ concatMap (padLitToWord dflags) payload
+  ++ payload
   ++ padding
   ++ static_link_field
   ++ saved_info_field
-
--- JD: Simon had ellided this padding, but without it the C back end asserts
--- failure. Maybe it's a bad assertion, and this padding is indeed unnecessary?
-padLitToWord :: DynFlags -> CmmLit -> [CmmLit]
-padLitToWord dflags lit = lit : padding pad_length
-  where width = typeWidth (cmmLitType dflags lit)
-        pad_length = wORD_SIZE dflags - widthInBytes width :: Int
-
-        padding n | n <= 0 = []
-                  | n `rem` 2 /= 0 = CmmInt 0 W8  : padding (n-1)
-                  | n `rem` 4 /= 0 = CmmInt 0 W16 : padding (n-2)
-                  | n `rem` 8 /= 0 = CmmInt 0 W32 : padding (n-4)
-                  | otherwise      = CmmInt 0 W64 : padding (n-8)
 
 -----------------------------------------------------------
 --              Heap overflow checking
@@ -382,7 +370,7 @@ entryHeapCheck' is_fastf node arity args code
 
        updfr_sz <- getUpdFrameOff
 
-       loop_id <- newLabelC
+       loop_id <- newBlockId
        emitLabel loop_id
        heapCheck True True (gc_call updfr_sz <*> mkBranch loop_id) code
 
@@ -413,10 +401,11 @@ altOrNoEscapeHeapCheck checkYield regs code = do
     case cannedGCEntryPoint dflags regs of
       Nothing -> genericGC checkYield code
       Just gc -> do
-        lret <- newLabelC
+        lret <- newBlockId
         let (off, _, copyin) = copyInOflow dflags NativeReturn (Young lret) regs []
-        lcont <- newLabelC
-        emitOutOfLine lret (copyin <*> mkBranch lcont)
+        lcont <- newBlockId
+        tscope <- getTickScope
+        emitOutOfLine lret (copyin <*> mkBranch lcont, tscope)
         emitLabel lcont
         cannedGCReturnsTo checkYield False gc regs lret off code
 
@@ -457,7 +446,7 @@ cannedGCReturnsTo checkYield cont_on_stack gc regs lret off code
 genericGC :: Bool -> FCode a -> FCode a
 genericGC checkYield code
   = do updfr_sz <- getUpdFrameOff
-       lretry <- newLabelC
+       lretry <- newBlockId
        emitLabel lretry
        call <- mkCall generic_gc (GC, GC) [] [] updfr_sz []
        heapCheck False checkYield (call <*> mkBranch lretry) code
@@ -516,7 +505,7 @@ generic_gc = mkGcLabel "stg_gc_noregs"
 
 -- | Create a CLabel for calling a garbage collector entry point
 mkGcLabel :: String -> CmmExpr
-mkGcLabel s = CmmLit (CmmLabel (mkCmmCodeLabel rtsPackageKey (fsLit s)))
+mkGcLabel s = CmmLit (CmmLabel (mkCmmCodeLabel rtsUnitId (fsLit s)))
 
 -------------------------------
 heapCheck :: Bool -> Bool -> CmmAGraph -> FCode a -> FCode a
@@ -526,8 +515,16 @@ heapCheck checkStack checkYield do_gc code
     -- that the conditionals on hpHw don't cause a black hole
     do  { dflags <- getDynFlags
         ; let mb_alloc_bytes
+                 | hpHw > mBLOCK_SIZE = sorry $ unlines
+                    [" Trying to allocate more than "++show mBLOCK_SIZE++" bytes.",
+                     "",
+                     "This is currently not possible due to a limitation of GHC's code generator.",
+                     "See http://hackage.haskell.org/trac/ghc/ticket/4505 for details.",
+                     "Suggestion: read data from a file instead of having large static data",
+                     "structures in code."]
                  | hpHw > 0  = Just (mkIntExpr dflags (hpHw * (wORD_SIZE dflags)))
                  | otherwise = Nothing
+                 where mBLOCK_SIZE = bLOCKS_PER_MBLOCK dflags * bLOCK_SIZE_W dflags
               stk_hwm | checkStack = Just (CmmLit CmmHighStackMark)
                       | otherwise  = Nothing
         ; codeOnly $ do_checks stk_hwm checkYield mb_alloc_bytes do_gc
@@ -538,7 +535,7 @@ heapCheck checkStack checkYield do_gc code
 heapStackCheckGen :: Maybe CmmExpr -> Maybe CmmExpr -> FCode ()
 heapStackCheckGen stk_hwm mb_bytes
   = do updfr_sz <- getUpdFrameOff
-       lretry <- newLabelC
+       lretry <- newBlockId
        emitLabel lretry
        call <- mkCall generic_gc (GC, GC) [] [] updfr_sz []
        do_checks stk_hwm False mb_bytes (call <*> mkBranch lretry)
@@ -597,12 +594,12 @@ do_checks :: Maybe CmmExpr    -- Should we check the stack?
           -> FCode ()
 do_checks mb_stk_hwm checkYield mb_alloc_lit do_gc = do
   dflags <- getDynFlags
-  gc_id <- newLabelC
+  gc_id <- newBlockId
 
   let
     Just alloc_lit = mb_alloc_lit
 
-    bump_hp   = cmmOffsetExprB dflags (CmmReg hpReg) alloc_lit
+    bump_hp   = cmmOffsetExprB dflags hpExpr alloc_lit
 
     -- Sp overflow if ((old + 0) - CmmHighStack < SpLim)
     -- At the beginning of a function old + 0 = Sp
@@ -616,14 +613,14 @@ do_checks mb_stk_hwm checkYield mb_alloc_lit do_gc = do
     -- Hp overflow if (Hp > HpLim)
     -- (Hp has been incremented by now)
     -- HpLim points to the LAST WORD of valid allocation space.
-    hp_oflo = CmmMachOp (mo_wordUGt dflags)
-                  [CmmReg hpReg, CmmReg (CmmGlobal HpLim)]
+    hp_oflo = CmmMachOp (mo_wordUGt dflags) [hpExpr, hpLimExpr]
 
-    alloc_n = mkAssign (CmmGlobal HpAlloc) alloc_lit
+    alloc_n = mkAssign hpAllocReg alloc_lit
 
   case mb_stk_hwm of
     Nothing -> return ()
-    Just stk_hwm -> tickyStackCheck >> (emit =<< mkCmmIfGoto (sp_oflo stk_hwm) gc_id)
+    Just stk_hwm -> tickyStackCheck
+      >> (emit =<< mkCmmIfGoto' (sp_oflo stk_hwm) gc_id (Just False) )
 
   -- Emit new label that might potentially be a header
   -- of a self-recursive tail call.
@@ -638,17 +635,18 @@ do_checks mb_stk_hwm checkYield mb_alloc_lit do_gc = do
     then do
      tickyHeapCheck
      emitAssign hpReg bump_hp
-     emit =<< mkCmmIfThen hp_oflo (alloc_n <*> mkBranch gc_id)
+     emit =<< mkCmmIfThen' hp_oflo (alloc_n <*> mkBranch gc_id) (Just False)
     else do
       when (checkYield && not (gopt Opt_OmitYields dflags)) $ do
          -- Yielding if HpLim == 0
          let yielding = CmmMachOp (mo_wordEq dflags)
-                                  [CmmReg (CmmGlobal HpLim),
+                                  [CmmReg hpLimReg,
                                    CmmLit (zeroCLit dflags)]
-         emit =<< mkCmmIfGoto yielding gc_id
+         emit =<< mkCmmIfGoto' yielding gc_id (Just False)
 
-  emitOutOfLine gc_id $
-     do_gc -- this is expected to jump back somewhere
+  tscope <- getTickScope
+  emitOutOfLine gc_id
+   (do_gc, tscope) -- this is expected to jump back somewhere
 
                 -- Test for stack pointer exhaustion, then
                 -- bump heap pointer, and test for heap exhaustion

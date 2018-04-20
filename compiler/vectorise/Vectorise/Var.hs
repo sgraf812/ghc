@@ -2,7 +2,7 @@
 
 -- |Vectorise variables and literals.
 
-module Vectorise.Var 
+module Vectorise.Var
   ( vectBndr
   , vectBndrNew
   , vectBndrIn
@@ -12,6 +12,8 @@ module Vectorise.Var
   , vectConst
   )
 where
+
+import GhcPrelude
 
 import Vectorise.Utils
 import Vectorise.Monad
@@ -23,8 +25,6 @@ import Type
 import VarEnv
 import Id
 import FastString
-import Control.Applicative
-
 
 -- Binders ----------------------------------------------------------------------------------------
 

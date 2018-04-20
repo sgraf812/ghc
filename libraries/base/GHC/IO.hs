@@ -3,6 +3,7 @@
            , BangPatterns
            , RankNTypes
            , MagicHash
+           , ScopedTypeVariables
            , UnboxedTuples
   #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
@@ -13,7 +14,7 @@
 -- Module      :  GHC.IO
 -- Copyright   :  (c) The University of Glasgow 1994-2002
 -- License     :  see libraries/base/LICENSE
--- 
+--
 -- Maintainer  :  cvs-ghc@haskell.org
 -- Stability   :  internal
 -- Portability :  non-portable (GHC Extensions)
@@ -23,7 +24,7 @@
 -----------------------------------------------------------------------------
 
 module GHC.IO (
-        IO(..), unIO, failIO, liftIO,
+        IO(..), unIO, failIO, liftIO, mplusIO,
         unsafePerformIO, unsafeInterleaveIO,
         unsafeDupablePerformIO, unsafeDupableInterleaveIO,
         noDuplicate,
@@ -33,10 +34,10 @@ module GHC.IO (
 
         FilePath,
 
-        catchException, catchAny, throwIO,
-        mask, mask_, uninterruptibleMask, uninterruptibleMask_, 
+        catch, catchException, catchAny, throwIO,
+        mask, mask_, uninterruptibleMask, uninterruptibleMask_,
         MaskingState(..), getMaskingState,
-        unsafeUnmask,
+        unsafeUnmask, interruptible,
         onException, bracket, finally, evaluate
     ) where
 
@@ -44,9 +45,9 @@ import GHC.Base
 import GHC.ST
 import GHC.Exception
 import GHC.Show
-import Data.Maybe
+import GHC.IO.Unsafe
 
-import {-# SOURCE #-} GHC.IO.Exception ( userError )
+import {-# SOURCE #-} GHC.IO.Exception ( userError, IOError )
 
 -- ---------------------------------------------------------------------------
 -- The IO Monad
@@ -59,15 +60,15 @@ implement IO exceptions.
 NOTE: The IO representation is deeply wired in to various parts of the
 system.  The following list may or may not be exhaustive:
 
-Compiler  - types of various primitives in PrimOp.lhs
+Compiler  - types of various primitives in PrimOp.hs
 
-RTS       - forceIO (StgMiscClosures.hc)
-          - catchzh_fast, (un)?blockAsyncExceptionszh_fast, raisezh_fast 
-            (Exceptions.hc)
-          - raiseAsync (Schedule.c)
+RTS       - forceIO (StgStartup.cmm)
+          - catchzh_fast, (un)?blockAsyncExceptionszh_fast, raisezh_fast
+            (Exception.cmm)
+          - raiseAsync (RaiseAsync.c)
 
-Prelude   - GHC.IO.lhs, and several other places including
-            GHC.Exception.lhs.
+Prelude   - GHC.IO.hs, and several other places including
+            GHC.Exception.hs.
 
 Libraries - parts of hslibs/lang.
 
@@ -83,173 +84,33 @@ failIO s = IO (raiseIO# (toException (userError s)))
 -- ---------------------------------------------------------------------------
 -- Coercions between IO and ST
 
--- | A monad transformer embedding strict state transformers in the 'IO'
--- monad.  The 'RealWorld' parameter indicates that the internal state
+-- | Embed a strict state transformer in an 'IO'
+-- action.  The 'RealWorld' parameter indicates that the internal state
 -- used by the 'ST' computation is a special one supplied by the 'IO'
 -- monad, and thus distinct from those used by invocations of 'runST'.
 stToIO        :: ST RealWorld a -> IO a
 stToIO (ST m) = IO m
 
+-- | Convert an 'IO' action into an 'ST' action. The type of the result
+-- is constrained to use a 'RealWorld' state, and therefore the result cannot
+-- be passed to 'runST'.
 ioToST        :: IO a -> ST RealWorld a
 ioToST (IO m) = (ST m)
 
--- This relies on IO and ST having the same representation modulo the
--- constraint on the type of the state
---
+-- | Convert an 'IO' action to an 'ST' action.
+-- This relies on 'IO' and 'ST' having the same representation modulo the
+-- constraint on the type of the state.
 unsafeIOToST        :: IO a -> ST s a
 unsafeIOToST (IO io) = ST $ \ s -> (unsafeCoerce# io) s
 
+-- | Convert an 'ST' action to an 'IO' action.
+-- This relies on 'IO' and 'ST' having the same representation modulo the
+-- constraint on the type of the state.
+--
+-- For an example demonstrating why this is unsafe, see
+-- https://mail.haskell.org/pipermail/haskell-cafe/2009-April/060719.html
 unsafeSTToIO :: ST s a -> IO a
 unsafeSTToIO (ST m) = IO (unsafeCoerce# m)
-
--- ---------------------------------------------------------------------------
--- Unsafe IO operations
-
-{-|
-This is the \"back door\" into the 'IO' monad, allowing
-'IO' computation to be performed at any time.  For
-this to be safe, the 'IO' computation should be
-free of side effects and independent of its environment.
-
-If the I\/O computation wrapped in 'unsafePerformIO' performs side
-effects, then the relative order in which those side effects take
-place (relative to the main I\/O trunk, or other calls to
-'unsafePerformIO') is indeterminate.  Furthermore, when using
-'unsafePerformIO' to cause side-effects, you should take the following
-precautions to ensure the side effects are performed as many times as
-you expect them to be.  Note that these precautions are necessary for
-GHC, but may not be sufficient, and other compilers may require
-different precautions:
-
-  * Use @{\-\# NOINLINE foo \#-\}@ as a pragma on any function @foo@
-        that calls 'unsafePerformIO'.  If the call is inlined,
-        the I\/O may be performed more than once.
-
-  * Use the compiler flag @-fno-cse@ to prevent common sub-expression
-        elimination being performed on the module, which might combine
-        two side effects that were meant to be separate.  A good example
-        is using multiple global variables (like @test@ in the example below).
-
-  * Make sure that the either you switch off let-floating (@-fno-full-laziness@), or that the 
-        call to 'unsafePerformIO' cannot float outside a lambda.  For example, 
-        if you say:
-        @
-           f x = unsafePerformIO (newIORef [])
-        @
-        you may get only one reference cell shared between all calls to @f@.
-        Better would be
-        @
-           f x = unsafePerformIO (newIORef [x])
-        @
-        because now it can't float outside the lambda.
-
-It is less well known that
-'unsafePerformIO' is not type safe.  For example:
-
->     test :: IORef [a]
->     test = unsafePerformIO $ newIORef []
->     
->     main = do
->             writeIORef test [42]
->             bang <- readIORef test
->             print (bang :: [Char])
-
-This program will core dump.  This problem with polymorphic references
-is well known in the ML community, and does not arise with normal
-monadic use of references.  There is no easy way to make it impossible
-once you use 'unsafePerformIO'.  Indeed, it is
-possible to write @coerce :: a -> b@ with the
-help of 'unsafePerformIO'.  So be careful!
--}
-unsafePerformIO :: IO a -> a
-unsafePerformIO m = unsafeDupablePerformIO (noDuplicate >> m)
-
-{-| 
-This version of 'unsafePerformIO' is more efficient
-because it omits the check that the IO is only being performed by a
-single thread.  Hence, when you use 'unsafeDupablePerformIO',
-there is a possibility that the IO action may be performed multiple
-times (on a multiprocessor), and you should therefore ensure that
-it gives the same results each time. It may even happen that one
-of the duplicated IO actions is only run partially, and then interrupted
-in the middle without an exception being raised. Therefore, functions
-like 'bracket' cannot be used safely within 'unsafeDupablePerformIO'.
-
-/Since: 4.4.0.0/
--}
-{-# NOINLINE unsafeDupablePerformIO #-}
-unsafeDupablePerformIO  :: IO a -> a
-unsafeDupablePerformIO (IO m) = lazy (case m realWorld# of (# _, r #) -> r)
-
--- Why do we NOINLINE unsafeDupablePerformIO?  See the comment with
--- GHC.ST.runST.  Essentially the issue is that the IO computation
--- inside unsafePerformIO must be atomic: it must either all run, or
--- not at all.  If we let the compiler see the application of the IO
--- to realWorld#, it might float out part of the IO.
-
--- Why is there a call to 'lazy' in unsafeDupablePerformIO?
--- If we don't have it, the demand analyser discovers the following strictness
--- for unsafeDupablePerformIO:  C(U(AV))
--- But then consider
---      unsafeDupablePerformIO (\s -> let r = f x in 
---                             case writeIORef v r s of (# s1, _ #) ->
---                             (# s1, r #)
--- The strictness analyser will find that the binding for r is strict,
--- (because of uPIO's strictness sig), and so it'll evaluate it before 
--- doing the writeIORef.  This actually makes tests/lib/should_run/memo002
--- get a deadlock!  
---
--- Solution: don't expose the strictness of unsafeDupablePerformIO,
---           by hiding it with 'lazy'
-
-{-|
-'unsafeInterleaveIO' allows 'IO' computation to be deferred lazily.
-When passed a value of type @IO a@, the 'IO' will only be performed
-when the value of the @a@ is demanded.  This is used to implement lazy
-file reading, see 'System.IO.hGetContents'.
--}
-{-# INLINE unsafeInterleaveIO #-}
-unsafeInterleaveIO :: IO a -> IO a
-unsafeInterleaveIO m = unsafeDupableInterleaveIO (noDuplicate >> m)
-
--- We used to believe that INLINE on unsafeInterleaveIO was safe,
--- because the state from this IO thread is passed explicitly to the
--- interleaved IO, so it cannot be floated out and shared.
---
--- HOWEVER, if the compiler figures out that r is used strictly here,
--- then it will eliminate the thunk and the side effects in m will no
--- longer be shared in the way the programmer was probably expecting,
--- but can be performed many times.  In #5943, this broke our
--- definition of fixIO, which contains
---
---    ans <- unsafeInterleaveIO (takeMVar m)
---
--- after inlining, we lose the sharing of the takeMVar, so the second
--- time 'ans' was demanded we got a deadlock.  We could fix this with
--- a readMVar, but it seems wrong for unsafeInterleaveIO to sometimes
--- share and sometimes not (plus it probably breaks the noDuplicate).
--- So now, we do not inline unsafeDupableInterleaveIO.
-
-{-# NOINLINE unsafeDupableInterleaveIO #-}
-unsafeDupableInterleaveIO :: IO a -> IO a
-unsafeDupableInterleaveIO (IO m)
-  = IO ( \ s -> let
-                   r = case m s of (# _, res #) -> res
-                in
-                (# s, r #))
-
-{-| 
-Ensures that the suspensions under evaluation by the current thread
-are unique; that is, the current thread is not evaluating anything
-that is also under evaluation by another thread that has also executed
-'noDuplicate'.
-
-This operation is used in the definition of 'unsafePerformIO' to
-prevent the IO action from being executed multiple times, which is usually
-undesirable.
--}
-noDuplicate :: IO ()
-noDuplicate = IO $ \s -> case noDuplicate# s of s' -> (# s', () #)
 
 -- -----------------------------------------------------------------------------
 -- | File and directory names are values of type 'String', whose precise
@@ -262,7 +123,7 @@ type FilePath = String
 -- Primitive catch and throwIO
 
 {-
-catchException used to handle the passing around of the state to the
+catchException/catch used to handle the passing around of the state to the
 action and the handler.  This turned out to be a bad idea - it meant
 that we had to wrap both arguments in thunks so they could be entered
 as normal (remember IO returns an unboxed pair...).
@@ -272,18 +133,75 @@ Now catch# has type
     catch# :: IO a -> (b -> IO a) -> IO a
 
 (well almost; the compiler doesn't know about the IO newtype so we
-have to work around that in the definition of catchException below).
+have to work around that in the definition of catch below).
 -}
 
+-- | Catch an exception in the 'IO' monad.
+--
+-- Note that this function is /strict/ in the action. That is,
+-- @catchException undefined b == _|_@. See #exceptions_and_strictness#
+-- for details.
 catchException :: Exception e => IO a -> (e -> IO a) -> IO a
-catchException (IO io) handler = IO $ catch# io handler'
+catchException !io handler = catch io handler
+
+-- | This is the simplest of the exception-catching functions.  It
+-- takes a single argument, runs it, and if an exception is raised
+-- the \"handler\" is executed, with the value of the exception passed as an
+-- argument.  Otherwise, the result is returned as normal.  For example:
+--
+-- >   catch (readFile f)
+-- >         (\e -> do let err = show (e :: IOException)
+-- >                   hPutStr stderr ("Warning: Couldn't open " ++ f ++ ": " ++ err)
+-- >                   return "")
+--
+-- Note that we have to give a type signature to @e@, or the program
+-- will not typecheck as the type is ambiguous. While it is possible
+-- to catch exceptions of any type, see the section \"Catching all
+-- exceptions\" (in "Control.Exception") for an explanation of the problems with doing so.
+--
+-- For catching exceptions in pure (non-'IO') expressions, see the
+-- function 'evaluate'.
+--
+-- Note that due to Haskell\'s unspecified evaluation order, an
+-- expression may throw one of several possible exceptions: consider
+-- the expression @(error \"urk\") + (1 \`div\` 0)@.  Does
+-- the expression throw
+-- @ErrorCall \"urk\"@, or @DivideByZero@?
+--
+-- The answer is \"it might throw either\"; the choice is
+-- non-deterministic. If you are catching any type of exception then you
+-- might catch either. If you are calling @catch@ with type
+-- @IO Int -> (ArithException -> IO Int) -> IO Int@ then the handler may
+-- get run with @DivideByZero@ as an argument, or an @ErrorCall \"urk\"@
+-- exception may be propogated further up. If you call it again, you
+-- might get a the opposite behaviour. This is ok, because 'catch' is an
+-- 'IO' computation.
+--
+catch   :: Exception e
+        => IO a         -- ^ The computation to run
+        -> (e -> IO a)  -- ^ Handler to invoke if an exception is raised
+        -> IO a
+-- See #exceptions_and_strictness#.
+catch (IO io) handler = IO $ catch# io handler'
     where handler' e = case fromException e of
                        Just e' -> unIO (handler e')
                        Nothing -> raiseIO# e
 
+
+-- | Catch any 'Exception' type in the 'IO' monad.
+--
+-- Note that this function is /strict/ in the action. That is,
+-- @catchAny undefined b == _|_@. See #exceptions_and_strictness# for
+-- details.
 catchAny :: IO a -> (forall e . Exception e => e -> IO a) -> IO a
-catchAny (IO io) handler = IO $ catch# io handler'
+catchAny !(IO io) handler = IO $ catch# io handler'
     where handler' (SomeException e) = unIO (handler e)
+
+-- Using catchException here means that if `m` throws an
+-- 'IOError' /as an imprecise exception/, we will not catch
+-- it. No one should really be doing that anyway.
+mplusIO :: IO a -> IO a -> IO a
+mplusIO m n = m `catchException` \ (_ :: IOError) -> n
 
 -- | A variant of 'throw' that can only be used within the 'IO' monad.
 --
@@ -334,6 +252,22 @@ unblock = unsafeUnmask
 unsafeUnmask :: IO a -> IO a
 unsafeUnmask (IO io) = IO $ unmaskAsyncExceptions# io
 
+-- | Allow asynchronous exceptions to be raised even inside 'mask', making
+-- the operation interruptible (see the discussion of "Interruptible operations"
+-- in 'Control.Exception').
+--
+-- When called outside 'mask', or inside 'uninterruptibleMask', this
+-- function has no effect.
+--
+-- @since 4.9.0.0
+interruptible :: IO a -> IO a
+interruptible act = do
+  st <- getMaskingState
+  case st of
+    Unmasked              -> act
+    MaskedInterruptible   -> unsafeUnmask act
+    MaskedUninterruptible -> act
+
 blockUninterruptible :: IO a -> IO a
 blockUninterruptible (IO io) = IO $ maskUninterruptible# io
 
@@ -341,15 +275,17 @@ blockUninterruptible (IO io) = IO $ maskUninterruptible# io
 -- exception is received.
 data MaskingState
   = Unmasked -- ^ asynchronous exceptions are unmasked (the normal state)
-  | MaskedInterruptible 
+  | MaskedInterruptible
       -- ^ the state during 'mask': asynchronous exceptions are masked, but blocking operations may still be interrupted
   | MaskedUninterruptible
       -- ^ the state during 'uninterruptibleMask': asynchronous exceptions are masked, and blocking operations may not be interrupted
- deriving (Eq,Show)
+ deriving ( Eq   -- ^ @since 4.3.0.0
+          , Show -- ^ @since 4.3.0.0
+          )
 
 -- | Returns the 'MaskingState' for the current thread.
 getMaskingState :: IO MaskingState
-getMaskingState  = IO $ \s -> 
+getMaskingState  = IO $ \s ->
   case getMaskingState# s of
      (# s', i #) -> (# s', case i of
                              0# -> Unmasked
@@ -395,13 +331,14 @@ onException io what = io `catchException` \e -> do _ <- what
 -- state if the masked thread /blocks/ in certain ways; see
 -- "Control.Exception#interruptible".
 --
--- Threads created by 'Control.Concurrent.forkIO' inherit the masked
--- state from the parent; that is, to start a thread in blocked mode,
+-- Threads created by 'Control.Concurrent.forkIO' inherit the
+-- 'MaskingState' from the parent; that is, to start a thread in the
+-- 'MaskedInterruptible' state,
 -- use @mask_ $ forkIO ...@.  This is particularly useful if you need
 -- to establish an exception handler in the forked thread before any
--- asynchronous exceptions are received.  To create a a new thread in
--- an unmasked state use 'Control.Concurrent.forkIOUnmasked'.
--- 
+-- asynchronous exceptions are received.  To create a new thread in
+-- an unmasked state use 'Control.Concurrent.forkIOWithUnmask'.
+--
 mask  :: ((forall a. IO a -> IO a) -> IO b) -> IO b
 
 -- | Like 'mask', but does not pass a @restore@ action to the argument.
@@ -428,8 +365,9 @@ mask_ io = mask $ \_ -> io
 mask io = do
   b <- getMaskingState
   case b of
-    Unmasked -> block $ io unblock
-    _        -> io id
+    Unmasked              -> block $ io unblock
+    MaskedInterruptible   -> io block
+    MaskedUninterruptible -> io blockUninterruptible
 
 uninterruptibleMask_ io = uninterruptibleMask $ \_ -> io
 
@@ -438,7 +376,7 @@ uninterruptibleMask io = do
   case b of
     Unmasked              -> blockUninterruptible $ io unblock
     MaskedInterruptible   -> blockUninterruptible $ io block
-    MaskedUninterruptible -> io id
+    MaskedUninterruptible -> io blockUninterruptible
 
 bracket
         :: IO a         -- ^ computation to run first (\"acquire resource\")
@@ -462,20 +400,60 @@ a `finally` sequel =
     _ <- sequel
     return r
 
--- | Forces its argument to be evaluated to weak head normal form when
--- the resultant 'IO' action is executed. It can be used to order
--- evaluation with respect to other 'IO' operations; its semantics are
--- given by
+-- | Evaluate the argument to weak head normal form.
 --
--- >   evaluate x `seq` y    ==>  y
--- >   evaluate x `catch` f  ==>  (return $! x) `catch` f
--- >   evaluate x >>= f      ==>  (return $! x) >>= f
+-- 'evaluate' is typically used to uncover any exceptions that a lazy value
+-- may contain, and possibly handle them.
 --
--- /Note:/ the first equation implies that @(evaluate x)@ is /not/ the
--- same as @(return $! x)@.  A correct definition is
+-- 'evaluate' only evaluates to /weak head normal form/. If deeper
+-- evaluation is needed, the @force@ function from @Control.DeepSeq@
+-- may be handy:
 --
--- >   evaluate x = (return $! x) >>= return
+-- > evaluate $ force x
 --
+-- There is a subtle difference between @'evaluate' x@ and @'return' '$!' x@,
+-- analogous to the difference between 'throwIO' and 'throw'. If the lazy
+-- value @x@ throws an exception, @'return' '$!' x@ will fail to return an
+-- 'IO' action and will throw an exception instead. @'evaluate' x@, on the
+-- other hand, always produces an 'IO' action; that action will throw an
+-- exception upon /execution/ iff @x@ throws an exception upon /evaluation/.
+--
+-- The practical implication of this difference is that due to the
+-- /imprecise exceptions/ semantics,
+--
+-- > (return $! error "foo") >> error "bar"
+--
+-- may throw either @"foo"@ or @"bar"@, depending on the optimizations
+-- performed by the compiler. On the other hand,
+--
+-- > evaluate (error "foo") >> error "bar"
+--
+-- is guaranteed to throw @"foo"@.
+--
+-- The rule of thumb is to use 'evaluate' to force or handle exceptions in
+-- lazy values. If, on the other hand, you are forcing a lazy value for
+-- efficiency reasons only and do not care about exceptions, you may
+-- use @'return' '$!' x@.
 evaluate :: a -> IO a
 evaluate a = IO $ \s -> seq# a s -- NB. see #2273, #5129
 
+{- $exceptions_and_strictness
+
+Laziness can interact with @catch@-like operations in non-obvious ways (see,
+e.g. GHC Trac #11555 and #13330). For instance, consider these subtly-different
+examples:
+
+> test1 = Control.Exception.catch (error "uh oh") (\(_ :: SomeException) -> putStrLn "it failed")
+>
+> test2 = GHC.IO.catchException (error "uh oh") (\(_ :: SomeException) -> putStrLn "it failed")
+
+While @test1@ will print "it failed", @test2@ will print "uh oh".
+
+When using 'catchException', exceptions thrown while evaluating the
+action-to-be-executed will not be caught; only exceptions thrown during
+execution of the action will be handled by the exception handler.
+
+Since this strictness is a small optimization and may lead to surprising
+results, all of the @catch@ and @handle@ variants offered by "Control.Exception"
+use 'catch' rather than 'catchException'.
+-}

@@ -1,8 +1,8 @@
 {-# LANGUAGE UnboxedTuples #-}
 
-module State (module State, mapAccumLM {- XXX hack -}) where
+module State where
 
-import MonadUtils
+import GhcPrelude
 
 newtype State s a = State { runState' :: s -> (# a, s #) }
 
@@ -17,7 +17,6 @@ instance Applicative (State s) where
                                            (# x, s'' #) -> (# f x, s'' #)
 
 instance Monad (State s) where
-    return x = State $ \s -> (# x, s #)
     m >>= n  = State $ \s -> case runState' m s of
                              (# r, s' #) -> runState' (n r) s'
 

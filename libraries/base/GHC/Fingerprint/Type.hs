@@ -1,5 +1,6 @@
 {-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+
 -- ----------------------------------------------------------------------------
 --
 --  (c) The University of Glasgow 2006
@@ -21,8 +22,11 @@ import Numeric (showHex)
 -- Using 128-bit MD5 fingerprints for now.
 
 data Fingerprint = Fingerprint {-# UNPACK #-} !Word64 {-# UNPACK #-} !Word64
-  deriving (Eq, Ord)
+  deriving ( Eq  -- ^ @since 4.4.0.0
+           , Ord -- ^ @since 4.4.0.0
+           )
 
+-- | @since 4.7.0.0
 instance Show Fingerprint where
   show (Fingerprint w1 w2) = hex16 w1 ++ hex16 w2
     where

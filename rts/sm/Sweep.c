@@ -22,7 +22,7 @@ void
 sweep(generation *gen)
 {
     bdescr *bd, *prev, *next;
-    nat i;
+    uint32_t i;
     W_ freed, resid, fragd, blocks, live;
     
     ASSERT(countBlocks(gen->old_blocks) == gen->n_old_blocks);
@@ -84,11 +84,3 @@ sweep(generation *gen)
 
     ASSERT(countBlocks(gen->old_blocks) == gen->n_old_blocks);
 }
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

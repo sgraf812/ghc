@@ -1,6 +1,8 @@
+{-# OPTIONS_GHC -fno-warn-redundant-constraints #-}
 {-# LANGUAGE Rank2Types, TypeSynonymInstances, FlexibleInstances #-}
 {-# LANGUAGE TypeFamilies, GeneralizedNewtypeDeriving #-}
-module Bug2 where
+
+module T3064 where
 import Control.Applicative
 
 newtype ReaderT r m a = ReaderT { runReaderT :: r -> m a }
@@ -54,20 +56,23 @@ runCA action = runCtxM (runCAT (unCA action))
 runCtxM :: (forall c. CtxM c v) -> IO v
 runCtxM action = runReaderT (unResourceT action) Ctx
 
--- test11 :: IO ()
--- test11 = runCA(newRgn(newRgn(newRgn(newRgn(newRgn(
---   newRgn(newRgn(newRgn(newRgn(return()))))))))))
-
--- test12 :: IO ()
--- test12 = runCA(newRgn(newRgn(newRgn(newRgn(newRgn(newRgn(
---   newRgn(newRgn(newRgn(newRgn(return())))))))))))
-
--- test13 :: IO ()
--- test13 = runCA(newRgn(newRgn(newRgn(newRgn(newRgn(newRgn(newRgn(
---   newRgn(newRgn(newRgn(newRgn(return()))))))))))))
-
-
 {-
+
+test4 :: IO ()
+test4 = runCA(newRgn(newRgn(newRgn(newRgn(return())))))
+
+test11 :: IO ()
+test11 = runCA(newRgn(newRgn(newRgn(newRgn(newRgn(
+               newRgn(newRgn(newRgn(newRgn(return()))))))))))
+
+test12 :: IO ()
+test12 = runCA(newRgn(newRgn(newRgn(newRgn(newRgn(newRgn(
+               newRgn(newRgn(newRgn(newRgn(return())))))))))))
+
+test13 :: IO ()
+test13 = runCA(newRgn(newRgn(newRgn(newRgn(newRgn(newRgn(newRgn(
+               newRgn(newRgn(newRgn(newRgn(return()))))))))))))
+
 test14 :: IO ()
 test14 = runCA(newRgn(newRgn(newRgn(newRgn(newRgn(newRgn(newRgn(newRgn(
                newRgn(newRgn(newRgn(newRgn(return())))))))))))))

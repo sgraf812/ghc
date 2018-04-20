@@ -1,14 +1,12 @@
 {-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE AutoDeriveTypeable #-}
-{-# OPTIONS -Wall -fno-warn-unused-binds #-}
 
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Data.Fixed
 -- Copyright   :  (c) Ashley Yakeley 2005, 2006, 2009
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  Ashley Yakeley <ashley@semantic.org>
 -- Stability   :  experimental
 -- Portability :  portable
@@ -37,8 +35,6 @@ module Data.Fixed
     E12,Pico
 ) where
 
-import Prelude -- necessary to get dependencies right
-import Data.Typeable
 import Data.Data
 import GHC.Read
 import Text.ParserCombinators.ReadPrec
@@ -61,8 +57,10 @@ mod' n d = n - (fromInteger f) * d where
     f = div' n d
 
 -- | The type parameter should be an instance of 'HasResolution'.
-newtype Fixed a = MkFixed Integer -- ^ /Since: 4.7.0.0/
-        deriving (Eq,Ord,Typeable)
+newtype Fixed a = MkFixed Integer
+        deriving ( Eq  -- ^ @since 2.01
+                 , Ord -- ^ @since 2.01
+                 )
 
 -- We do this because the automatically derived Data instance requires (Data a) context.
 -- Our manual instance has the more general (Typeable a) context.
@@ -70,6 +68,8 @@ tyFixed :: DataType
 tyFixed = mkDataType "Data.Fixed.Fixed" [conMkFixed]
 conMkFixed :: Constr
 conMkFixed = mkConstr tyFixed "MkFixed" [] Prefix
+
+-- | @since 4.1.0.0
 instance (Typeable a) => Data (Fixed a) where
     gfoldl k z (MkFixed a) = k (z MkFixed) a
     gunfold k z _ = k (z MkFixed)
@@ -85,6 +85,7 @@ withType foo = foo undefined
 withResolution :: (HasResolution a) => (Integer -> f a) -> f a
 withResolution foo = withType (foo . resolution)
 
+-- | @since 2.01
 instance Enum (Fixed a) where
     succ (MkFixed a) = MkFixed (succ a)
     pred (MkFixed a) = MkFixed (pred a)
@@ -95,6 +96,7 @@ instance Enum (Fixed a) where
     enumFromTo (MkFixed a) (MkFixed b) = fmap MkFixed (enumFromTo a b)
     enumFromThenTo (MkFixed a) (MkFixed b) (MkFixed c) = fmap MkFixed (enumFromThenTo a b c)
 
+-- | @since 2.01
 instance (HasResolution a) => Num (Fixed a) where
     (MkFixed a) + (MkFixed b) = MkFixed (a + b)
     (MkFixed a) - (MkFixed b) = MkFixed (a - b)
@@ -104,15 +106,18 @@ instance (HasResolution a) => Num (Fixed a) where
     signum (MkFixed a) = fromInteger (signum a)
     fromInteger i = withResolution (\res -> MkFixed (i * res))
 
+-- | @since 2.01
 instance (HasResolution a) => Real (Fixed a) where
     toRational fa@(MkFixed a) = (toRational a) / (toRational (resolution fa))
 
+-- | @since 2.01
 instance (HasResolution a) => Fractional (Fixed a) where
     fa@(MkFixed a) / (MkFixed b) = MkFixed (div (a * (resolution fa)) b)
     recip fa@(MkFixed a) = MkFixed (div (res * res) a) where
         res = resolution fa
     fromRational r = withResolution (\res -> MkFixed (floor (r * (toRational res))))
 
+-- | @since 2.01
 instance (HasResolution a) => RealFrac (Fixed a) where
     properFraction a = (i,a - (fromIntegral i)) where
         i = truncate a
@@ -146,11 +151,15 @@ showFixed chopTrailingZeros fa@(MkFixed a) = (show i) ++ (withDot (showIntegerZe
     -- enough digits to be unambiguous
     digits = ceiling (logBase 10 (fromInteger res) :: Double)
     maxnum = 10 ^ digits
-    fracNum = div (d * maxnum) res
+    -- read floors, so show must ceil for `read . show = id` to hold. See #9240
+    fracNum = divCeil (d * maxnum) res
+    divCeil x y = (x + y - 1) `div` y
 
+-- | @since 2.01
 instance (HasResolution a) => Show (Fixed a) where
     show = showFixed False
 
+-- | @since 4.3.0.0
 instance (HasResolution a) => Read (Fixed a) where
     readPrec     = readNumber convertFixed
     readListPrec = readListPrecDefault
@@ -167,52 +176,58 @@ convertFixed (Number n)
           e = ceiling (logBase 10 (fromInteger r) :: Double)
 convertFixed _ = pfail
 
-data E0 = E0
-     deriving (Typeable)
+data E0
+
+-- | @since 4.1.0.0
 instance HasResolution E0 where
     resolution _ = 1
 -- | resolution of 1, this works the same as Integer
 type Uni = Fixed E0
 
-data E1 = E1
-     deriving (Typeable)
+data E1
+
+-- | @since 4.1.0.0
 instance HasResolution E1 where
     resolution _ = 10
 -- | resolution of 10^-1 = .1
 type Deci = Fixed E1
 
-data E2 = E2
-     deriving (Typeable)
+data E2
+
+-- | @since 4.1.0.0
 instance HasResolution E2 where
     resolution _ = 100
 -- | resolution of 10^-2 = .01, useful for many monetary currencies
 type Centi = Fixed E2
 
-data E3 = E3
-     deriving (Typeable)
+data E3
+
+-- | @since 4.1.0.0
 instance HasResolution E3 where
     resolution _ = 1000
 -- | resolution of 10^-3 = .001
 type Milli = Fixed E3
 
-data E6 = E6
-     deriving (Typeable)
+data E6
+
+-- | @since 2.01
 instance HasResolution E6 where
     resolution _ = 1000000
 -- | resolution of 10^-6 = .000001
 type Micro = Fixed E6
 
-data E9 = E9
-     deriving (Typeable)
+data E9
+
+-- | @since 4.1.0.0
 instance HasResolution E9 where
     resolution _ = 1000000000
 -- | resolution of 10^-9 = .000000001
 type Nano = Fixed E9
 
-data E12 = E12
-     deriving (Typeable)
+data E12
+
+-- | @since 2.01
 instance HasResolution E12 where
     resolution _ = 1000000000000
 -- | resolution of 10^-12 = .000000000001
 type Pico = Fixed E12
-

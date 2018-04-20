@@ -2,12 +2,11 @@
  *
  * (c) The GHC Team, 2000-2009
  *
- * Sparking support for GRAN, PAR and THREADED_RTS versions of the RTS.
+ * Sparking support for PAR and THREADED_RTS versions of the RTS.
  * 
  * ---------------------------------------------------------------------------*/
 
-#ifndef SPARKS_H
-#define SPARKS_H
+#pragma once
 
 #include "WSDeque.h"
 
@@ -38,10 +37,10 @@ INLINE_HEADER StgClosure* reclaimSpark(SparkPool *pool);
 
 // Returns True if the spark pool is empty (can give a false positive
 // if the pool is almost empty).
-INLINE_HEADER rtsBool looksEmpty(SparkPool* deque);
+INLINE_HEADER bool looksEmpty(SparkPool* deque);
 
 INLINE_HEADER StgClosure * tryStealSpark (SparkPool *pool);
-INLINE_HEADER rtsBool      fizzledSpark  (StgClosure *);
+INLINE_HEADER bool         fizzledSpark  (StgClosure *);
 
 void         freeSparkPool     (SparkPool *pool);
 void         createSparkThread (Capability *cap);
@@ -60,7 +59,7 @@ INLINE_HEADER StgClosure* reclaimSpark(SparkPool *pool)
     return popWSDeque(pool);
 }
 
-INLINE_HEADER rtsBool looksEmpty(SparkPool* deque)
+INLINE_HEADER bool looksEmpty(SparkPool* deque)
 {
     return looksEmptyWSDeque(deque);
 }
@@ -96,7 +95,7 @@ INLINE_HEADER StgClosure * tryStealSpark (SparkPool *pool)
     // other pools before trying again.
 }
 
-INLINE_HEADER rtsBool fizzledSpark (StgClosure *spark)
+INLINE_HEADER bool fizzledSpark (StgClosure *spark)
 {
     return (GET_CLOSURE_TAG(spark) != 0 || !closure_SHOULD_SPARK(spark));
 }
@@ -104,13 +103,3 @@ INLINE_HEADER rtsBool fizzledSpark (StgClosure *spark)
 #endif // THREADED_RTS
 
 #include "EndPrivate.h"
-
-#endif /* SPARKS_H */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

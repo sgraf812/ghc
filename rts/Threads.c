@@ -35,11 +35,11 @@ static StgThreadID next_thread_id = 1;
  *    RESERVED_STACK_WORDS    (so we can get back from the stack overflow)
  *  + sizeofW(StgStopFrame)   (the stg_stop_thread_info frame)
  *  + 1                       (the closure to enter)
- *  + 1			      (stg_ap_v_ret)
- *  + 1			      (spare slot req'd by stg_ap_v_ret)
+ *  + 1                       (stg_ap_v_ret)
+ *  + 1                       (spare slot req'd by stg_ap_v_ret)
  *
  * A thread with this stack will bomb immediately with a stack
- * overflow, which will increase its stack size.  
+ * overflow, which will increase its stack size.
  */
 #define MIN_STACK_WORDS (RESERVED_STACK_WORDS + sizeofW(StgStopFrame) + 3)
 
@@ -53,15 +53,13 @@ static StgThreadID next_thread_id = 1;
 
    createGenThread() and createIOThread() (in SchedAPI.h) are
    convenient packaged versions of this function.
-
-   currently pri (priority) is only used in a GRAN setup -- HWL
    ------------------------------------------------------------------------ */
 StgTSO *
 createThread(Capability *cap, W_ size)
 {
     StgTSO *tso;
     StgStack *stack;
-    nat stack_size;
+    uint32_t stack_size;
 
     /* sched_mutex is *not* required */
 
@@ -106,16 +104,18 @@ createThread(Capability *cap, W_ size)
     tso->saved_errno = 0;
     tso->bound = NULL;
     tso->cap = cap;
-    
+
     tso->stackobj       = stack;
     tso->tot_stack_size = stack->stack_size;
 
+    ASSIGN_Int64((W_*)&(tso->alloc_limit), 0);
+
     tso->trec = NO_TREC;
 
-#ifdef PROFILING
+#if defined(PROFILING)
     tso->prof.cccs = CCS_MAIN;
 #endif
-    
+
     // put a stop frame on the stack
     stack->sp -= sizeofW(StgStopFrame);
     SET_HDR((StgClosure*)stack->sp,
@@ -128,7 +128,7 @@ createThread(Capability *cap, W_ size)
     tso->global_link = g0->threads;
     g0->threads = tso;
     RELEASE_LOCK(&sched_mutex);
-    
+
     // ToDo: report the stack size in the event?
     traceEventCreateThread(cap, tso);
 
@@ -143,11 +143,11 @@ createThread(Capability *cap, W_ size)
  * ------------------------------------------------------------------------ */
 
 int
-cmp_thread(StgPtr tso1, StgPtr tso2) 
-{ 
-  StgThreadID id1 = ((StgTSO *)tso1)->id; 
+cmp_thread(StgPtr tso1, StgPtr tso2)
+{
+  StgThreadID id1 = ((StgTSO *)tso1)->id;
   StgThreadID id2 = ((StgTSO *)tso2)->id;
- 
+
   if (id1 < id2) return (-1);
   if (id1 > id2) return 1;
   return 0;
@@ -159,9 +159,23 @@ cmp_thread(StgPtr tso1, StgPtr tso2)
  * This is used in the implementation of Show for ThreadIds.
  * ------------------------------------------------------------------------ */
 int
-rts_getThreadId(StgPtr tso) 
+rts_getThreadId(StgPtr tso)
 {
   return ((StgTSO *)tso)->id;
+}
+
+/* ---------------------------------------------------------------------------
+ * Enabling and disabling the thread allocation limit
+ * ------------------------------------------------------------------------ */
+
+void rts_enableThreadAllocationLimit(StgPtr tso)
+{
+    ((StgTSO *)tso)->flags |= TSO_ALLOC_LIMIT;
+}
+
+void rts_disableThreadAllocationLimit(StgPtr tso)
+{
+    ((StgTSO *)tso)->flags &= ~TSO_ALLOC_LIMIT;
 }
 
 /* -----------------------------------------------------------------------------
@@ -169,57 +183,57 @@ rts_getThreadId(StgPtr tso)
    Fails fatally if the TSO is not on the queue.
    -------------------------------------------------------------------------- */
 
-rtsBool // returns True if we modified queue
+bool // returns true if we modified queue
 removeThreadFromQueue (Capability *cap, StgTSO **queue, StgTSO *tso)
 {
     StgTSO *t, *prev;
 
     prev = NULL;
     for (t = *queue; t != END_TSO_QUEUE; prev = t, t = t->_link) {
-	if (t == tso) {
-	    if (prev) {
-		setTSOLink(cap,prev,t->_link);
+        if (t == tso) {
+            if (prev) {
+                setTSOLink(cap,prev,t->_link);
                 t->_link = END_TSO_QUEUE;
-                return rtsFalse;
-	    } else {
-		*queue = t->_link;
+                return false;
+            } else {
+                *queue = t->_link;
                 t->_link = END_TSO_QUEUE;
-                return rtsTrue;
-	    }
-	}
+                return true;
+            }
+        }
     }
     barf("removeThreadFromQueue: not found");
 }
 
-rtsBool // returns True if we modified head or tail
-removeThreadFromDeQueue (Capability *cap, 
+bool // returns true if we modified head or tail
+removeThreadFromDeQueue (Capability *cap,
                          StgTSO **head, StgTSO **tail, StgTSO *tso)
 {
     StgTSO *t, *prev;
-    rtsBool flag = rtsFalse;
+    bool flag = false;
 
     prev = NULL;
     for (t = *head; t != END_TSO_QUEUE; prev = t, t = t->_link) {
-	if (t == tso) {
-	    if (prev) {
-		setTSOLink(cap,prev,t->_link);
-                flag = rtsFalse;
-	    } else {
-		*head = t->_link;
-                flag = rtsTrue;
-	    }
+        if (t == tso) {
+            if (prev) {
+                setTSOLink(cap,prev,t->_link);
+                flag = false;
+            } else {
+                *head = t->_link;
+                flag = true;
+            }
             t->_link = END_TSO_QUEUE;
             if (*tail == tso) {
-		if (prev) {
-		    *tail = prev;
-		} else {
-		    *tail = END_TSO_QUEUE;
-		}
-                return rtsTrue;
-	    } else {
+                if (prev) {
+                    *tail = prev;
+                } else {
+                    *tail = END_TSO_QUEUE;
+                }
+                return true;
+            } else {
                 return flag;
             }
-	}
+        }
     }
     barf("removeThreadFromDeQueue: not found");
 }
@@ -238,7 +252,7 @@ tryWakeupThread (Capability *cap, StgTSO *tso)
 {
     traceEventThreadWakeup (cap, tso, tso->cap->no);
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     if (tso->cap != cap)
     {
         MessageWakeup *msg;
@@ -268,7 +282,7 @@ tryWakeupThread (Capability *cap, StgTSO *tso)
     case BlockedOnMsgThrowTo:
     {
         const StgInfoTable *i;
-        
+
         i = lockClosure(tso->block_info.closure);
         unlockClosure(tso->block_info.closure, i);
         if (i != &stg_MSG_NULL_info) {
@@ -334,7 +348,7 @@ migrateThread (Capability *from, StgTSO *tso, Capability *to)
    wakes up all the threads on the specified queue.
    ------------------------------------------------------------------------- */
 
-void
+static void
 wakeBlockingQueue(Capability *cap, StgBlockingQueue *bq)
 {
     MessageBlackHole *msg;
@@ -343,7 +357,7 @@ wakeBlockingQueue(Capability *cap, StgBlockingQueue *bq)
     ASSERT(bq->header.info == &stg_BLOCKING_QUEUE_DIRTY_info  ||
            bq->header.info == &stg_BLOCKING_QUEUE_CLEAN_info  );
 
-    for (msg = bq->queue; msg != (MessageBlackHole*)END_TSO_QUEUE; 
+    for (msg = bq->queue; msg != (MessageBlackHole*)END_TSO_QUEUE;
          msg = msg->link) {
         i = msg->header.info;
         if (i != &stg_IND_info) {
@@ -377,7 +391,7 @@ checkBlockingQueues (Capability *cap, StgTSO *tso)
     debugTraceCap(DEBUG_sched, cap,
                   "collision occurred; checking blocking queues for thread %ld",
                   (W_)tso->id);
-    
+
     for (bq = tso->bq; bq != (StgBlockingQueue*)END_TSO_QUEUE; bq = next) {
         next = bq->link;
 
@@ -386,14 +400,14 @@ checkBlockingQueues (Capability *cap, StgTSO *tso)
             // traversing this IND multiple times.
             continue;
         }
-        
+
         p = bq->bh;
 
         if (p->header.info != &stg_BLACKHOLE_info ||
             ((StgInd *)p)->indirectee != (StgClosure*)bq)
         {
             wakeBlockingQueue(cap,bq);
-        }   
+        }
     }
 }
 
@@ -420,8 +434,8 @@ updateThunk (Capability *cap, StgTSO *tso, StgClosure *thunk, StgClosure *val)
         updateWithIndirection(cap, thunk, val);
         return;
     }
-    
-    v = ((StgInd*)thunk)->indirectee;
+
+    v = UNTAG_CLOSURE(((StgInd*)thunk)->indirectee);
 
     updateWithIndirection(cap, thunk, val);
 
@@ -457,7 +471,7 @@ updateThunk (Capability *cap, StgTSO *tso, StgClosure *thunk, StgClosure *val)
  * rtsSupportsBoundThreads(): is the RTS built to support bound threads?
  * used by Control.Concurrent for error checking.
  * ------------------------------------------------------------------------- */
- 
+
 HsBool
 rtsSupportsBoundThreads(void)
 {
@@ -471,14 +485,14 @@ rtsSupportsBoundThreads(void)
 /* ---------------------------------------------------------------------------
  * isThreadBound(tso): check whether tso is bound to an OS thread.
  * ------------------------------------------------------------------------- */
- 
+
 StgBool
 isThreadBound(StgTSO* tso USED_IF_THREADS)
 {
 #if defined(THREADED_RTS)
   return (tso->bound != NULL);
 #endif
-  return rtsFalse;
+  return false;
 }
 
 /* -----------------------------------------------------------------------------
@@ -524,21 +538,9 @@ threadStackOverflow (Capability *cap, StgTSO *tso)
                                  stg_min(tso->stackobj->stack + tso->stackobj->stack_size,
                                          tso->stackobj->sp+64)));
 
-        if (tso->flags & TSO_BLOCKEX) {
-            // NB. StackOverflow exceptions must be deferred if the thread is
-            // inside Control.Exception.mask.  See bug #767 and bug #8303.
-            // This implementation is a minor hack, see Note [Throw to self when masked]
-            MessageThrowTo *msg = (MessageThrowTo*)allocate(cap, sizeofW(MessageThrowTo));
-            SET_HDR(msg, &stg_MSG_THROWTO_info, CCS_SYSTEM);
-            msg->source = tso;
-            msg->target = tso;
-            msg->exception = (StgClosure *)stackOverflow_closure;
-            blockedThrowTo(cap, tso, msg);
-        } else {
-            // Send this thread the StackOverflow exception
-            throwToSingleThreaded(cap, tso, (StgClosure *)stackOverflow_closure);
-            return;
-        }
+        // Note [Throw to self when masked], also #767 and #8303.
+        throwToSelf(cap, tso, (StgClosure *)stackOverflow_closure);
+        return;
     }
 
 
@@ -558,7 +560,7 @@ threadStackOverflow (Capability *cap, StgTSO *tso)
     // we squeezed is not enough to run the thread, we'll come back
     // here (no squeezing will have occurred and thus we'll enlarge the
     // stack.)
-    if ((tso->flags & TSO_SQUEEZED) && 
+    if ((tso->flags & TSO_SQUEEZED) &&
         ((W_)(tso->stackobj->sp - tso->stackobj->stack) >= BLOCK_SIZE_W)) {
         return;
     }
@@ -589,7 +591,15 @@ threadStackOverflow (Capability *cap, StgTSO *tso)
                   "allocating new stack chunk of size %d bytes",
                   chunk_size * sizeof(W_));
 
+    // Charge the current thread for allocating stack.  Stack usage is
+    // non-deterministic, because the chunk boundaries might vary from
+    // run to run, but accounting for this is better than not
+    // accounting for it, since a deep recursion will otherwise not be
+    // subject to allocation limits.
+    cap->r.rCurrentTSO = tso;
     new_stack = (StgStack*) allocate(cap, chunk_size);
+    cap->r.rCurrentTSO = NULL;
+
     SET_HDR(new_stack, &stg_STACK_info, old_stack->header.prof.ccs);
     TICK_ALLOC_STACK(chunk_size);
 
@@ -619,8 +629,8 @@ threadStackOverflow (Capability *cap, StgTSO *tso)
             // if including this frame would exceed the size of the
             // new stack (taking into account the underflow frame),
             // then stop at the previous frame.
-            if (sp + size > old_stack->stack + (new_stack->stack_size -
-                                                sizeofW(StgUnderflowFrame))) {
+            if (sp + size > old_stack->sp + (new_stack->stack_size -
+                                             sizeofW(StgUnderflowFrame))) {
                 break;
             }
             sp += size;
@@ -669,39 +679,6 @@ threadStackOverflow (Capability *cap, StgTSO *tso)
     // IF_DEBUG(scheduler,printTSO(new_tso));
 }
 
-/* Note [Throw to self when masked]
- *
- * When a StackOverflow occurs when the thread is masked, we want to
- * defer the exception to when the thread becomes unmasked/hits an
- * interruptible point.  We already have a mechanism for doing this,
- * the blocked_exceptions list, but the use here is a bit unusual,
- * because an exception is normally only added to this list upon
- * an asynchronous 'throwTo' call (with all of the relevant
- * multithreaded nonsense). Morally, a stack overflow should be an
- * asynchronous exception sent by a thread to itself, and it should
- * have the same semantics.  But there are a few key differences:
- *
- * - If you actually tried to send an asynchronous exception to
- *   yourself using throwTo, the exception would actually immediately
- *   be delivered.  This is because throwTo itself is considered an
- *   interruptible point, so the exception is always deliverable. Thus,
- *   ordinarily, we never end up with a message to onesself in the
- *   blocked_exceptions queue.
- *
- * - In the case of a StackOverflow, we don't actually care about the
- *   wakeup semantics; when an exception is delivered, the thread that
- *   originally threw the exception should be woken up, since throwTo
- *   blocks until the exception is successfully thrown.  Fortunately,
- *   it is harmless to wakeup a thread that doesn't actually need waking
- *   up, e.g. ourselves.
- *
- * - No synchronization is necessary, because we own the TSO and the
- *   capability.  You can observe this by tracing through the execution
- *   of throwTo.  We skip synchronizing the message and inter-capability
- *   communication.
- *
- * We think this doesn't break any invariants, but do be careful!
- */
 
 
 /* ---------------------------------------------------------------------------
@@ -713,7 +690,7 @@ threadStackUnderflow (Capability *cap, StgTSO *tso)
 {
     StgStack *new_stack, *old_stack;
     StgUnderflowFrame *frame;
-    nat retvals;
+    uint32_t retvals;
 
     debugTraceCap(DEBUG_sched, cap, "stack underflow");
 
@@ -756,10 +733,89 @@ threadStackUnderflow (Capability *cap, StgTSO *tso)
 }
 
 /* ----------------------------------------------------------------------------
+   Implementation of tryPutMVar#
+
+   NOTE: this should be kept in sync with stg_tryPutMVarzh in PrimOps.cmm
+   ------------------------------------------------------------------------- */
+
+bool performTryPutMVar(Capability *cap, StgMVar *mvar, StgClosure *value)
+{
+    const StgInfoTable *info;
+    StgMVarTSOQueue *q;
+    StgTSO *tso;
+
+    info = lockClosure((StgClosure*)mvar);
+
+    if (mvar->value != &stg_END_TSO_QUEUE_closure) {
+#if defined(THREADED_RTS)
+        unlockClosure((StgClosure*)mvar, info);
+#endif
+        return false;
+    }
+
+    q = mvar->head;
+loop:
+    if (q == (StgMVarTSOQueue*)&stg_END_TSO_QUEUE_closure) {
+        /* No further takes, the MVar is now full. */
+        if (info == &stg_MVAR_CLEAN_info) {
+            dirty_MVAR(&cap->r, (StgClosure*)mvar);
+        }
+
+        mvar->value = value;
+        unlockClosure((StgClosure*)mvar, &stg_MVAR_DIRTY_info);
+        return true;
+    }
+    if (q->header.info == &stg_IND_info ||
+        q->header.info == &stg_MSG_NULL_info) {
+        q = (StgMVarTSOQueue*)((StgInd*)q)->indirectee;
+        goto loop;
+    }
+
+    // There are takeMVar(s) waiting: wake up the first one
+    tso = q->tso;
+    mvar->head = q->link;
+    if (mvar->head == (StgMVarTSOQueue*)&stg_END_TSO_QUEUE_closure) {
+        mvar->tail = (StgMVarTSOQueue*)&stg_END_TSO_QUEUE_closure;
+    }
+
+    ASSERT(tso->block_info.closure == (StgClosure*)mvar);
+    // save why_blocked here, because waking up the thread destroys
+    // this information
+    StgWord why_blocked = tso->why_blocked;
+
+    // actually perform the takeMVar
+    StgStack* stack = tso->stackobj;
+    stack->sp[1] = (W_)value;
+    stack->sp[0] = (W_)&stg_ret_p_info;
+
+    // indicate that the MVar operation has now completed.
+    tso->_link = (StgTSO*)&stg_END_TSO_QUEUE_closure;
+
+    if (stack->dirty == 0) {
+        dirty_STACK(cap, stack);
+    }
+
+    tryWakeupThread(cap, tso);
+
+    // If it was a readMVar, then we can still do work,
+    // so loop back. (XXX: This could take a while)
+    if (why_blocked == BlockedOnMVarRead) {
+        q = ((StgMVarTSOQueue*)q)->link;
+        goto loop;
+    }
+
+    ASSERT(why_blocked == BlockedOnMVar);
+
+    unlockClosure((StgClosure*)mvar, info);
+
+    return true;
+}
+
+/* ----------------------------------------------------------------------------
  * Debugging: why is a thread blocked
  * ------------------------------------------------------------------------- */
 
-#if DEBUG
+#if defined(DEBUG)
 void
 printThreadBlockage(StgTSO *tso)
 {
@@ -787,7 +843,7 @@ printThreadBlockage(StgTSO *tso)
     debugBelch("is blocked on atomic MVar read @ %p", tso->block_info.closure);
     break;
   case BlockedOnBlackHole:
-      debugBelch("is blocked on a black hole %p", 
+      debugBelch("is blocked on a black hole %p",
                  ((StgBlockingQueue*)tso->block_info.bh->bh));
     break;
   case BlockedOnMsgThrowTo:
@@ -809,8 +865,8 @@ printThreadBlockage(StgTSO *tso)
     debugBelch("is blocked on an STM operation");
     break;
   default:
-    barf("printThreadBlockage: strange tso->why_blocked: %d for TSO %d (%d)",
-	 tso->why_blocked, tso->id, tso);
+    barf("printThreadBlockage: strange tso->why_blocked: %d for TSO %d (%p)",
+         tso->why_blocked, tso->id, tso);
   }
 }
 
@@ -824,26 +880,26 @@ printThreadStatus(StgTSO *t)
       if (label) debugBelch("[\"%s\"] ",(char *)label);
     }
         switch (t->what_next) {
-	case ThreadKilled:
-	    debugBelch("has been killed");
-	    break;
-	case ThreadComplete:
-	    debugBelch("has completed");
-	    break;
-	default:
-	    printThreadBlockage(t);
-	}
+        case ThreadKilled:
+            debugBelch("has been killed");
+            break;
+        case ThreadComplete:
+            debugBelch("has completed");
+            break;
+        default:
+            printThreadBlockage(t);
+        }
         if (t->dirty) {
             debugBelch(" (TSO_DIRTY)");
         }
-	debugBelch("\n");
+        debugBelch("\n");
 }
 
 void
 printAllThreads(void)
 {
   StgTSO *t, *next;
-  nat i, g;
+  uint32_t i, g;
   Capability *cap;
 
   debugBelch("all threads:\n");
@@ -852,7 +908,7 @@ printAllThreads(void)
       cap = capabilities[i];
       debugBelch("threads on capability %d:\n", cap->no);
       for (t = cap->run_queue_hd; t != END_TSO_QUEUE; t = t->_link) {
-	  printThreadStatus(t);
+          printThreadStatus(t);
       }
   }
 
@@ -860,7 +916,7 @@ printAllThreads(void)
   for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
     for (t = generations[g].threads; t != END_TSO_QUEUE; t = next) {
       if (t->why_blocked != NotBlocked) {
-	  printThreadStatus(t);
+          printThreadStatus(t);
       }
       next = t->global_link;
     }
@@ -868,23 +924,15 @@ printAllThreads(void)
 }
 
 // useful from gdb
-void 
+void
 printThreadQueue(StgTSO *t)
 {
-    nat i = 0;
+    uint32_t i = 0;
     for (; t != END_TSO_QUEUE; t = t->_link) {
-	printThreadStatus(t);
-	i++;
+        printThreadStatus(t);
+        i++;
     }
     debugBelch("%d threads on queue\n", i);
 }
 
 #endif /* DEBUG */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

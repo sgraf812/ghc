@@ -2,6 +2,8 @@
 module RegAlloc.Linear.PPC.FreeRegs
 where
 
+import GhcPrelude
+
 import PPC.Regs
 import RegClass
 import Reg
@@ -11,7 +13,7 @@ import Platform
 
 import Data.Word
 import Data.Bits
--- import Data.List
+import Data.Foldable (foldl')
 
 -- The PowerPC has 32 integer and 32 floating point registers.
 -- This is 32bit PowerPC, so Word64 is inefficient - two Word32s are much
@@ -37,9 +39,9 @@ releaseReg (RealRegSingle r) (FreeRegs g f)
 
 releaseReg _ _
         = panic "RegAlloc.Linear.PPC.releaseReg: bad reg"
-    
+
 initFreeRegs :: Platform -> FreeRegs
-initFreeRegs platform = foldr releaseReg noFreeRegs (allocatableRegs platform)
+initFreeRegs platform = foldl' (flip releaseReg) noFreeRegs (allocatableRegs platform)
 
 getFreeRegs :: RegClass -> FreeRegs -> [RealReg]        -- lazily
 getFreeRegs cls (FreeRegs g f)
@@ -52,7 +54,7 @@ getFreeRegs cls (FreeRegs g f)
                  | otherwise    = go x (m `shiftR` 1) $! i-1
 
 allocateReg :: RealReg -> FreeRegs -> FreeRegs
-allocateReg (RealRegSingle r) (FreeRegs g f) 
+allocateReg (RealRegSingle r) (FreeRegs g f)
     | r > 31    = FreeRegs g (f .&. complement (1 `shiftL` (r - 32)))
     | otherwise = FreeRegs (g .&. complement (1 `shiftL` r)) f
 

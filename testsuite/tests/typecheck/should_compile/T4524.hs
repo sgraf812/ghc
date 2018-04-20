@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -fno-warn-redundant-constraints #-}
 {-# LANGUAGE 
         GADTs,
         TypeOperators,
@@ -28,7 +29,8 @@
 module T4524 where
 
 import Data.Maybe ( mapMaybe )
-import Control.Monad ( MonadPlus, mplus, msum, mzero )
+import Control.Applicative ( Alternative(..) )
+import Control.Monad ( MonadPlus(..), msum, ap, liftM )
 import Unsafe.Coerce (unsafeCoerce)
 
 newtype FileName = FN FilePath deriving ( Eq, Ord )
@@ -157,6 +159,13 @@ unsafeCoerceP1 = unsafeCoerce
 
 data Perhaps a = Unknown | Failed | Succeeded a
 
+instance Functor Perhaps where
+  fmap = liftM
+
+instance Applicative Perhaps where
+  pure  = return
+  (<*>) = ap
+
 instance  Monad Perhaps where
     (Succeeded x) >>= k =  k x
     Failed   >>= _      =  Failed
@@ -166,6 +175,10 @@ instance  Monad Perhaps where
     Unknown  >> k       =  k
     return              =  Succeeded
     fail _              =  Unknown
+
+instance Alternative Perhaps where
+  (<|>) = mplus
+  empty = mzero
 
 instance  MonadPlus Perhaps where
     mzero                 = Unknown

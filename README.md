@@ -26,79 +26,69 @@ There are two ways to get a source tree:
 
  2. *Check out the source code from git*
 
-  The official mirror for GHC on GitHub is located at https://github.com/ghc/ghc.
+        $ git clone --recursive git://git.haskell.org/ghc.git
 
-        $ git clone git://github.com/ghc/ghc.git
-        $ cd ghc
-        $ ./sync-all get
+  Note: cloning GHC from Github requires a special setup. See [Getting a GHC
+  repository from Github][7].
 
-  If you want to clone your own fork instead, add an argument to `sync-all` to
-  tell it where it can find the other repositories it needs.
-
-        $ git clone <your preferred github.com GHC fork URL> ghc
-        $ cd ghc
-        $ ./sync-all -r git://github.com/ghc get
-
-  **DO NOT submit pull request directly to the github repo.**
-  *See the GHC developer team's working conventions re [contributing patches](http://ghc.haskell.org/trac/ghc/wiki/WorkingConventions/Git#Contributingpatches "ghc.haskell.org/trac/ghc/wiki/WorkingConventions/Git#Contributingpatches").*
+  *See the GHC team's working conventions regarding [how to contribute a patch to GHC](http://ghc.haskell.org/trac/ghc/wiki/WorkingConventions/FixingBugs).* First time contributors are encouraged to get started by just sending a Pull Request.
 
 
 Building & Installing
 =====================
 
-For full information on building GHC, see the [GHC Building Guide] [3].
+For full information on building GHC, see the [GHC Building Guide][3].
 Here follows a summary - if you get into trouble, the Building Guide
 has all the answers.
 
 Before building GHC you may need to install some other tools and
-libraries.  See, [Setting up your system for building GHC] [8].
+libraries.  See, [Setting up your system for building GHC][8].
 
-*NB.* In particular, you need [GHC] [1] installed in order to build GHC,
+*NB.* In particular, you need [GHC][1] installed in order to build GHC,
 because the compiler is itself written in Haskell.  You also need
-[Happy] [4], [Alex] [5], and [Cabal] [9].  For instructions on how
-to port GHC to a new platform, see the [GHC Building Guide] [3].
+[Happy][4], [Alex][5], and [Cabal][9].  For instructions on how
+to port GHC to a new platform, see the [GHC Building Guide][3].
 
-For building library documentation, you'll need [Haddock] [6].  To build
-the compiler documentation, you need a good DocBook XML toolchain and
-dblatex.
+For building library documentation, you'll need [Haddock][6].  To build
+the compiler documentation, you need [Sphinx](http://www.sphinx-doc.org/)
+and Xelatex (only for PDF output).
 
 **Quick start**: the following gives you a default build:
 
-    $ perl boot
+    $ ./boot
     $ ./configure
     $ make         # can also say 'make -jX' for X number of jobs
     $ make install
+
+  On Windows, you need an extra repository containing some build tools.
+  These can be downloaded for you by configure. This only needs to be done once by running:
+
+    $ ./configure --enable-tarballs-autodownload
 
 (NB: **Do you have multiple cores? Be sure to tell that to `make`!** This can
 save you hours of build time depending on your system configuration, and is
 almost always a win regardless of how many cores you have. As a simple rule,
 you should have about N+1 jobs, where `N` is the amount of cores you have.)
 
-The `perl boot` step is only necessary if this is a tree checked out
-from git.  For source distributions downloaded from [GHC's web site] [1],
+The `./boot` step is only necessary if this is a tree checked out
+from git.  For source distributions downloaded from [GHC's web site][1],
 this step has already been performed.
 
 These steps give you the default build, which includes everything
 optimised and built in various ways (eg. profiling libs are built).
-It can take a long time.  To customise the build, see the file `HACKING`.
-
-Once you have a build you need to keep it going.  You need to keep all
-repos in sync with the [sync-all script] [7].  To get the latest changes:
-
-    $ ./sync-all pull
-    $ ./sync-all get
+It can take a long time.  To customise the build, see the file `HACKING.md`.
 
 Filing bugs and feature requests
 ================================
 
 If you've encountered what you believe is a bug in GHC, or you'd like
 to propose a feature request, please let us know! Submit a ticket in
-our [bug tracker] [10] and we'll be sure to look into it. Remember:
+our [bug tracker][10] and we'll be sure to look into it. Remember:
 **Filing a bug is the best way to make sure your issue isn't lost over
 time**, so please feel free.
 
 If you're an active user of GHC, you may also be interested in joining
-the [glasgow-haskell-users] [11] mailing list, where developers and
+the [glasgow-haskell-users][11] mailing list, where developers and
 GHC users discuss various topics and hang out.
 
 Hacking & Developing GHC
@@ -113,7 +103,7 @@ Contributors & Acknowledgements
 ===============================
 
 GHC in its current form wouldn't exist without the hard work of
-[its many contributors] [12]. Over time, it has grown to include the
+[its many contributors][12]. Over time, it has grown to include the
 efforts and research of many institutions, highly talented people, and
 groups from around the world. We'd like to thank them all, and invite
 you to join!
@@ -125,8 +115,8 @@ you to join!
   [4]:  http://www.haskell.org/happy/          "www.haskell.org/happy/"
   [5]:  http://www.haskell.org/alex/           "www.haskell.org/alex/"
   [6]:  http://www.haskell.org/haddock/        "www.haskell.org/haddock/"
-  [7]:  http://ghc.haskell.org/trac/ghc/wiki/Building/SyncAll
-          "http://ghc.haskell.org/trac/ghc/wiki/Building/SyncAll"
+  [7]: https://ghc.haskell.org/trac/ghc/wiki/Building/GettingTheSources#GettingaGHCrepositoryfromGitHub
+          "https://ghc.haskell.org/trac/ghc/wiki/Building/GettingTheSources#GettingaGHCrepositoryfromGitHub"
   [8]:  http://ghc.haskell.org/trac/ghc/wiki/Building/Preparation
           "http://ghc.haskell.org/trac/ghc/wiki/Building/Preparation"
   [9]:  http://www.haskell.org/cabal/          "http://www.haskell.org/cabal/"

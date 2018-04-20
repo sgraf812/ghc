@@ -1,51 +1,82 @@
-# -----------------------------------------------------------------------------
-# Utils
+import errno
+import os
+import platform
+import subprocess
+import shutil
 
-def id(a):
-    return a
+import threading
 
-def eq(x):
-    return lambda y,z=x: y == z
+def strip_quotes(s):
+    # Don't wrap commands to subprocess.call/Popen in quotes.
+    return s.strip('\'"')
 
-def neq(x):
-    return lambda y,z=x: y != z
+def getStdout(cmd_and_args):
+    # Can't use subprocess.check_output as it's not available in Python 2.6;
+    # It's also not quite the same as check_output, since we also verify that
+    # no stderr was produced
+    p = subprocess.Popen([strip_quotes(cmd_and_args[0])] + cmd_and_args[1:],
+                         stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE)
+    (stdout, stderr) = p.communicate()
+    r = p.wait()
+    if r != 0:
+        raise Exception("Command failed: " + str(cmd_and_args))
+    if stderr:
+        raise Exception("stderr from command: %s\nOutput:\n%s\n" % (cmd_and_args, stderr))
+    return stdout
 
-def append(x,y):
-    return x + y
+def mkdirp(path):
+    try:
+        os.makedirs(path)
+    except OSError as e:
+        if e.errno == errno.EEXIST and os.path.isdir(path):
+            pass
+        else:
+            raise
 
-def concat(xs):
-    return reduce(append,xs,[])
+def lndir(srcdir, dstdir):
+    # Create symlinks for all files in src directory.
+    # Not all developers might have lndir installed.
+    # os.system('lndir -silent {0} {1}'.format(srcdir, dstdir))
+    for filename in os.listdir(srcdir):
+        src = os.path.join(srcdir, filename)
+        dst = os.path.join(dstdir, filename)
+        if os.path.isfile(src):
+            link_or_copy_file(src, dst)
+        else:
+            os.mkdir(dst)
+            lndir(src, dst)
 
-def chop(s):
-    if s[len(s)-1:] == '\n':
-        return s[:len(s)-1]
-    else:
-        return s
+# On Windows, os.symlink is not defined with Python 2.7, but is in Python 3
+# when using msys2, as GHC does. Unfortunately, only Administrative users have
+# the privileges necessary to create symbolic links by default. Consequently we
+# are forced to just copy instead.
+#
+# We define the following function to make this magic more
+# explicit/discoverable. You are enouraged to use it instead of os.symlink.
+if platform.system() == 'Windows':
+    link_or_copy_file = shutil.copyfile
+else:
+    link_or_copy_file = os.symlink
+
+class Watcher(object):
+    global pool
+    global evt
+    global sync_lock
     
-def all(p,xs):
-    for x in xs:
-        if not p(x):
-            return False
-    return True
+    def __init__(self, count):
+        self.pool = count
+        self.evt = threading.Event()
+        self.sync_lock = threading.Lock()
+        if count <= 0:
+            self.evt.set()
 
-def elem(xs):
-    return lambda x: x in xs
+    def wait(self):
+        self.evt.wait()
 
-def notElem(xs):
-    return lambda x: x not in xs
-
-def version_to_ints(v):
-    return [ int(x) for x in v.split('.') ]
-
-def version_lt(x, y):
-    return version_to_ints(x) < version_to_ints(y)
-
-def version_le(x, y):
-    return version_to_ints(x) <= version_to_ints(y)
-
-def version_gt(x, y):
-    return version_to_ints(x) > version_to_ints(y)
-
-def version_ge(x, y):
-    return version_to_ints(x) >= version_to_ints(y)
-
+    def notify(self):
+        self.sync_lock.acquire()
+        self.pool -= 1
+        if self.pool <= 0:
+            self.evt.set()
+        self.sync_lock.release()

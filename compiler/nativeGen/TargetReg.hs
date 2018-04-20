@@ -21,13 +21,14 @@ where
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import Reg
 import RegClass
-import Size
+import Format
 
 import Outputable
 import Unique
-import FastTypes
 import Platform
 
 import qualified X86.Regs       as X86
@@ -37,14 +38,15 @@ import qualified PPC.Regs       as PPC
 
 import qualified SPARC.Regs     as SPARC
 
-targetVirtualRegSqueeze :: Platform -> RegClass -> VirtualReg -> FastInt
+targetVirtualRegSqueeze :: Platform -> RegClass -> VirtualReg -> Int
 targetVirtualRegSqueeze platform
     = case platformArch platform of
       ArchX86       -> X86.virtualRegSqueeze
       ArchX86_64    -> X86.virtualRegSqueeze
       ArchPPC       -> PPC.virtualRegSqueeze
       ArchSPARC     -> SPARC.virtualRegSqueeze
-      ArchPPC_64    -> panic "targetVirtualRegSqueeze ArchPPC_64"
+      ArchSPARC64   -> panic "targetVirtualRegSqueeze ArchSPARC64"
+      ArchPPC_64 _  -> PPC.virtualRegSqueeze
       ArchARM _ _ _ -> panic "targetVirtualRegSqueeze ArchARM"
       ArchARM64     -> panic "targetVirtualRegSqueeze ArchARM64"
       ArchAlpha     -> panic "targetVirtualRegSqueeze ArchAlpha"
@@ -54,14 +56,15 @@ targetVirtualRegSqueeze platform
       ArchUnknown   -> panic "targetVirtualRegSqueeze ArchUnknown"
 
 
-targetRealRegSqueeze :: Platform -> RegClass -> RealReg -> FastInt
+targetRealRegSqueeze :: Platform -> RegClass -> RealReg -> Int
 targetRealRegSqueeze platform
     = case platformArch platform of
       ArchX86       -> X86.realRegSqueeze
       ArchX86_64    -> X86.realRegSqueeze
       ArchPPC       -> PPC.realRegSqueeze
       ArchSPARC     -> SPARC.realRegSqueeze
-      ArchPPC_64    -> panic "targetRealRegSqueeze ArchPPC_64"
+      ArchSPARC64   -> panic "targetRealRegSqueeze ArchSPARC64"
+      ArchPPC_64 _  -> PPC.realRegSqueeze
       ArchARM _ _ _ -> panic "targetRealRegSqueeze ArchARM"
       ArchARM64     -> panic "targetRealRegSqueeze ArchARM64"
       ArchAlpha     -> panic "targetRealRegSqueeze ArchAlpha"
@@ -77,7 +80,8 @@ targetClassOfRealReg platform
       ArchX86_64    -> X86.classOfRealReg platform
       ArchPPC       -> PPC.classOfRealReg
       ArchSPARC     -> SPARC.classOfRealReg
-      ArchPPC_64    -> panic "targetClassOfRealReg ArchPPC_64"
+      ArchSPARC64   -> panic "targetClassOfRealReg ArchSPARC64"
+      ArchPPC_64 _  -> PPC.classOfRealReg
       ArchARM _ _ _ -> panic "targetClassOfRealReg ArchARM"
       ArchARM64     -> panic "targetClassOfRealReg ArchARM64"
       ArchAlpha     -> panic "targetClassOfRealReg ArchAlpha"
@@ -86,14 +90,15 @@ targetClassOfRealReg platform
       ArchJavaScript-> panic "targetClassOfRealReg ArchJavaScript"
       ArchUnknown   -> panic "targetClassOfRealReg ArchUnknown"
 
-targetMkVirtualReg :: Platform -> Unique -> Size -> VirtualReg
+targetMkVirtualReg :: Platform -> Unique -> Format -> VirtualReg
 targetMkVirtualReg platform
     = case platformArch platform of
       ArchX86       -> X86.mkVirtualReg
       ArchX86_64    -> X86.mkVirtualReg
       ArchPPC       -> PPC.mkVirtualReg
       ArchSPARC     -> SPARC.mkVirtualReg
-      ArchPPC_64    -> panic "targetMkVirtualReg ArchPPC_64"
+      ArchSPARC64   -> panic "targetMkVirtualReg ArchSPARC64"
+      ArchPPC_64 _  -> PPC.mkVirtualReg
       ArchARM _ _ _ -> panic "targetMkVirtualReg ArchARM"
       ArchARM64     -> panic "targetMkVirtualReg ArchARM64"
       ArchAlpha     -> panic "targetMkVirtualReg ArchAlpha"
@@ -109,7 +114,8 @@ targetRegDotColor platform
       ArchX86_64    -> X86.regDotColor platform
       ArchPPC       -> PPC.regDotColor
       ArchSPARC     -> SPARC.regDotColor
-      ArchPPC_64    -> panic "targetRegDotColor ArchPPC_64"
+      ArchSPARC64   -> panic "targetRegDotColor ArchSPARC64"
+      ArchPPC_64 _  -> PPC.regDotColor
       ArchARM _ _ _ -> panic "targetRegDotColor ArchARM"
       ArchARM64     -> panic "targetRegDotColor ArchARM64"
       ArchAlpha     -> panic "targetRegDotColor ArchAlpha"

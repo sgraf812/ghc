@@ -6,8 +6,7 @@
  *
  * -------------------------------------------------------------------------- */
 
-#ifndef RTS_STORAGE_CLOSUREMACROS_H
-#define RTS_STORAGE_CLOSUREMACROS_H
+#pragma once
 
 /* -----------------------------------------------------------------------------
    Info tables are slammed up against the entry code, and the label
@@ -25,25 +24,25 @@
 
        "info pointer"    The first word of the closure.  Might point
                          to either the end or the beginning of the
-			 info table, depending on whether we're using
-			 the mini interpreter or not.  GET_INFO(c)
-			 retrieves the info pointer of a closure.
+                         info table, depending on whether we're using
+                         the mini interpreter or not.  GET_INFO(c)
+                         retrieves the info pointer of a closure.
 
        "info table"      The info table structure associated with a
                          closure.  This is always a pointer to the
-			 beginning of the structure, so we can
-			 use standard C structure indexing to pull out
-			 the fields.  get_itbl(c) returns a pointer to
-			 the info table for closure c.
+                         beginning of the structure, so we can
+                         use standard C structure indexing to pull out
+                         the fields.  get_itbl(c) returns a pointer to
+                         the info table for closure c.
 
    An address of the form xxxx_info points to the end of the info
    table or the beginning of the info table depending on whether we're
-   mangling or not respectively.  So, 
+   mangling or not respectively.  So,
 
-         c->header.info = xxx_info 
+         c->header.info = xxx_info
 
    makes absolute sense, whether mangling or not.
- 
+
    -------------------------------------------------------------------------- */
 
 INLINE_HEADER void SET_INFO(StgClosure *c, const StgInfoTable *info) {
@@ -55,7 +54,7 @@ INLINE_HEADER const StgInfoTable *GET_INFO(StgClosure *c) {
 
 #define GET_ENTRY(c)  (ENTRY_CODE(GET_INFO(c)))
 
-#ifdef TABLES_NEXT_TO_CODE
+#if defined(TABLES_NEXT_TO_CODE)
 EXTERN_INLINE StgInfoTable *INFO_PTR_TO_STRUCT(const StgInfoTable *info);
 EXTERN_INLINE StgInfoTable *INFO_PTR_TO_STRUCT(const StgInfoTable *info) {return (StgInfoTable *)info - 1;}
 EXTERN_INLINE StgRetInfoTable *RET_INFO_PTR_TO_STRUCT(const StgInfoTable *info);
@@ -81,19 +80,35 @@ INLINE_HEADER StgThunkInfoTable *itbl_to_thunk_itbl(const StgInfoTable *i) {retu
 INLINE_HEADER StgConInfoTable *itbl_to_con_itbl(const StgInfoTable *i) {return (StgConInfoTable *)i;}
 #endif
 
-EXTERN_INLINE StgInfoTable *get_itbl(const StgClosure *c);
-EXTERN_INLINE StgInfoTable *get_itbl(const StgClosure *c) {return INFO_PTR_TO_STRUCT(c->header.info);}
+EXTERN_INLINE const StgInfoTable *get_itbl(const StgClosure *c);
+EXTERN_INLINE const StgInfoTable *get_itbl(const StgClosure *c)
+{
+   return INFO_PTR_TO_STRUCT(c->header.info);
+}
 
-EXTERN_INLINE StgRetInfoTable *get_ret_itbl(const StgClosure *c);
-EXTERN_INLINE StgRetInfoTable *get_ret_itbl(const StgClosure *c) {return RET_INFO_PTR_TO_STRUCT(c->header.info);}
+EXTERN_INLINE const StgRetInfoTable *get_ret_itbl(const StgClosure *c);
+EXTERN_INLINE const StgRetInfoTable *get_ret_itbl(const StgClosure *c)
+{
+   return RET_INFO_PTR_TO_STRUCT(c->header.info);
+}
 
-INLINE_HEADER StgFunInfoTable *get_fun_itbl(const StgClosure *c) {return FUN_INFO_PTR_TO_STRUCT(c->header.info);}
+INLINE_HEADER const StgFunInfoTable *get_fun_itbl(const StgClosure *c)
+{
+   return FUN_INFO_PTR_TO_STRUCT(c->header.info);
+}
 
-INLINE_HEADER StgThunkInfoTable *get_thunk_itbl(const StgClosure *c) {return THUNK_INFO_PTR_TO_STRUCT(c->header.info);}
+INLINE_HEADER const StgThunkInfoTable *get_thunk_itbl(const StgClosure *c)
+{
+   return THUNK_INFO_PTR_TO_STRUCT(c->header.info);
+}
 
-INLINE_HEADER StgConInfoTable *get_con_itbl(const StgClosure *c) {return CON_INFO_PTR_TO_STRUCT((c)->header.info);}
+INLINE_HEADER const StgConInfoTable *get_con_itbl(const StgClosure *c)
+{
+   return CON_INFO_PTR_TO_STRUCT((c)->header.info);
+}
 
-INLINE_HEADER StgHalfWord GET_TAG(const StgClosure *con) {
+INLINE_HEADER StgHalfWord GET_TAG(const StgClosure *con)
+{
     return get_itbl(con)->srt_bitmap;
 }
 
@@ -101,10 +116,10 @@ INLINE_HEADER StgHalfWord GET_TAG(const StgClosure *con) {
    Macros for building closures
    -------------------------------------------------------------------------- */
 
-#ifdef PROFILING
-#ifdef DEBUG_RETAINER
-/* 
-  For the sake of debugging, we take the safest way for the moment. Actually, this 
+#if defined(PROFILING)
+#if defined(DEBUG_RETAINER)
+/*
+  For the sake of debugging, we take the safest way for the moment. Actually, this
   is useful to check the sanity of heap before beginning retainer profiling.
   flip is defined in RetainerProfile.c, and declared as extern in RetainerProfile.h.
   Note: change those functions building Haskell objects from C datatypes, i.e.,
@@ -116,7 +131,7 @@ INLINE_HEADER StgHalfWord GET_TAG(const StgClosure *con) {
 /*
   For retainer profiling only: we do not have to set (c)->header.prof.hp.rs to
   NULL | flip (flip is defined in RetainerProfile.c) because even when flip
-  is 1, rs is invalid and will be initialized to NULL | flip later when 
+  is 1, rs is invalid and will be initialized to NULL | flip later when
   the closure *c is visited.
  */
 /*
@@ -136,14 +151,14 @@ INLINE_HEADER StgHalfWord GET_TAG(const StgClosure *con) {
 #define SET_PROF_HDR(c,ccs)
 #endif
 
-#define SET_HDR(c,_info,ccs)				\
-   {							\
-	(c)->header.info = _info;			\
-	SET_PROF_HDR((StgClosure *)(c),ccs);		\
+#define SET_HDR(c,_info,ccs)                            \
+   {                                                    \
+        (c)->header.info = _info;                       \
+        SET_PROF_HDR((StgClosure *)(c),ccs);            \
    }
 
-#define SET_ARR_HDR(c,info,costCentreStack,n_bytes)	\
-   SET_HDR(c,info,costCentreStack);			\
+#define SET_ARR_HDR(c,info,costCentreStack,n_bytes)     \
+   SET_HDR(c,info,costCentreStack);                     \
    (c)->bytes = n_bytes;
 
 // Use when changing a closure from one kind to another
@@ -163,24 +178,18 @@ INLINE_HEADER StgHalfWord GET_TAG(const StgClosure *con) {
 
 INLINE_HEADER StgClosure **
 STATIC_LINK(const StgInfoTable *info, StgClosure *p)
-{ 
+{
     switch (info->type) {
     case THUNK_STATIC:
-	return THUNK_STATIC_LINK(p);
+        return THUNK_STATIC_LINK(p);
     case FUN_STATIC:
-	return FUN_STATIC_LINK(p);
+        return FUN_STATIC_LINK(p);
     case IND_STATIC:
-	return IND_STATIC_LINK(p);
+        return IND_STATIC_LINK(p);
     default:
-	return &(p)->payload[info->layout.payload.ptrs +
-			     info->layout.payload.nptrs];
+        return &(p)->payload[info->layout.payload.ptrs +
+                             info->layout.payload.nptrs];
     }
-}
-
-INLINE_HEADER StgClosure *STATIC_LINK2(const StgInfoTable *info,
-                                       StgClosure *p) {
-    return (*(StgClosure**)(&((p)->payload[info->layout.payload.ptrs +
-                            info->layout.payload.nptrs + 1])));
 }
 
 /* -----------------------------------------------------------------------------
@@ -200,7 +209,7 @@ INLINE_HEADER P_ INTLIKE_CLOSURE(int n) {
    ------------------------------------------------------------------------- */
 
 static inline StgWord
-GET_CLOSURE_TAG(StgClosure * p)
+GET_CLOSURE_TAG(const StgClosure * p)
 {
     return (StgWord)p & TAG_MASK;
 }
@@ -209,6 +218,12 @@ static inline StgClosure *
 UNTAG_CLOSURE(StgClosure * p)
 {
     return (StgClosure*)((StgWord)p & ~TAG_MASK);
+}
+
+static inline const StgClosure *
+UNTAG_CONST_CLOSURE(const StgClosure * p)
+{
+    return (const StgClosure*)((StgWord)p & ~TAG_MASK);
 }
 
 static inline StgClosure *
@@ -242,40 +257,41 @@ TAG_CLOSURE(StgWord tag,StgClosure * p)
    make sense...
    -------------------------------------------------------------------------- */
 
-INLINE_HEADER rtsBool LOOKS_LIKE_INFO_PTR_NOT_NULL (StgWord p)
+INLINE_HEADER bool LOOKS_LIKE_INFO_PTR_NOT_NULL (StgWord p)
 {
     StgInfoTable *info = INFO_PTR_TO_STRUCT((StgInfoTable *)p);
-    return (info->type != INVALID_OBJECT && info->type < N_CLOSURE_TYPES) ? rtsTrue : rtsFalse;
+    return info->type != INVALID_OBJECT && info->type < N_CLOSURE_TYPES;
 }
 
-INLINE_HEADER rtsBool LOOKS_LIKE_INFO_PTR (StgWord p)
+INLINE_HEADER bool LOOKS_LIKE_INFO_PTR (StgWord p)
 {
-    return (p && (IS_FORWARDING_PTR(p) || LOOKS_LIKE_INFO_PTR_NOT_NULL(p))) ? rtsTrue : rtsFalse;
+    return p && (IS_FORWARDING_PTR(p) || LOOKS_LIKE_INFO_PTR_NOT_NULL(p));
 }
 
-INLINE_HEADER rtsBool LOOKS_LIKE_CLOSURE_PTR (void *p)
+INLINE_HEADER bool LOOKS_LIKE_CLOSURE_PTR (const void *p)
 {
-    return LOOKS_LIKE_INFO_PTR((StgWord)(UNTAG_CLOSURE((StgClosure *)(p)))->header.info);
+    return LOOKS_LIKE_INFO_PTR((StgWord)
+            (UNTAG_CONST_CLOSURE((const StgClosure *)(p)))->header.info);
 }
 
 /* -----------------------------------------------------------------------------
    Macros for calculating the size of a closure
    -------------------------------------------------------------------------- */
 
-EXTERN_INLINE StgOffset PAP_sizeW   ( nat n_args );
-EXTERN_INLINE StgOffset PAP_sizeW   ( nat n_args )
+EXTERN_INLINE StgOffset PAP_sizeW   ( uint32_t n_args );
+EXTERN_INLINE StgOffset PAP_sizeW   ( uint32_t n_args )
 { return sizeofW(StgPAP) + n_args; }
 
-EXTERN_INLINE StgOffset AP_sizeW   ( nat n_args );
-EXTERN_INLINE StgOffset AP_sizeW   ( nat n_args )
+EXTERN_INLINE StgOffset AP_sizeW   ( uint32_t n_args );
+EXTERN_INLINE StgOffset AP_sizeW   ( uint32_t n_args )
 { return sizeofW(StgAP) + n_args; }
 
-EXTERN_INLINE StgOffset AP_STACK_sizeW ( nat size );
-EXTERN_INLINE StgOffset AP_STACK_sizeW ( nat size )
+EXTERN_INLINE StgOffset AP_STACK_sizeW ( uint32_t size );
+EXTERN_INLINE StgOffset AP_STACK_sizeW ( uint32_t size )
 { return sizeofW(StgAP_STACK) + size; }
 
-EXTERN_INLINE StgOffset CONSTR_sizeW( nat p, nat np );
-EXTERN_INLINE StgOffset CONSTR_sizeW( nat p, nat np )
+EXTERN_INLINE StgOffset CONSTR_sizeW( uint32_t p, uint32_t np );
+EXTERN_INLINE StgOffset CONSTR_sizeW( uint32_t p, uint32_t np )
 { return sizeofW(StgHeader) + p + np; }
 
 EXTERN_INLINE StgOffset THUNK_SELECTOR_sizeW ( void );
@@ -314,13 +330,13 @@ EXTERN_INLINE StgOffset pap_sizeW( StgPAP* x );
 EXTERN_INLINE StgOffset pap_sizeW( StgPAP* x )
 { return PAP_sizeW(x->n_args); }
 
-EXTERN_INLINE StgWord arr_words_words( StgArrWords* x);
-EXTERN_INLINE StgWord arr_words_words( StgArrWords* x)
+EXTERN_INLINE StgWord arr_words_words( StgArrBytes* x);
+EXTERN_INLINE StgWord arr_words_words( StgArrBytes* x)
 { return ROUNDUP_BYTES_TO_WDS(x->bytes); }
 
-EXTERN_INLINE StgOffset arr_words_sizeW( StgArrWords* x );
-EXTERN_INLINE StgOffset arr_words_sizeW( StgArrWords* x )
-{ return sizeofW(StgArrWords) + arr_words_words(x); }
+EXTERN_INLINE StgOffset arr_words_sizeW( StgArrBytes* x );
+EXTERN_INLINE StgOffset arr_words_sizeW( StgArrBytes* x )
+{ return sizeofW(StgArrBytes) + arr_words_words(x); }
 
 EXTERN_INLINE StgOffset mut_arr_ptrs_sizeW( StgMutArrPtrs* x );
 EXTERN_INLINE StgOffset mut_arr_ptrs_sizeW( StgMutArrPtrs* x )
@@ -338,76 +354,80 @@ EXTERN_INLINE StgWord bco_sizeW ( StgBCO *bco );
 EXTERN_INLINE StgWord bco_sizeW ( StgBCO *bco )
 { return bco->size; }
 
+EXTERN_INLINE StgWord compact_nfdata_full_sizeW ( StgCompactNFData *str );
+EXTERN_INLINE StgWord compact_nfdata_full_sizeW ( StgCompactNFData *str )
+{ return str->totalW; }
+
 /*
- * TODO: Consider to switch return type from 'nat' to 'StgWord' #8742
+ * TODO: Consider to switch return type from 'uint32_t' to 'StgWord' #8742
  *
  * (Also for 'closure_sizeW' below)
  */
-EXTERN_INLINE nat closure_sizeW_ (StgClosure *p, StgInfoTable *info);
-EXTERN_INLINE nat
-closure_sizeW_ (StgClosure *p, StgInfoTable *info)
+EXTERN_INLINE uint32_t
+closure_sizeW_ (const StgClosure *p, const StgInfoTable *info);
+EXTERN_INLINE uint32_t
+closure_sizeW_ (const StgClosure *p, const StgInfoTable *info)
 {
     switch (info->type) {
     case THUNK_0_1:
     case THUNK_1_0:
-	return sizeofW(StgThunk) + 1;
+        return sizeofW(StgThunk) + 1;
     case FUN_0_1:
     case CONSTR_0_1:
     case FUN_1_0:
     case CONSTR_1_0:
-	return sizeofW(StgHeader) + 1;
+        return sizeofW(StgHeader) + 1;
     case THUNK_0_2:
     case THUNK_1_1:
     case THUNK_2_0:
-	return sizeofW(StgThunk) + 2;
+        return sizeofW(StgThunk) + 2;
     case FUN_0_2:
     case CONSTR_0_2:
     case FUN_1_1:
     case CONSTR_1_1:
     case FUN_2_0:
     case CONSTR_2_0:
-	return sizeofW(StgHeader) + 2;
+        return sizeofW(StgHeader) + 2;
     case THUNK:
-	return thunk_sizeW_fromITBL(info);
+        return thunk_sizeW_fromITBL(info);
     case THUNK_SELECTOR:
-	return THUNK_SELECTOR_sizeW();
+        return THUNK_SELECTOR_sizeW();
     case AP_STACK:
-	return ap_stack_sizeW((StgAP_STACK *)p);
+        return ap_stack_sizeW((StgAP_STACK *)p);
     case AP:
-	return ap_sizeW((StgAP *)p);
+        return ap_sizeW((StgAP *)p);
     case PAP:
-	return pap_sizeW((StgPAP *)p);
+        return pap_sizeW((StgPAP *)p);
     case IND:
-    case IND_PERM:
-	return sizeofW(StgInd);
+        return sizeofW(StgInd);
     case ARR_WORDS:
-	return arr_words_sizeW((StgArrWords *)p);
+        return arr_words_sizeW((StgArrBytes *)p);
     case MUT_ARR_PTRS_CLEAN:
     case MUT_ARR_PTRS_DIRTY:
     case MUT_ARR_PTRS_FROZEN:
     case MUT_ARR_PTRS_FROZEN0:
-	return mut_arr_ptrs_sizeW((StgMutArrPtrs*)p);
+        return mut_arr_ptrs_sizeW((StgMutArrPtrs*)p);
     case SMALL_MUT_ARR_PTRS_CLEAN:
     case SMALL_MUT_ARR_PTRS_DIRTY:
     case SMALL_MUT_ARR_PTRS_FROZEN:
     case SMALL_MUT_ARR_PTRS_FROZEN0:
-	return small_mut_arr_ptrs_sizeW((StgSmallMutArrPtrs*)p);
+        return small_mut_arr_ptrs_sizeW((StgSmallMutArrPtrs*)p);
     case TSO:
         return sizeofW(StgTSO);
     case STACK:
         return stack_sizeW((StgStack*)p);
     case BCO:
-	return bco_sizeW((StgBCO *)p);
+        return bco_sizeW((StgBCO *)p);
     case TREC_CHUNK:
         return sizeofW(StgTRecChunk);
     default:
-	return sizeW_fromITBL(info);
+        return sizeW_fromITBL(info);
     }
 }
 
 // The definitive way to find the size, in words, of a heap-allocated closure
-EXTERN_INLINE nat closure_sizeW (StgClosure *p);
-EXTERN_INLINE nat closure_sizeW (StgClosure *p)
+EXTERN_INLINE uint32_t closure_sizeW (const StgClosure *p);
+EXTERN_INLINE uint32_t closure_sizeW (const StgClosure *p)
 {
     return closure_sizeW_(p, get_itbl(p));
 }
@@ -419,22 +439,22 @@ EXTERN_INLINE nat closure_sizeW (StgClosure *p)
 EXTERN_INLINE StgWord stack_frame_sizeW( StgClosure *frame );
 EXTERN_INLINE StgWord stack_frame_sizeW( StgClosure *frame )
 {
-    StgRetInfoTable *info;
+    const StgRetInfoTable *info;
 
     info = get_ret_itbl(frame);
     switch (info->i.type) {
 
     case RET_FUN:
-	return sizeofW(StgRetFun) + ((StgRetFun *)frame)->size;
+        return sizeofW(StgRetFun) + ((StgRetFun *)frame)->size;
 
     case RET_BIG:
-	return 1 + GET_LARGE_BITMAP(&info->i)->size;
+        return 1 + GET_LARGE_BITMAP(&info->i)->size;
 
     case RET_BCO:
-	return 2 + BCO_BITMAP_SIZE((StgBCO *)((P_)frame)[1]);
+        return 2 + BCO_BITMAP_SIZE((StgBCO *)((P_)frame)[1]);
 
     default:
-	return 1 + BITMAP_SIZE(info->i.layout.bitmap);
+        return 1 + BITMAP_SIZE(info->i.layout.bitmap);
     }
 }
 
@@ -499,8 +519,17 @@ INLINE_HEADER StgWord8 *mutArrPtrsCard (StgMutArrPtrs *a, W_ n)
 
    -------------------------------------------------------------------------- */
 
-#define ZERO_SLOP_FOR_LDV_PROF     (defined(PROFILING))
-#define ZERO_SLOP_FOR_SANITY_CHECK (defined(DEBUG) && !defined(THREADED_RTS))
+#if defined(PROFILING)
+#define ZERO_SLOP_FOR_LDV_PROF 1
+#else
+#define ZERO_SLOP_FOR_LDV_PROF 0
+#endif
+
+#if defined(DEBUG) && !defined(THREADED_RTS)
+#define ZERO_SLOP_FOR_SANITY_CHECK 1
+#else
+#define ZERO_SLOP_FOR_SANITY_CHECK 0
+#endif
 
 #if ZERO_SLOP_FOR_LDV_PROF || ZERO_SLOP_FOR_SANITY_CHECK
 #define OVERWRITING_CLOSURE(c) overwritingClosure(c)
@@ -511,14 +540,14 @@ INLINE_HEADER StgWord8 *mutArrPtrsCard (StgMutArrPtrs *a, W_ n)
 #define OVERWRITING_CLOSURE_OFS(c,n) /* nothing */
 #endif
 
-#ifdef PROFILING
-void LDV_recordDead (StgClosure *c, nat size);
+#if defined(PROFILING)
+void LDV_recordDead (const StgClosure *c, uint32_t size);
 #endif
 
 EXTERN_INLINE void overwritingClosure (StgClosure *p);
 EXTERN_INLINE void overwritingClosure (StgClosure *p)
 {
-    nat size, i;
+    uint32_t size, i;
 
 #if ZERO_SLOP_FOR_LDV_PROF && !ZERO_SLOP_FOR_SANITY_CHECK
     // see Note [zeroing slop], also #8402
@@ -544,10 +573,10 @@ EXTERN_INLINE void overwritingClosure (StgClosure *p)
 //
 // Note: As this calls LDV_recordDead() you have to call LDV_RECORD()
 //       on the final state of the closure at the call-site
-EXTERN_INLINE void overwritingClosureOfs (StgClosure *p, nat offset);
-EXTERN_INLINE void overwritingClosureOfs (StgClosure *p, nat offset)
+EXTERN_INLINE void overwritingClosureOfs (StgClosure *p, uint32_t offset);
+EXTERN_INLINE void overwritingClosureOfs (StgClosure *p, uint32_t offset)
 {
-    nat size, i;
+    uint32_t size, i;
 
 #if ZERO_SLOP_FOR_LDV_PROF && !ZERO_SLOP_FOR_SANITY_CHECK
     // see Note [zeroing slop], also #8402
@@ -566,5 +595,3 @@ EXTERN_INLINE void overwritingClosureOfs (StgClosure *p, nat offset)
     for (i = offset; i < size; i++)
         ((StgWord *)p)[i] = 0;
 }
-
-#endif /* RTS_STORAGE_CLOSUREMACROS_H */

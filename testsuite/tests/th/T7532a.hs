@@ -8,8 +8,8 @@ import Language.Haskell.TH
 class C a where
      data D a
 
-bang :: DecsQ
-bang = return [
-     InstanceD [] (AppT (ConT ''C) (ConT ''Int)) [
-         DataInstD [] ''D [ConT ''Int] [
-             NormalC (mkName "T") []] []]] 
+bang' :: DecsQ
+bang' = return [
+     InstanceD Nothing [] (AppT (ConT ''C) (ConT ''Int)) [
+         DataInstD [] ''D [ConT ''Int] Nothing [
+             NormalC (mkName "T") []] []]]

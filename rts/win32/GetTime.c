@@ -11,13 +11,13 @@
 
 #include <windows.h>
 
-#ifdef HAVE_TIME_H
+#if defined(HAVE_TIME_H)
 # include <time.h>
 #endif
 
 /* Convert FILETIMEs into secs */
 
-static INLINE_ME Time
+static inline Time
 fileTimeToRtsTime(FILETIME ft)
 {
     Time t;
@@ -48,7 +48,7 @@ getProcessCPUTime(void)
 }
 
 // Number of ticks per second used by the QueryPerformanceFrequency
-// implementaiton, represented by a 64-bit union type.
+// implementation, represented by a 64-bit union type.
 static LARGE_INTEGER qpc_frequency = {.QuadPart = 0};
 
 // Initialize qpc_frequency. This function should be called before any call to
@@ -84,6 +84,11 @@ getMonotonicNSec()
     }
     else // fallback to GetTickCount
     {
+        // TODO: Remove this code path, it cannot be taken because
+        // `QueryPerformanceFrequency` cannot fail on Windows >= XP
+        // and GHC no longer supports Windows <= XP.
+        // See https://ghc.haskell.org/trac/ghc/ticket/14233
+
         // NOTE: GetTickCount is a 32-bit millisecond value, so it wraps around
         // every 49 days.
         DWORD count = GetTickCount();
@@ -98,19 +103,6 @@ Time
 getProcessElapsedTime(void)
 {
     return NSToTime(getMonotonicNSec());
-}
-
-Time
-getThreadCPUTime(void)
-{
-    FILETIME creationTime, exitTime, userTime, kernelTime = {0,0};
-
-    if (!GetThreadTimes(GetCurrentThread(), &creationTime,
-                        &exitTime, &kernelTime, &userTime)) {
-        return 0;
-    }
-
-    return fileTimeToRtsTime(userTime);
 }
 
 void
@@ -160,11 +152,3 @@ getPageFaults(void)
      that's stored in the registry. */
     return 0;
 }
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

@@ -20,6 +20,8 @@ module RegAlloc.Linear.StackMap (
 
 where
 
+import GhcPrelude
+
 import DynFlags
 import UniqFM
 import Unique
@@ -28,8 +30,8 @@ import Unique
 -- | Identifier for a stack slot.
 type StackSlot = Int
 
-data StackMap 
-        = StackMap 
+data StackMap
+        = StackMap
         { -- | The slots that are still available to be allocated.
           stackMapNextFreeSlot  :: !Int
 

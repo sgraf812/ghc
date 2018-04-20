@@ -8,15 +8,19 @@ module HsDoc (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import Outputable
 import SrcLoc
 import FastString
 
 import Data.Data
 
+-- | Haskell Documentation String
 newtype HsDocString = HsDocString FastString
-  deriving (Eq, Show, Data, Typeable)
+  deriving (Eq, Show, Data)
 
+-- | Located Haskell Documentation String
 type LHsDocString = Located HsDocString
 
 instance Outputable HsDocString where

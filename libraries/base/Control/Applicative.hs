@@ -1,6 +1,7 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE AutoDeriveTypeable #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -42,292 +43,102 @@ module Control.Applicative (
     Const(..), WrappedMonad(..), WrappedArrow(..), ZipList(..),
     -- * Utility functions
     (<$>), (<$), (<**>),
-    liftA, liftA2, liftA3,
+    liftA, liftA3,
     optional,
     ) where
 
-import Prelude hiding (id,(.))
-
-import Control.Category
+import Control.Category hiding ((.), id)
 import Control.Arrow
-import Control.Monad (liftM, ap, MonadPlus(..))
-import Control.Monad.ST.Safe (ST)
-import qualified Control.Monad.ST.Lazy.Safe as Lazy (ST)
-import Data.Functor ((<$>), (<$))
-import Data.Monoid (Monoid(..), First(..), Last(..))
-import Data.Proxy
+import Data.Maybe
+import Data.Tuple
+import Data.Eq
+import Data.Ord
+import Data.Foldable (Foldable(..))
+import Data.Functor ((<$>))
+import Data.Functor.Const (Const(..))
 
-import Text.ParserCombinators.ReadP (ReadP)
-import Text.ParserCombinators.ReadPrec (ReadPrec)
-
-import GHC.Conc (STM, retry, orElse)
+import GHC.Base
 import GHC.Generics
-
-infixl 3 <|>
-infixl 4 <*>, <*, *>, <**>
-
--- | A functor with application, providing operations to
---
--- * embed pure expressions ('pure'), and
---
--- * sequence computations and combine their results ('<*>').
---
--- A minimal complete definition must include implementations of these
--- functions satisfying the following laws:
---
--- [/identity/]
---
---      @'pure' 'id' '<*>' v = v@
---
--- [/composition/]
---
---      @'pure' (.) '<*>' u '<*>' v '<*>' w = u '<*>' (v '<*>' w)@
---
--- [/homomorphism/]
---
---      @'pure' f '<*>' 'pure' x = 'pure' (f x)@
---
--- [/interchange/]
---
---      @u '<*>' 'pure' y = 'pure' ('$' y) '<*>' u@
---
--- The other methods have the following default definitions, which may
--- be overridden with equivalent specialized implementations:
---
---   * @u '*>' v = 'pure' ('const' 'id') '<*>' u '<*>' v@
---
---   * @u '<*' v = 'pure' 'const' '<*>' u '<*>' v@
---
--- As a consequence of these laws, the 'Functor' instance for @f@ will satisfy
---
---   * @'fmap' f x = 'pure' f '<*>' x@
---
--- If @f@ is also a 'Monad', it should satisfy
---
---   * @'pure' = 'return'@
---
---   * @('<*>') = 'ap'@
---
--- (which implies that 'pure' and '<*>' satisfy the applicative functor laws).
-
-class Functor f => Applicative f where
-    -- | Lift a value.
-    pure :: a -> f a
-
-    -- | Sequential application.
-    (<*>) :: f (a -> b) -> f a -> f b
-
-    -- | Sequence actions, discarding the value of the first argument.
-    (*>) :: f a -> f b -> f b
-    (*>) = liftA2 (const id)
-
-    -- | Sequence actions, discarding the value of the second argument.
-    (<*) :: f a -> f b -> f a
-    (<*) = liftA2 const
-
--- | A monoid on applicative functors.
---
--- Minimal complete definition: 'empty' and '<|>'.
---
--- If defined, 'some' and 'many' should be the least solutions
--- of the equations:
---
--- * @some v = (:) '<$>' v '<*>' many v@
---
--- * @many v = some v '<|>' 'pure' []@
-class Applicative f => Alternative f where
-    -- | The identity of '<|>'
-    empty :: f a
-    -- | An associative binary operation
-    (<|>) :: f a -> f a -> f a
-
-    -- | One or more.
-    some :: f a -> f [a]
-    some v = some_v
-      where
-        many_v = some_v <|> pure []
-        some_v = (:) <$> v <*> many_v
-
-    -- | Zero or more.
-    many :: f a -> f [a]
-    many v = many_v
-      where
-        many_v = some_v <|> pure []
-        some_v = (:) <$> v <*> many_v
-
--- instances for Prelude types
-
-instance Applicative Maybe where
-    pure = return
-    (<*>) = ap
-
-instance Alternative Maybe where
-    empty = Nothing
-    Nothing <|> r = r
-    l       <|> _ = l
-
-instance Applicative [] where
-    pure = return
-    (<*>) = ap
-
-instance Alternative [] where
-    empty = []
-    (<|>) = (++)
-
-instance Applicative IO where
-    pure = return
-    (<*>) = ap
-
-instance Applicative (ST s) where
-    pure = return
-    (<*>) = ap
-
-instance Applicative (Lazy.ST s) where
-    pure = return
-    (<*>) = ap
-
-instance Applicative STM where
-    pure = return
-    (<*>) = ap
-
-instance Alternative STM where
-    empty = retry
-    (<|>) = orElse
-
-instance Applicative ((->) a) where
-    pure = const
-    (<*>) f g x = f x (g x)
-
-instance Monoid a => Applicative ((,) a) where
-    pure x = (mempty, x)
-    (u, f) <*> (v, x) = (u `mappend` v, f x)
-
-instance Applicative (Either e) where
-    pure          = Right
-    Left  e <*> _ = Left e
-    Right f <*> r = fmap f r
-
-instance Applicative ReadP where
-    pure = return
-    (<*>) = ap
-
-instance Alternative ReadP where
-    empty = mzero
-    (<|>) = mplus
-
-instance Applicative ReadPrec where
-    pure = return
-    (<*>) = ap
-
-instance Alternative ReadPrec where
-    empty = mzero
-    (<|>) = mplus
-
-instance Arrow a => Applicative (ArrowMonad a) where
-   pure x = ArrowMonad (arr (const x))
-   ArrowMonad f <*> ArrowMonad x = ArrowMonad (f &&& x >>> arr (uncurry id))
-
-instance ArrowPlus a => Alternative (ArrowMonad a) where
-   empty = ArrowMonad zeroArrow
-   ArrowMonad x <|> ArrowMonad y = ArrowMonad (x <+> y)
-
--- new instances
-
-newtype Const a b = Const { getConst :: a }
-                  deriving (Generic, Generic1)
-
-instance Functor (Const m) where
-    fmap _ (Const v) = Const v
-
--- Added in base-4.7.0.0
-instance Monoid a => Monoid (Const a b) where
-    mempty = Const mempty
-    mappend (Const a) (Const b) = Const (mappend a b)
-
-instance Monoid m => Applicative (Const m) where
-    pure _ = Const mempty
-    Const f <*> Const v = Const (f `mappend` v)
+import GHC.List (repeat, zipWith, drop)
+import GHC.Read (Read)
+import GHC.Show (Show)
 
 newtype WrappedMonad m a = WrapMonad { unwrapMonad :: m a }
-                         deriving (Generic, Generic1)
+                         deriving ( Generic  -- ^ @since 4.7.0.0
+                                  , Generic1 -- ^ @since 4.7.0.0
+                                  , Monad    -- ^ @since 4.7.0.0
+                                  )
 
+-- | @since 2.01
 instance Monad m => Functor (WrappedMonad m) where
     fmap f (WrapMonad v) = WrapMonad (liftM f v)
 
+-- | @since 2.01
 instance Monad m => Applicative (WrappedMonad m) where
-    pure = WrapMonad . return
+    pure = WrapMonad . pure
     WrapMonad f <*> WrapMonad v = WrapMonad (f `ap` v)
+    liftA2 f (WrapMonad x) (WrapMonad y) = WrapMonad (liftM2 f x y)
 
--- Added in base-4.7.0.0 (GHC Trac #8218)
-instance Monad m => Monad (WrappedMonad m) where
-    return = WrapMonad . return
-    a >>= f = WrapMonad (unwrapMonad a >>= unwrapMonad . f)
-
+-- | @since 2.01
 instance MonadPlus m => Alternative (WrappedMonad m) where
     empty = WrapMonad mzero
     WrapMonad u <|> WrapMonad v = WrapMonad (u `mplus` v)
 
 newtype WrappedArrow a b c = WrapArrow { unwrapArrow :: a b c }
-                           deriving (Generic, Generic1)
+                           deriving ( Generic  -- ^ @since 4.7.0.0
+                                    , Generic1 -- ^ @since 4.7.0.0
+                                    )
 
+-- | @since 2.01
 instance Arrow a => Functor (WrappedArrow a b) where
     fmap f (WrapArrow a) = WrapArrow (a >>> arr f)
 
+-- | @since 2.01
 instance Arrow a => Applicative (WrappedArrow a b) where
     pure x = WrapArrow (arr (const x))
-    WrapArrow f <*> WrapArrow v = WrapArrow (f &&& v >>> arr (uncurry id))
+    liftA2 f (WrapArrow u) (WrapArrow v) =
+      WrapArrow (u &&& v >>> arr (uncurry f))
 
+-- | @since 2.01
 instance (ArrowZero a, ArrowPlus a) => Alternative (WrappedArrow a b) where
     empty = WrapArrow zeroArrow
     WrapArrow u <|> WrapArrow v = WrapArrow (u <+> v)
 
--- Added in base-4.8.0.0
-instance Applicative First where
-        pure x = First (Just x)
-        First x <*> First y = First (x <*> y)
-
-instance Applicative Last where
-        pure x = Last (Just x)
-        Last x <*> Last y = Last (x <*> y)
-
--- | Lists, but with an 'Applicative' functor based on zipping, so that
---
--- @f '<$>' 'ZipList' xs1 '<*>' ... '<*>' 'ZipList' xsn = 'ZipList' (zipWithn f xs1 ... xsn)@
---
+-- | Lists, but with an 'Applicative' functor based on zipping.
 newtype ZipList a = ZipList { getZipList :: [a] }
-                  deriving (Show, Eq, Ord, Read, Generic, Generic1)
+                  deriving ( Show     -- ^ @since 4.7.0.0
+                           , Eq       -- ^ @since 4.7.0.0
+                           , Ord      -- ^ @since 4.7.0.0
+                           , Read     -- ^ @since 4.7.0.0
+                           , Functor  -- ^ @since 2.01
+                           , Foldable -- ^ @since 4.9.0.0
+                           , Generic  -- ^ @since 4.7.0.0
+                           , Generic1 -- ^ @since 4.7.0.0
+                           )
+-- See Data.Traversable for Traversable instance due to import loops
 
-instance Functor ZipList where
-    fmap f (ZipList xs) = ZipList (map f xs)
-
+-- |
+-- > f '<$>' 'ZipList' xs1 '<*>' ... '<*>' 'ZipList' xsN
+-- >     = 'ZipList' (zipWithN f xs1 ... xsN)
+--
+-- where @zipWithN@ refers to the @zipWith@ function of the appropriate arity
+-- (@zipWith@, @zipWith3@, @zipWith4@, ...). For example:
+--
+-- > (\a b c -> stimes c [a, b]) <$> ZipList "abcd" <*> ZipList "567" <*> ZipList [1..]
+-- >     = ZipList (zipWith3 (\a b c -> stimes c [a, b]) "abcd" "567" [1..])
+-- >     = ZipList {getZipList = ["a5","b6b6","c7c7c7"]}
+--
+-- @since 2.01
 instance Applicative ZipList where
     pure x = ZipList (repeat x)
-    ZipList fs <*> ZipList xs = ZipList (zipWith id fs xs)
+    liftA2 f (ZipList xs) (ZipList ys) = ZipList (zipWith f xs ys)
 
-instance Applicative Proxy where
-    pure _ = Proxy
-    {-# INLINE pure #-}
-    _ <*> _ = Proxy
-    {-# INLINE (<*>) #-}
+-- | @since 4.11.0.0
+instance Alternative ZipList where
+   empty = ZipList []
+   ZipList xs <|> ZipList ys = ZipList (xs ++ drop (length xs) ys)
 
 -- extra functions
-
--- | A variant of '<*>' with the arguments reversed.
-(<**>) :: Applicative f => f a -> f (a -> b) -> f b
-(<**>) = liftA2 (flip ($))
-
--- | Lift a function to actions.
--- This function may be used as a value for `fmap` in a `Functor` instance.
-liftA :: Applicative f => (a -> b) -> f a -> f b
-liftA f a = pure f <*> a
-
--- | Lift a binary function to actions.
-liftA2 :: Applicative f => (a -> b -> c) -> f a -> f b -> f c
-liftA2 f a b = f <$> a <*> b
-
--- | Lift a ternary function to actions.
-liftA3 :: Applicative f => (a -> b -> c -> d) -> f a -> f b -> f c -> f d
-liftA3 f a b c = f <$> a <*> b <*> c
 
 -- | One or none.
 optional :: Alternative f => f a -> f (Maybe a)

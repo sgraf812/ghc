@@ -1,10 +1,7 @@
 
-T5892a.hs:12:8: Warning:
-    Fields of ‘Version’ not initialised: Data.Version.versionTags
-    In the expression: Version {..}
-    In the expression: let versionBranch = [] in Version {..}
-    In an equation for ‘foo’:
-        foo (Version {..}) = let versionBranch = ... in Version {..}
-
-<no location info>: 
-Failing due to -Werror.
+T5892a.hs:12:8: error: [-Wmissing-fields (in -Wdefault), -Werror=missing-fields]
+    • Fields of ‘Node’ not initialised: subForest
+    • In the expression: Node {..}
+      In the expression: let rootLabel = [] in Node {..}
+      In an equation for ‘foo’:
+          foo (Node {..}) = let rootLabel = ... in Node {..}

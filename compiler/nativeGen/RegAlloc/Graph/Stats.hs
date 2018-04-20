@@ -16,6 +16,8 @@ module RegAlloc.Graph.Stats (
 
 #include "nativeGen/NCG.h"
 
+import GhcPrelude
+
 import qualified GraphColor as Color
 import RegAlloc.Liveness
 import RegAlloc.Graph.Spill
@@ -41,13 +43,13 @@ data RegAllocStats statics instr
         -- Information about the initial conflict graph.
         = RegAllocStatsStart
         { -- | Initial code, with liveness.
-          raLiveCmm     :: [LiveCmmDecl statics instr]                  
+          raLiveCmm     :: [LiveCmmDecl statics instr]
 
           -- | The initial, uncolored graph.
-        , raGraph       :: Color.Graph VirtualReg RegClass RealReg      
+        , raGraph       :: Color.Graph VirtualReg RegClass RealReg
 
           -- | Information to help choose which regs to spill.
-        , raSpillCosts  :: SpillCostInfo }                              
+        , raSpillCosts  :: SpillCostInfo }
 
 
         -- Information about an intermediate graph.
@@ -55,22 +57,22 @@ data RegAllocStats statics instr
         -- instruction stream.
         | RegAllocStatsSpill
         { -- | Code we tried to allocate registers for.
-          raCode        :: [LiveCmmDecl statics instr]                  
+          raCode        :: [LiveCmmDecl statics instr]
 
           -- | Partially colored graph.
         , raGraph       :: Color.Graph VirtualReg RegClass RealReg
 
-          -- | The regs that were coaleced.
-        , raCoalesced   :: UniqFM VirtualReg                            
+          -- | The regs that were coalesced.
+        , raCoalesced   :: UniqFM VirtualReg
 
           -- | Spiller stats.
-        , raSpillStats  :: SpillStats                                   
+        , raSpillStats  :: SpillStats
 
           -- | Number of instructions each reg lives for.
-        , raSpillCosts  :: SpillCostInfo                                
+        , raSpillCosts  :: SpillCostInfo
 
           -- | Code with spill instructions added.
-        , raSpilled     :: [LiveCmmDecl statics instr] }                
+        , raSpilled     :: [LiveCmmDecl statics instr] }
 
 
         -- a successful coloring
@@ -84,7 +86,7 @@ data RegAllocStats statics instr
           -- | Coalesced and colored graph.
         , raGraphColored  :: Color.Graph VirtualReg RegClass RealReg
 
-          -- | Regs that were coaleced.
+          -- | Regs that were coalesced.
         , raCoalesced     :: UniqFM VirtualReg
 
           -- | Code with coalescings applied.
@@ -103,7 +105,7 @@ data RegAllocStats statics instr
         , raSRMs          :: (Int, Int, Int) }
 
 
-instance (Outputable statics, Outputable instr) 
+instance (Outputable statics, Outputable instr)
        => Outputable (RegAllocStats statics instr) where
 
  ppr (s@RegAllocStatsStart{}) = sdocWithPlatform $ \platform ->
@@ -129,7 +131,7 @@ instance (Outputable statics, Outputable instr)
 
         $$ (if (not $ isNullUFM $ raCoalesced s)
                 then    text "#  Registers coalesced."
-                        $$ (vcat $ map ppr $ ufmToList $ raCoalesced s)
+                        $$ pprUFMWithKeys (raCoalesced s) (vcat . map ppr)
                         $$ text ""
                 else empty)
 
@@ -141,7 +143,7 @@ instance (Outputable statics, Outputable instr)
         $$ ppr (raSpilled s)
 
 
- ppr (s@RegAllocStatsColored { raSRMs = (spills, reloads, moves) }) 
+ ppr (s@RegAllocStatsColored { raSRMs = (spills, reloads, moves) })
     = sdocWithPlatform $ \platform ->
            text "#  Colored"
 
@@ -160,7 +162,7 @@ instance (Outputable statics, Outputable instr)
 
         $$ (if (not $ isNullUFM $ raCoalesced s)
                 then    text "#  Registers coalesced."
-                        $$ (vcat $ map ppr $ ufmToList $ raCoalesced s)
+                        $$ pprUFMWithKeys (raCoalesced s) (vcat . map ppr)
                         $$ text ""
                 else empty)
 
@@ -232,7 +234,7 @@ pprStatsLifetimes stats
 
    in   (  text "-- vreg-population-lifetimes"
         $$ text "--   (instruction_count, number_of_vregs_that_lived_that_long)"
-        $$ (vcat $ map ppr $ eltsUFM lifeBins)
+        $$ pprUFM lifeBins (vcat . map ppr)
         $$ text "\n")
 
 
@@ -240,7 +242,8 @@ binLifetimeCount :: UniqFM (VirtualReg, Int) -> UniqFM (Int, Int)
 binLifetimeCount fm
  = let  lifes   = map (\l -> (l, (l, 1)))
                 $ map snd
-                $ eltsUFM fm
+                $ nonDetEltsUFM fm
+                -- See Note [Unique Determinism and code generation]
 
    in   addListToUFM_C
                 (\(l1, c1) (_, c2) -> (l1, c1 + c2))
@@ -260,7 +263,7 @@ pprStatsConflict stats
 
    in   (  text "-- vreg-conflicts"
         $$ text "--   (conflict_count, number_of_vregs_that_had_that_many_conflicts)"
-        $$ (vcat $ map ppr $ eltsUFM confMap)
+        $$ pprUFM confMap (vcat . map ppr)
         $$ text "\n")
 
 
@@ -285,7 +288,8 @@ pprStatsLifeConflict stats graph
                                         , ppr $ sizeUniqSet (Color.nodeConflicts node)
                                         , ppr $ lifetime ])
                 $ map Color.nodeId
-                $ eltsUFM
+                $ nonDetEltsUFM
+                -- See Note [Unique Determinism and code generation]
                 $ Color.graphMap graph
 
    in   (  text "-- vreg-conflict-lifetime"
@@ -304,7 +308,7 @@ countSRMs cmm
         = execState (mapBlockTopM countSRM_block cmm) (0, 0, 0)
 
 
-countSRM_block 
+countSRM_block
         :: Instruction instr
         => GenBasicBlock (LiveInstr instr)
         -> State (Int, Int, Int) (GenBasicBlock (LiveInstr instr))

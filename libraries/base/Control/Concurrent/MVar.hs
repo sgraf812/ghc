@@ -25,7 +25,7 @@
 --      wait and signal.
 --
 -- They were introduced in the paper
--- <http://research.microsoft.com/~simonpj/papers/concurrent-haskell.ps.gz "Concurrent Haskell">
+-- <https://www.haskell.org/ghc/docs/papers/concurrent-haskell.ps.gz "Concurrent Haskell">
 -- by Simon Peyton Jones, Andrew Gordon and Sigbjorn Finne, though
 -- some details of their implementation have since then changed (in
 -- particular, a put on a full 'MVar' used to error, but now merely
@@ -41,8 +41,8 @@
 -- atomic operations such as reading from multiple variables: use 'STM'
 -- instead.
 --
--- In particular, the "bigger" functions in this module ('readMVar',
--- 'swapMVar', 'withMVar', 'modifyMVar_' and 'modifyMVar') are simply
+-- In particular, the "bigger" functions in this module ('swapMVar',
+-- 'withMVar', 'modifyMVar_' and 'modifyMVar') are simply
 -- the composition of a 'takeMVar' followed by a 'putMVar' with
 -- exception safety.
 -- These only have atomicity guarantees if all other threads
@@ -193,7 +193,7 @@ withMVar m io =
   Like 'withMVar', but the @IO@ action in the second argument is executed
   with asynchronous exceptions masked.
 
-  /Since: 4.7.0.0/
+  @since 4.7.0.0
 -}
 {-# INLINE withMVarMasked #-}
 withMVarMasked :: MVar a -> (a -> IO b) -> IO b
@@ -236,7 +236,7 @@ modifyMVar m io =
   Like 'modifyMVar_', but the @IO@ action in the second argument is executed with
   asynchronous exceptions masked.
 
-  /Since: 4.6.0.0/
+  @since 4.6.0.0
 -}
 {-# INLINE modifyMVarMasked_ #-}
 modifyMVarMasked_ :: MVar a -> (a -> IO a) -> IO ()
@@ -250,7 +250,7 @@ modifyMVarMasked_ m io =
   Like 'modifyMVar', but the @IO@ action in the second argument is executed with
   asynchronous exceptions masked.
 
-  /Since: 4.6.0.0/
+  @since 4.6.0.0
 -}
 {-# INLINE modifyMVarMasked #-}
 modifyMVarMasked :: MVar a -> (a -> IO (a,b)) -> IO b
@@ -268,7 +268,7 @@ addMVarFinalizer = GHC.MVar.addMVarFinalizer
 -- | Make a 'Weak' pointer to an 'MVar', using the second argument as
 -- a finalizer to run when 'MVar' is garbage-collected
 --
--- /Since: 4.6.0.0/
+-- @since 4.6.0.0
 mkWeakMVar :: MVar a -> IO () -> IO (Weak (MVar a))
-mkWeakMVar m@(MVar m#) f = IO $ \s ->
-  case mkWeak# m# m f s of (# s1, w #) -> (# s1, Weak w #)
+mkWeakMVar m@(MVar m#) (IO f) = IO $ \s ->
+    case mkWeak# m# m f s of (# s1, w #) -> (# s1, Weak w #)

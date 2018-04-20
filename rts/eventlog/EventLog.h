@@ -6,27 +6,27 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef EVENTLOG_H
-#define EVENTLOG_H
+#pragma once
 
 #include "rts/EventLogFormat.h"
+#include "rts/EventLogWriter.h"
 #include "Capability.h"
 
 #include "BeginPrivate.h"
 
-#ifdef TRACING
+#if defined(TRACING)
 
 /*
  * Descriptions of EventTags for events.
  */
 extern char *EventTagDesc[];
 
-void initEventLogging(void);
+void initEventLogging(const EventLogWriter *writer);
 void endEventLogging(void);
 void freeEventLogging(void);
 void abortEventLogging(void); // #4512 - after fork child needs to abort
 void flushEventLog(void);     // event log inherited from parent
-void moreCapEventBufs (nat from, nat to);
+void moreCapEventBufs (uint32_t from, uint32_t to);
 
 /*
  * Post a scheduler event to the capability's event buffer (an event
@@ -45,13 +45,9 @@ void postEventAtTimestamp (Capability *cap, EventTimestamp ts,
 
 void postMsg(char *msg, va_list ap);
 
-void postUserMsg(Capability *cap, char *msg, va_list ap);
+void postUserEvent(Capability *cap, EventTypeNum type, char *msg);
 
 void postCapMsg(Capability *cap, char *msg, va_list ap);
-
-void postUserMarker(Capability *cap, char *markername);
-
-void postEventStartup(EventCapNo n_caps);
 
 /*
  * Post an event relating to a capability itself (create/delete/etc)
@@ -111,7 +107,7 @@ void postHeapEvent (Capability    *cap,
                     W_           info1);
 
 void postEventHeapInfo (EventCapsetID heap_capset,
-                        nat           gens,
+                        uint32_t    gens,
                         W_          maxHeapSize,
                         W_          allocAreaSize,
                         W_          mblockSize,
@@ -119,13 +115,14 @@ void postEventHeapInfo (EventCapsetID heap_capset,
 
 void postEventGcStats  (Capability    *cap,
                         EventCapsetID  heap_capset,
-                        nat            gen,
+                        uint32_t     gen,
                         W_           copied,
                         W_           slop,
                         W_           fragmentation,
-                        nat            par_n_threads,
+                        uint32_t     par_n_threads,
                         W_           par_max_copied,
-                        W_           par_tot_copied);
+                        W_           par_tot_copied,
+                        W_           par_balanced_copied);
 
 void postTaskCreateEvent (EventTaskId taskId,
                           EventCapNo cap,
@@ -136,6 +133,26 @@ void postTaskMigrateEvent (EventTaskId taskId,
                            EventCapNo new_capno);
 
 void postTaskDeleteEvent (EventTaskId taskId);
+
+void postHeapProfBegin(StgWord8 profile_id);
+
+void postHeapProfSampleBegin(StgInt era);
+
+void postHeapProfSampleString(StgWord8 profile_id,
+                              const char *label,
+                              StgWord64 residency);
+
+#if defined(PROFILING)
+void postHeapProfCostCentre(StgWord32 ccID,
+                            const char *label,
+                            const char *module,
+                            const char *srcloc,
+                            StgBool is_caf);
+
+void postHeapProfSampleCostCentre(StgWord8 profile_id,
+                                  CostCentreStack *stack,
+                                  StgWord64 residency);
+#endif /* PROFILING */
 
 #else /* !TRACING */
 
@@ -168,13 +185,3 @@ INLINE_HEADER void postThreadLabel(Capability    *cap   STG_UNUSED,
 #endif
 
 #include "EndPrivate.h"
-
-#endif /* TRACING_H */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

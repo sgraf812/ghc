@@ -1,5 +1,8 @@
-{-# LANGUAGE CPP, NoImplicitPrelude, NondecreasingIndentation, RecordWildCards, ScopedTypeVariables #-}
-{-# OPTIONS_GHC -fno-warn-name-shadowing #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, NoImplicitPrelude, NondecreasingIndentation,
+             RecordWildCards, ScopedTypeVariables #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
+
 module GHC.IO.Encoding.CodePage.API (
     mkCodePageEncoding
   ) where
@@ -8,7 +11,6 @@ import Foreign.C
 import Foreign.Ptr
 import Foreign.Marshal
 import Foreign.Storable
-import Control.Monad
 import Data.Bits
 import Data.Either
 import Data.Word
@@ -62,6 +64,7 @@ data CPINFO = CPINFO {
     leadByte    :: [BYTE]  -- ^ Always of length mAX_LEADBYTES
   }
 
+-- | @since 4.7.0.0
 instance Storable CPINFO where
     sizeOf    _ = sizeOf (undefined :: UINT) + (mAX_DEFAULTCHAR + mAX_LEADBYTES) * sizeOf (undefined :: BYTE)
     alignment _ = alignment (undefined :: CInt)
@@ -71,17 +74,17 @@ instance Storable CPINFO where
       ptr <- return $ castPtr $ advancePtr ptr 1
       b <- peekArray mAX_DEFAULTCHAR ptr
       c <- peekArray mAX_LEADBYTES   (advancePtr ptr mAX_DEFAULTCHAR)
-      return $ CPINFO a b c  
+      return $ CPINFO a b c
     poke ptr val = do
       ptr <- return $ castPtr ptr
       poke ptr (maxCharSize val)
       ptr <- return $ castPtr $ advancePtr ptr 1
       pokeArray' "CPINFO.defaultChar" mAX_DEFAULTCHAR ptr                              (defaultChar val)
-      pokeArray' "CPINFO.leadByte"    mAX_LEADBYTES   (advancePtr ptr mAX_DEFAULTCHAR) (leadByte val) 
+      pokeArray' "CPINFO.leadByte"    mAX_LEADBYTES   (advancePtr ptr mAX_DEFAULTCHAR) (leadByte val)
 
 pokeArray' :: Storable a => String -> Int -> Ptr a -> [a] -> IO ()
 pokeArray' msg sz ptr xs | length xs == sz = pokeArray ptr xs
-                         | otherwise       = error $ msg ++ ": expected " ++ show sz ++ " elements in list but got " ++ show (length xs)
+                         | otherwise       = errorWithoutStackTrace $ msg ++ ": expected " ++ show sz ++ " elements in list but got " ++ show (length xs)
 
 
 foreign import WINDOWS_CCONV unsafe "windows.h GetCPInfo"
@@ -119,10 +122,10 @@ foreign import WINDOWS_CCONV unsafe "windows.h IsDBCSLeadByteEx"
 --
 -- This is useful for supporting DBCS text encoding on the console without having to statically link
 -- in huge code tables into all of our executables, or just as a fallback mechanism if a new code page
--- is introduced that we don't know how to deal with ourselves yet.  
+-- is introduced that we don't know how to deal with ourselves yet.
 mkCodePageEncoding :: CodingFailureMode -> Word32 -> TextEncoding
 mkCodePageEncoding cfm cp
-  = TextEncoding { 
+  = TextEncoding {
         textEncodingName = "CP" ++ show cp,
         mkTextDecoder = newCP (recoverDecode cfm) cpDecode cp,
         mkTextEncoder = newCP (recoverEncode cfm) cpEncode cp
@@ -135,8 +138,8 @@ newCP :: (Buffer from -> Buffer to -> IO (Buffer from, Buffer to))
 newCP rec fn cp = do
   -- Fail early if the code page doesn't exist, to match the behaviour of the IConv TextEncoding
   max_char_size <- alloca $ \cpinfo_ptr -> do
-    success <- c_GetCPInfo cp cpinfo_ptr 
-    unless success $ throwGetLastError ("GetCPInfo " ++ show cp)
+    success <- c_GetCPInfo cp cpinfo_ptr
+    when (not success) $ throwGetLastError ("GetCPInfo " ++ show cp)
     fmap (fromIntegral . maxCharSize) $ peek cpinfo_ptr
 
   debugIO $ "GetCPInfo " ++ show cp ++ " = " ++ show max_char_size
@@ -154,7 +157,7 @@ newCP rec fn cp = do
 
 utf16_native_encode' :: EncodeBuffer
 utf16_native_decode' :: DecodeBuffer
-#ifdef WORDS_BIGENDIAN
+#if defined(WORDS_BIGENDIAN)
 utf16_native_encode' = utf16be_encode
 utf16_native_decode' = utf16be_decode
 #else
@@ -187,7 +190,7 @@ byteView (Buffer {..}) = Buffer { bufState = bufState, bufRaw = castForeignPtr b
 cwcharView :: Buffer Word8 -> Buffer CWchar
 cwcharView (Buffer {..}) = Buffer { bufState = bufState, bufRaw = castForeignPtr bufRaw, bufSize = half bufSize, bufL = half bufL, bufR = half bufR }
   where half x = case x `divMod` 2 of (y, 0) -> y
-                                      _      -> error "cwcharView: utf16_(encode|decode) (wrote out|consumed) non multiple-of-2 number of bytes"
+                                      _      -> errorWithoutStackTrace "cwcharView: utf16_(encode|decode) (wrote out|consumed) non multiple-of-2 number of bytes"
 
 utf16_native_encode :: CodeBuffer Char CWchar
 utf16_native_encode ibuf obuf = do
@@ -201,7 +204,7 @@ utf16_native_decode ibuf obuf = do
 
 cpDecode :: Word32 -> Int -> DecodeBuffer
 cpDecode cp max_char_size = \ibuf obuf -> do
-#ifdef CHARBUF_UTF16
+#if defined(CHARBUF_UTF16)
     let mbuf = obuf
 #else
     -- FIXME: share the buffer between runs, even if the buffer is not the perfect size
@@ -212,7 +215,7 @@ cpDecode cp max_char_size = \ibuf obuf -> do
     debugIO $ "cpDecode " ++ summaryBuffer ibuf ++ " " ++ summaryBuffer mbuf
     (why1, ibuf', mbuf') <- cpRecode try' is_valid_prefix max_char_size 1 0 1 ibuf mbuf
     debugIO $ "cpRecode (cpDecode) = " ++ show why1 ++ " " ++ summaryBuffer ibuf' ++ " " ++ summaryBuffer mbuf'
-#ifdef CHARBUF_UTF16
+#if defined(CHARBUF_UTF16)
     return (why1, ibuf', mbuf')
 #else
     -- Convert as much UTF-16 as possible to UTF-32. Note that it's impossible for this to fail
@@ -225,9 +228,9 @@ cpDecode cp max_char_size = \ibuf obuf -> do
       -- If we successfully translate all of the UTF-16 buffer, we need to know why we couldn't get any more
       -- UTF-16 out of the Windows API
       InputUnderflow | isEmptyBuffer mbuf' -> return (why1, ibuf', obuf)
-                     | otherwise           -> error "cpDecode: impossible underflown UTF-16 buffer"
+                     | otherwise           -> errorWithoutStackTrace "cpDecode: impossible underflown UTF-16 buffer"
       -- InvalidSequence should be impossible since mbuf' is output from Windows.
-      InvalidSequence -> error "InvalidSequence on output of Windows API"
+      InvalidSequence -> errorWithoutStackTrace "InvalidSequence on output of Windows API"
       -- If we run out of space in obuf, we need to ask for more output buffer space, while also returning
       -- the characters we have managed to consume so far.
       OutputUnderflow -> do
@@ -262,14 +265,14 @@ cpDecode cp max_char_size = \ibuf obuf -> do
 
 cpEncode :: Word32 -> Int -> EncodeBuffer
 cpEncode cp _max_char_size = \ibuf obuf -> do
-#ifdef CHARBUF_UTF16
+#if defined(CHARBUF_UTF16)
     let mbuf' = ibuf
 #else
     -- FIXME: share the buffer between runs, even though that means we can't size the buffer as we want.
     let sz =       (bufferElems ibuf * 2)     -- UTF-32 always uses 4 bytes. UTF-16 uses at most 4 bytes.
              `min` (bufferAvailable obuf * 2) -- In the best case, each pair of UTF-16 points fits into only 1 byte
     mbuf <- newBuffer (2 * sz) sz WriteBuffer
-    
+
     -- Convert as much UTF-32 as possible to UTF-16. NB: this can't fail due to output underflow
     -- since we sized the output buffer correctly. However, it could fail due to an illegal character
     -- in the input if it encounters a lone surrogate. In this case, our recovery will be applied as normal.
@@ -278,14 +281,14 @@ cpEncode cp _max_char_size = \ibuf obuf -> do
     debugIO $ "\ncpEncode " ++ summaryBuffer mbuf' ++ " " ++ summaryBuffer obuf
     (why2, target_utf16_count, mbuf', obuf) <- saner (cpRecode try' is_valid_prefix 2 1 1 0) (mbuf' { bufState = ReadBuffer }) obuf
     debugIO $ "cpRecode (cpEncode) = " ++ show why2 ++ " " ++ summaryBuffer mbuf' ++ " " ++ summaryBuffer obuf
-#ifdef CHARBUF_UTF16
+#if defined(CHARBUF_UTF16)
     return (why2, mbuf', obuf)
 #else
     case why2 of
-      -- If we succesfully translate all of the UTF-16 buffer, we need to know why
+      -- If we successfully translate all of the UTF-16 buffer, we need to know why
       -- we weren't able to get any more UTF-16 out of the UTF-32 buffer
       InputUnderflow | isEmptyBuffer mbuf' -> return (why1, ibuf', obuf)
-                     | otherwise           -> error "cpEncode: impossible underflown UTF-16 buffer"
+                     | otherwise           -> errorWithoutStackTrace "cpEncode: impossible underflown UTF-16 buffer"
       -- With OutputUnderflow/InvalidSequence we only care about the failings of the UTF-16->CP translation.
       -- Yes, InvalidSequence is possible even though mbuf' is guaranteed to be valid UTF-16, because
       -- the code page may not be able to represent the encoded Unicode codepoint.
@@ -296,7 +299,7 @@ cpEncode cp _max_char_size = \ibuf obuf -> do
         -- UTF-32 characters required to get the consumed count of UTF-16 characters:
         --
         -- When dealing with data from the BMP (the common case), consuming N UTF-16 characters will be the same as consuming N
-        -- UTF-32 characters. We start our search there so that most binary searches will terminate in a single iteration. 
+        -- UTF-32 characters. We start our search there so that most binary searches will terminate in a single iteration.
         -- Furthermore, the absolute minimum number of UTF-32 characters this can correspond to is 1/2 the UTF-16 byte count
         -- (this will be realised when the input data is entirely not in the BMP).
         utf32_count <- bSearch "cpEncode" utf16_native_encode ibuf mbuf target_utf16_count (target_utf16_count `div` 2) target_utf16_count target_utf16_count
@@ -347,7 +350,7 @@ bSearch msg code ibuf mbuf target_to_elems = go
       -- have just been unlucky enough to set md so that ibuf straddles a byte boundary.
       -- In this case we have to be really careful, because we don't want to report that
       -- "md" elements is the right number when in actual fact we could have had md-1 input
-      -- elements and still produced the same number of bufferElems in mbuf. 
+      -- elements and still produced the same number of bufferElems in mbuf.
       --
       -- In fact, we have to worry about this possibility even if we get InputUnderflow
       -- since that will report InputUnderflow rather than InvalidSequence if the buffer
@@ -358,8 +361,8 @@ bSearch msg code ibuf mbuf target_to_elems = go
       --
       -- Luckily if we have InvalidSequence/OutputUnderflow and we do not appear to have reached
       -- the target, what we should do is the same as normal because the fraction of ibuf that our
-      -- first "code" coded succesfully must be invalid-sequence-free, and ibuf will always
-      -- have been decoded as far as the first invalid sequence in it. 
+      -- first "code" coded successfully must be invalid-sequence-free, and ibuf will always
+      -- have been decoded as far as the first invalid sequence in it.
       case bufferElems mbuf `compare` target_to_elems of
         -- Coding n "from" chars from the input yields exactly as many "to" chars
         -- as were consumed by the recode. All is peachy:
@@ -369,9 +372,9 @@ bSearch msg code ibuf mbuf target_to_elems = go
         LT -> go' (md+1) mx
         GT -> go' mn (md-1)
     go' mn mx | mn <= mx  = go mn (mn + ((mx - mn) `div` 2)) mx
-              | otherwise = error $ "bSearch(" ++ msg ++ "): search crossed! " ++ show (summaryBuffer ibuf, summaryBuffer mbuf, target_to_elems, mn, mx)
+              | otherwise = errorWithoutStackTrace $ "bSearch(" ++ msg ++ "): search crossed! " ++ show (summaryBuffer ibuf, summaryBuffer mbuf, target_to_elems, mn, mx)
 
-cpRecode :: forall from to. (Show from, Storable from)
+cpRecode :: forall from to. Storable from
          => (Ptr from -> Int -> Ptr to -> Int -> IO (Either Bool Int))
          -> (from -> IO Bool)
          -> Int -- ^ Maximum length of a complete translatable sequence in the input (e.g. 2 if the input is UTF-16, 1 if the input is a SBCS, 2 is the input is a DBCS). Must be at least 1.

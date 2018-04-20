@@ -5,6 +5,8 @@ module SPARC.CodeGen.Expand (
 
 where
 
+import GhcPrelude
+
 import SPARC.Instr
 import SPARC.Imm
 import SPARC.AddrMode
@@ -12,7 +14,7 @@ import SPARC.Regs
 import SPARC.Ppr        ()
 import Instruction
 import Reg
-import Size
+import Format
 import Cmm
 
 
@@ -140,7 +142,7 @@ expandMisalignedDoubles instr
 
 
 
--- | The the high partner for this float reg.
+-- | The high partner for this float reg.
 fRegHi :: Reg -> Reg
 fRegHi (RegReal (RealRegSingle r1))
         | r1            >= 32

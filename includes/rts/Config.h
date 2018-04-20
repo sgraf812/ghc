@@ -13,8 +13,7 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef RTS_CONFIG_H
-#define RTS_CONFIG_H
+#pragma once
 
 #if defined(TICKY_TICKY) && defined(THREADED_RTS)
 #error TICKY_TICKY is incompatible with THREADED_RTS
@@ -27,12 +26,16 @@
 #define USING_LIBBFD 1
 #endif
 
-/* DEBUG implies TRACING and TICKY_TICKY
- */
+/* DEBUG implies TRACING and TICKY_TICKY  */
 #if defined(DEBUG)
+#if !defined(TRACING)
 #define TRACING
+#endif
+#if !defined(TICKY_TICKY)
 #define TICKY_TICKY
 #endif
+#endif
+
 
 /* -----------------------------------------------------------------------------
    Signals - supported on non-PAR versions of the runtime.  See RtsSignals.h.
@@ -43,5 +46,3 @@
 /* Profile spin locks */
 
 #define PROF_SPIN
-
-#endif /* RTS_CONFIG_H */

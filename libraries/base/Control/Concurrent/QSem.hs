@@ -1,5 +1,5 @@
-{-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE AutoDeriveTypeable, BangPatterns #-}
+{-# LANGUAGE Safe #-}
+{-# LANGUAGE BangPatterns #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 
 -----------------------------------------------------------------------------
@@ -29,7 +29,7 @@ import Control.Concurrent.MVar ( MVar, newEmptyMVar, takeMVar, tryTakeMVar
 import Control.Exception
 import Data.Maybe
 
--- | 'QSem' is a quantity semaphore in which the resource is aqcuired
+-- | 'QSem' is a quantity semaphore in which the resource is acquired
 -- and released in units of one. It provides guaranteed FIFO ordering
 -- for satisfying blocked `waitQSem` calls.
 --

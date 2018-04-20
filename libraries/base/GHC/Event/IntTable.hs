@@ -1,5 +1,6 @@
-{-# LANGUAGE BangPatterns, NoImplicitPrelude, RecordWildCards, Trustworthy #-}
-{-# OPTIONS_GHC -fno-warn-name-shadowing #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE BangPatterns, NoImplicitPrelude, RecordWildCards #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 
 module GHC.Event.IntTable
     (
@@ -12,13 +13,12 @@ module GHC.Event.IntTable
     , updateWith
     ) where
 
-import Control.Monad ((=<<), liftM, unless, when)
 import Data.Bits ((.&.), shiftL, shiftR)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Maybe (Maybe(..), isJust)
 import Foreign.ForeignPtr (ForeignPtr, mallocForeignPtr, withForeignPtr)
 import Foreign.Storable (peek, poke)
-import GHC.Base (Monad(..), ($), const, otherwise)
+import GHC.Base (Monad(..), (=<<), ($), ($!), const, liftM, otherwise, when)
 import GHC.Classes (Eq(..), Ord(..))
 import GHC.Event.Arr (Arr)
 import GHC.Num (Num(..))
@@ -47,11 +47,12 @@ data Bucket a = Empty
 lookup :: Int -> IntTable a -> IO (Maybe a)
 lookup k (IntTable ref) = do
   let go Bucket{..}
-        | bucketKey == k = return (Just bucketValue)
+        | bucketKey == k = Just bucketValue
         | otherwise      = go bucketNext
-      go _ = return Nothing
+      go _ = Nothing
   it@IT{..} <- readIORef ref
-  go =<< Arr.read tabArr (indexOf k it)
+  bkt <- Arr.read tabArr (indexOf k it)
+  return $! go bkt
 
 new :: Int -> IO (IntTable a)
 new capacity = IntTable `liftM` (newIORef =<< new_ capacity)
@@ -82,6 +83,9 @@ grow oldit ref size = do
   withForeignPtr (tabSize newit) $ \ptr -> poke ptr size
   writeIORef ref newit
 
+-- | @insertWith f k v table@ inserts @k@ into @table@ with value @v@.
+-- If @k@ already appears in @table@ with value @v0@, the value is updated
+-- to @f v0 v@ and @Just v0@ is returned.
 insertWith :: (a -> a -> a) -> Int -> a -> IntTable a -> IO (Maybe a)
 insertWith f k v inttable@(IntTable ref) = do
   it@IT{..} <- readIORef ref
@@ -114,6 +118,7 @@ reset k Nothing  tbl = delete k tbl >> return ()
 indexOf :: Int -> IT a -> Int
 indexOf k IT{..} = k .&. (Arr.size tabArr - 1)
 
+-- | Remove the given key from the table and return its associated value.
 delete :: Int -> IntTable a -> IO (Maybe a)
 delete k t = updateWith (const Nothing) k t
 
@@ -121,20 +126,18 @@ updateWith :: (a -> Maybe a) -> Int -> IntTable a -> IO (Maybe a)
 updateWith f k (IntTable ref) = do
   it@IT{..} <- readIORef ref
   let idx = indexOf k it
-      go changed bkt@Bucket{..}
-        | bucketKey == k =
-            let fbv = f bucketValue
-                !nb = case fbv of
-                        Just val -> bkt { bucketValue = val }
-                        Nothing  -> bucketNext
-            in (fbv, Just bucketValue, nb)
-        | otherwise = case go changed bucketNext of
+      go bkt@Bucket{..}
+        | bucketKey == k = case f bucketValue of
+            Just val -> let !nb = bkt { bucketValue = val }
+                        in (False, Just bucketValue, nb)
+            Nothing  -> (True, Just bucketValue, bucketNext)
+        | otherwise = case go bucketNext of
                         (fbv, ov, nb) -> (fbv, ov, bkt { bucketNext = nb })
-      go _ e = (Nothing, Nothing, e)
-  (fbv, oldVal, newBucket) <- go False `liftM` Arr.read tabArr idx
+      go e = (False, Nothing, e)
+  (del, oldVal, newBucket) <- go `liftM` Arr.read tabArr idx
   when (isJust oldVal) $ do
     Arr.write tabArr idx newBucket
-    unless (isJust fbv) $
+    when del $
       withForeignPtr tabSize $ \ptr -> do
         size <- peek ptr
         poke ptr (size - 1)

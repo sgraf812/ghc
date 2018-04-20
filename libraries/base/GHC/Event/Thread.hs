@@ -1,5 +1,6 @@
 {-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE BangPatterns, NoImplicitPrelude #-}
+
 module GHC.Event.Thread
     ( getSystemEventManager
     , getSystemTimerManager
@@ -16,15 +17,14 @@ module GHC.Event.Thread
     ) where
 
 import Control.Exception (finally, SomeException, toException)
-import Control.Monad (forM, forM_, sequence_, zipWithM, when)
+import Data.Foldable (forM_, mapM_, sequence_)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Data.List (zipWith3)
-import Data.Maybe (Maybe(..))
 import Data.Tuple (snd)
 import Foreign.C.Error (eBADF, errnoToIOError)
 import Foreign.C.Types (CInt(..), CUInt(..))
 import Foreign.Ptr (Ptr)
 import GHC.Base
+import GHC.List (zipWith, zipWith3)
 import GHC.Conc.Sync (TVar, ThreadId, ThreadStatus(..), atomically, forkIO,
                       labelThread, modifyMVar_, withMVar, newTVar, sharedCAF,
                       getNumCapabilities, threadCapability, myThreadId, forkOn,
@@ -100,21 +100,22 @@ closeFdWith :: (Fd -> IO ())        -- ^ Action that performs the close.
 closeFdWith close fd = do
   eventManagerArray <- readIORef eventManager
   let (low, high) = boundsIOArray eventManagerArray
-  mgrs <- forM [low..high] $ \i -> do
+  mgrs <- flip mapM [low..high] $ \i -> do
     Just (_,!mgr) <- readIOArray eventManagerArray i
     return mgr
   mask_ $ do
-    tables <- forM mgrs $ \mgr -> takeMVar $ M.callbackTableVar mgr fd
+    tables <- flip mapM mgrs $ \mgr -> takeMVar $ M.callbackTableVar mgr fd
     cbApps <- zipWithM (\mgr table -> M.closeFd_ mgr table fd) mgrs tables
     close fd `finally` sequence_ (zipWith3 finish mgrs tables cbApps)
   where
     finish mgr table cbApp = putMVar (M.callbackTableVar mgr fd) table >> cbApp
+    zipWithM f xs ys = sequence (zipWith f xs ys)
 
 threadWait :: Event -> Fd -> IO ()
 threadWait evt fd = mask_ $ do
   m <- newEmptyMVar
   mgr <- getSystemEventManager_
-  reg <- registerFd mgr (\_ e -> putMVar m e) fd evt
+  reg <- registerFd mgr (\_ e -> putMVar m e) fd evt M.OneShot
   evt' <- takeMVar m `onException` unregisterFd_ mgr reg
   if evt' `eventIs` evtClose
     then ioError $ errnoToIOError "threadWait" eBADF Nothing Nothing
@@ -128,7 +129,7 @@ threadWaitSTM :: Event -> Fd -> IO (STM (), IO ())
 threadWaitSTM evt fd = mask_ $ do
   m <- newTVarIO Nothing
   mgr <- getSystemEventManager_
-  reg <- registerFd mgr (\_ e -> atomically (writeTVar m (Just e))) fd evt
+  reg <- registerFd mgr (\_ e -> atomically (writeTVar m (Just e))) fd evt M.OneShot
   let waitAction =
         do mevt <- readTVar m
            case mevt of
@@ -245,7 +246,7 @@ startIOManagerThreads =
   withMVar ioManagerLock $ \_ -> do
     eventManagerArray <- readIORef eventManager
     let (_, high) = boundsIOArray eventManagerArray
-    forM_ [0..high] (startIOManagerThread eventManagerArray)
+    mapM_ (startIOManagerThread eventManagerArray) [0..high]
     writeIORef numEnabledEventManagers (high+1)
 
 show_int :: Int -> String
@@ -263,7 +264,7 @@ startIOManagerThread :: IOArray Int (Maybe (ThreadId, EventManager))
                         -> IO ()
 startIOManagerThread eventManagerArray i = do
   let create = do
-        !mgr <- new True
+        !mgr <- new
         !t <- forkOn i $ do
                 c_setIOManagerControlFd
                   (fromIntegral i)

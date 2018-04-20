@@ -5,14 +5,15 @@
 -- Monadic streams
 --
 -- -----------------------------------------------------------------------------
-
 module Stream (
     Stream(..), yield, liftIO,
     collect, fromList,
     Stream.map, Stream.mapM, Stream.mapAccumL
   ) where
+
+import GhcPrelude
+
 import Control.Monad
-import Control.Applicative
 
 -- |
 -- @Stream m a b@ is a computation in some Monad @m@ that delivers a sequence
@@ -43,11 +44,10 @@ instance Monad f => Functor (Stream f a) where
   fmap = liftM
 
 instance Monad m => Applicative (Stream m a) where
-  pure  = return
+  pure a = Stream (return (Left a))
   (<*>) = ap
 
 instance Monad m => Monad (Stream m a) where
-  return a = Stream (return (Left a))
 
   Stream m >>= k = Stream $ do
                 r <- m

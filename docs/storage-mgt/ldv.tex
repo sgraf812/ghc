@@ -244,7 +244,7 @@ If retainer profiling is being performed, @ldvTime@ is equal to $0$,
 and @LDV_recordUse()@ causes no side effect.\footnote{Due to this
 interference with LDVU profiling, retainer profiling slows down a bit;
 for instance, checking @ldvTime@ against $0$ in the above example
-would always evaluate to @rtsFalse@ during retainer profiling.
+would always evaluate to @false@ during retainer profiling.
 However, this is the price to be paid for our decision not to employ a
 separate field for LDVU profiling.}
 
@@ -619,7 +619,7 @@ two options should result in nearly same profiling outputs, but
 the second run (without @-Sstderr@ option) spends almost twice as
 long in the Haskell mutator as the first run:
 1) @+RTS -Sstderr -hL -RTS@; 2) @+RTS -hL -RTS@.
-This is quite a subtle bug because this wierd phenomenon is not 
+This is quite a subtle bug because this weird phenomenon is not 
 observed in retainer profiling, yet the implementation of 
 @mut_user_time_during_LDV()@ is completely analogous to that of 
 @mut_user_time_during_RP()@. The overall shapes of the resultant graphs 
@@ -646,7 +646,7 @@ with LDVU profiling.
 
 \begin{description}
 \item[GC.c] invokes @LdvCensusForDead()@ before tidying up, sets @hasBeenAnyGC@ to 
-  @rtsTrue@, and changes @copy()@ and @copyPart()@.
+  @true@, and changes @copy()@ and @copyPart()@.
   Invokes @LDV_recordDead()@ and @LDV_recordDead_FILL_SLOP_DYNAMIC()@.
 \item[Itimer.c] changes @handle_tick()@.
 \item[LdvProfile.c] implements the LDVU profiling engine. 

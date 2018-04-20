@@ -1,3 +1,4 @@
+AC_PREREQ([2.60])
 AC_INIT([Haskell base package], [1.0], [libraries@haskell.org], [base])
 
 # Safety check: Ensure that we are in the correct source directory.
@@ -9,14 +10,13 @@ AC_CANONICAL_BUILD
 AC_CANONICAL_HOST
 AC_CANONICAL_TARGET
 
-AC_ARG_WITH([cc],
-            [C compiler],
-            [CC=$withval])
-AC_PROG_CC()
+AC_PROG_CC
+dnl make extensions visible to allow feature-tests to detect them lateron
+AC_USE_SYSTEM_EXTENSIONS
 
 AC_MSG_CHECKING(for WINDOWS platform)
 case $host in
-    *mingw32*|*mingw64*|*cygwin*)
+    *mingw32*|*mingw64*|*cygwin*|*msys*)
         WINDOWS=YES;;
     *)
         WINDOWS=NO;;
@@ -30,7 +30,7 @@ dnl ** check for full ANSI header (.h) files
 AC_HEADER_STDC
 
 # check for specific header (.h) files that we are interested in
-AC_CHECK_HEADERS([ctype.h errno.h fcntl.h inttypes.h limits.h signal.h sys/resource.h sys/select.h sys/stat.h sys/syscall.h sys/time.h sys/timeb.h sys/timers.h sys/times.h sys/types.h sys/utsname.h sys/wait.h termios.h time.h unistd.h utime.h windows.h winsock.h langinfo.h poll.h sys/epoll.h sys/event.h sys/eventfd.h])
+AC_CHECK_HEADERS([ctype.h errno.h fcntl.h inttypes.h limits.h signal.h sys/file.h sys/resource.h sys/select.h sys/stat.h sys/syscall.h sys/time.h sys/timeb.h sys/timers.h sys/times.h sys/types.h sys/utsname.h sys/wait.h termios.h time.h unistd.h utime.h windows.h winsock.h langinfo.h poll.h sys/epoll.h sys/event.h sys/eventfd.h])
 
 # Enable large file support. Do this before testing the types ino_t, off_t, and
 # rlim_t, because it will affect the result of that test.
@@ -51,11 +51,11 @@ AC_CHECK_FUNCS([epoll_ctl eventfd kevent kevent64 kqueue poll])
 
 # event-related fun
 
-if test "$ac_cv_header_sys_epoll_h" = yes -a "$ac_cv_func_epoll_ctl" = yes; then
+if test "$ac_cv_header_sys_epoll_h" = yes && test "$ac_cv_func_epoll_ctl" = yes; then
   AC_DEFINE([HAVE_EPOLL], [1], [Define if you have epoll support.])
 fi
 
-if test "$ac_cv_header_sys_event_h" = yes -a "$ac_cv_func_kqueue" = yes; then
+if test "$ac_cv_header_sys_event_h" = yes && test "$ac_cv_func_kqueue" = yes; then
   AC_DEFINE([HAVE_KQUEUE], [1], [Define if you have kqueue support.])
 
   AC_CHECK_SIZEOF([kev.filter], [], [#include <sys/event.h>
@@ -65,8 +65,19 @@ struct kevent kev;])
 struct kevent kev;])
 fi
 
-if test "$ac_cv_header_poll_h" = yes -a "$ac_cv_func_poll" = yes; then
+if test "$ac_cv_header_poll_h" = yes && test "$ac_cv_func_poll" = yes; then
   AC_DEFINE([HAVE_POLL], [1], [Define if you have poll support.])
+fi
+
+# Linux open file descriptor locks
+AC_CHECK_DECL([F_OFD_SETLK], [
+  AC_DEFINE([HAVE_OFD_LOCKING], [1], [Define if you have open file descriptor lock support.])
+])
+
+# flock
+AC_CHECK_FUNCS([flock])
+if test "$ac_cv_header_sys_file_h" = yes && test "$ac_cv_func_flock" = yes; then
+  AC_DEFINE([HAVE_FLOCK], [1], [Define if you have flock support.])
 fi
 
 # unsetenv
@@ -92,13 +103,13 @@ dnl--------------------------------------------------------------------
 AC_ARG_WITH([iconv-includes],
   [AC_HELP_STRING([--with-iconv-includes],
     [directory containing iconv.h])],
-    [ICONV_INCLUDE_DIRS=$withval; CPPFLAGS="-I$withval"],
+    [ICONV_INCLUDE_DIRS=$withval; CPPFLAGS="-I$withval $CPPFLAGS"],
     [ICONV_INCLUDE_DIRS=])
 
 AC_ARG_WITH([iconv-libraries],
   [AC_HELP_STRING([--with-iconv-libraries],
     [directory containing iconv library])],
-    [ICONV_LIB_DIRS=$withval; LDFLAGS="-L$withval"],
+    [ICONV_LIB_DIRS=$withval; LDFLAGS="-L$withval $LDFLAGS"],
     [ICONV_LIB_DIRS=])
 
 AC_SUBST(ICONV_INCLUDE_DIRS)
@@ -118,6 +129,7 @@ if test "$ac_cv_type_long_long" = yes; then
 FPTOOLS_CHECK_HTYPE(long long)
 FPTOOLS_CHECK_HTYPE(unsigned long long)
 fi
+FPTOOLS_CHECK_HTYPE(bool)
 FPTOOLS_CHECK_HTYPE(float)
 FPTOOLS_CHECK_HTYPE(double)
 FPTOOLS_CHECK_HTYPE(ptrdiff_t)
@@ -148,6 +160,14 @@ FPTOOLS_CHECK_HTYPE(tcflag_t)
 FPTOOLS_CHECK_HTYPE(nlink_t)
 FPTOOLS_CHECK_HTYPE(ssize_t)
 FPTOOLS_CHECK_HTYPE(rlim_t)
+FPTOOLS_CHECK_HTYPE(blksize_t)
+FPTOOLS_CHECK_HTYPE(blkcnt_t)
+FPTOOLS_CHECK_HTYPE(clockid_t)
+FPTOOLS_CHECK_HTYPE(fsblkcnt_t)
+FPTOOLS_CHECK_HTYPE(fsfilcnt_t)
+FPTOOLS_CHECK_HTYPE(id_t)
+FPTOOLS_CHECK_HTYPE(key_t)
+FPTOOLS_CHECK_HTYPE(timer_t)
 
 FPTOOLS_CHECK_HTYPE(intptr_t)
 FPTOOLS_CHECK_HTYPE(uintptr_t)
@@ -192,20 +212,33 @@ FP_SEARCH_LIBS_PROTO(iconv,
                      [AC_MSG_ERROR([iconv is required on non-Windows platforms])])
 
 # If possible, we use libcharset instead of nl_langinfo(CODESET) to
-# determine the current locale's character encoding.
-FP_SEARCH_LIBS_PROTO(
+# determine the current locale's character encoding.  Allow the user
+# to disable this with --without-libcharset if they don't want a
+# dependency on libcharset.
+AC_ARG_WITH([libcharset],
+  [AS_HELP_STRING([--with-libcharset],
+    [Use libcharset [default=only if available]])],
+  [],
+  [with_libcharset=check])
+
+AS_IF([test "x$with_libcharset" != xno],
+  FP_SEARCH_LIBS_PROTO(
     [locale_charset],
     [#include <libcharset.h>],
     [const char* charset = locale_charset();],
     [charset],
     [AC_DEFINE([HAVE_LIBCHARSET], [1], [Define to 1 if you have libcharset.])
-     EXTRA_LIBS="$EXTRA_LIBS $ac_lib"])
+     EXTRA_LIBS="$EXTRA_LIBS $ac_lib"]
+  ))
 
 fi
 
 # Hack - md5.h needs HsFFI.h.  Is there a better way to do this?
-CFLAGS="-I../../includes $CFLAGS"
-AC_CHECK_SIZEOF([struct MD5Context], ,[#include "include/md5.h"])
+CFLAGS="-I../.. -I../../../../includes $CFLAGS"
+dnl Calling AC_CHECK_TYPE(T) makes AC_CHECK_SIZEOF(T) abort on failure
+dnl instead of considering sizeof(T) as 0.
+AC_CHECK_TYPE([struct MD5Context], [], [AC_MSG_ERROR([internal error])], [#include "include/md5.h"])
+AC_CHECK_SIZEOF([struct MD5Context], [], [#include "include/md5.h"])
 
 AC_SUBST(EXTRA_LIBS)
 AC_CONFIG_FILES([base.buildinfo])

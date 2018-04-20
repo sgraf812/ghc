@@ -6,7 +6,7 @@
  *
  * Documentation on the architecture of the Storage Manager can be
  * found in the online commentary:
- * 
+ *
  *   http://ghc.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage
  *
  * ---------------------------------------------------------------------------*/
@@ -37,13 +37,13 @@
 
 #include "ffi.h"
 
-/* 
+/*
  * All these globals require sm_mutex to access in THREADED_RTS mode.
  */
 StgIndStatic  *dyn_caf_list        = NULL;
 StgIndStatic  *debug_caf_list      = NULL;
 StgIndStatic  *revertible_caf_list = NULL;
-rtsBool       keepCAFs;
+bool           keepCAFs;
 
 W_ large_alloc_lim;    /* GC if n_large_blocks in any nursery
                         * reaches this. */
@@ -54,9 +54,24 @@ generation *generations = NULL; /* all the generations */
 generation *g0          = NULL; /* generation 0, for convenience */
 generation *oldest_gen  = NULL; /* oldest generation, for convenience */
 
-nursery *nurseries = NULL;     /* array of nurseries, size == n_capabilities */
+/*
+ * Array of nurseries, size == n_capabilities
+ *
+ * nursery[i] belongs to NUMA node (i % n_numa_nodes)
+ * This is chosen to be the same convention as capabilities[i], so
+ * that when not using nursery chunks (+RTS -n), we just map
+ * capabilities to nurseries 1:1.
+ */
+nursery *nurseries = NULL;
+uint32_t n_nurseries;
 
-#ifdef THREADED_RTS
+/*
+ * When we are using nursery chunks, we need a separate next_nursery
+ * pointer for each NUMA node.
+ */
+volatile StgWord next_nursery[MAX_NUMA_NODES];
+
+#if defined(THREADED_RTS)
 /*
  * Storage manager mutex:  protects all the above state from
  * simultaneous access by two STG threads.
@@ -64,7 +79,8 @@ nursery *nurseries = NULL;     /* array of nurseries, size == n_capabilities */
 Mutex sm_mutex;
 #endif
 
-static void allocNurseries (nat from, nat to);
+static void allocNurseries (uint32_t from, uint32_t to);
+static void assignNurseriesToCapabilities (uint32_t from, uint32_t to);
 
 static void
 initGeneration (generation *gen, int g)
@@ -84,12 +100,20 @@ initGeneration (generation *gen, int g)
     gen->n_large_blocks = 0;
     gen->n_large_words = 0;
     gen->n_new_large_words = 0;
+    gen->compact_objects = NULL;
+    gen->n_compact_blocks = 0;
+    gen->compact_blocks_in_import = NULL;
+    gen->n_compact_blocks_in_import = 0;
     gen->scavenged_large_objects = NULL;
     gen->n_scavenged_large_blocks = 0;
+    gen->live_compact_objects = NULL;
+    gen->n_live_compact_blocks = 0;
+    gen->compact_blocks_in_import = NULL;
+    gen->n_compact_blocks_in_import = 0;
     gen->mark = 0;
     gen->compact = 0;
     gen->bitmap = NULL;
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     initSpinLock(&gen->sync);
 #endif
     gen->threads = END_TSO_QUEUE;
@@ -101,7 +125,7 @@ initGeneration (generation *gen, int g)
 void
 initStorage (void)
 {
-  nat g;
+  uint32_t g, n;
 
   if (generations != NULL) {
       // multi-init protection
@@ -117,22 +141,9 @@ initStorage (void)
   ASSERT(LOOKS_LIKE_INFO_PTR_NOT_NULL((StgWord)&stg_BLOCKING_QUEUE_CLEAN_info));
   ASSERT(LOOKS_LIKE_CLOSURE_PTR(&stg_dummy_ret_closure));
   ASSERT(!HEAP_ALLOCED(&stg_dummy_ret_closure));
-  
-  if (RtsFlags.GcFlags.maxHeapSize != 0 &&
-      RtsFlags.GcFlags.heapSizeSuggestion > 
-      RtsFlags.GcFlags.maxHeapSize) {
-      RtsFlags.GcFlags.maxHeapSize = RtsFlags.GcFlags.heapSizeSuggestion;
-  }
-
-  if (RtsFlags.GcFlags.maxHeapSize != 0 &&
-      RtsFlags.GcFlags.minAllocAreaSize > 
-      RtsFlags.GcFlags.maxHeapSize) {
-      errorBelch("maximum heap size (-M) is smaller than minimum alloc area size (-A)");
-      RtsFlags.GcFlags.minAllocAreaSize = RtsFlags.GcFlags.maxHeapSize;
-  }
 
   initBlockAllocator();
-  
+
 #if defined(THREADED_RTS)
   initMutex(&sm_mutex);
 #endif
@@ -140,7 +151,7 @@ initStorage (void)
   ACQUIRE_SM_LOCK;
 
   /* allocate generation info array */
-  generations = (generation *)stgMallocBytes(RtsFlags.GcFlags.generations 
+  generations = (generation *)stgMallocBytes(RtsFlags.GcFlags.generations
                                              * sizeof(struct generation_),
                                              "initStorage: gens");
 
@@ -158,7 +169,7 @@ initStorage (void)
       generations[g].to = &generations[g+1];
   }
   oldest_gen->to = oldest_gen;
-  
+
   /* The oldest generation has one step. */
   if (RtsFlags.GcFlags.compact || RtsFlags.GcFlags.sweep) {
       if (RtsFlags.GcFlags.generations == 1) {
@@ -172,24 +183,26 @@ initStorage (void)
 
   generations[0].max_blocks = 0;
 
-  dyn_caf_list = (StgIndStatic*)END_OF_STATIC_LIST;
-  debug_caf_list = (StgIndStatic*)END_OF_STATIC_LIST;
-  revertible_caf_list = (StgIndStatic*)END_OF_STATIC_LIST;
-   
-  /* initialise the allocate() interface */
-  large_alloc_lim = RtsFlags.GcFlags.minAllocAreaSize * BLOCK_SIZE_W;
+  dyn_caf_list = (StgIndStatic*)END_OF_CAF_LIST;
+  debug_caf_list = (StgIndStatic*)END_OF_CAF_LIST;
+  revertible_caf_list = (StgIndStatic*)END_OF_CAF_LIST;
+
+  if (RtsFlags.GcFlags.largeAllocLim > 0) {
+      large_alloc_lim = RtsFlags.GcFlags.largeAllocLim * BLOCK_SIZE_W;
+  } else {
+      large_alloc_lim = RtsFlags.GcFlags.minAllocAreaSize * BLOCK_SIZE_W;
+  }
 
   exec_block = NULL;
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
   initSpinLock(&gc_alloc_block_sync);
-#ifdef PROF_SPIN
-  whitehole_spin = 0;
 #endif
-#endif
-
   N = 0;
 
+  for (n = 0; n < n_numa_nodes; n++) {
+      next_nursery[n] = n;
+  }
   storageAddCapabilities(0, n_capabilities);
 
   IF_DEBUG(gc, statDescribeGens());
@@ -198,21 +211,30 @@ initStorage (void)
 
   traceEventHeapInfo(CAPSET_HEAP_DEFAULT,
                      RtsFlags.GcFlags.generations,
-                     RtsFlags.GcFlags.maxHeapSize * BLOCK_SIZE_W * sizeof(W_),
-                     RtsFlags.GcFlags.minAllocAreaSize * BLOCK_SIZE_W * sizeof(W_),
-                     MBLOCK_SIZE_W * sizeof(W_),
-                     BLOCK_SIZE_W  * sizeof(W_));
+                     RtsFlags.GcFlags.maxHeapSize * BLOCK_SIZE,
+                     RtsFlags.GcFlags.minAllocAreaSize * BLOCK_SIZE,
+                     MBLOCK_SIZE,
+                     BLOCK_SIZE);
 }
 
-void storageAddCapabilities (nat from, nat to)
+void storageAddCapabilities (uint32_t from, uint32_t to)
 {
-    nat n, g, i;
+    uint32_t n, g, i, new_n_nurseries;
+
+    if (RtsFlags.GcFlags.nurseryChunkSize == 0) {
+        new_n_nurseries = to;
+    } else {
+        memcount total_alloc = to * RtsFlags.GcFlags.minAllocAreaSize;
+        new_n_nurseries =
+            stg_max(to, total_alloc / RtsFlags.GcFlags.nurseryChunkSize);
+    }
 
     if (from > 0) {
-        nurseries = stgReallocBytes(nurseries, to * sizeof(struct nursery_),
+        nurseries = stgReallocBytes(nurseries,
+                                    new_n_nurseries * sizeof(struct nursery_),
                                     "storageAddCapabilities");
     } else {
-        nurseries = stgMallocBytes(to * sizeof(struct nursery_),
+        nurseries = stgMallocBytes(new_n_nurseries * sizeof(struct nursery_),
                                    "storageAddCapabilities");
     }
 
@@ -228,12 +250,21 @@ void storageAddCapabilities (nat from, nat to)
      * don't want it to be a big one.  This vague idea is borne out by
      * rigorous experimental evidence.
      */
-    allocNurseries(from, to);
+    allocNurseries(n_nurseries, new_n_nurseries);
+    n_nurseries = new_n_nurseries;
+
+    /*
+     * Assign each of the new capabilities a nursery.  Remember to start from
+     * next_nursery, because we may have already consumed some of the earlier
+     * nurseries.
+     */
+    assignNurseriesToCapabilities(from,to);
 
     // allocate a block for each mut list
     for (n = from; n < to; n++) {
         for (g = 1; g < RtsFlags.GcFlags.generations; g++) {
-            capabilities[n]->mut_lists[g] = allocBlock();
+            capabilities[n]->mut_lists[g] =
+                allocBlockOnNode(capNoToNumaNode(n));
         }
     }
 
@@ -253,7 +284,7 @@ exitStorage (void)
 }
 
 void
-freeStorage (rtsBool free_heap)
+freeStorage (bool free_heap)
 {
     stgFree(generations);
     if (free_heap) freeAllMBlocks();
@@ -272,21 +303,21 @@ freeStorage (rtsBool free_heap)
 
    The entry code for every CAF does the following:
 
-      - calls newCaf, which builds a CAF_BLACKHOLE on the heap and atomically
+      - calls newCAF, which builds a CAF_BLACKHOLE on the heap and atomically
         updates the CAF with IND_STATIC pointing to the CAF_BLACKHOLE
 
-      - if newCaf returns zero, it re-enters the CAF (see Note [atomic
+      - if newCAF returns zero, it re-enters the CAF (see Note [atomic
         CAF entry])
 
       - pushes an update frame pointing to the CAF_BLACKHOLE
 
-   Why do we build an BLACKHOLE in the heap rather than just updating
+   Why do we build a BLACKHOLE in the heap rather than just updating
    the thunk directly?  It's so that we only need one kind of update
    frame - otherwise we'd need a static version of the update frame
    too, and various other parts of the RTS that deal with update
    frames would also need special cases for static update frames.
 
-   newCaf() does the following:
+   newCAF() does the following:
 
       - atomically locks the CAF (see [atomic CAF entry])
 
@@ -304,7 +335,7 @@ freeStorage (rtsBool free_heap)
    ------------------
    Note [atomic CAF entry]
 
-   With THREADED_RTS, newCaf() is required to be atomic (see
+   With THREADED_RTS, newCAF() is required to be atomic (see
    #5558). This is because if two threads happened to enter the same
    CAF simultaneously, they would create two distinct CAF_BLACKHOLEs,
    and so the normal threadPaused() machinery for detecting duplicate
@@ -324,7 +355,7 @@ freeStorage (rtsBool free_heap)
       - we must be able to *revert* CAFs that have been evaluated, to
         their pre-evaluated form.
 
-      To do this, we use an additional CAF list.  When newCaf() is
+      To do this, we use an additional CAF list.  When newCAF() is
       called on a dynamically-loaded CAF, we add it to the CAF list
       instead of the old-generation mutable list, and save away its
       old info pointer (in caf->saved_info) for later reversion.
@@ -346,7 +377,7 @@ lockCAF (StgRegTable *reg, StgIndStatic *caf)
 
     orig_info = caf->header.info;
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     const StgInfoTable *cur_info;
 
     if (orig_info == &stg_IND_STATIC_info ||
@@ -395,8 +426,8 @@ newCAF(StgRegTable *reg, StgIndStatic *caf)
     {
         // Note [dyn_caf_list]
         // If we are in GHCi _and_ we are using dynamic libraries,
-        // then we can't redirect newCAF calls to newDynCAF (see below),
-        // so we make newCAF behave almost like newDynCAF.
+        // then we can't redirect newCAF calls to newRetainedCAF (see below),
+        // so we make newCAF behave almost like newRetainedCAF.
         // The dynamic libraries might be used by both the interpreted
         // program and GHCi itself, so they must not be reverted.
         // This also means that in GHCi with dynamic libraries, CAFs are not
@@ -406,7 +437,7 @@ newCAF(StgRegTable *reg, StgIndStatic *caf)
 
         ACQUIRE_SM_LOCK; // dyn_caf_list is global, locked by sm_mutex
         caf->static_link = (StgClosure*)dyn_caf_list;
-        dyn_caf_list = caf;
+        dyn_caf_list = (StgIndStatic*)((StgWord)caf | STATIC_FLAG_LIST);
         RELEASE_SM_LOCK;
     }
     else
@@ -417,7 +448,7 @@ newCAF(StgRegTable *reg, StgIndStatic *caf)
                              regTableToCapability(reg), oldest_gen->no);
         }
 
-#ifdef DEBUG
+#if defined(DEBUG)
         // In the DEBUG rts, we keep track of live CAFs by chaining them
         // onto a list debug_caf_list.  This is so that we can tell if we
         // ever enter a GC'd CAF, and emit a suitable barf().
@@ -443,17 +474,17 @@ setKeepCAFs (void)
     keepCAFs = 1;
 }
 
-// An alternate version of newCaf which is used for dynamically loaded
+// An alternate version of newCAF which is used for dynamically loaded
 // object code in GHCi.  In this case we want to retain *all* CAFs in
 // the object code, because they might be demanded at any time from an
 // expression evaluated on the command line.
 // Also, GHCi might want to revert CAFs, so we add these to the
 // revertible_caf_list.
 //
-// The linker hackily arranges that references to newCaf from dynamic
-// code end up pointing to newDynCAF.
-StgInd *
-newDynCAF (StgRegTable *reg, StgIndStatic *caf)
+// The linker hackily arranges that references to newCAF from dynamic
+// code end up pointing to newRetainedCAF.
+//
+StgInd* newRetainedCAF (StgRegTable *reg, StgIndStatic *caf)
 {
     StgInd *bh;
 
@@ -463,9 +494,36 @@ newDynCAF (StgRegTable *reg, StgIndStatic *caf)
     ACQUIRE_SM_LOCK;
 
     caf->static_link = (StgClosure*)revertible_caf_list;
-    revertible_caf_list = caf;
+    revertible_caf_list = (StgIndStatic*)((StgWord)caf | STATIC_FLAG_LIST);
 
     RELEASE_SM_LOCK;
+
+    return bh;
+}
+
+// If we are using loadObj/unloadObj in the linker, then we want to
+//
+//  - retain all CAFs in statically linked code (keepCAFs == true),
+//    because we might link a new object that uses any of these CAFs.
+//
+//  - GC CAFs in dynamically-linked code, so that we can detect when
+//    a dynamically-linked object is unloadable.
+//
+// So for this case, we set keepCAFs to true, and link newCAF to newGCdCAF
+// for dynamically-linked code.
+//
+StgInd* newGCdCAF (StgRegTable *reg, StgIndStatic *caf)
+{
+    StgInd *bh;
+
+    bh = lockCAF(reg, caf);
+    if (!bh) return NULL;
+
+    // Put this CAF on the mutable list for the old generation.
+    if (oldest_gen->no != 0) {
+        recordMutableCap((StgClosure*)caf,
+                         regTableToCapability(reg), oldest_gen->no);
+    }
 
     return bh;
 }
@@ -475,7 +533,7 @@ newDynCAF (StgRegTable *reg, StgIndStatic *caf)
    -------------------------------------------------------------------------- */
 
 static bdescr *
-allocNursery (bdescr *tail, W_ blocks)
+allocNursery (uint32_t node, bdescr *tail, W_ blocks)
 {
     bdescr *bd = NULL;
     W_ i, n;
@@ -491,7 +549,7 @@ allocNursery (bdescr *tail, W_ blocks)
         // allocLargeChunk will prefer large chunks, but will pick up
         // small chunks if there are any available.  We must allow
         // single blocks here to avoid fragmentation (#7257)
-        bd = allocLargeChunk(1, n);
+        bd = allocLargeChunkOnNode(node, 1, n);
         n = bd->blocks;
         blocks -= n;
 
@@ -525,116 +583,152 @@ allocNursery (bdescr *tail, W_ blocks)
     return &bd[0];
 }
 
-static void
-assignNurseriesToCapabilities (nat from, nat to)
+STATIC_INLINE void
+assignNurseryToCapability (Capability *cap, uint32_t n)
 {
-    nat i;
+    ASSERT(n < n_nurseries);
+    cap->r.rNursery = &nurseries[n];
+    cap->r.rCurrentNursery = nurseries[n].blocks;
+    newNurseryBlock(nurseries[n].blocks);
+    cap->r.rCurrentAlloc   = NULL;
+    ASSERT(cap->r.rCurrentNursery->node == cap->node);
+}
+
+/*
+ * Give each Capability a nursery from the pool. No need to do atomic increments
+ * here, everything must be stopped to call this function.
+ */
+static void
+assignNurseriesToCapabilities (uint32_t from, uint32_t to)
+{
+    uint32_t i, node;
 
     for (i = from; i < to; i++) {
-        capabilities[i]->r.rCurrentNursery = nurseries[i].blocks;
-        capabilities[i]->r.rCurrentAlloc   = NULL;
+        node = capabilities[i]->node;
+        assignNurseryToCapability(capabilities[i], next_nursery[node]);
+        next_nursery[node] += n_numa_nodes;
     }
 }
 
 static void
-allocNurseries (nat from, nat to)
-{ 
-    nat i;
+allocNurseries (uint32_t from, uint32_t to)
+{
+    uint32_t i;
+    memcount n_blocks;
+
+    if (RtsFlags.GcFlags.nurseryChunkSize) {
+        n_blocks = RtsFlags.GcFlags.nurseryChunkSize;
+    } else {
+        n_blocks = RtsFlags.GcFlags.minAllocAreaSize;
+    }
 
     for (i = from; i < to; i++) {
-        nurseries[i].blocks =
-            allocNursery(NULL, RtsFlags.GcFlags.minAllocAreaSize);
-        nurseries[i].n_blocks =
-            RtsFlags.GcFlags.minAllocAreaSize;
-    }
-    assignNurseriesToCapabilities(from, to);
-}
-      
-void
-clearNursery (Capability *cap)
-{
-    bdescr *bd;
-
-    for (bd = nurseries[cap->no].blocks; bd; bd = bd->link) {
-        cap->total_allocated += (W_)(bd->free - bd->start);
-        bd->free = bd->start;
-        ASSERT(bd->gen_no == 0);
-        ASSERT(bd->gen == g0);
-        IF_DEBUG(sanity,memset(bd->start, 0xaa, BLOCK_SIZE));
+        nurseries[i].blocks = allocNursery(capNoToNumaNode(i), NULL, n_blocks);
+        nurseries[i].n_blocks = n_blocks;
     }
 }
 
 void
 resetNurseries (void)
 {
+    uint32_t n;
+
+    for (n = 0; n < n_numa_nodes; n++) {
+        next_nursery[n] = n;
+    }
     assignNurseriesToCapabilities(0, n_capabilities);
+
+#if defined(DEBUG)
+    bdescr *bd;
+    for (n = 0; n < n_nurseries; n++) {
+        for (bd = nurseries[n].blocks; bd; bd = bd->link) {
+            ASSERT(bd->gen_no == 0);
+            ASSERT(bd->gen == g0);
+            ASSERT(bd->node == capNoToNumaNode(n));
+            IF_DEBUG(sanity, memset(bd->start, 0xaa, BLOCK_SIZE));
+        }
+    }
+#endif
 }
 
 W_
 countNurseryBlocks (void)
 {
-    nat i;
+    uint32_t i;
     W_ blocks = 0;
 
-    for (i = 0; i < n_capabilities; i++) {
+    for (i = 0; i < n_nurseries; i++) {
         blocks += nurseries[i].n_blocks;
     }
     return blocks;
 }
 
-static void
-resizeNursery (nursery *nursery, W_ blocks)
-{
-  bdescr *bd;
-  W_ nursery_blocks;
-
-  nursery_blocks = nursery->n_blocks;
-  if (nursery_blocks == blocks) return;
-
-  if (nursery_blocks < blocks) {
-      debugTrace(DEBUG_gc, "increasing size of nursery to %d blocks", 
-                 blocks);
-    nursery->blocks = allocNursery(nursery->blocks, blocks-nursery_blocks);
-  } 
-  else {
-    bdescr *next_bd;
-    
-    debugTrace(DEBUG_gc, "decreasing size of nursery to %d blocks", 
-               blocks);
-
-    bd = nursery->blocks;
-    while (nursery_blocks > blocks) {
-        next_bd = bd->link;
-        next_bd->u.back = NULL;
-        nursery_blocks -= bd->blocks; // might be a large block
-        freeGroup(bd);
-        bd = next_bd;
-    }
-    nursery->blocks = bd;
-    // might have gone just under, by freeing a large block, so make
-    // up the difference.
-    if (nursery_blocks < blocks) {
-        nursery->blocks = allocNursery(nursery->blocks, blocks-nursery_blocks);
-    }
-  }
-  
-  nursery->n_blocks = blocks;
-  ASSERT(countBlocks(nursery->blocks) == nursery->n_blocks);
-}
-
-// 
+//
 // Resize each of the nurseries to the specified size.
 //
-void
-resizeNurseriesFixed (W_ blocks)
+static void
+resizeNurseriesEach (W_ blocks)
 {
-    nat i;
-    for (i = 0; i < n_capabilities; i++) {
-        resizeNursery(&nurseries[i], blocks);
+    uint32_t i, node;
+    bdescr *bd;
+    W_ nursery_blocks;
+    nursery *nursery;
+
+    for (i = 0; i < n_nurseries; i++) {
+        nursery = &nurseries[i];
+        nursery_blocks = nursery->n_blocks;
+        if (nursery_blocks == blocks) continue;
+
+        node = capNoToNumaNode(i);
+        if (nursery_blocks < blocks) {
+            debugTrace(DEBUG_gc, "increasing size of nursery to %d blocks",
+                       blocks);
+            nursery->blocks = allocNursery(node, nursery->blocks,
+                                           blocks-nursery_blocks);
+        }
+        else
+        {
+            bdescr *next_bd;
+
+            debugTrace(DEBUG_gc, "decreasing size of nursery to %d blocks",
+                       blocks);
+
+            bd = nursery->blocks;
+            while (nursery_blocks > blocks) {
+                next_bd = bd->link;
+                next_bd->u.back = NULL;
+                nursery_blocks -= bd->blocks; // might be a large block
+                freeGroup(bd);
+                bd = next_bd;
+            }
+            nursery->blocks = bd;
+            // might have gone just under, by freeing a large block, so make
+            // up the difference.
+            if (nursery_blocks < blocks) {
+                nursery->blocks = allocNursery(node, nursery->blocks,
+                                               blocks-nursery_blocks);
+            }
+        }
+        nursery->n_blocks = blocks;
+        ASSERT(countBlocks(nursery->blocks) == nursery->n_blocks);
     }
 }
 
-// 
+void
+resizeNurseriesFixed (void)
+{
+    uint32_t blocks;
+
+    if (RtsFlags.GcFlags.nurseryChunkSize) {
+        blocks = RtsFlags.GcFlags.nurseryChunkSize;
+    } else {
+        blocks = RtsFlags.GcFlags.minAllocAreaSize;
+    }
+
+    resizeNurseriesEach(blocks);
+}
+
+//
 // Resize the nurseries to the total specified size.
 //
 void
@@ -642,9 +736,46 @@ resizeNurseries (W_ blocks)
 {
     // If there are multiple nurseries, then we just divide the number
     // of available blocks between them.
-    resizeNurseriesFixed(blocks / n_capabilities);
+    resizeNurseriesEach(blocks / n_nurseries);
 }
 
+bool
+getNewNursery (Capability *cap)
+{
+    StgWord i;
+    uint32_t node = cap->node;
+    uint32_t n;
+
+    for(;;) {
+        i = next_nursery[node];
+        if (i < n_nurseries) {
+            if (cas(&next_nursery[node], i, i+n_numa_nodes) == i) {
+                assignNurseryToCapability(cap, i);
+                return true;
+            }
+        } else if (n_numa_nodes > 1) {
+            // Try to find an unused nursery chunk on other nodes.  We'll get
+            // remote memory, but the rationale is that avoiding GC is better
+            // than avoiding remote memory access.
+            bool lost = false;
+            for (n = 0; n < n_numa_nodes; n++) {
+                if (n == node) continue;
+                i = next_nursery[n];
+                if (i < n_nurseries) {
+                    if (cas(&next_nursery[n], i, i+n_numa_nodes) == i) {
+                        assignNurseryToCapability(cap, i);
+                        return true;
+                    } else {
+                        lost = true; /* lost a race */
+                    }
+                }
+            }
+            if (!lost) return false;
+        } else {
+            return false;
+        }
+    }
+}
 
 /* -----------------------------------------------------------------------------
    move_STACK is called to update the TSO structure after it has been
@@ -656,9 +787,23 @@ move_STACK (StgStack *src, StgStack *dest)
 {
     ptrdiff_t diff;
 
-    // relocate the stack pointer... 
-    diff = (StgPtr)dest - (StgPtr)src; // In *words* 
+    // relocate the stack pointer...
+    diff = (StgPtr)dest - (StgPtr)src; // In *words*
     dest->sp = (StgPtr)dest->sp + diff;
+}
+
+STATIC_INLINE void
+accountAllocation(Capability *cap, W_ n)
+{
+    TICK_ALLOC_HEAP_NOCTR(WDS(n));
+    CCS_ALLOC(cap->r.rCCCS,n);
+    if (cap->r.rCurrentTSO != NULL) {
+        // cap->r.rCurrentTSO->alloc_limit -= n*sizeof(W_)
+        ASSIGN_Int64((W_*)&(cap->r.rCurrentTSO->alloc_limit),
+                     (PK_Int64((W_*)&(cap->r.rCurrentTSO->alloc_limit))
+                      - n*sizeof(W_)));
+    }
+
 }
 
 /* -----------------------------------------------------------------------------
@@ -677,14 +822,37 @@ move_STACK (StgStack *src, StgStack *dest)
    that operation fails, then the whole process will be killed.
    -------------------------------------------------------------------------- */
 
-StgPtr allocate (Capability *cap, W_ n)
+/*
+ * Allocate some n words of heap memory; terminating
+ * on heap overflow
+ */
+StgPtr
+allocate (Capability *cap, W_ n)
+{
+    StgPtr p = allocateMightFail(cap, n);
+    if (p == NULL) {
+        reportHeapOverflow();
+        // heapOverflow() doesn't exit (see #2592), but we aren't
+        // in a position to do a clean shutdown here: we
+        // either have to allocate the memory or exit now.
+        // Allocating the memory would be bad, because the user
+        // has requested that we not exceed maxHeapSize, so we
+        // just exit.
+        stg_exit(EXIT_HEAPOVERFLOW);
+    }
+    return p;
+}
+
+/*
+ * Allocate some n words of heap memory; returning NULL
+ * on heap overflow
+ */
+StgPtr
+allocateMightFail (Capability *cap, W_ n)
 {
     bdescr *bd;
     StgPtr p;
 
-    TICK_ALLOC_HEAP_NOCTR(WDS(n));
-    CCS_ALLOC(cap->r.rCCCS,n);
-    
     if (n >= LARGE_OBJECT_THRESHOLD/sizeof(W_)) {
         // The largest number of words such that
         // the computation of req_blocks will not overflow.
@@ -703,18 +871,14 @@ StgPtr allocate (Capability *cap, W_ n)
             req_blocks >= HS_INT32_MAX)   // avoid overflow when
                                           // calling allocGroup() below
         {
-            heapOverflow();
-            // heapOverflow() doesn't exit (see #2592), but we aren't
-            // in a position to do a clean shutdown here: we
-            // either have to allocate the memory or exit now.
-            // Allocating the memory would be bad, because the user
-            // has requested that we not exceed maxHeapSize, so we
-            // just exit.
-            stg_exit(EXIT_HEAPOVERFLOW);
+            return NULL;
         }
 
+        // Only credit allocation after we've passed the size check above
+        accountAllocation(cap, n);
+
         ACQUIRE_SM_LOCK
-        bd = allocGroup(req_blocks);
+        bd = allocGroupOnNode(cap->node,req_blocks);
         dbl_link_onto(bd, &g0->large_objects);
         g0->n_large_blocks += bd->blocks; // might be larger than req_blocks
         g0->n_new_large_words += n;
@@ -728,19 +892,22 @@ StgPtr allocate (Capability *cap, W_ n)
 
     /* small allocation (<LARGE_OBJECT_THRESHOLD) */
 
+    accountAllocation(cap, n);
     bd = cap->r.rCurrentAlloc;
     if (bd == NULL || bd->free + n > bd->start + BLOCK_SIZE_W) {
-        
+
+        if (bd) finishedNurseryBlock(cap,bd);
+
         // The CurrentAlloc block is full, we need to find another
         // one.  First, we try taking the next block from the
         // nursery:
         bd = cap->r.rCurrentNursery->link;
-        
-        if (bd == NULL || bd->free + n > bd->start + BLOCK_SIZE_W) {
-            // The nursery is empty, or the next block is already
-            // full: allocate a fresh block (we can't fail here).
+
+        if (bd == NULL) {
+            // The nursery is empty: allocate a fresh block (we can't
+            // fail here).
             ACQUIRE_SM_LOCK;
-            bd = allocBlock();
+            bd = allocBlockOnNode(cap->node);
             cap->r.rNursery->n_blocks++;
             RELEASE_SM_LOCK;
             initBdescr(bd, g0, g0);
@@ -749,6 +916,7 @@ StgPtr allocate (Capability *cap, W_ n)
             // pretty quickly now, because MAYBE_GC() will
             // notice that CurrentNursery->link is NULL.
         } else {
+            newNurseryBlock(bd);
             // we have a block in the nursery: take it and put
             // it at the *front* of the nursery list, and use it
             // to allocate() from.
@@ -810,7 +978,8 @@ StgPtr allocate (Capability *cap, W_ n)
    to pinned ByteArrays, not scavenging is ok.
 
    This function is called by newPinnedByteArray# which immediately
-   fills the allocated memory with a MutableByteArray#.
+   fills the allocated memory with a MutableByteArray#. Note that
+   this returns NULL on heap overflow.
    ------------------------------------------------------------------------- */
 
 StgPtr
@@ -822,16 +991,18 @@ allocatePinned (Capability *cap, W_ n)
     // If the request is for a large object, then allocate()
     // will give us a pinned object anyway.
     if (n >= LARGE_OBJECT_THRESHOLD/sizeof(W_)) {
-        p = allocate(cap, n);
-        Bdescr(p)->flags |= BF_PINNED;
-        return p;
+        p = allocateMightFail(cap, n);
+        if (p == NULL) {
+            return NULL;
+        } else {
+            Bdescr(p)->flags |= BF_PINNED;
+            return p;
+        }
     }
 
-    TICK_ALLOC_HEAP_NOCTR(WDS(n));
-    CCS_ALLOC(cap->r.rCCCS,n);
-
+    accountAllocation(cap, n);
     bd = cap->pinned_object_block;
-    
+
     // If we don't have a block of pinned objects yet, or the current
     // one isn't large enough to hold the new object, get a new one.
     if (bd == NULL || (bd->free + n) > (bd->start + BLOCK_SIZE_W)) {
@@ -840,9 +1011,9 @@ allocatePinned (Capability *cap, W_ n)
         // next GC cycle these objects will be moved to
         // g0->large_objects.
         if (bd != NULL) {
-            dbl_link_onto(bd, &cap->pinned_object_blocks);
             // add it to the allocation stats when the block is full
-            cap->total_allocated += bd->free - bd->start;
+            finishedNurseryBlock(cap, bd);
+            dbl_link_onto(bd, &cap->pinned_object_blocks);
         }
 
         // We need to find another block.  We could just allocate one,
@@ -851,27 +1022,17 @@ allocatePinned (Capability *cap, W_ n)
         // objects scale really badly if we do this).
         //
         // So first, we try taking the next block from the nursery, in
-        // the same way as allocate(), but note that we can only take
-        // an *empty* block, because we're about to mark it as
-        // BF_PINNED | BF_LARGE.
+        // the same way as allocate().
         bd = cap->r.rCurrentNursery->link;
-        if (bd == NULL || bd->free != bd->start) { // must be empty!
-            // The nursery is empty, or the next block is non-empty:
-            // allocate a fresh block (we can't fail here).
-
-            // XXX in the case when the next nursery block is
-            // non-empty we aren't exerting any pressure to GC soon,
-            // so if this case ever happens then we could in theory
-            // keep allocating for ever without calling the GC. We
-            // can't bump g0->n_new_large_words because that will be
-            // counted towards allocation, and we're already counting
-            // our pinned obects as allocation in
-            // collect_pinned_object_blocks in the GC.
+        if (bd == NULL) {
+            // The nursery is empty: allocate a fresh block (we can't fail
+            // here).
             ACQUIRE_SM_LOCK;
-            bd = allocBlock();
+            bd = allocBlockOnNode(cap->node);
             RELEASE_SM_LOCK;
             initBdescr(bd, g0, g0);
         } else {
+            newNurseryBlock(bd);
             // we have a block in the nursery: steal it
             cap->r.rCurrentNursery->link = bd->link;
             if (bd->link != NULL) {
@@ -935,7 +1096,6 @@ dirty_TVAR(Capability *cap, StgTVar *p)
 // Setting a TSO's link field with a write barrier.
 // It is *not* necessary to call this function when
 //    * setting the link field to END_TSO_QUEUE
-//    * putting a TSO on the blackhole_queue
 //    * setting the link field of the currently running TSO, as it
 //      will already be dirty.
 void
@@ -995,21 +1155,57 @@ dirty_MVAR(StgRegTable *reg, StgClosure *p)
  * -------------------------------------------------------------------------- */
 
 /* -----------------------------------------------------------------------------
- * updateNurseriesStats()
+ * [Note allocation accounting]
  *
- * Update the per-cap total_allocated numbers with an approximation of
- * the amount of memory used in each cap's nursery.
+ *   - When cap->r.rCurrentNusery moves to a new block in the nursery,
+ *     we add the size of the used portion of the previous block to
+ *     cap->total_allocated. (see finishedNurseryBlock())
  *
- * Since this update is also performed by clearNurseries() then we only
- * need this function for the final stats when the RTS is shutting down.
+ *   - When we start a GC, the allocated portion of CurrentNursery and
+ *     CurrentAlloc are added to cap->total_allocated. (see
+ *     updateNurseriesStats())
+ *
  * -------------------------------------------------------------------------- */
 
-void updateNurseriesStats (void)
+//
+// Calculate the total allocated memory since the start of the
+// program.  Also emits events reporting the per-cap allocation
+// totals.
+//
+StgWord
+calcTotalAllocated (void)
 {
-    nat i;
+    W_ tot_alloc = 0;
+    W_ n;
+
+    for (n = 0; n < n_capabilities; n++) {
+        tot_alloc += capabilities[n]->total_allocated;
+
+        traceEventHeapAllocated(capabilities[n],
+                                CAPSET_HEAP_DEFAULT,
+                                capabilities[n]->total_allocated * sizeof(W_));
+    }
+
+    return tot_alloc;
+}
+
+//
+// Update the per-cap total_allocated numbers with an approximation of
+// the amount of memory used in each cap's nursery.
+//
+void
+updateNurseriesStats (void)
+{
+    uint32_t i;
+    bdescr *bd;
 
     for (i = 0; i < n_capabilities; i++) {
-        capabilities[i]->total_allocated += countOccupied(nurseries[i].blocks);
+        // The current nursery block and the current allocate block have not
+        // yet been accounted for in cap->total_allocated, so we add them here.
+        bd = capabilities[i]->r.rCurrentNursery;
+        if (bd) finishedNurseryBlock(capabilities[i], bd);
+        bd = capabilities[i]->r.rCurrentAlloc;
+        if (bd) finishedNurseryBlock(capabilities[i], bd);
     }
 }
 
@@ -1027,26 +1223,28 @@ W_ countOccupied (bdescr *bd)
 
 W_ genLiveWords (generation *gen)
 {
-    return gen->n_words + gen->n_large_words;
+    return gen->n_words + gen->n_large_words +
+        gen->n_compact_blocks * BLOCK_SIZE_W;
 }
 
 W_ genLiveBlocks (generation *gen)
 {
-    return gen->n_blocks + gen->n_large_blocks;
+    return gen->n_blocks + gen->n_large_blocks + gen->n_compact_blocks;
 }
 
-W_ gcThreadLiveWords (nat i, nat g)
+W_ gcThreadLiveWords (uint32_t i, uint32_t g)
 {
-    W_ words;
+    W_ a, b, c;
 
-    words   = countOccupied(gc_threads[i]->gens[g].todo_bd);
-    words  += countOccupied(gc_threads[i]->gens[g].part_list);
-    words  += countOccupied(gc_threads[i]->gens[g].scavd_list);
+    a = countOccupied(gc_threads[i]->gens[g].todo_bd);
+    b = gc_threads[i]->gens[g].n_part_words;
+    c = gc_threads[i]->gens[g].n_scavd_words;
 
-    return words;
+//    debugBelch("cap %d, g%d, %ld %ld %ld\n", i, g, a, b, c);
+    return a + b + c;
 }
 
-W_ gcThreadLiveBlocks (nat i, nat g)
+W_ gcThreadLiveBlocks (uint32_t i, uint32_t g)
 {
     W_ blocks;
 
@@ -1055,32 +1253,6 @@ W_ gcThreadLiveBlocks (nat i, nat g)
     blocks += gc_threads[i]->gens[g].n_scavd_blocks;
 
     return blocks;
-}
-
-// Return an accurate count of the live data in the heap, excluding
-// generation 0.
-W_ calcLiveWords (void)
-{
-    nat g;
-    W_ live;
-
-    live = 0;
-    for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
-        live += genLiveWords(&generations[g]);
-    }
-    return live;
-}
-
-W_ calcLiveBlocks (void)
-{
-    nat g;
-    W_ live;
-
-    live = 0;
-    for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
-        live += genLiveBlocks(&generations[g]);
-    }
-    return live;
 }
 
 /* Determine which generation will be collected next, and approximate
@@ -1093,13 +1265,13 @@ W_ calcLiveBlocks (void)
  * that will be collected next time will therefore need twice as many
  * blocks since all the data will be copied.
  */
-extern W_ 
-calcNeeded (rtsBool force_major, memcount *blocks_needed)
+extern W_
+calcNeeded (bool force_major, memcount *blocks_needed)
 {
     W_ needed = 0, blocks;
-    nat g, N;
+    uint32_t g, N;
     generation *gen;
-    
+
     if (force_major) {
         N = RtsFlags.GcFlags.generations - 1;
     } else {
@@ -1110,11 +1282,12 @@ calcNeeded (rtsBool force_major, memcount *blocks_needed)
         gen = &generations[g];
 
         blocks = gen->n_blocks // or: gen->n_words / BLOCK_SIZE_W (?)
-               + gen->n_large_blocks;
+               + gen->n_large_blocks
+               + gen->n_compact_blocks;
 
         // we need at least this much space
         needed += blocks;
-        
+
         // are we collecting this gen?
         if (g == 0 || // always collect gen 0
             blocks > gen->max_blocks)
@@ -1142,6 +1315,28 @@ calcNeeded (rtsBool force_major, memcount *blocks_needed)
     return N;
 }
 
+StgWord calcTotalLargeObjectsW (void)
+{
+    uint32_t g;
+    StgWord totalW = 0;
+
+    for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
+        totalW += generations[g].n_large_words;
+    }
+    return totalW;
+}
+
+StgWord calcTotalCompactW (void)
+{
+    uint32_t g;
+    StgWord totalW = 0;
+
+    for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
+        totalW += generations[g].n_compact_blocks * BLOCK_SIZE_W;
+    }
+    return totalW;
+}
+
 /* ----------------------------------------------------------------------------
    Executable memory
 
@@ -1162,9 +1357,23 @@ calcNeeded (rtsBool force_major, memcount *blocks_needed)
          should be modified to use allocateExec instead of VirtualAlloc.
    ------------------------------------------------------------------------- */
 
-#if defined(arm_HOST_ARCH) && defined(ios_HOST_OS)
-void sys_icache_invalidate(void *start, size_t len);
+#if (defined(arm_HOST_ARCH) || defined(aarch64_HOST_ARCH)) && defined(ios_HOST_OS)
+#include <libkern/OSCacheControl.h>
 #endif
+
+#if defined(__clang__)
+/* clang defines __clear_cache as a builtin on some platforms.
+ * For example on armv7-linux-androideabi. The type slightly
+ * differs from gcc.
+ */
+extern void __clear_cache(void * begin, void * end);
+#elif defined(__GNUC__)
+/* __clear_cache is a libgcc function.
+ * It existed before __builtin___clear_cache was introduced.
+ * See Trac #8562.
+ */
+extern void __clear_cache(char * begin, char * end);
+#endif /* __GNUC__ */
 
 /* On ARM and other platforms, we need to flush the cache after
    writing code into memory, so the processor reliably sees it. */
@@ -1174,14 +1383,29 @@ void flushExec (W_ len, AdjustorExecutable exec_addr)
   /* x86 doesn't need to do anything, so just suppress some warnings. */
   (void)len;
   (void)exec_addr;
-#elif defined(arm_HOST_ARCH) && defined(ios_HOST_OS)
+#elif (defined(arm_HOST_ARCH) || defined(aarch64_HOST_ARCH)) && defined(ios_HOST_OS)
   /* On iOS we need to use the special 'sys_icache_invalidate' call. */
-  sys_icache_invalidate(exec_addr, ((unsigned char*)exec_addr)+len);
+  sys_icache_invalidate(exec_addr, len);
+#elif defined(__clang__)
+  unsigned char* begin = (unsigned char*)exec_addr;
+  unsigned char* end   = begin + len;
+# if __has_builtin(__builtin___clear_cache)
+  __builtin___clear_cache((void*)begin, (void*)end);
+# else
+  __clear_cache((void*)begin, (void*)end);
+# endif
 #elif defined(__GNUC__)
   /* For all other platforms, fall back to a libgcc builtin. */
   unsigned char* begin = (unsigned char*)exec_addr;
   unsigned char* end   = begin + len;
+  /* __builtin___clear_cache is supported since GNU C 4.3.6.
+   * We pick 4.4 to simplify condition a bit.
+   */
+# if __GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 4)
+  __builtin___clear_cache((void*)begin, (void*)end);
+# else
   __clear_cache((void*)begin, (void*)end);
+# endif
 #else
 #error Missing support to flush the instruction cache
 #endif
@@ -1291,7 +1515,7 @@ AdjustorWritable allocateExec (W_ bytes, AdjustorExecutable *exec_ret)
             exec_block->u.back = bd;
         }
         bd->u.back = NULL;
-        setExecutable(bd->start, bd->blocks * BLOCK_SIZE, rtsTrue);
+        setExecutable(bd->start, bd->blocks * BLOCK_SIZE, true);
         exec_block = bd;
     }
     *(exec_block->free) = n;  // store the size of this chunk
@@ -1328,7 +1552,7 @@ void freeExec (void *addr)
         if (bd != exec_block) {
             debugTrace(DEBUG_gc, "free exec block %p", bd->start);
             dbl_link_remove(bd, &exec_block);
-            setExecutable(bd->start, bd->blocks * BLOCK_SIZE, rtsFalse);
+            setExecutable(bd->start, bd->blocks * BLOCK_SIZE, false);
             freeGroup(bd);
         } else {
             bd->free = bd->start;
@@ -1340,7 +1564,7 @@ void freeExec (void *addr)
 
 #endif /* switch(HOST_OS) */
 
-#ifdef DEBUG
+#if defined(DEBUG)
 
 // handy function for use in gdb, because Bdescr() is inlined.
 extern bdescr *_bdescr (StgPtr p);
@@ -1352,11 +1576,3 @@ _bdescr (StgPtr p)
 }
 
 #endif
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

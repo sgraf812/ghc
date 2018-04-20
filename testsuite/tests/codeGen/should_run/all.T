@@ -1,5 +1,5 @@
 # Test +RTS -G1 here (it isn't tested anywhere else)
-setTestOpts(extra_ways(['g1']))
+setTestOpts(unless(fast(), extra_ways(['g1'])))
 
 test('cgrun001', normal, compile_and_run, [''])
 test('cgrun002', normal, compile_and_run, [''])
@@ -12,27 +12,30 @@ test('cgrun008', normal, compile_and_run, [''])
 test('cgrun009', normal, compile_and_run, [''])
 test('cgrun010', normal, compile_and_run, [''])
 test('cgrun011', normal, compile_and_run, [''])
-test('cgrun012', only_compiler_types(['ghc']), compile_and_run, [''])
+test('cgrun012', normal, compile_and_run, [''])
 test('cgrun013', normal, compile_and_run, [''])
 test('cgrun014', normal, compile_and_run, [''])
-test('cgrun015', only_compiler_types(['ghc']), compile_and_run, [''])
+test('cgrun015', normal, compile_and_run, [''])
 test('cgrun016', exit_code(1), compile_and_run, [''])
 test('cgrun017', normal, compile_and_run, [''])
-test('cgrun018', only_compiler_types(['ghc']), compile_and_run, [''])
+test('cgrun018', normal, compile_and_run, [''])
 test('cgrun019', normal, compile_and_run, [''])
 test('cgrun020', normal, compile_and_run, [''])
-test('cgrun021', normal, compile_and_run, [''])
+
+# cgrun021 does some GC, so let's use it to test GC parameters
+test('cgrun021', extra_ways(['nursery_chunks']), compile_and_run, [''])
+
 test('cgrun022', normal, compile_and_run, [''])
 test('cgrun024', normal, compile_and_run, [''])
 test('cgrun025',
-     [reqlib('regex-compat'), extra_run_opts('cg025.hs'), exit_code(1)],
+     [reqlib('regex-compat'), extra_run_opts('cgrun025.hs'), exit_code(1)],
      compile_and_run, ['-package regex-compat'])
-test('cgrun026', only_compiler_types(['ghc']), compile_and_run, [''])
+test('cgrun026', normal, compile_and_run, [''])
 test('cgrun027', normal, compile_and_run, [''])
 test('cgrun028', normal, compile_and_run, [''])
-test('cgrun031', only_compiler_types(['ghc']), compile_and_run, [''])
-test('cgrun032', only_compiler_types(['ghc']), compile_and_run, [''])
-test('cgrun033', only_compiler_types(['ghc']), compile_and_run, [''])
+test('cgrun031', normal, compile_and_run, [''])
+test('cgrun032', normal, compile_and_run, [''])
+test('cgrun033', normal, compile_and_run, [''])
 test('cgrun034', normal, compile_and_run, [''])
 test('cgrun035', normal, compile_and_run, [''])
 test('cgrun036', normal, compile_and_run, [''])
@@ -67,14 +70,15 @@ test('cgrun063', normal, compile_and_run, [''])
 test('cgrun064', normal, compile_and_run, [''])
 test('cgrun065', normal, compile_and_run, [''])
 test('cgrun066', normal, compile_and_run, [''])
-test('cgrun067', extra_clean(['Cgrun067A.hi', 'Cgrun067A.o']),
-     compile_and_run, [''])
+test('cgrun067', [extra_files(['Cgrun067A.hs'])], compile_and_run, [''])
 test('cgrun068', reqlib('random'), compile_and_run, [''])
 test('cgrun069', omit_ways(['ghci']), multi_compile_and_run,
                  ['cgrun069', [('cgrun069_cmm.cmm', '')], ''])
 test('cgrun070', normal, compile_and_run, [''])
 test('cgrun071', normal, compile_and_run, [''])
 test('cgrun072', normal, compile_and_run, [''])
+test('cgrun075', normal, compile_and_run, [''])
+test('cgrun076', normal, compile_and_run, [''])
 
 test('T1852', normal, compile_and_run, [''])
 test('T1861', extra_run_opts('0'), compile_and_run, [''])
@@ -86,11 +90,16 @@ test('T3677', extra_run_opts('+RTS -K8k -RTS'), compile_and_run, [''])
 test('T4441', normal, compile_and_run, [''])
 test('T5149', omit_ways(['ghci']), multi_compile_and_run,
                  ['T5149', [('T5149_cmm.cmm', '')], ''])
-test('T5129', normal, compile_and_run, [''])
+test('T5129',
+     # The bug is in simplifier when run with -O1 and above, so only run it
+     # optimised, using any backend.
+     only_ways(['optasm']),
+     compile_and_run, [''])
 test('T5626', exit_code(1), compile_and_run, [''])
 test('T5747', when(arch('i386'), extra_hc_opts('-msse2')), compile_and_run, ['-O2'])
 test('T5785', normal, compile_and_run, [''])
 test('setByteArray', normal, compile_and_run, [''])
+test('compareByteArrays', normal, compile_and_run, [''])
 
 test('T6146', normal, compile_and_run, [''])
 test('T5900', normal, compile_and_run, [''])
@@ -112,9 +121,14 @@ test('T7361', normal, compile_and_run, [''])
 test('T7600', normal, compile_and_run, [''])
 test('T8103', only_ways(['normal']), compile_and_run, [''])
 test('T7953', reqlib('random'), compile_and_run, [''])
-test('T8256', reqlib('vector'), compile_and_run, [''])
+test('T8256', normal, compile_and_run, ['-dcore-lint -O1'])
 test('T6084',normal, compile_and_run, ['-O2'])
-test('StaticArraySize', normal, compile_and_run, ['-O2'])
+test('CgStaticPointers', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
+     compile_and_run, [''])
+test('CgStaticPointersNoFullLazyness', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
+     compile_and_run, ['-O -fno-full-laziness'])
+test('StaticArraySize', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
+     compile_and_run, ['-O2'])
 test('StaticByteArraySize', normal, compile_and_run, ['-O2'])
 test('CopySmallArray', normal, compile_and_run, [''])
 test('CopySmallArrayStressTest', reqlib('random'), compile_and_run, [''])
@@ -123,3 +137,37 @@ test('T9001', normal, compile_and_run, [''])
 test('T9013', omit_ways(['ghci']),  # ghci doesn't support unboxed tuples
      compile_and_run, [''])
 test('T9340', normal, compile_and_run, [''])
+test('cgrun074', normal, compile_and_run, [''])
+test('CmmSwitchTest32', unless(wordsize(32), skip), compile_and_run, [''])
+test('CmmSwitchTest64', unless(wordsize(64), skip), compile_and_run, [''])
+# Skipping WAY=ghci, because it is not broken.
+test('T10245', normal, compile_and_run, [''])
+test('T10246', normal, compile_and_run, [''])
+test('T9533', normal, compile_and_run, [''])
+test('T9533b', normal, compile_and_run, [''])
+test('T9533c', normal, compile_and_run, [''])
+test('T10414', [only_ways(['threaded2']), extra_ways(['threaded2']), req_smp],
+     compile_and_run, ['-feager-blackholing'])
+test('T10521', normal, compile_and_run, [''])
+test('T10521b', normal, compile_and_run, [''])
+test('T10870', when(wordsize(32), skip), compile_and_run, [''])
+test('PopCnt', omit_ways(['ghci']), multi_compile_and_run,
+                 ['PopCnt', [('PopCnt_cmm.cmm', '')], ''])
+test('T12059', normal, compile_and_run, [''])
+test('T12433', normal, compile_and_run, [''])
+test('T12622', normal, multimod_compile_and_run, ['T12622', '-O'])
+test('T12757', normal, compile_and_run, [''])
+test('T12855', normal, compile_and_run, [''])
+test('T9577', [ unless(arch('x86_64') or arch('i386'),skip),
+                when(opsys('darwin'), expect_broken(12937)),
+                when(opsys('mingw32'), expect_broken(12965)),
+                only_ways(['normal']) ], compile_and_run, [''])
+
+test('T13425', normal, compile_and_run, ['-O'])
+test('castFloatWord', normal, compile_and_run, ['-dcmm-lint'])
+test('T13825-unit',
+     extra_run_opts('"' + config.libdir + '"'),
+     compile_and_run,
+     ['-package ghc'])
+test('T14619', normal, compile_and_run, [''])
+test('T14754', normal, compile_and_run, [''])

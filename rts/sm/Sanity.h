@@ -6,10 +6,9 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef SANITY_H
-#define SANITY_H
+#pragma once
 
-#ifdef DEBUG
+#if defined(DEBUG)
 
 #include "BeginPrivate.h"
 
@@ -21,34 +20,24 @@
 # endif
 
 /* debugging routines */
-void checkSanity        ( rtsBool after_gc, rtsBool major_gc );
+void checkSanity        ( bool after_gc, bool major_gc );
 void checkNurserySanity ( nursery *nursery );
 void checkHeapChain     ( bdescr *bd );
 void checkHeapChunk     ( StgPtr start, StgPtr end );
 void checkLargeObjects  ( bdescr *bd );
 void checkTSO           ( StgTSO* tso );
-void checkGlobalTSOList ( rtsBool checkTSOs );
+void checkGlobalTSOList ( bool checkTSOs );
 void checkStaticObjects ( StgClosure* static_objects );
 void checkStackChunk    ( StgPtr sp, StgPtr stack_end );
 StgOffset checkStackFrame ( StgPtr sp );
-StgOffset checkClosure  ( StgClosure* p );
+StgOffset checkClosure  ( const StgClosure* p );
 
 void checkRunQueue      (Capability *cap);
 
-void memInventory (rtsBool show);
+void memInventory (bool show);
 
 void checkBQ (StgTSO *bqe, StgClosure *closure);
 
 #include "EndPrivate.h"
 
 #endif /* DEBUG */
- 
-#endif /* SANITY_H */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

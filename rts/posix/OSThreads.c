@@ -7,18 +7,17 @@
  *
  * --------------------------------------------------------------------------*/
 
-#if defined(__linux__) || defined(__GLIBC__)
-/* We want GNU extensions in DEBUG mode for mutex error checking */
-/* We also want the affinity API, which requires _GNU_SOURCE */
-#define _GNU_SOURCE
-#endif
-
 #include "PosixSource.h"
 
-#if defined(freebsd_HOST_OS)
-/* Inclusion of system headers usually requires __BSD_VISIBLE on FreeBSD,
- * because of some specific types, like u_char, u_int, etc. */
+#if defined(freebsd_HOST_OS) || defined(dragonfly_HOST_OS)
+/* Inclusion of system headers usually requires __BSD_VISIBLE on FreeBSD and
+ * DragonflyBSD, because of some specific types, like u_char, u_int, etc. */
 #define __BSD_VISIBLE   1
+#endif
+#if defined(darwin_HOST_OS)
+/* Inclusion of system headers usually requires _DARWIN_C_SOURCE on Mac OS X
+ * because of some specific types like u_char, u_int, etc. */
+#define _DARWIN_C_SOURCE 1
 #endif
 
 #include "Rts.h"
@@ -36,7 +35,6 @@
 #endif
 #endif
 
-#if defined(THREADED_RTS)
 #include "RtsUtils.h"
 #include "Task.h"
 
@@ -64,7 +62,7 @@
 #include <sys/cpuset.h>
 #endif
 
-#ifdef HAVE_UNISTD_H
+#if defined(HAVE_UNISTD_H)
 #include <unistd.h>
 #endif
 
@@ -72,8 +70,12 @@
 #include <mach/mach.h>
 #endif
 
-#ifdef HAVE_SIGNAL_H
+#if defined(HAVE_SIGNAL_H)
 # include <signal.h>
+#endif
+
+#if defined(HAVE_NUMA_H)
+#include <numa.h>
 #endif
 
 /*
@@ -97,19 +99,19 @@ closeCondition( Condition* pCond )
   return;
 }
 
-rtsBool
+bool
 broadcastCondition ( Condition* pCond )
 {
   return (pthread_cond_broadcast(pCond) == 0);
 }
 
-rtsBool
+bool
 signalCondition ( Condition* pCond )
 {
   return (pthread_cond_signal(pCond) == 0);
 }
 
-rtsBool
+bool
 waitCondition ( Condition* pCond, Mutex* pMut )
 {
   return (pthread_cond_wait(pCond,pMut) == 0);
@@ -129,11 +131,16 @@ shutdownThread(void)
 }
 
 int
-createOSThread (OSThreadId* pId, OSThreadProc *startProc, void *param)
+createOSThread (OSThreadId* pId, char *name STG_UNUSED,
+                OSThreadProc *startProc, void *param)
 {
   int result = pthread_create(pId, NULL, (void *(*)(void *))startProc, param);
-  if(!result)
+  if (!result) {
     pthread_detach(*pId);
+#if defined(HAVE_PTHREAD_SETNAME_NP)
+    pthread_setname_np(*pId, name);
+#endif
+  }
   return result;
 }
 
@@ -143,12 +150,12 @@ osThreadId(void)
   return pthread_self();
 }
 
-rtsBool
+bool
 osThreadIsAlive(OSThreadId id STG_UNUSED)
 {
     // no good way to implement this on POSIX, AFAICT.  Returning true
     // is safe.
-    return rtsTrue;
+    return true;
 }
 
 void
@@ -207,6 +214,8 @@ freeThreadLocalKey (ThreadLocalKey *key)
     }
 }
 
+#if defined(THREADED_RTS)
+
 static void *
 forkOS_createThreadWrapper ( void * entry )
 {
@@ -214,6 +223,7 @@ forkOS_createThreadWrapper ( void * entry )
     cap = rts_lock();
     rts_evalStableIO(&cap, (HsStablePtr) entry, NULL);
     rts_unlock(cap);
+    rts_done();
     return NULL;
 }
 
@@ -228,19 +238,27 @@ forkOS_createThread ( HsStablePtr entry )
     return result;
 }
 
-nat
+void freeThreadingResources (void) { /* nothing */ }
+
+uint32_t
 getNumberOfProcessors (void)
 {
-    static nat nproc = 0;
+    static uint32_t nproc = 0;
 
     if (nproc == 0) {
 #if defined(HAVE_SYSCONF) && defined(_SC_NPROCESSORS_ONLN)
         nproc = sysconf(_SC_NPROCESSORS_ONLN);
 #elif defined(HAVE_SYSCONF) && defined(_SC_NPROCESSORS_CONF)
         nproc = sysconf(_SC_NPROCESSORS_CONF);
-#elif defined(darwin_HOST_OS) || defined(freebsd_HOST_OS)
-        size_t size = sizeof(nat);
-        if(0 != sysctlbyname("hw.ncpu",&nproc,&size,NULL,0))
+#elif defined(darwin_HOST_OS)
+        size_t size = sizeof(uint32_t);
+        if(sysctlbyname("hw.logicalcpu",&nproc,&size,NULL,0) != 0) {
+            if(sysctlbyname("hw.ncpu",&nproc,&size,NULL,0) != 0)
+                nproc = 1;
+        }
+#elif defined(freebsd_HOST_OS)
+        size_t size = sizeof(uint32_t);
+        if(sysctlbyname("hw.ncpu",&nproc,&size,NULL,0) != 0)
             nproc = 1;
 #else
         nproc = 1;
@@ -250,16 +268,33 @@ getNumberOfProcessors (void)
     return nproc;
 }
 
+#else /* !defined(THREADED_RTS) */
+
+int
+forkOS_createThread ( HsStablePtr entry STG_UNUSED )
+{
+    return -1;
+}
+
+void freeThreadingResources (void) { /* nothing */ }
+
+uint32_t getNumberOfProcessors (void)
+{
+    return 1;
+}
+
+#endif /* defined(THREADED_RTS) */
+
 #if defined(HAVE_SCHED_H) && defined(HAVE_SCHED_SETAFFINITY)
 // Schedules the thread to run on CPU n of m.  m may be less than the
 // number of physical CPUs, in which case, the thread will be allowed
 // to run on CPU n, n+m, n+2m etc.
 void
-setThreadAffinity (nat n, nat m)
+setThreadAffinity (uint32_t n, uint32_t m)
 {
-    nat nproc;
+    uint32_t nproc;
     cpu_set_t cs;
-    nat i;
+    uint32_t i;
 
     nproc = getNumberOfProcessors();
     CPU_ZERO(&cs);
@@ -272,7 +307,7 @@ setThreadAffinity (nat n, nat m)
 #elif defined(darwin_HOST_OS) && defined(THREAD_AFFINITY_POLICY)
 // Schedules the current thread in the affinity set identified by tag n.
 void
-setThreadAffinity (nat n, nat m GNUC3_ATTRIBUTE(__unused__))
+setThreadAffinity (uint32_t n, uint32_t m GNUC3_ATTRIBUTE(__unused__))
 {
     thread_affinity_policy_data_t policy;
 
@@ -285,11 +320,11 @@ setThreadAffinity (nat n, nat m GNUC3_ATTRIBUTE(__unused__))
 
 #elif defined(HAVE_SYS_CPUSET_H) /* FreeBSD 7.1+ */
 void
-setThreadAffinity(nat n, nat m)
+setThreadAffinity(uint32_t n, uint32_t m)
 {
-        nat nproc;
+        uint32_t nproc;
         cpuset_t cs;
-        nat i;
+        uint32_t i;
 
         nproc = getNumberOfProcessors();
         CPU_ZERO(&cs);
@@ -303,10 +338,32 @@ setThreadAffinity(nat n, nat m)
 
 #else
 void
-setThreadAffinity (nat n GNUC3_ATTRIBUTE(__unused__),
-                   nat m GNUC3_ATTRIBUTE(__unused__))
+setThreadAffinity (uint32_t n STG_UNUSED,
+                   uint32_t m STG_UNUSED)
 {
 }
+#endif
+
+#if HAVE_LIBNUMA
+void setThreadNode (uint32_t node)
+{
+    if (numa_run_on_node(node) == -1) {
+        sysErrorBelch("numa_run_on_node");
+        stg_exit(1);
+    }
+}
+
+void releaseThreadNode (void)
+{
+    if (numa_run_on_node(-1) == -1) {
+        sysErrorBelch("numa_run_on_node");
+        stg_exit(1);
+    }
+}
+
+#else
+void setThreadNode (uint32_t node STG_UNUSED) { /* nothing */ }
+void releaseThreadNode (void) { /* nothing */ }
 #endif
 
 void
@@ -314,21 +371,6 @@ interruptOSThread (OSThreadId id)
 {
     pthread_kill(id, SIGPIPE);
 }
-
-#else /* !defined(THREADED_RTS) */
-
-int
-forkOS_createThread ( HsStablePtr entry STG_UNUSED )
-{
-    return -1;
-}
-
-nat getNumberOfProcessors (void)
-{
-    return 1;
-}
-
-#endif /* defined(THREADED_RTS) */
 
 KernelThreadId kernelThreadId (void)
 {
@@ -353,11 +395,3 @@ KernelThreadId kernelThreadId (void)
     return 0;
 #endif
 }
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

@@ -7,7 +7,7 @@
 -- Module      :  GHC.IO.Encoding
 -- Copyright   :  (c) The University of Glasgow, 2008-2009
 -- License     :  see libraries/base/LICENSE
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  internal
 -- Portability :  non-portable
@@ -21,12 +21,13 @@ module GHC.IO.Encoding (
         latin1, latin1_encode, latin1_decode,
         utf8, utf8_bom,
         utf16, utf16le, utf16be,
-        utf32, utf32le, utf32be, 
+        utf32, utf32le, utf32be,
         initLocaleEncoding,
         getLocaleEncoding, getFileSystemEncoding, getForeignEncoding,
         setLocaleEncoding, setFileSystemEncoding, setForeignEncoding,
         char8,
         mkTextEncoding,
+        argvEncoding
     ) where
 
 import GHC.Base
@@ -44,12 +45,11 @@ import qualified GHC.IO.Encoding.Latin1 as Latin1
 import qualified GHC.IO.Encoding.UTF8   as UTF8
 import qualified GHC.IO.Encoding.UTF16  as UTF16
 import qualified GHC.IO.Encoding.UTF32  as UTF32
+import GHC.List
 import GHC.Word
 
 import Data.IORef
 import Data.Char (toUpper)
-import Data.List
-import Data.Maybe
 import System.IO.Unsafe (unsafePerformIO)
 
 -- -----------------------------------------------------------------------------
@@ -104,7 +104,7 @@ utf32be = UTF32.utf32be
 
 -- | The Unicode encoding of the current locale
 --
--- /Since: 4.5.0.0/
+-- @since 4.5.0.0
 getLocaleEncoding :: IO TextEncoding
 
 -- | The Unicode encoding of the current locale, but allowing arbitrary
@@ -117,17 +117,17 @@ getLocaleEncoding :: IO TextEncoding
 -- the use of code pages is deprecated: Strings should be retrieved
 -- via the "wide" W-family of UTF-16 APIs instead
 --
--- /Since: 4.5.0.0/
+-- @since 4.5.0.0
 getFileSystemEncoding :: IO TextEncoding
 
 -- | The Unicode encoding of the current locale, but where undecodable
 -- bytes are replaced with their closest visual match. Used for
 -- the 'CString' marshalling functions in "Foreign.C.String"
 --
--- /Since: 4.5.0.0/
+-- @since 4.5.0.0
 getForeignEncoding :: IO TextEncoding
 
--- | /Since: 4.5.0.0/
+-- | @since 4.5.0.0
 setLocaleEncoding, setFileSystemEncoding, setForeignEncoding :: TextEncoding -> IO ()
 
 (getLocaleEncoding, setLocaleEncoding)         = mkGlobal initLocaleEncoding
@@ -139,7 +139,7 @@ mkGlobal x = unsafePerformIO $ do
     x_ref <- newIORef x
     return (readIORef x_ref, writeIORef x_ref)
 
--- | /Since: 4.5.0.0/
+-- | @since 4.5.0.0
 initLocaleEncoding, initFileSystemEncoding, initForeignEncoding :: TextEncoding
 
 #if !defined(mingw32_HOST_OS)
@@ -162,6 +162,17 @@ initFileSystemEncoding = CodePage.mkLocaleEncoding RoundtripFailure
 initForeignEncoding    = CodePage.mkLocaleEncoding IgnoreCodingFailure
 #endif
 
+-- See Note [Windows Unicode Arguments] in rts/RtsFlags.c
+-- On Windows we assume hs_init argv is in utf8 encoding.
+
+-- | Internal encoding of argv
+argvEncoding :: IO TextEncoding
+#if defined(mingw32_HOST_OS)
+argvEncoding = return utf8
+#else
+argvEncoding = getFileSystemEncoding
+#endif
+
 -- | An encoding in which Unicode code points are translated to bytes
 -- by taking the code point modulo 256.  When decoding, bytes are
 -- translated directly into the equivalent code point.
@@ -170,11 +181,11 @@ initForeignEncoding    = CodePage.mkLocaleEncoding IgnoreCodingFailure
 -- discards information, so encode followed by decode is not the
 -- identity.
 --
--- /Since: 4.4.0.0/
+-- @since 4.4.0.0
 char8 :: TextEncoding
 char8 = Latin1.latin1
 
--- | Look up the named Unicode encoding.  May fail with 
+-- | Look up the named Unicode encoding.  May fail with
 --
 --  * 'isDoesNotExistError' if the encoding is unknown
 --
@@ -189,7 +200,7 @@ char8 = Latin1.latin1
 -- There is additional notation (borrowed from GNU iconv) for specifying
 -- how illegal characters are handled:
 --
---  * a suffix of @\/\/IGNORE@, e.g. @UTF-8\/\/IGNORE@, will cause 
+--  * a suffix of @\/\/IGNORE@, e.g. @UTF-8\/\/IGNORE@, will cause
 --    all illegal sequences on input to be ignored, and on output
 --    will drop all code points that have no representation in the
 --    target encoding.
@@ -236,7 +247,9 @@ mkTextEncoding e = case mb_coding_failure_mode of
         _             -> Nothing
 
 mkTextEncoding' :: CodingFailureMode -> String -> IO TextEncoding
-mkTextEncoding' cfm enc = case [toUpper c | c <- enc, c /= '-'] of
+mkTextEncoding' cfm enc =
+  case [toUpper c | c <- enc, c /= '-'] of
+  -- UTF-8 and friends we can handle ourselves
     "UTF8"    -> return $ UTF8.mkUTF8 cfm
     "UTF16"   -> return $ UTF16.mkUTF16 cfm
     "UTF16LE" -> return $ UTF16.mkUTF16le cfm
@@ -244,12 +257,41 @@ mkTextEncoding' cfm enc = case [toUpper c | c <- enc, c /= '-'] of
     "UTF32"   -> return $ UTF32.mkUTF32 cfm
     "UTF32LE" -> return $ UTF32.mkUTF32le cfm
     "UTF32BE" -> return $ UTF32.mkUTF32be cfm
+    -- On AIX, we want to avoid iconv, because it is either
+    -- a) totally broken, or b) non-reentrant, or c) actually works.
+    -- Detecting b) is difficult as you'd have to trigger the reentrancy
+    -- corruption.
+    -- Therefore, on AIX, we handle the popular ASCII and latin1 encodings
+    -- ourselves. For consistency, we do the same on other platforms.
+    -- We use `mkLatin1_checked` instead of `mkLatin1`, since the latter
+    -- completely ignores the CodingFailureMode (TEST=encoding005).
+    _ | isAscii -> return (Latin1.mkAscii cfm)
+    _ | isLatin1 -> return (Latin1.mkLatin1_checked cfm)
 #if defined(mingw32_HOST_OS)
     'C':'P':n | [(cp,"")] <- reads n -> return $ CodePage.mkCodePageEncoding cfm cp
     _ -> unknownEncodingErr (enc ++ codingFailureModeSuffix cfm)
 #else
-    _ -> Iconv.mkIconvEncoding cfm enc
+    -- Otherwise, handle other encoding needs via iconv.
+
+    -- Unfortunately there is no good way to determine whether iconv is actually
+    -- functional without telling it to do something.
+    _ -> do res <- Iconv.mkIconvEncoding cfm enc
+            case res of
+              Just e -> return e
+              Nothing -> unknownEncodingErr (enc ++ codingFailureModeSuffix cfm)
 #endif
+  where
+    isAscii = enc `elem` asciiEncNames
+    isLatin1 = enc `elem` latin1EncNames
+    asciiEncNames = -- ASCII aliases specified by RFC 1345 and RFC 3808.
+      [ "ANSI_X3.4-1968", "iso-ir-6", "ANSI_X3.4-1986", "ISO_646.irv:1991"
+      , "US-ASCII", "us", "IBM367", "cp367", "csASCII", "ASCII", "ISO646-US"
+      ]
+    latin1EncNames = -- latin1 aliases specified by RFC 1345 and RFC 3808.
+      [ "ISO_8859-1:1987", "iso-ir-100", "ISO_8859-1", "ISO-8859-1", "latin1",
+        "l1", "IBM819", "CP819", "csISOLatin1"
+      ]
+
 
 latin1_encode :: CharBuffer -> Buffer Word8 -> IO (CharBuffer, Buffer Word8)
 latin1_encode input output = fmap (\(_why,input',output') -> (input',output')) $ Latin1.latin1_encode input output -- unchecked, used for char8
@@ -259,6 +301,6 @@ latin1_decode :: Buffer Word8 -> CharBuffer -> IO (Buffer Word8, CharBuffer)
 latin1_decode input output = fmap (\(_why,input',output') -> (input',output')) $ Latin1.latin1_decode input output
 --latin1_decode = unsafePerformIO $ do mkTextDecoder Iconv.latin1 >>= return.encode
 
-unknownEncodingErr :: String -> IO a    
+unknownEncodingErr :: String -> IO a
 unknownEncodingErr e = ioException (IOError Nothing NoSuchThing "mkTextEncoding"
                                             ("unknown encoding:" ++ e)  Nothing Nothing)

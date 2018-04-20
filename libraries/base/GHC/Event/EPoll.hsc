@@ -29,7 +29,7 @@ import qualified GHC.Event.Internal as E
 import GHC.Base
 
 new :: IO E.Backend
-new = error "EPoll back end not implemented for this platform"
+new = errorWithoutStackTrace "EPoll back end not implemented for this platform"
 
 available :: Bool
 available = False
@@ -38,10 +38,7 @@ available = False
 
 #include <sys/epoll.h>
 
-import Control.Monad (when)
 import Data.Bits (Bits, FiniteBits, (.|.), (.&.))
-import Data.Maybe (Maybe(..))
-import Data.Monoid (Monoid(..))
 import Data.Word (Word32)
 import Foreign.C.Error (eNOENT, getErrno, throwErrno,
                         throwErrnoIfMinus1, throwErrnoIfMinus1_)
@@ -51,7 +48,7 @@ import Foreign.Ptr (Ptr)
 import Foreign.Storable (Storable(..))
 import GHC.Base
 import GHC.Num (Num(..))
-import GHC.Real (ceiling, fromIntegral)
+import GHC.Real (fromIntegral, div)
 import GHC.Show (Show)
 import System.Posix.Internals (c_close)
 import System.Posix.Internals (setCloseOnExec)
@@ -118,7 +115,7 @@ poll ep mtimeout f = do
   let events = epollEvents ep
       fd = epollFd ep
 
-  -- Will return zero if the system call was interupted, in which case
+  -- Will return zero if the system call was interrupted, in which case
   -- we just return (and try again later.)
   n <- A.unsafeLoad events $ \es cap -> case mtimeout of
     Just timeout -> epollWait fd es cap $ fromTimeout timeout
@@ -139,6 +136,7 @@ data Event = Event {
     , eventFd    :: Fd
     } deriving (Show)
 
+-- | @since 4.3.1.0
 instance Storable Event where
     sizeOf    _ = #size struct epoll_event
     alignment _ = alignment (undefined :: CInt)
@@ -163,14 +161,19 @@ newtype ControlOp = ControlOp CInt
 
 newtype EventType = EventType {
       unEventType :: Word32
-    } deriving (Show, Eq, Num, Bits, FiniteBits)
+    } deriving ( Show       -- ^ @since 4.4.0.0
+               , Eq         -- ^ @since 4.4.0.0
+               , Num        -- ^ @since 4.4.0.0
+               , Bits       -- ^ @since 4.4.0.0
+               , FiniteBits -- ^ @since 4.7.0.0
+               )
 
 #{enum EventType, EventType
  , epollIn  = EPOLLIN
  , epollOut = EPOLLOUT
  , epollErr = EPOLLERR
  , epollHup = EPOLLHUP
- , epollOneShot = EPOLLONESHOT              
+ , epollOneShot = EPOLLONESHOT
  }
 
 -- | Create a new epoll context, returning a file descriptor associated with the context.
@@ -225,7 +228,9 @@ toEvent e = remap (epollIn  .|. epollErr .|. epollHup) E.evtRead `mappend`
 
 fromTimeout :: Timeout -> Int
 fromTimeout Forever     = -1
-fromTimeout (Timeout s) = ceiling $ 1000 * s
+fromTimeout (Timeout s) = fromIntegral $ s `divRoundUp` 1000000
+  where
+    divRoundUp num denom = (num + denom - 1) `div` denom
 
 foreign import ccall unsafe "sys/epoll.h epoll_create"
     c_epoll_create :: CInt -> IO CInt

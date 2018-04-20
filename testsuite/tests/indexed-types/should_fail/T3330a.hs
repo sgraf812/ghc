@@ -30,12 +30,13 @@ children p x = execWriter (hmapM p collect x)
 Hence ix0 := ix
       r0  := r
       f0  := PF s
-      phi0 := s2 ix2
+      phi0 := (->) s2 ix2
       m0 := Writer [AnyF s]
       a0 : = f0 r'0 ix0
 
-  (forall ixx. (s2 ix2 ixx -> r ixx -> Writer [AnyF s] (r'0 ixx) ~ s ix))
-  s2 ix2 ix0 ~ s2 ix2 -> r2 ix2 -> Writer [AnyF s2] (r2 ix2)
+  (forall ixx. ((->) (s2 ix2 -> ixx) (r ixx -> Writer [AnyF s] (r'0 ixx)) ~ s ix))
+
+  s2 ix2 ix0 ~ (->) (s2 ix2) (r2 ix2 -> Writer [AnyF s2] (r2 ix2))
 
 -}
 
@@ -44,5 +45,4 @@ collect = error "collect"
 
 hmapM :: (forall ix. phi ix -> r ix -> m (r' ix))
       -> phi ix -> f r ix -> m (f r' ix)
-hmapM = error "hmapM"
-
+hmapM _ = error "hmapM"

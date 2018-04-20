@@ -11,46 +11,45 @@
  *
  * -------------------------------------------------------------------------- */
 
-#ifndef PRIM_H
-#define PRIM_H
+#pragma once
 
 /* libraries/ghc-prim/cbits/atomic.c */
-StgWord hs_atomic_add8(volatile StgWord8 *x, StgWord val);
-StgWord hs_atomic_add16(volatile StgWord16 *x, StgWord val);
-StgWord hs_atomic_add32(volatile StgWord32 *x, StgWord val);
-StgWord64 hs_atomic_add64(volatile StgWord64 *x, StgWord64 val);
-StgWord hs_atomic_sub8(volatile StgWord8 *x, StgWord val);
-StgWord hs_atomic_sub16(volatile StgWord16 *x, StgWord val);
-StgWord hs_atomic_sub32(volatile StgWord32 *x, StgWord val);
-StgWord64 hs_atomic_sub64(volatile StgWord64 *x, StgWord64 val);
-StgWord hs_atomic_and8(volatile StgWord8 *x, StgWord val);
-StgWord hs_atomic_and16(volatile StgWord16 *x, StgWord val);
-StgWord hs_atomic_and32(volatile StgWord32 *x, StgWord val);
-StgWord64 hs_atomic_and64(volatile StgWord64 *x, StgWord64 val);
-StgWord hs_atomic_nand8(volatile StgWord8 *x, StgWord val);
-StgWord hs_atomic_nand16(volatile StgWord16 *x, StgWord val);
-StgWord hs_atomic_nand32(volatile StgWord32 *x, StgWord val);
-StgWord64 hs_atomic_nand64(volatile StgWord64 *x, StgWord64 val);
-StgWord hs_atomic_or8(volatile StgWord8 *x, StgWord val);
-StgWord hs_atomic_or16(volatile StgWord16 *x, StgWord val);
-StgWord hs_atomic_or32(volatile StgWord32 *x, StgWord val);
-StgWord64 hs_atomic_or64(volatile StgWord64 *x, StgWord64 val);
-StgWord hs_atomic_xor8(volatile StgWord8 *x, StgWord val);
-StgWord hs_atomic_xor16(volatile StgWord16 *x, StgWord val);
-StgWord hs_atomic_xor32(volatile StgWord32 *x, StgWord val);
-StgWord64 hs_atomic_xor64(volatile StgWord64 *x, StgWord64 val);
-StgWord hs_cmpxchg8(volatile StgWord8 *x, StgWord old, StgWord new);
-StgWord hs_cmpxchg16(volatile StgWord16 *x, StgWord old, StgWord new);
-StgWord hs_cmpxchg32(volatile StgWord32 *x, StgWord old, StgWord new);
-StgWord hs_cmpxchg64(volatile StgWord64 *x, StgWord64 old, StgWord64 new);
-StgWord hs_atomicread8(volatile StgWord8 *x);
-StgWord hs_atomicread16(volatile StgWord16 *x);
-StgWord hs_atomicread32(volatile StgWord32 *x);
-StgWord64 hs_atomicread64(volatile StgWord64 *x);
-void hs_atomicwrite8(volatile StgWord8 *x, StgWord val);
-void hs_atomicwrite16(volatile StgWord16 *x, StgWord val);
-void hs_atomicwrite32(volatile StgWord32 *x, StgWord val);
-void hs_atomicwrite64(volatile StgWord64 *x, StgWord64 val);
+StgWord hs_atomic_add8(StgWord x, StgWord val);
+StgWord hs_atomic_add16(StgWord x, StgWord val);
+StgWord hs_atomic_add32(StgWord x, StgWord val);
+StgWord64 hs_atomic_add64(StgWord x, StgWord64 val);
+StgWord hs_atomic_sub8(StgWord x, StgWord val);
+StgWord hs_atomic_sub16(StgWord x, StgWord val);
+StgWord hs_atomic_sub32(StgWord x, StgWord val);
+StgWord64 hs_atomic_sub64(StgWord x, StgWord64 val);
+StgWord hs_atomic_and8(StgWord x, StgWord val);
+StgWord hs_atomic_and16(StgWord x, StgWord val);
+StgWord hs_atomic_and32(StgWord x, StgWord val);
+StgWord64 hs_atomic_and64(StgWord x, StgWord64 val);
+StgWord hs_atomic_nand8(StgWord x, StgWord val);
+StgWord hs_atomic_nand16(StgWord x, StgWord val);
+StgWord hs_atomic_nand32(StgWord x, StgWord val);
+StgWord64 hs_atomic_nand64(StgWord x, StgWord64 val);
+StgWord hs_atomic_or8(StgWord x, StgWord val);
+StgWord hs_atomic_or16(StgWord x, StgWord val);
+StgWord hs_atomic_or32(StgWord x, StgWord val);
+StgWord64 hs_atomic_or64(StgWord x, StgWord64 val);
+StgWord hs_atomic_xor8(StgWord x, StgWord val);
+StgWord hs_atomic_xor16(StgWord x, StgWord val);
+StgWord hs_atomic_xor32(StgWord x, StgWord val);
+StgWord64 hs_atomic_xor64(StgWord x, StgWord64 val);
+StgWord hs_cmpxchg8(StgWord x, StgWord old, StgWord new_);
+StgWord hs_cmpxchg16(StgWord x, StgWord old, StgWord new_);
+StgWord hs_cmpxchg32(StgWord x, StgWord old, StgWord new_);
+StgWord hs_cmpxchg64(StgWord x, StgWord64 old, StgWord64 new_);
+StgWord hs_atomicread8(StgWord x);
+StgWord hs_atomicread16(StgWord x);
+StgWord hs_atomicread32(StgWord x);
+StgWord64 hs_atomicread64(StgWord x);
+void hs_atomicwrite8(StgWord x, StgWord val);
+void hs_atomicwrite16(StgWord x, StgWord val);
+void hs_atomicwrite32(StgWord x, StgWord val);
+void hs_atomicwrite64(StgWord x, StgWord64 val);
 
 /* libraries/ghc-prim/cbits/bswap.c */
 StgWord16 hs_bswap16(StgWord16 x);
@@ -58,6 +57,18 @@ StgWord32 hs_bswap32(StgWord32 x);
 StgWord64 hs_bswap64(StgWord64 x);
 
 /* TODO: longlong.c */
+
+/* libraries/ghc-prim/cbits/pdep.c */
+StgWord64 hs_pdep64(StgWord64 src, StgWord64 mask);
+StgWord hs_pdep32(StgWord src, StgWord mask);
+StgWord hs_pdep16(StgWord src, StgWord mask);
+StgWord hs_pdep8(StgWord src, StgWord mask);
+
+/* libraries/ghc-prim/cbits/pext.c */
+StgWord64 hs_pext64(StgWord64 src, StgWord64 mask);
+StgWord hs_pext32(StgWord src, StgWord mask);
+StgWord hs_pext16(StgWord src, StgWord mask);
+StgWord hs_pext8(StgWord src, StgWord mask);
 
 /* libraries/ghc-prim/cbits/popcnt.c */
 StgWord hs_popcnt8(StgWord x);
@@ -81,5 +92,3 @@ StgWord hs_ctz8(StgWord x);
 StgWord hs_ctz16(StgWord x);
 StgWord hs_ctz32(StgWord x);
 StgWord hs_ctz64(StgWord64 x);
-
-#endif /* PRIM_H */

@@ -6,16 +6,17 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef POSIX_SIGNALS_H
-#define POSIX_SIGNALS_H
+#pragma once
 
-#ifdef HAVE_SIGNAL_H
+#if defined(HAVE_SIGNAL_H)
 # include <signal.h>
 #endif
 
+#include "Ticker.h"
+
 #include "BeginPrivate.h"
 
-rtsBool anyUserHandlers(void);
+bool anyUserHandlers(void);
 
 #if !defined(THREADED_RTS)
 extern siginfo_t pending_handler_buf[];
@@ -24,18 +25,10 @@ extern siginfo_t *next_pending_handler;
 void startSignalHandlers(Capability *cap);
 #endif
 
+void install_vtalrm_handler(int sig, TickProc handle_tick);
+
 void ioManagerStartCap (/* inout */ Capability **cap);
 
 extern StgInt *signal_handlers;
 
 #include "EndPrivate.h"
-
-#endif /* POSIX_SIGNALS_H */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

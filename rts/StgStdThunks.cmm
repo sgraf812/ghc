@@ -27,7 +27,7 @@
    matching.
    -------------------------------------------------------------------------- */
 
-#ifdef PROFILING
+#if defined(PROFILING)
 #define SAVE_CCS        W_ saved_ccs; saved_ccs = CCCS;
 #define RESTORE_CCS     CCCS = saved_ccs;
 #else
@@ -38,7 +38,7 @@
 /*
  * TODO: On return, we can use a more efficient
  *       untagging (we know the constructor tag).
- * 
+ *
  * When entering stg_sel_#_upd, we know R1 points to its closure,
  * so it's untagged.
  * The payload might be a thunk or a constructor,
@@ -48,7 +48,7 @@
  * so we untag it before accessing the field.
  *
  */
-#ifdef PROFILING
+#if defined(PROFILING)
 /* When profiling, we cannot shortcut by checking the tag,
  * because LDV profiling relies on entering closures to mark them as
  * "used".
@@ -152,9 +152,9 @@ SELECTOR_CODE_NOUPD(15)
    Apply thunks
 
    An apply thunk is a thunk of the form
-	
-		let z = [x1...xn] \u x1...xn
-		in ...
+
+                let z = [x1...xn] \u x1...xn
+                in ...
 
    We pre-compile some of these because the code is always the same.
 

@@ -1,4 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 
 -- ----------------------------------------------------------------------------
 -- | This module provides scalable event notification for file
@@ -24,8 +25,8 @@ module GHC.Event
     , evtWrite
     , IOCallback
     , FdKey(keyFd)
+    , Lifetime(..)
     , registerFd
-    , registerFd_
     , unregisterFd
     , unregisterFd_
     , closeFd

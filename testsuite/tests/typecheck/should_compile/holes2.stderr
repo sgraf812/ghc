@@ -1,20 +1,46 @@
 
-holes2.hs:3:5: Warning:
-    No instance for (Show a0) arising from a use of ‘show’
-    The type variable ‘a0’ is ambiguous
-    Note: there are several potential instances:
-      instance Show Double -- Defined in ‘GHC.Float’
-      instance Show Float -- Defined in ‘GHC.Float’
-      instance (Integral a, Show a) => Show (GHC.Real.Ratio a)
-        -- Defined in ‘GHC.Real’
-      ...plus 23 others
-    In the expression: show _
-    In an equation for ‘f’: f = show _
+holes2.hs:3:5: warning: [-Wdeferred-type-errors (in -Wdefault)]
+    • Ambiguous type variable ‘a0’ arising from a use of ‘show’
+      prevents the constraint ‘(Show a0)’ from being solved.
+      Probable fix: use a type annotation to specify what ‘a0’ should be.
+      These potential instances exist:
+        instance (Show a, Show b) => Show (Either a b)
+          -- Defined in ‘Data.Either’
+        instance Show Ordering -- Defined in ‘GHC.Show’
+        instance Show Integer -- Defined in ‘GHC.Show’
+        ...plus 23 others
+        ...plus 67 instances involving out-of-scope types
+        (use -fprint-potential-instances to see them all)
+    • In the expression: show _
+      In an equation for ‘f’: f = show _
 
-holes2.hs:3:10: Warning:
-    Found hole ‘_’ with type: a0
-    Where: ‘a0’ is an ambiguous type variable
-    Relevant bindings include f :: String (bound at holes2.hs:3:1)
-    In the first argument of ‘show’, namely ‘_’
-    In the expression: show _
-    In an equation for ‘f’: f = show _
+holes2.hs:3:10: warning: [-Wtyped-holes (in -Wdefault)]
+    • Found hole: _ :: a0
+      Where: ‘a0’ is an ambiguous type variable
+    • In the first argument of ‘show’, namely ‘_’
+      In the expression: show _
+      In an equation for ‘f’: f = show _
+    • Relevant bindings include f :: String (bound at holes2.hs:3:1)
+      Valid substitutions include
+        f :: String (defined at holes2.hs:3:1)
+        EQ :: Ordering
+          (imported from ‘Prelude’ at holes2.hs:1:8-13
+           (and originally defined in ‘GHC.Types’))
+        LT :: Ordering
+          (imported from ‘Prelude’ at holes2.hs:1:8-13
+           (and originally defined in ‘GHC.Types’))
+        GT :: Ordering
+          (imported from ‘Prelude’ at holes2.hs:1:8-13
+           (and originally defined in ‘GHC.Types’))
+        pi :: forall a. Floating a => a
+          (imported from ‘Prelude’ at holes2.hs:1:8-13
+           (and originally defined in ‘GHC.Float’))
+        otherwise :: Bool
+          (imported from ‘Prelude’ at holes2.hs:1:8-13
+           (and originally defined in ‘GHC.Base’))
+        False :: Bool
+          (imported from ‘Prelude’ at holes2.hs:1:8-13
+           (and originally defined in ‘GHC.Types’))
+        True :: Bool
+          (imported from ‘Prelude’ at holes2.hs:1:8-13
+           (and originally defined in ‘GHC.Types’))

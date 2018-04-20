@@ -20,7 +20,7 @@ PREFIX := $(abspath install)
 $(eval $(call canonicalise,PREFIX))
 
 cabal01:
-	$(MAKE) clean
+	$(MAKE) -s --no-print-directory clean
 	'$(TEST_HC)' --make -o setup Setup.lhs -v0
 
 	'$(GHC_PKG)' init local.db
@@ -28,7 +28,7 @@ cabal01:
 # we get a warning if dynlibs are enabled by default that:
 # 	Warning: -rtsopts and -with-rtsopts have no effect with -shared.
 # so we filter the flag out
-	./setup configure -v0 --prefix=$(PREFIX) --with-compiler='$(TEST_HC)' --ghc-options='$(filter-out -rtsopts,$(TEST_HC_OPTS))' --with-hc-pkg='$(GHC_PKG)' --package-db=local.db $(VANILLA) $(PROF) $(DYN) --libsubdir='$$pkgid'
+	./setup configure -v0 --prefix="$(PREFIX)" --with-compiler='$(TEST_HC)' --ghc-options='$(filter-out -rtsopts,$(TEST_HC_OPTS))' --with-hc-pkg='$(GHC_PKG)' --package-db=local.db $(VANILLA) $(PROF) $(DYN) --libsubdir='$$pkgid'
 	./setup build -v0
 	./setup copy -v0
 	echo install1:
@@ -41,4 +41,4 @@ cabal01:
 	./setup sdist -v0
 	echo dist:
 	ls -1 dist
-	if [ "$(CLEANUP)" != "" ]; then $(MAKE) clean; fi
+	if [ "$(CLEANUP)" != "" ]; then $(MAKE) -s --no-print-directory clean; fi

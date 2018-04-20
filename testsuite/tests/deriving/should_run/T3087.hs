@@ -2,7 +2,7 @@
 
 module Main where
 
-import Data.Generics
+import Data.Generics hiding (ext2Q)
 
 data MyMaybe a = MyNothing | MyJust a deriving (Data, Typeable)
 
@@ -14,7 +14,7 @@ test1' = undefined `ext1Q` (\ (MyJust _) -> ()) $ MyJust ()
 
 newtype Q r a = Q { unQ :: a -> r }
 
-ext2Q :: (Data d, Typeable2 t)
+ext2Q :: (Data d, Typeable t)
       => (d -> q) -> (forall d1 d2. (Data d1, Data d2) => t d1 d2 -> q)
       -> d -> q
 ext2Q def ext arg =

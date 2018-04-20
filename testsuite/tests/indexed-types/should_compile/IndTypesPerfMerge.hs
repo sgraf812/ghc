@@ -41,7 +41,59 @@ class Mergeable a b where
     type MergerType a b
     merger :: a -> b -> MergerType a b
 
+{-
+merge ::
+    forall a b.
+    (Merger (MergerType a b), Mergeable a b,
+     UnmergedLeft (MergerType a b) ~ a,
+     UnmergedRight (MergerType a b) ~ b) =>
+    a -> b -> Merged (MergerType a b)
+-}
 merge x y = mkMerge (merger x y) x y
+
+
+{- ------------- NASTY TYPE FOR merge -----------------
+   -- See Trac #11408
+
+   x:tx, y:ty
+   mkMerge @ gamma
+   merger @ alpha beta
+   merge :: tx -> ty -> tr
+
+Constraints generated:
+   gamma ~ MergerType alpha beta
+   UnmergedLeft gamma ~ tx
+   UnmergedRight gamma ~ ty
+   alpha ~ tx
+   beta ~ ty
+   tr ~ Merged gamma
+   Mergeable tx ty
+   Merger gamma
+
+One solve path:
+  gamma := t
+  tx := alpha := UnmergedLeft t
+  ty := beta  := UnmergedRight t
+
+  Mergeable (UnmergedLeft t) (UnmergedRight t)
+  Merger t
+  t ~ MergerType (UnmergedLeft t) (UnmergedRight t)
+
+  LEADS TO AMBIGUOUS TYPE
+
+Another solve path:
+  tx := alpha
+  ty := beta
+  gamma := MergerType alpha beta
+
+  UnmergedLeft (MergerType alpha beta) ~ alpha
+  UnmergedRight (MergerType alpha beta) ~ beta
+  Merger (MergerType alpha beta)
+  Mergeable alpha beta
+
+  LEADS TO NON-AMBIGUOUS TYPE
+---------------  -}
+
 
 data TakeRight a
 data TakeLeft a

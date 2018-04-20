@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable, UndecidableInstances #-}
-
 --
 -- (c) The University of Glasgow 2002-2006
 --
@@ -31,17 +29,19 @@ module IOEnv (
         atomicUpdMutVar, atomicUpdMutVar'
   ) where
 
+import GhcPrelude
+
 import DynFlags
 import Exception
 import Module
 import Panic
 
 import Data.IORef       ( IORef, newIORef, readIORef, writeIORef, modifyIORef,
-                          atomicModifyIORef )
-import Data.Typeable
+                          atomicModifyIORef, atomicModifyIORef' )
 import System.IO.Unsafe ( unsafeInterleaveIO )
 import System.IO        ( fixIO )
 import Control.Monad
+import qualified Control.Monad.Fail as MonadFail
 import MonadUtils
 import Control.Applicative (Alternative(..))
 
@@ -57,13 +57,16 @@ unIOEnv (IOEnv m) = m
 
 instance Monad (IOEnv m) where
     (>>=)  = thenM
-    (>>)   = thenM_
-    return = returnM
+    (>>)   = (*>)
+    fail   = MonadFail.fail
+
+instance MonadFail.MonadFail (IOEnv m) where
     fail _ = failM -- Ignore the string
 
 instance Applicative (IOEnv m) where
     pure = returnM
     IOEnv f <*> IOEnv x = IOEnv (\ env -> f env <*> x env )
+    (*>) = thenM_
 
 instance Functor (IOEnv m) where
     fmap f (IOEnv m) = IOEnv (\ env -> fmap f (m env))
@@ -85,12 +88,21 @@ failWithM :: String -> IOEnv env a
 failWithM s = IOEnv (\ _ -> ioError (userError s))
 
 data IOEnvFailure = IOEnvFailure
-    deriving Typeable
 
 instance Show IOEnvFailure where
     show IOEnvFailure = "IOEnv failure"
 
 instance Exception IOEnvFailure
+
+instance ExceptionMonad (IOEnv a) where
+  gcatch act handle =
+      IOEnv $ \s -> unIOEnv act s `gcatch` \e -> unIOEnv (handle e) s
+  gmask f =
+      IOEnv $ \s -> gmask $ \io_restore ->
+                             let
+                                g_restore (IOEnv m) = IOEnv $ \s -> io_restore (m s)
+                             in
+                                unIOEnv (f g_restore) s
 
 instance ContainsDynFlags env => HasDynFlags (IOEnv env) where
     getDynFlags = do env <- getEnv
@@ -101,7 +113,7 @@ instance ContainsModule env => HasModule (IOEnv env) where
                    return $ extractModule env
 
 ----------------------------------------------------------------------
--- Fundmantal combinators specific to the monad
+-- Fundamental combinators specific to the monad
 ----------------------------------------------------------------------
 
 
@@ -112,9 +124,9 @@ runIOEnv env (IOEnv m) = m env
 
 ---------------------------
 {-# NOINLINE fixM #-}
-  -- Aargh!  Not inlining fixTc alleviates a space leak problem.
-  -- Normally fixTc is used with a lazy tuple match: if the optimiser is
-  -- shown the definition of fixTc, it occasionally transforms the code
+  -- Aargh!  Not inlining fixM alleviates a space leak problem.
+  -- Normally fixM is used with a lazy tuple match: if the optimiser is
+  -- shown the definition of fixM, it occasionally transforms the code
   -- in such a way that the code generator doesn't spot the selector
   -- thunks.  Sigh.
 
@@ -157,15 +169,11 @@ uninterruptibleMaskM_ (IOEnv m) = IOEnv (\ env -> uninterruptibleMask_ (m env))
 -- Alternative/MonadPlus
 ----------------------------------------------------------------------
 
-instance MonadPlus IO => Alternative (IOEnv env) where
-      empty = mzero
-      (<|>) = mplus
+instance Alternative (IOEnv env) where
+    empty   = IOEnv (const empty)
+    m <|> n = IOEnv (\env -> unIOEnv m env <|> unIOEnv n env)
 
--- For use if the user has imported Control.Monad.Error from MTL
--- Requires UndecidableInstances
-instance MonadPlus IO => MonadPlus (IOEnv env) where
-    mzero = IOEnv (const mzero)
-    m `mplus` n = IOEnv (\env -> unIOEnv m env `mplus` unIOEnv n env)
+instance MonadPlus (IOEnv env)
 
 ----------------------------------------------------------------------
 -- Accessing input/output
@@ -193,10 +201,7 @@ atomicUpdMutVar var upd = liftIO (atomicModifyIORef var upd)
 
 -- | Strict variant of 'atomicUpdMutVar'.
 atomicUpdMutVar' :: IORef a -> (a -> (a, b)) -> IOEnv env b
-atomicUpdMutVar' var upd = do
-  r <- atomicUpdMutVar var upd
-  _ <- liftIO . evaluate =<< readMutVar var
-  return r
+atomicUpdMutVar' var upd = liftIO (atomicModifyIORef' var upd)
 
 ----------------------------------------------------------------------
 -- Accessing the environment
@@ -215,4 +220,3 @@ setEnv new_env (IOEnv m) = IOEnv (\ _ -> m new_env)
 updEnv :: (env -> env') -> IOEnv env' a -> IOEnv env a
 {-# INLINE updEnv #-}
 updEnv upd (IOEnv m) = IOEnv (\ env -> m (upd env))
-

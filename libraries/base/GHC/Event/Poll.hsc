@@ -17,7 +17,7 @@ import GHC.Base
 import qualified GHC.Event.Internal as E
 
 new :: IO E.Backend
-new = error "Poll back end not implemented for this platform"
+new = errorWithoutStackTrace "Poll back end not implemented for this platform"
 
 available :: Bool
 available = False
@@ -26,10 +26,7 @@ available = False
 #include <poll.h>
 
 import Control.Concurrent.MVar (MVar, newMVar, swapMVar)
-import Control.Monad ((=<<), liftM, liftM2, unless)
 import Data.Bits (Bits, FiniteBits, (.|.), (.&.))
-import Data.Maybe (Maybe(..))
-import Data.Monoid (Monoid(..))
 import Data.Word
 import Foreign.C.Types (CInt(..), CShort(..))
 import Foreign.Ptr (Ptr)
@@ -38,7 +35,7 @@ import GHC.Base
 import GHC.Conc.Sync (withMVar)
 import GHC.Enum (maxBound)
 import GHC.Num (Num(..))
-import GHC.Real (ceiling, fromIntegral)
+import GHC.Real (fromIntegral, div)
 import GHC.Show (Show)
 import System.Posix.Types (Fd(..))
 
@@ -65,7 +62,7 @@ modifyFd p fd oevt nevt =
     return True
 
 modifyFdOnce :: Poll -> Fd -> E.Event -> IO Bool
-modifyFdOnce = error "modifyFdOnce not supported in Poll backend"
+modifyFdOnce = errorWithoutStackTrace "modifyFdOnce not supported in Poll backend"
 
 reworkFd :: Poll -> PollFd -> IO ()
 reworkFd p (PollFd fd npevt opevt) = do
@@ -75,7 +72,7 @@ reworkFd p (PollFd fd npevt opevt) = do
     else do
       found <- A.findIndex ((== fd) . pfdFd) ary
       case found of
-        Nothing        -> error "reworkFd: event not found"
+        Nothing        -> errorWithoutStackTrace "reworkFd: event not found"
         Just (i,_)
           | npevt /= 0 -> A.unsafeWrite ary i $ PollFd fd npevt 0
           | otherwise  -> A.removeAt ary i
@@ -95,7 +92,7 @@ poll p mtout f = do
         c_pollLoop ptr (fromIntegral len) (fromTimeout tout)
       Nothing   ->
         c_poll_unsafe ptr (fromIntegral len) 0
-  unless (n == 0) $ do
+  when (n /= 0) $ do
     A.loop a 0 $ \i e -> do
       let r = pfdRevents e
       if r /= 0
@@ -115,12 +112,17 @@ poll p mtout f = do
     -- expired) OR the full timeout has passed.
     c_pollLoop :: Ptr PollFd -> (#type nfds_t) -> Int -> IO CInt
     c_pollLoop ptr len tout
-        | tout <= maxPollTimeout = c_poll ptr len (fromIntegral tout)
+        | isShortTimeout = c_poll ptr len (fromIntegral tout)
         | otherwise = do
             result <- c_poll ptr len (fromIntegral maxPollTimeout)
             if result == 0
                then c_pollLoop ptr len (fromIntegral (tout - maxPollTimeout))
                else return result
+        where
+          -- maxPollTimeout is smaller than 0 IFF Int is smaller than CInt.
+          -- This means any possible Int input to poll can be safely directly
+          -- converted to CInt.
+          isShortTimeout = tout <= maxPollTimeout || maxPollTimeout < 0
 
     -- We need to account for 3 cases:
     --     1. Int and CInt are of equal size.
@@ -134,28 +136,35 @@ poll p mtout f = do
     -- c_pollLoop recursing if the provided timeout is larger.
     --
     -- In case 3, "fromIntegral (maxBound :: CInt) :: Int" will result in a
-    -- negative Int, max will thus return maxBound :: Int. Since poll doesn't
-    -- accept values bigger than maxBound :: Int and CInt is larger than Int,
-    -- there is no problem converting Int to CInt for the c_poll call.
+    -- negative Int. This will cause isShortTimeout to be true and result in
+    -- the timeout being directly converted to a CInt.
     maxPollTimeout :: Int
-    maxPollTimeout = max maxBound (fromIntegral (maxBound :: CInt))
+    maxPollTimeout = fromIntegral (maxBound :: CInt)
 
 fromTimeout :: E.Timeout -> Int
 fromTimeout E.Forever     = -1
-fromTimeout (E.Timeout s) = ceiling $ 1000 * s
+fromTimeout (E.Timeout s) = fromIntegral $ s `divRoundUp` 1000000
+  where
+    divRoundUp num denom = (num + denom - 1) `div` denom
 
 data PollFd = PollFd {
       pfdFd      :: {-# UNPACK #-} !Fd
     , pfdEvents  :: {-# UNPACK #-} !Event
     , pfdRevents :: {-# UNPACK #-} !Event
-    } deriving (Show)
+    } deriving Show -- ^ @since 4.4.0.0
 
 newtype Event = Event CShort
-    deriving (Eq, Show, Num, Storable, Bits, FiniteBits)
+    deriving ( Eq         -- ^ @since 4.4.0.0
+             , Show       -- ^ @since 4.4.0.0
+             , Num        -- ^ @since 4.4.0.0
+             , Storable   -- ^ @since 4.4.0.0
+             , Bits       -- ^ @since 4.4.0.0
+             , FiniteBits -- ^ @since 4.7.0.0
+             )
 
 -- We have to duplicate the whole enum like this in order for the
 -- hsc2hs cross-compilation mode to work
-#ifdef POLLRDHUP
+#if defined(POLLRDHUP)
 #{enum Event, Event
  , pollIn    = POLLIN
  , pollOut   = POLLOUT
@@ -186,6 +195,7 @@ toEvent e = remap (pollIn .|. pollErr .|. pollHup)  E.evtRead `mappend`
             | e .&. evt /= 0 = to
             | otherwise      = mempty
 
+-- | @since 4.3.1.0
 instance Storable PollFd where
     sizeOf _    = #size struct pollfd
     alignment _ = alignment (undefined :: CInt)

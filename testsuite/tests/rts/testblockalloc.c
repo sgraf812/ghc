@@ -2,7 +2,7 @@
 
 #include <stdio.h>
 
-extern bdescr *allocGroup_lock_lock(nat n);
+extern bdescr *allocGroup_lock_lock(uint32_t n);
 extern void freeGroup_lock(bdescr *p);
 
 const int ARRSIZE  = 256;
@@ -11,7 +11,7 @@ const int MAXALLOC = ((8 * 1024 * 1024) / BLOCK_SIZE - 1);
 //const int MAXALLOC = ((64 * 1024 * 1024) / BLOCK_SIZE - 1);
 const int SEED     = 0xf00f00;
 
-extern lnat mblocks_allocated;
+extern StgWord mblocks_allocated;
 
 int main (int argc, char *argv[])
 {
@@ -21,15 +21,11 @@ int main (int argc, char *argv[])
 
     srand(SEED);
 
-#if __GLASGOW_HASKELL__ >= 703
     {
         RtsConfig conf = defaultRtsConfig;
         conf.rts_opts_enabled = RtsOptsAll;
         hs_init_ghc(&argc, &argv, conf);
     }
-#else
-    hs_init(&argc, &argv);
-#endif
 
    // repeatedly sweep though the array, allocating new random-sized
    // objects and deallocating the old ones.

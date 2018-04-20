@@ -5,7 +5,7 @@
  * The task manager subsystem.  Tasks execute STG code, with this
  * module providing the API which the Scheduler uses to control their
  * creation and destruction.
- * 
+ *
  * -------------------------------------------------------------------------*/
 
 #include "PosixSource.h"
@@ -19,6 +19,8 @@
 #include "Hash.h"
 #include "Trace.h"
 
+#include <string.h>
+
 #if HAVE_SIGNAL_H
 #include <signal.h>
 #endif
@@ -27,16 +29,16 @@
 // Locks required: all_tasks_mutex.
 Task *all_tasks = NULL;
 
-nat taskCount;
-nat workerCount;
-nat currentWorkerCount;
-nat peakWorkerCount;
+// current number of bound tasks + total number of worker tasks.
+uint32_t taskCount;
+uint32_t workerCount;
+uint32_t currentWorkerCount;
+uint32_t peakWorkerCount;
 
 static int tasksInitialized = 0;
 
 static void   freeTask  (Task *task);
-static Task * allocTask (void);
-static Task * newTask   (rtsBool);
+static Task * newTask   (bool);
 
 #if defined(THREADED_RTS)
 Mutex all_tasks_mutex;
@@ -73,18 +75,18 @@ initTaskManager (void)
         tasksInitialized = 1;
 #if defined(THREADED_RTS)
 #if !defined(MYTASK_USE_TLV)
-	newThreadLocalKey(&currentTaskKey);
+        newThreadLocalKey(&currentTaskKey);
 #endif
         initMutex(&all_tasks_mutex);
 #endif
     }
 }
 
-nat
+uint32_t
 freeTaskManager (void)
 {
     Task *task, *next;
-    nat tasksRunning = 0;
+    uint32_t tasksRunning = 0;
 
     ACQUIRE_LOCK(&all_tasks_mutex);
 
@@ -105,7 +107,7 @@ freeTaskManager (void)
     RELEASE_LOCK(&all_tasks_mutex);
 
 #if defined(THREADED_RTS)
-    closeMutex(&all_tasks_mutex); 
+    closeMutex(&all_tasks_mutex);
 #if !defined(MYTASK_USE_TLV)
     freeThreadLocalKey(&currentTaskKey);
 #endif
@@ -116,8 +118,7 @@ freeTaskManager (void)
     return tasksRunning;
 }
 
-static Task *
-allocTask (void)
+Task* getTask (void)
 {
     Task *task;
 
@@ -125,7 +126,7 @@ allocTask (void)
     if (task != NULL) {
         return task;
     } else {
-        task = newTask(rtsFalse);
+        task = newTask(false);
 #if defined(THREADED_RTS)
         task->id = osThreadId();
 #endif
@@ -198,26 +199,29 @@ freeTask (Task *task)
     stgFree(task);
 }
 
+/* Must take all_tasks_mutex */
 static Task*
-newTask (rtsBool worker)
+newTask (bool worker)
 {
     Task *task;
 
 #define ROUND_TO_CACHE_LINE(x) ((((x)+63) / 64) * 64)
     task = stgMallocBytes(ROUND_TO_CACHE_LINE(sizeof(Task)), "newTask");
-    
+
     task->cap           = NULL;
     task->worker        = worker;
-    task->stopped       = rtsFalse;
-    task->running_finalizers = rtsFalse;
+    task->stopped       = true;
+    task->running_finalizers = false;
     task->n_spare_incalls = 0;
     task->spare_incalls = NULL;
     task->incall        = NULL;
-    
+    task->preferred_capability = -1;
+
 #if defined(THREADED_RTS)
     initCondition(&task->cond);
     initMutex(&task->lock);
-    task->wakeup = rtsFalse;
+    task->wakeup = false;
+    task->node = 0;
 #endif
 
     task->next = NULL;
@@ -251,7 +255,7 @@ static void
 newInCall (Task *task)
 {
     InCall *incall;
-    
+
     if (task->spare_incalls != NULL) {
         incall = task->spare_incalls;
         task->spare_incalls = incall->next;
@@ -264,7 +268,7 @@ newInCall (Task *task)
     incall->task = task;
     incall->suspended_tso = NULL;
     incall->suspended_cap = NULL;
-    incall->stat          = NoStatus;
+    incall->rstat         = NoStatus;
     incall->ret           = NULL;
     incall->next = NULL;
     incall->prev = NULL;
@@ -301,9 +305,9 @@ newBoundTask (void)
         stg_exit(EXIT_FAILURE);
     }
 
-    task = allocTask();
+    task = getTask();
 
-    task->stopped = rtsFalse;
+    task->stopped = false;
 
     newInCall(task);
 
@@ -326,14 +330,14 @@ boundTaskExiting (Task *task)
     // call and then a callback, so it can transform into a bound
     // Task for the duration of the callback.
     if (task->incall == NULL) {
-        task->stopped = rtsTrue;
+        task->stopped = true;
     }
 
     debugTrace(DEBUG_sched, "task exiting");
 }
 
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
 #define TASK_ID(t) (t)->id
 #else
 #define TASK_ID(t) (t)
@@ -425,6 +429,9 @@ workerStart(Task *task)
     if (RtsFlags.ParFlags.setAffinity) {
         setThreadAffinity(cap->no, n_capabilities);
     }
+    if (RtsFlags.GcFlags.numa && !RtsFlags.DebugFlags.numa) {
+        setThreadNode(numa_map[task->node]);
+    }
 
     // set the thread-local pointer to the Task:
     setMyTask(task);
@@ -437,6 +444,7 @@ workerStart(Task *task)
     scheduleWorker(cap,task);
 }
 
+/* N.B. must take all_tasks_mutex */
 void
 startWorkerTask (Capability *cap)
 {
@@ -445,7 +453,8 @@ startWorkerTask (Capability *cap)
   Task *task;
 
   // A worker always gets a fresh Task structure.
-  task = newTask(rtsTrue);
+  task = newTask(true);
+  task->stopped = false;
 
   // The lock here is to synchronise with taskStart(), to make sure
   // that we have finished setting up the Task structure before the
@@ -455,6 +464,7 @@ startWorkerTask (Capability *cap)
   // We don't emit a task creation event here, but in workerStart,
   // where the kernel thread id is known.
   task->cap = cap;
+  task->node = cap->node;
 
   // Give the capability directly to the worker; we can't let anyone
   // else get in, because the new worker Task has nowhere to go to
@@ -462,7 +472,26 @@ startWorkerTask (Capability *cap)
   ASSERT_LOCK_HELD(&cap->lock);
   cap->running_task = task;
 
-  r = createOSThread(&tid, (OSThreadProc*)workerStart, task);
+  // Set the name of the worker thread to the original process name followed by
+  // ":w", but only if we're on Linux where the program_invocation_short_name
+  // global is available.
+#if defined(linux_HOST_OS)
+  size_t procname_len = strlen(program_invocation_short_name);
+  char worker_name[16];
+  // The kernel only allocates 16 bytes for thread names, so we truncate if the
+  // original name is too long. Process names go in another table that has more
+  // capacity.
+  if (procname_len >= 13) {
+      strncpy(worker_name, program_invocation_short_name, 13);
+      strcpy(worker_name + 13, ":w");
+  } else {
+      strcpy(worker_name, program_invocation_short_name);
+      strcpy(worker_name + procname_len, ":w");
+  }
+#else
+  char * worker_name = "ghc_worker";
+#endif
+  r = createOSThread(&tid, worker_name, (OSThreadProc*)workerStart, task);
   if (r != 0) {
     sysErrorBelch("failed to create OS thread");
     stg_exit(EXIT_FAILURE);
@@ -488,7 +517,37 @@ interruptWorkerTask (Task *task)
 
 #endif /* THREADED_RTS */
 
-#ifdef DEBUG
+void rts_setInCallCapability (
+    int preferred_capability,
+    int affinity USED_IF_THREADS)
+{
+    Task *task = getTask();
+    task->preferred_capability = preferred_capability;
+
+#if defined(THREADED_RTS)
+    if (affinity) {
+        if (RtsFlags.ParFlags.setAffinity) {
+            setThreadAffinity(preferred_capability, n_capabilities);
+        }
+    }
+#endif
+}
+
+void rts_pinThreadToNumaNode (
+    int node USED_IF_THREADS)
+{
+#if defined(THREADED_RTS)
+    if (RtsFlags.GcFlags.numa) {
+        Task *task = getTask();
+        task->node = capNoToNumaNode(node);
+        if (!DEBUG_IS_ON || !RtsFlags.DebugFlags.numa) { // faking NUMA
+            setThreadNode(numa_map[task->node]);
+        }
+    }
+#endif
+}
+
+#if defined(DEBUG)
 
 void printAllTasks(void);
 
@@ -497,30 +556,21 @@ printAllTasks(void)
 {
     Task *task;
     for (task = all_tasks; task != NULL; task = task->all_next) {
-	debugBelch("task %#" FMT_HexWord64 " is %s, ", serialisableTaskId(task),
+        debugBelch("task %#" FMT_HexWord64 " is %s, ", serialisableTaskId(task),
                    task->stopped ? "stopped" : "alive");
-	if (!task->stopped) {
-	    if (task->cap) {
-		debugBelch("on capability %d, ", task->cap->no);
-	    }
-	    if (task->incall->tso) {
-	      debugBelch("bound to thread %lu",
+        if (!task->stopped) {
+            if (task->cap) {
+                debugBelch("on capability %d, ", task->cap->no);
+            }
+            if (task->incall->tso) {
+              debugBelch("bound to thread %lu",
                          (unsigned long)task->incall->tso->id);
-	    } else {
-		debugBelch("worker");
-	    }
-	}
-	debugBelch("\n");
+            } else {
+                debugBelch("worker");
+            }
+        }
+        debugBelch("\n");
     }
-}		       
+}
 
 #endif
-
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

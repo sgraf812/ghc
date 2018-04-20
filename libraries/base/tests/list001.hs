@@ -3,9 +3,6 @@ module Main where
 
 import Data.List
 import Control.Exception
-#if __GLASGOW_HASKELL__ < 705
-import Prelude hiding (catch)
-#endif
 
 -- This module briefly tests all the functions in PrelList and a few
 -- from List.
@@ -142,14 +139,14 @@ main = do
   print (unwords (words "a b c d"),   words "", unwords [])
 
   -- deleteBy
-  print [deleteBy (==) 1 [0,1,1,2,3,4], 
-	 deleteBy (==) (error "deleteBy") []]
+  print [deleteBy (==) 1 [0,1,1,2,3,4],
+         deleteBy (==) (error "deleteBy") []]
 
   -- delete
-  print [delete 1 [0,1,1,2,3,4], 
-	 delete (error "delete") []]
-  
+  print [delete 1 [0,1,1,2,3,4],
+         delete (error "delete") []]
+
   -- (\\)
   print [ [0,1,1,2,3,4] \\ [3,2,1],
           [1,2,3,4] \\ [],
-	  [] \\ [error "\\\\"] ]
+          [] \\ [error "\\\\"] ]

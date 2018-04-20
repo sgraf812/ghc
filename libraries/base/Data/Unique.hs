@@ -1,12 +1,12 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE MagicHash, AutoDeriveTypeable #-}
+{-# LANGUAGE MagicHash #-}
 
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Data.Unique
 -- Copyright   :  (c) The University of Glasgow 2001
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  experimental
 -- Portability :  non-portable
@@ -22,18 +22,24 @@ module Data.Unique (
    hashUnique
  ) where
 
-import Prelude
-
 import System.IO.Unsafe (unsafePerformIO)
 
 import GHC.Base
 import GHC.Num
-import Data.Typeable
 import Data.IORef
 
 -- | An abstract unique object.  Objects of type 'Unique' may be
 -- compared for equality and ordering and hashed into 'Int'.
-newtype Unique = Unique Integer deriving (Eq,Ord,Typeable)
+--
+-- >>> :{
+-- do x <- newUnique
+--    print (x == x)
+--    y <- newUnique
+--    print (x == y)
+-- :}
+-- True
+-- False
+newtype Unique = Unique Integer deriving (Eq,Ord)
 
 uniqSource :: IORef Integer
 uniqSource = unsafePerformIO (newIORef 0)

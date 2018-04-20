@@ -14,20 +14,24 @@
 #include "Profiling.h"
 #include "RtsFlags.h"
 #include "sm/OSMem.h"
+#include "hooks/Hooks.h"
+#include "Capability.h"
 
-#ifdef HAVE_CTYPE_H
+#if defined(HAVE_CTYPE_H)
 #include <ctype.h>
 #endif
 
 #include <string.h>
 
-#ifdef HAVE_UNISTD_H
+#if defined(HAVE_UNISTD_H)
 #include <unistd.h>
 #endif
 
-#ifdef HAVE_SYS_TYPES_H
+#if defined(HAVE_SYS_TYPES_H)
 #include <sys/types.h>
 #endif
+
+#include <fs_rts.h>
 
 // Flag Structure
 RTS_FLAGS RtsFlags;
@@ -44,13 +48,33 @@ int     rts_argc = 0;  /* ditto */
 char  **rts_argv = NULL;
 int     rts_argv_size = 0;
 #if defined(mingw32_HOST_OS)
-// On Windows, we want to use GetCommandLineW rather than argc/argv,
-// but we need to mutate the command line arguments for withProgName and
-// friends. The System.Environment module achieves that using this bit of
-// shared state:
-int       win32_prog_argc = 0;
-wchar_t **win32_prog_argv = NULL;
+// On Windows hs_main uses GetCommandLineW to get Unicode arguments and
+// passes them along UTF8 encoded as argv. We store them here in order to
+// free them on exit.
+int       win32_full_utf8_argc = 0;
+char**    win32_utf8_argv = NULL;
 #endif
+
+// The global rtsConfig, set from the RtsConfig supplied by the call
+// to hs_init_ghc().
+RtsConfig rtsConfig;
+
+const RtsConfig defaultRtsConfig  = {
+    .rts_opts_enabled = RtsOptsSafeOnly,
+    .rts_opts_suggestions = true,
+    .rts_opts = NULL,
+    .rts_hs_main = false,
+    .keep_cafs = false,
+    .eventlog_writer = &FileEventLogWriter,
+    .defaultsHook = FlagDefaultsHook,
+    .onExitHook = OnExitHook,
+    .stackOverflowHook = StackOverflowHook,
+    .outOfHeapHook = OutOfHeapHook,
+    .mallocFailHook = MallocFailHook,
+    .gcDoneHook = NULL,
+    .longGCSync = LongGCSync,
+    .longGCSyncEnd = LongGCSyncEnd
+};
 
 /*
  * constants, used later
@@ -62,31 +86,43 @@ wchar_t **win32_prog_argv = NULL;
    Static function decls
    -------------------------------------------------------------------------- */
 
-static void procRtsOpts      (HsBool is_hs_main, int rts_argc0, RtsOptsEnabledEnum enabled);
+static void procRtsOpts (int rts_argc0, RtsOptsEnabledEnum enabled);
 
 static void normaliseRtsOpts (void);
 
-static void initStatsFile    (FILE *f);
+static void initStatsFile (FILE *f);
 
-static int  openStatsFile    (char *filename, const char *FILENAME_FMT,
-                              FILE **file_ret);
+static int  openStatsFile (
+    char *filename, const char *FILENAME_FMT, FILE **file_ret);
 
-static StgWord64 decodeSize  (const char *flag, nat offset,
-                              StgWord64 min, StgWord64 max);
+static StgWord64 decodeSize (
+    const char *flag, uint32_t offset, StgWord64 min, StgWord64 max);
 
-static void bad_option       (const char *s);
+static void bad_option (const char *s);
 
-#ifdef TRACING
-static void read_trace_flags(char *arg);
+#if defined(DEBUG)
+static void read_debug_flags(const char *arg);
 #endif
 
-static void errorUsage      (void) GNU_ATTRIBUTE(__noreturn__);
+#if defined(PROFILING)
+static bool read_heap_profiling_flag(const char *arg);
+#endif
 
-static char *  copyArg  (char *arg);
+#if defined(TRACING)
+static void read_trace_flags(const char *arg);
+#endif
+
+static void errorUsage (void) GNU_ATTRIBUTE(__noreturn__);
+
+#if defined(mingw32_HOST_OS)
+static char** win32_full_utf8_argv;
+#endif
+static char *  copyArg (char *arg);
 static char ** copyArgv (int argc, char *argv[]);
 static void    freeArgv (int argc, char *argv[]);
+static void setProgName (char *argv[]);
 
-static void errorRtsOptsDisabled(HsBool is_hs_main, const char *s);
+static void errorRtsOptsDisabled (const char *s);
 
 /* -----------------------------------------------------------------------------
  * Command-line option parsing routines.
@@ -107,65 +143,63 @@ void initRtsFlagsDefaults(void)
     RtsFlags.GcFlags.stkChunkSize       = (32 * 1024) / sizeof(W_);
     RtsFlags.GcFlags.stkChunkBufferSize = (1 * 1024) / sizeof(W_);
 
-    RtsFlags.GcFlags.minAllocAreaSize   = (512 * 1024)        / BLOCK_SIZE;
+    RtsFlags.GcFlags.minAllocAreaSize   = (1024 * 1024)       / BLOCK_SIZE;
+    RtsFlags.GcFlags.largeAllocLim      = 0; /* defaults to minAllocAreasize */
+    RtsFlags.GcFlags.nurseryChunkSize   = 0;
     RtsFlags.GcFlags.minOldGenSize      = (1024 * 1024)       / BLOCK_SIZE;
     RtsFlags.GcFlags.maxHeapSize        = 0;    /* off by default */
+    RtsFlags.GcFlags.heapLimitGrace     = (1024 * 1024);
     RtsFlags.GcFlags.heapSizeSuggestion = 0;    /* none */
-    RtsFlags.GcFlags.heapSizeSuggestionAuto = rtsFalse;
+    RtsFlags.GcFlags.heapSizeSuggestionAuto = false;
     RtsFlags.GcFlags.pcFreeHeap         = 3;    /* 3% */
     RtsFlags.GcFlags.oldGenFactor       = 2;
     RtsFlags.GcFlags.generations        = 2;
-    RtsFlags.GcFlags.squeezeUpdFrames   = rtsTrue;
-    RtsFlags.GcFlags.compact            = rtsFalse;
+    RtsFlags.GcFlags.squeezeUpdFrames   = true;
+    RtsFlags.GcFlags.compact            = false;
     RtsFlags.GcFlags.compactThreshold   = 30.0;
-    RtsFlags.GcFlags.sweep              = rtsFalse;
+    RtsFlags.GcFlags.sweep              = false;
     RtsFlags.GcFlags.idleGCDelayTime    = USToTime(300000); // 300ms
-#ifdef THREADED_RTS
-    RtsFlags.GcFlags.doIdleGC           = rtsTrue;
+#if defined(THREADED_RTS)
+    RtsFlags.GcFlags.doIdleGC           = true;
 #else
-    RtsFlags.GcFlags.doIdleGC           = rtsFalse;
+    RtsFlags.GcFlags.doIdleGC           = false;
 #endif
-
-#if osf3_HOST_OS
-/* ToDo: Perhaps by adjusting this value we can make linking without
- * -static work (i.e., not generate a core-dumping executable)? */
-# if SIZEOF_VOID_P == 8
-    RtsFlags.GcFlags.heapBase           = 0x180000000L;
-# else
-#  error I have no idea where to begin the heap on a non-64-bit osf3 machine.
-# endif
-#else
     RtsFlags.GcFlags.heapBase           = 0;   /* means don't care */
-#endif
+    RtsFlags.GcFlags.allocLimitGrace    = (100*1024) / BLOCK_SIZE;
+    RtsFlags.GcFlags.numa               = false;
+    RtsFlags.GcFlags.numaMask           = 1;
+    RtsFlags.GcFlags.ringBell           = false;
+    RtsFlags.GcFlags.longGCSync         = 0; /* detection turned off */
 
-#ifdef DEBUG
-    RtsFlags.DebugFlags.scheduler       = rtsFalse;
-    RtsFlags.DebugFlags.interpreter     = rtsFalse;
-    RtsFlags.DebugFlags.weak            = rtsFalse;
-    RtsFlags.DebugFlags.gccafs          = rtsFalse;
-    RtsFlags.DebugFlags.gc              = rtsFalse;
-    RtsFlags.DebugFlags.block_alloc     = rtsFalse;
-    RtsFlags.DebugFlags.sanity          = rtsFalse;
-    RtsFlags.DebugFlags.stable          = rtsFalse;
-    RtsFlags.DebugFlags.stm             = rtsFalse;
-    RtsFlags.DebugFlags.prof            = rtsFalse;
-    RtsFlags.DebugFlags.apply           = rtsFalse;
-    RtsFlags.DebugFlags.linker          = rtsFalse;
-    RtsFlags.DebugFlags.squeeze         = rtsFalse;
-    RtsFlags.DebugFlags.hpc             = rtsFalse;
-    RtsFlags.DebugFlags.sparks          = rtsFalse;
-#endif
+    RtsFlags.DebugFlags.scheduler       = false;
+    RtsFlags.DebugFlags.interpreter     = false;
+    RtsFlags.DebugFlags.weak            = false;
+    RtsFlags.DebugFlags.gccafs          = false;
+    RtsFlags.DebugFlags.gc              = false;
+    RtsFlags.DebugFlags.block_alloc     = false;
+    RtsFlags.DebugFlags.sanity          = false;
+    RtsFlags.DebugFlags.stable          = false;
+    RtsFlags.DebugFlags.stm             = false;
+    RtsFlags.DebugFlags.prof            = false;
+    RtsFlags.DebugFlags.apply           = false;
+    RtsFlags.DebugFlags.linker          = false;
+    RtsFlags.DebugFlags.squeeze         = false;
+    RtsFlags.DebugFlags.hpc             = false;
+    RtsFlags.DebugFlags.sparks          = false;
+    RtsFlags.DebugFlags.numa            = false;
+    RtsFlags.DebugFlags.compact         = false;
 
 #if defined(PROFILING)
-    RtsFlags.CcFlags.doCostCentres      = 0;
+    RtsFlags.CcFlags.doCostCentres      = COST_CENTRES_NONE;
+    RtsFlags.CcFlags.outputFileNameStem = NULL;
 #endif /* PROFILING */
 
-    RtsFlags.ProfFlags.doHeapProfile      = rtsFalse;
-    RtsFlags.ProfFlags. heapProfileInterval = USToTime(100000); // 100ms
+    RtsFlags.ProfFlags.doHeapProfile      = false;
+    RtsFlags.ProfFlags.heapProfileInterval = USToTime(100000); // 100ms
 
-#ifdef PROFILING
-    RtsFlags.ProfFlags.includeTSOs        = rtsFalse;
-    RtsFlags.ProfFlags.showCCSOnException = rtsFalse;
+#if defined(PROFILING)
+    RtsFlags.ProfFlags.includeTSOs        = false;
+    RtsFlags.ProfFlags.showCCSOnException = false;
     RtsFlags.ProfFlags.maxRetainerSetSize = 8;
     RtsFlags.ProfFlags.ccsLength          = 25;
     RtsFlags.ProfFlags.modSelector        = NULL;
@@ -177,17 +211,17 @@ void initRtsFlagsDefaults(void)
     RtsFlags.ProfFlags.bioSelector        = NULL;
 #endif
 
-#ifdef TRACING
+#if defined(TRACING)
     RtsFlags.TraceFlags.tracing       = TRACE_NONE;
-    RtsFlags.TraceFlags.timestamp     = rtsFalse;
-    RtsFlags.TraceFlags.scheduler     = rtsFalse;
-    RtsFlags.TraceFlags.gc            = rtsFalse;
-    RtsFlags.TraceFlags.sparks_sampled= rtsFalse;
-    RtsFlags.TraceFlags.sparks_full   = rtsFalse;
-    RtsFlags.TraceFlags.user          = rtsFalse;
+    RtsFlags.TraceFlags.timestamp     = false;
+    RtsFlags.TraceFlags.scheduler     = false;
+    RtsFlags.TraceFlags.gc            = false;
+    RtsFlags.TraceFlags.sparks_sampled= false;
+    RtsFlags.TraceFlags.sparks_full   = false;
+    RtsFlags.TraceFlags.user          = false;
 #endif
 
-#ifdef PROFILING
+#if defined(PROFILING)
     // When profiling we want a lot more ticks
     RtsFlags.MiscFlags.tickInterval     = USToTime(1000);  // 1ms
 #else
@@ -195,18 +229,23 @@ void initRtsFlagsDefaults(void)
 #endif
     RtsFlags.ConcFlags.ctxtSwitchTime   = USToTime(20000); // 20ms
 
-    RtsFlags.MiscFlags.install_signal_handlers = rtsTrue;
-    RtsFlags.MiscFlags.machineReadable = rtsFalse;
-    RtsFlags.MiscFlags.linkerMemBase    = 0;
+    RtsFlags.MiscFlags.install_signal_handlers = true;
+    RtsFlags.MiscFlags.install_seh_handlers    = true;
+    RtsFlags.MiscFlags.generate_stack_trace    = true;
+    RtsFlags.MiscFlags.generate_dump_file      = false;
+    RtsFlags.MiscFlags.machineReadable         = false;
+    RtsFlags.MiscFlags.internalCounters        = false;
+    RtsFlags.MiscFlags.linkerMemBase           = 0;
 
-#ifdef THREADED_RTS
-    RtsFlags.ParFlags.nNodes            = 1;
-    RtsFlags.ParFlags.migrate           = rtsTrue;
+#if defined(THREADED_RTS)
+    RtsFlags.ParFlags.nCapabilities     = 1;
+    RtsFlags.ParFlags.migrate           = true;
     RtsFlags.ParFlags.parGcEnabled      = 1;
     RtsFlags.ParFlags.parGcGen          = 0;
-    RtsFlags.ParFlags.parGcLoadBalancingEnabled = rtsTrue;
-    RtsFlags.ParFlags.parGcLoadBalancingGen = 1;
+    RtsFlags.ParFlags.parGcLoadBalancingEnabled = true;
+    RtsFlags.ParFlags.parGcLoadBalancingGen = ~0u; /* auto, based on -A */
     RtsFlags.ParFlags.parGcNoSyncWithIdle   = 0;
+    RtsFlags.ParFlags.parGcThreads      = 0; /* defaults to -N */
     RtsFlags.ParFlags.setAffinity       = 0;
 #endif
 
@@ -214,15 +253,9 @@ void initRtsFlagsDefaults(void)
     RtsFlags.ParFlags.maxLocalSparks    = 4096;
 #endif /* THREADED_RTS */
 
-#ifdef TICKY_TICKY
-    RtsFlags.TickyFlags.showTickyStats   = rtsFalse;
+#if defined(TICKY_TICKY)
+    RtsFlags.TickyFlags.showTickyStats   = false;
     RtsFlags.TickyFlags.tickyFile        = NULL;
-#endif
-
-#ifdef USE_PAPI
-    /* By default no special measurements taken */
-    RtsFlags.PapiFlags.eventType        = 0;
-    RtsFlags.PapiFlags.numUserEvents    = 0;
 #endif
 }
 
@@ -247,12 +280,19 @@ usage_text[] = {
 "  -kc<size> Sets the stack chunk size (default 32k)",
 "  -kb<size> Sets the stack chunk buffer size (default 1k)",
 "",
-"  -A<size> Sets the minimum allocation area size (default 512k) Egs: -A1m -A10k",
-"  -M<size> Sets the maximum heap size (default unlimited)  Egs: -M256k -M1G",
-"  -H<size> Sets the minimum heap size (default 0M)   Egs: -H24m  -H1G",
-"  -m<n>    Minimum % of heap which must be available (default 3%)",
-"  -G<n>    Number of generations (default: 2)",
-"  -c<n>    Use in-place compaction instead of copying in the oldest generation",
+"  -A<size>  Sets the minimum allocation area size (default 1m) Egs: -A20m -A10k",
+"  -AL<size> Sets the amount of large-object memory that can be allocated",
+"            before a GC is triggered (default: the value of -A)",
+"  -n<size>  Allocation area chunk size (0 = disabled, default: 0)",
+"  -O<size>  Sets the minimum size of the old generation (default 1M)",
+"  -M<size>  Sets the maximum heap size (default unlimited)  Egs: -M256k -M1G",
+"  -H<size>  Sets the minimum heap size (default 0M)   Egs: -H24m  -H1G",
+"  -xb<addr> Sets the address from which a suitable start for the heap memory",
+"            will be searched from. This is useful if the default address",
+"            clashes with some third-party library.",
+"  -m<n>     Minimum % of heap which must be available (default 3%)",
+"  -G<n>     Number of generations (default: 2)",
+"  -c<n>     Use in-place compaction instead of copying in the oldest generation",
 "           when live data is at least <n>% of the maximum heap size set with",
 "           -M (default: 30%)",
 "  -c       Use in-place compaction for all oldest generation collections",
@@ -268,15 +308,16 @@ usage_text[] = {
 "  -S[<file>] Detailed GC statistics (if <file> omitted, uses stderr)",
 "",
 "",
-"  -Z       Don't squeeze out update frames on stack overflow",
-"  -B       Sound the bell at the start of each garbage collection",
+"  -Z         Don't squeeze out update frames on stack overflow",
+"  -B         Sound the bell at the start of each garbage collection",
 #if defined(PROFILING)
 "",
-"  -p       Time/allocation profile        (output file <program>.prof)",
-"  -P       More detailed Time/Allocation profile",
-"  -Pa      Give information about *all* cost centres",
-
-# if defined(PROFILING)
+"  -p         Time/allocation profile in tree format ",
+"             (output file <output prefix>.prof)",
+"  -po<file>  Override profiling output file name prefix (program name by default)",
+"  -P         More detailed Time/Allocation profile in tree format",
+"  -Pa        Give information about *all* cost centres in tree format",
+"  -pj        Output cost-center profile in JSON format",
 "",
 "  -h<break-down> Heap residency profile (hp2ps) (output file <program>.hp)",
 "     break-down: c = cost centre stack (default)",
@@ -302,13 +343,12 @@ usage_text[] = {
 "  -xt            Include threads (TSOs) in a heap profile",
 "",
 "  -xc      Show current cost centre stack on raising an exception",
-# endif
-#endif /* PROFILING or PAR */
+#endif /* PROFILING */
 
-#ifdef TRACING
+#if defined(TRACING)
 "",
 "  -l[flags]  Log events in binary format to the file <program>.eventlog",
-#  ifdef DEBUG
+#  if defined(DEBUG)
 "  -v[flags]  Log events to stderr",
 #  endif
 "             where [flags] can contain:",
@@ -318,7 +358,7 @@ usage_text[] = {
 "                f    par spark events (full detail)",
 "                u    user events (emitted from Haskell code)",
 "                a    all event classes above",
-#  ifdef DEBUG
+#  if defined(DEBUG)
 "                t    add time stamps (only useful with -v)",
 #  endif
 "               -x    disable an event class, for any flag above",
@@ -340,8 +380,8 @@ usage_text[] = {
 "            Default: 0.02 sec.",
 "  -V<secs>  Master tick interval in seconds (0 == disable timer).",
 "            This sets the resolution for -C and the heap profile timer -i,",
-"            and is the frequence of time profile samples.",
-#ifdef PROFILING
+"            and is the frequency of time profile samples.",
+#if defined(PROFILING)
 "            Default: 0.001 sec.",
 #else
 "            Default: 0.01 sec.",
@@ -363,26 +403,50 @@ usage_text[] = {
 "  -Dz  DEBUG: stack squeezing",
 "  -Dc  DEBUG: program coverage",
 "  -Dr  DEBUG: sparks",
+"  -DC  DEBUG: compact",
 "",
 "     NOTE: DEBUG events are sent to stderr by default; add -l to create a",
 "     binary event log file instead.",
 "",
 #endif /* DEBUG */
 #if defined(THREADED_RTS) && !defined(NOSMP)
-"  -N[<n>]   Use <n> processors (default: 1, -N alone determines",
-"            the number of processors to use automatically)",
+"  -N[<n>]    Use <n> processors (default: 1, -N alone determines",
+"             the number of processors to use automatically)",
+"  -maxN[<n>] Use up to <n> processors automatically",
 "  -qg[<n>]  Use parallel GC only for generations >= <n>",
 "            (default: 0, -qg alone turns off parallel GC)",
 "  -qb[<n>]  Use load-balancing in the parallel GC only for generations >= <n>",
-"            (default: 1, -qb alone turns off load-balancing)",
+"            (default: 1 for -A < 32M, 0 otherwise;"
+"             -qb alone turns off load-balancing)",
+"  -qn<n>    Use <n> threads for parallel GC (defaults to value of -N)",
 "  -qa       Use the OS to set thread affinity (experimental)",
 "  -qm       Don't automatically migrate threads between CPUs",
 "  -qi<n>    If a processor has been idle for the last <n> GCs, do not",
 "            wake it up for a non-load-balancing parallel GC.",
 "            (0 disables,  default: 0)",
+"  --numa[=<node_mask>]",
+"            Use NUMA, nodes given by <node_mask> (default: off)",
+#if defined(DEBUG)
+"  --debug-numa[=<num_nodes>]",
+"            Pretend NUMA: like --numa, but without the system calls.",
+"            Can be used on non-NUMA systems for debugging.",
+"",
+#endif
 #endif
 "  --install-signal-handlers=<yes|no>",
 "            Install signal handlers (default: yes)",
+#if defined(mingw32_HOST_OS)
+"  --install-seh-handlers=<yes|no>",
+"            Install exception handlers (default: yes)",
+"  --generate-crash-dumps",
+"            Generate Windows crash dumps, requires exception handlers",
+"            to be installed. Implies --install-signal-handlers=yes.",
+"            (default: no)",
+"  --generate-stack-traces=<yes|no>",
+"            Generate a stack trace when your application encounters a",
+"            fatal error. When symbols are available an attempt will be",
+"            made to resolve addresses to names. (default: yes)",
+#endif
 #if defined(THREADED_RTS)
 "  -e<n>     Maximum number of outstanding local sparks (default: 4096)",
 #endif
@@ -390,19 +454,13 @@ usage_text[] = {
 "  -xm       Base address to mmap memory in the GHCi linker",
 "            (hex; must be <80000000)",
 #endif
-#if defined(USE_PAPI)
-"  -aX       CPU performance counter measurements using PAPI",
-"            (use with the -s<file> option).  X is one of:",
+"  -xq       The allocation limit given to a thread after it receives",
+"            an AllocationLimitExceeded exception. (default: 100k)",
 "",
-/* "            y - cycles", */
-"            1 - level 1 cache misses",
-"            2 - level 2 cache misses",
-"            b - branch mispredictions",
-"            s - stalled cycles",
-"            e - cache miss and branch misprediction events",
-"            +PAPI_EVENT   - collect papi preset event PAPI_EVENT",
-"            #NATIVE_EVENT - collect native event NATIVE_EVENT (in hex)",
-#endif
+"  -Mgrace=<n>",
+"            The amount of allocation after the program receives a",
+"            HeapOverflow exception before the exception is thrown again, if",
+"            the program is still exceeding the heap limit.",
 "",
 "RTS options may also be specified using the GHCRTS environment variable.",
 "",
@@ -412,8 +470,67 @@ usage_text[] = {
 0
 };
 
-STATIC_INLINE rtsBool
-strequal(const char *a, const char * b)
+/**
+Note [Windows Unicode Arguments]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+On Windows argv is usually encoded in the current Codepage which might not
+support unicode.
+
+Instead of ignoring the arguments to hs_init we expect them to be utf-8
+encoded when coming from a custom main function. In the regular hs_main we
+get the unicode arguments from the windows API and pass them along utf8
+encoded instead.
+
+This reduces special casing of arguments in later parts of the RTS and base
+libraries to dealing with slash differences and using utf8 instead of the
+current locale on Windows when decoding arguments.
+
+*/
+
+#if defined(mingw32_HOST_OS)
+//Allocate a buffer and return the string utf8 encoded.
+char* lpcwstrToUTF8(const wchar_t* utf16_str)
+{
+    //Check the utf8 encoded size first
+    int res = WideCharToMultiByte(CP_UTF8, 0, utf16_str, -1, NULL, 0,
+                                  NULL, NULL);
+    if (res == 0) {
+        return NULL;
+    }
+    char* buffer = (char*) stgMallocBytes((size_t)res, "getUTF8Args 2");
+    res = WideCharToMultiByte(CP_UTF8, 0, utf16_str, -1, buffer, res,
+                              NULL, NULL);
+    return buffer;
+}
+
+char** getUTF8Args(int* argc)
+{
+    LPCWSTR cmdLine = GetCommandLineW();
+    LPWSTR* argvw = CommandLineToArgvW(cmdLine, argc);
+
+    // We create two argument arrays, one which is later permutated by the RTS
+    // instead of the main argv.
+    // The other one is used to free the allocted memory later.
+    char** argv = (char**) stgMallocBytes(sizeof(char*) * (*argc + 1),
+                                          "getUTF8Args 1");
+    win32_full_utf8_argv = (char**) stgMallocBytes(sizeof(char*) * (*argc + 1),
+                                                   "getUTF8Args 1");
+
+    for (int i = 0; i < *argc; i++)
+    {
+        argv[i] = lpcwstrToUTF8(argvw[i]);
+    }
+    argv[*argc] = NULL;
+    memcpy(win32_full_utf8_argv, argv, sizeof(char*) * (*argc + 1));
+
+    LocalFree(argvw);
+    win32_utf8_argv = argv;
+    win32_full_utf8_argc = *argc;
+    return argv;
+}
+#endif
+
+STATIC_INLINE bool strequal(const char *a, const char * b)
 {
     return(strcmp(a, b) == 0);
 }
@@ -453,10 +570,10 @@ static void splitRtsFlags(const char *s)
     } while (*c1 != '\0');
 }
 
-static void
-errorRtsOptsDisabled(HsBool is_hs_main, const char *s) {
+static void errorRtsOptsDisabled(const char *s)
+{
     char *advice;
-    if (is_hs_main) {
+    if (rtsConfig.rts_hs_main) {
         advice = "Link with -rtsopts to enable them.";
     } else {
         advice = "Use hs_init_with_rtsopts() to enable them.";
@@ -479,16 +596,20 @@ errorRtsOptsDisabled(HsBool is_hs_main, const char *s) {
 
      - prog_name   (global) contains the basename of prog_argv[0]
 
+     - rtsConfig   (global) contains the supplied RtsConfig
+
+  On Windows argv is assumed to be utf8 encoded for unicode compatibility.
+  See Note [Windows Unicode Arguments]
+
   -------------------------------------------------------------------------- */
 
-void setupRtsFlags (int *argc, char *argv[],
-                    RtsOptsEnabledEnum rtsOptsEnabled,
-                    const char *ghc_rts_opts,
-                    HsBool is_hs_main)
+void setupRtsFlags (int *argc, char *argv[], RtsConfig rts_config)
 {
-    nat mode;
-    nat total_arg;
-    nat arg, rts_argc0;
+    uint32_t mode;
+    uint32_t total_arg;
+    uint32_t arg, rts_argc0;
+
+    rtsConfig = rts_config;
 
     setProgName (argv);
     total_arg = *argc;
@@ -506,65 +627,79 @@ void setupRtsFlags (int *argc, char *argv[],
     // (arguments from the GHCRTS environment variable and the command
     // line override these).
     {
-        if (ghc_rts_opts != NULL) {
-            splitRtsFlags(ghc_rts_opts);
-            // opts from ghc_rts_opts are always enabled:
-            procRtsOpts(is_hs_main, rts_argc0, RtsOptsAll);
+        if (rtsConfig.rts_opts != NULL) {
+            splitRtsFlags(rtsConfig.rts_opts);
+            // opts from rts_opts are always enabled:
+            procRtsOpts(rts_argc0, RtsOptsAll);
             rts_argc0 = rts_argc;
         }
     }
 
     // process arguments from the GHCRTS environment variable next
     // (arguments from the command line override these).
+    // If we ignore all non-builtin rtsOpts we skip these.
+    if(rtsConfig.rts_opts_enabled != RtsOptsIgnoreAll)
     {
         char *ghc_rts = getenv("GHCRTS");
 
         if (ghc_rts != NULL) {
-            if (rtsOptsEnabled == RtsOptsNone) {
-                errorRtsOptsDisabled(is_hs_main, "Warning: Ignoring GHCRTS variable as RTS options are disabled.\n         %s");
+            if (rtsConfig.rts_opts_enabled == RtsOptsNone) {
+                errorRtsOptsDisabled(
+                    "Warning: Ignoring GHCRTS variable as RTS options are disabled.\n         %s");
                 // We don't actually exit, just warn
             } else {
                 splitRtsFlags(ghc_rts);
-                procRtsOpts(is_hs_main, rts_argc0, rtsOptsEnabled);
+                procRtsOpts(rts_argc0, rtsConfig.rts_opts_enabled);
                 rts_argc0 = rts_argc;
             }
         }
     }
 
-    // Split arguments (argv) into PGM (argv) and RTS (rts_argv) parts
-    //   argv[0] must be PGM argument -- leave in argv
 
-    for (mode = PGM; arg < total_arg; arg++) {
-        // The '--RTS' argument disables all future +RTS ... -RTS processing.
-        if (strequal("--RTS", argv[arg])) {
-            arg++;
-            break;
+    // If we ignore all commandline rtsOpts we skip processing of argv by
+    // the RTS completely
+    if(!(rtsConfig.rts_opts_enabled == RtsOptsIgnoreAll ||
+         rtsConfig.rts_opts_enabled == RtsOptsIgnore)
+    )
+    {
+        // Split arguments (argv) into PGM (argv) and RTS (rts_argv) parts
+        //   argv[0] must be PGM argument -- leave in argv
+        //
+        for (mode = PGM; arg < total_arg; arg++) {
+            // The '--RTS' argument disables all future
+            // +RTS ... -RTS processing.
+            if (strequal("--RTS", argv[arg])) {
+                arg++;
+                break;
+            }
+            // The '--' argument is passed through to the program, but
+            // disables all further +RTS ... -RTS processing.
+            else if (strequal("--", argv[arg])) {
+                break;
+            }
+            else if (strequal("+RTS", argv[arg])) {
+                mode = RTS;
+            }
+            else if (strequal("-RTS", argv[arg])) {
+                mode = PGM;
+            }
+            else if (mode == RTS) {
+                appendRtsArg(copyArg(argv[arg]));
+            }
+            else {
+                argv[(*argc)++] = argv[arg];
+            }
         }
-        // The '--' argument is passed through to the program, but
-        // disables all further +RTS ... -RTS processing.
-        else if (strequal("--", argv[arg])) {
-            break;
-        }
-        else if (strequal("+RTS", argv[arg])) {
-            mode = RTS;
-        }
-        else if (strequal("-RTS", argv[arg])) {
-            mode = PGM;
-        }
-        else if (mode == RTS) {
-            appendRtsArg(copyArg(argv[arg]));
-        }
-        else {
-            argv[(*argc)++] = argv[arg];
-        }
+
     }
+
     // process remaining program arguments
     for (; arg < total_arg; arg++) {
         argv[(*argc)++] = argv[arg];
     }
     argv[*argc] = (char *) 0;
 
-    procRtsOpts(is_hs_main, rts_argc0, rtsOptsEnabled);
+    procRtsOpts(rts_argc0, rtsConfig.rts_opts_enabled);
 
     appendRtsArg((char *)0);
     rts_argc--; // appendRtsArg will have bumped it for the NULL (#7227)
@@ -576,9 +711,11 @@ void setupRtsFlags (int *argc, char *argv[],
     if (RtsFlags.GcFlags.statsFile != NULL) {
         initStatsFile (RtsFlags.GcFlags.statsFile);
     }
+#if defined(TICKY_TICKY)
     if (RtsFlags.TickyFlags.tickyFile != NULL) {
-        initStatsFile (RtsFlags.GcFlags.statsFile);
+        initStatsFile (RtsFlags.TickyFlags.tickyFile);
     }
+#endif
 }
 
 /* -----------------------------------------------------------------------------
@@ -586,44 +723,47 @@ void setupRtsFlags (int *argc, char *argv[],
  * -------------------------------------------------------------------------- */
 
 #if defined(HAVE_UNISTD_H) && defined(HAVE_SYS_TYPES_H) && !defined(mingw32_HOST_OS)
-static void checkSuid(HsBool is_hs_main, RtsOptsEnabledEnum enabled)
+static void checkSuid(RtsOptsEnabledEnum enabled)
 {
     if (enabled == RtsOptsSafeOnly) {
         /* This doesn't cover linux/posix capabilities like CAP_DAC_OVERRIDE,
            we'd have to link with -lcap for that. */
         if ((getuid() != geteuid()) || (getgid() != getegid())) {
-            errorRtsOptsDisabled(is_hs_main, "RTS options are disabled for setuid binaries. %s");
+            errorRtsOptsDisabled(
+                "RTS options are disabled for setuid binaries. %s");
             stg_exit(EXIT_FAILURE);
         }
     }
 }
 #else
-static void checkSuid(HsBool is_hs_main STG_UNUSED, RtsOptsEnabledEnum enabled STG_UNUSED)
+static void checkSuid (RtsOptsEnabledEnum enabled STG_UNUSED)
 {
 }
 #endif
 
-static void checkUnsafe(HsBool is_hs_main, RtsOptsEnabledEnum enabled)
+static void checkUnsafe(RtsOptsEnabledEnum enabled)
 {
     if (enabled == RtsOptsSafeOnly) {
-        errorRtsOptsDisabled(is_hs_main, "Most RTS options are disabled. %s");
+        errorRtsOptsDisabled("Most RTS options are disabled. %s");
         stg_exit(EXIT_FAILURE);
     }
 }
 
-static void procRtsOpts (HsBool is_hs_main, int rts_argc0, RtsOptsEnabledEnum rtsOptsEnabled)
+static void procRtsOpts (int rts_argc0,
+                         RtsOptsEnabledEnum rtsOptsEnabled)
 {
-    rtsBool error = rtsFalse;
+    bool error = false;
     int arg;
+    int unchecked_arg_start;
 
     if (!(rts_argc0 < rts_argc)) return;
 
     if (rtsOptsEnabled == RtsOptsNone) {
-        errorRtsOptsDisabled(is_hs_main, "RTS options are disabled. %s");
+        errorRtsOptsDisabled("RTS options are disabled. %s");
         stg_exit(EXIT_FAILURE);
     }
 
-    checkSuid(is_hs_main, rtsOptsEnabled);
+    checkSuid(rtsOptsEnabled);
 
     // Process RTS (rts_argv) part: mainly to determine statsfile
     for (arg = rts_argc0; arg < rts_argc; arg++) {
@@ -632,18 +772,21 @@ static void procRtsOpts (HsBool is_hs_main, int rts_argc0, RtsOptsEnabledEnum rt
            either OPTION_SAFE or OPTION_UNSAFE. To make sure we cover
            every branch we use an option_checked flag which is reset
            at the start each iteration and checked at the end. */
-        rtsBool option_checked = rtsFalse;
+        bool option_checked = false;
 
-#define OPTION_SAFE option_checked = rtsTrue;
-#define OPTION_UNSAFE checkUnsafe(is_hs_main, rtsOptsEnabled); option_checked = rtsTrue;
+// See Note [OPTION_SAFE vs OPTION_UNSAFE].
+#define OPTION_SAFE option_checked = true;
+#define OPTION_UNSAFE checkUnsafe(rtsOptsEnabled); option_checked = true;
 
         if (rts_argv[arg][0] != '-') {
             fflush(stdout);
             errorBelch("unexpected RTS argument: %s", rts_argv[arg]);
-            error = rtsTrue;
+            error = true;
 
         } else {
-
+            /* 0 is dash, 1 is first letter */
+            /* see Trac #9839 */
+            unchecked_arg_start = 1;
             switch(rts_argv[arg][1]) {
 
               /* process: general args, then PROFILING-only ones, then
@@ -653,50 +796,55 @@ static void procRtsOpts (HsBool is_hs_main, int rts_argc0, RtsOptsEnabledEnum rt
                  x*, which allows for more options.
               */
 
-#ifdef TICKY_TICKY
+#if defined(TICKY_TICKY)
 # define TICKY_BUILD_ONLY(x) x
 #else
 # define TICKY_BUILD_ONLY(x) \
-errorBelch("the flag %s requires the program to be built with -ticky", rts_argv[arg]); \
-error = rtsTrue;
+errorBelch("the flag %s requires the program to be built with -ticky", \
+           rts_argv[arg]);                                             \
+error = true;
 #endif
 
-#ifdef PROFILING
+#if defined(PROFILING)
 # define PROFILING_BUILD_ONLY(x)   x
 #else
 # define PROFILING_BUILD_ONLY(x) \
-errorBelch("the flag %s requires the program to be built with -prof", rts_argv[arg]); \
-error = rtsTrue;
+errorBelch("the flag %s requires the program to be built with -prof", \
+           rts_argv[arg]);                                            \
+error = true;
 #endif
 
-#ifdef TRACING
+#if defined(TRACING)
 # define TRACING_BUILD_ONLY(x)   x
 #else
 # define TRACING_BUILD_ONLY(x) \
-errorBelch("the flag %s requires the program to be built with -eventlog or -debug", rts_argv[arg]); \
-error = rtsTrue;
+errorBelch("the flag %s requires the program to be built with -eventlog or -debug", \
+           rts_argv[arg]);                                              \
+error = true;
 #endif
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
 # define THREADED_BUILD_ONLY(x)      x
 #else
 # define THREADED_BUILD_ONLY(x) \
-errorBelch("the flag %s requires the program to be built with -threaded", rts_argv[arg]); \
-error = rtsTrue;
+errorBelch("the flag %s requires the program to be built with -threaded", \
+           rts_argv[arg]);                                              \
+error = true;
 #endif
 
-#ifdef DEBUG
+#if defined(DEBUG)
 # define DEBUG_BUILD_ONLY(x) x
 #else
 # define DEBUG_BUILD_ONLY(x) \
-errorBelch("the flag %s requires the program to be built with -debug", rts_argv[arg]); \
-error = rtsTrue;
+errorBelch("the flag %s requires the program to be built with -debug", \
+           rts_argv[arg]);                                             \
+error = true;
 #endif
 
               /* =========== GENERAL ========================== */
               case '?':
                 OPTION_SAFE;
-                error = rtsTrue;
+                error = true;
                 break;
 
               /* This isn't going to allow us to keep related options
@@ -706,17 +854,47 @@ error = rtsTrue;
                   if (strequal("install-signal-handlers=yes",
                                &rts_argv[arg][2])) {
                       OPTION_UNSAFE;
-                      RtsFlags.MiscFlags.install_signal_handlers = rtsTrue;
+                      RtsFlags.MiscFlags.install_signal_handlers = true;
                   }
                   else if (strequal("install-signal-handlers=no",
                                &rts_argv[arg][2])) {
                       OPTION_UNSAFE;
-                      RtsFlags.MiscFlags.install_signal_handlers = rtsFalse;
+                      RtsFlags.MiscFlags.install_signal_handlers = false;
+                  }
+                  else if (strequal("install-seh-handlers=yes",
+                              &rts_argv[arg][2])) {
+                      OPTION_UNSAFE;
+                      RtsFlags.MiscFlags.install_seh_handlers = true;
+                  }
+                  else if (strequal("install-seh-handlers=no",
+                              &rts_argv[arg][2])) {
+                      OPTION_UNSAFE;
+                      RtsFlags.MiscFlags.install_seh_handlers = false;
+                  }
+                  else if (strequal("generate-stack-traces=yes",
+                               &rts_argv[arg][2])) {
+                      OPTION_UNSAFE;
+                      RtsFlags.MiscFlags.generate_stack_trace = true;
+                  }
+                  else if (strequal("generate-stack-traces=no",
+                              &rts_argv[arg][2])) {
+                      OPTION_UNSAFE;
+                      RtsFlags.MiscFlags.generate_stack_trace = false;
+                  }
+                  else if (strequal("generate-crash-dumps",
+                              &rts_argv[arg][2])) {
+                      OPTION_UNSAFE;
+                      RtsFlags.MiscFlags.generate_dump_file = true;
                   }
                   else if (strequal("machine-readable",
                                &rts_argv[arg][2])) {
                       OPTION_UNSAFE;
-                      RtsFlags.MiscFlags.machineReadable = rtsTrue;
+                      RtsFlags.MiscFlags.machineReadable = true;
+                  }
+                  else if (strequal("internal-counters",
+                                    &rts_argv[arg][2])) {
+                      OPTION_SAFE;
+                      RtsFlags.MiscFlags.internalCounters = true;
                   }
                   else if (strequal("info",
                                &rts_argv[arg][2])) {
@@ -724,62 +902,94 @@ error = rtsTrue;
                       printRtsInfo();
                       stg_exit(0);
                   }
+#if defined(THREADED_RTS)
+                  else if (!strncmp("numa", &rts_argv[arg][2], 4)) {
+                      OPTION_SAFE;
+                      StgWord mask;
+                      if (rts_argv[arg][6] == '=') {
+                          mask = (StgWord)strtol(rts_argv[arg]+7,
+                                                 (char **) NULL, 10);
+                      } else {
+                          mask = (StgWord)~0;
+                      }
+                      if (!osNumaAvailable()) {
+                          errorBelch("%s: OS reports NUMA is not available",
+                                     rts_argv[arg]);
+                          error = true;
+                          break;
+                      }
+
+                      RtsFlags.GcFlags.numa = true;
+                      RtsFlags.GcFlags.numaMask = mask;
+                  }
+#endif
+#if defined(DEBUG) && defined(THREADED_RTS)
+                  else if (!strncmp("debug-numa", &rts_argv[arg][2], 10)) {
+                      OPTION_SAFE;
+                      size_t nNodes;
+                      if (rts_argv[arg][12] == '=' &&
+                          isdigit(rts_argv[arg][13])) {
+                          nNodes = (StgWord)strtol(rts_argv[arg]+13,
+                                                 (char **) NULL, 10);
+                      } else {
+                          errorBelch("%s: missing number of nodes",
+                                     rts_argv[arg]);
+                          error = true;
+                          break;
+                      }
+                      if (nNodes > MAX_NUMA_NODES) {
+                          errorBelch("%s: Too many NUMA nodes (max %d)",
+                                     rts_argv[arg], MAX_NUMA_NODES);
+                          error = true;
+                      } else {
+                          RtsFlags.GcFlags.numa = true;
+                          RtsFlags.DebugFlags.numa = true;
+                          RtsFlags.GcFlags.numaMask = (1<<nNodes) - 1;
+                      }
+                  }
+#endif
+                  else if (!strncmp("long-gc-sync=", &rts_argv[arg][2], 13)) {
+                      OPTION_SAFE;
+                      if (rts_argv[arg][2] == '\0') {
+                          /* use default */
+                      } else {
+                          RtsFlags.GcFlags.longGCSync =
+                              fsecondsToTime(atof(rts_argv[arg]+16));
+                      }
+                      break;
+                  }
                   else {
                       OPTION_SAFE;
                       errorBelch("unknown RTS option: %s",rts_argv[arg]);
-                      error = rtsTrue;
+                      error = true;
                   }
                   break;
               case 'A':
                   OPTION_UNSAFE;
-                  RtsFlags.GcFlags.minAllocAreaSize
-                      = decodeSize(rts_argv[arg], 2, BLOCK_SIZE, HS_INT_MAX)
+                  if (rts_argv[arg][2] == 'L') {
+                      RtsFlags.GcFlags.largeAllocLim
+                          = decodeSize(rts_argv[arg], 3, 2*BLOCK_SIZE,
+                                       HS_INT_MAX) / BLOCK_SIZE;
+                  } else {
+                      // minimum two blocks in the nursery, so that we have one
+                      // to grab for allocate().
+                      RtsFlags.GcFlags.minAllocAreaSize
+                          = decodeSize(rts_argv[arg], 2, 2*BLOCK_SIZE,
+                                       HS_INT_MAX) / BLOCK_SIZE;
+                  }
+                  break;
+              case 'n':
+                  OPTION_UNSAFE;
+                  RtsFlags.GcFlags.nurseryChunkSize
+                      = decodeSize(rts_argv[arg], 2, 2*BLOCK_SIZE, HS_INT_MAX)
                            / BLOCK_SIZE;
                   break;
 
-#ifdef USE_PAPI
-              case 'a':
-                OPTION_UNSAFE;
-                switch(rts_argv[arg][2]) {
-                case '1':
-                  RtsFlags.PapiFlags.eventType = PAPI_FLAG_CACHE_L1;
-                  break;
-                case '2':
-                  RtsFlags.PapiFlags.eventType = PAPI_FLAG_CACHE_L2;
-                  break;
-                case 'b':
-                  RtsFlags.PapiFlags.eventType = PAPI_FLAG_BRANCH;
-                  break;
-                case 's':
-                  RtsFlags.PapiFlags.eventType = PAPI_FLAG_STALLS;
-                  break;
-                case 'e':
-                  RtsFlags.PapiFlags.eventType = PAPI_FLAG_CB_EVENTS;
-                  break;
-                case '+':
-                case '#':
-                  if (RtsFlags.PapiFlags.numUserEvents >= MAX_PAPI_USER_EVENTS) {
-                      errorBelch("maximum number of PAPI events reached");
-                      stg_exit(EXIT_FAILURE);
-                  }
-                  nat eventNum  = RtsFlags.PapiFlags.numUserEvents++;
-                  char kind     = rts_argv[arg][2];
-                  nat eventKind = kind == '+' ? PAPI_PRESET_EVENT_KIND : PAPI_NATIVE_EVENT_KIND;
-
-                  RtsFlags.PapiFlags.userEvents[eventNum] = rts_argv[arg] + 3;
-                  RtsFlags.PapiFlags.eventType = PAPI_USER_EVENTS;
-                  RtsFlags.PapiFlags.userEventsKind[eventNum] = eventKind;
-                  break;
-                default:
-                  bad_option( rts_argv[arg] );
-                }
-                break;
-#endif
-
               case 'B':
                 OPTION_UNSAFE;
-                RtsFlags.GcFlags.ringBell = rtsTrue;
-                break;
+                RtsFlags.GcFlags.ringBell = true;
+                unchecked_arg_start++;
+                goto check_rest;
 
               case 'c':
                   OPTION_UNSAFE;
@@ -787,14 +997,15 @@ error = rtsTrue;
                       RtsFlags.GcFlags.compactThreshold =
                           atof(rts_argv[arg]+2);
                   } else {
-                      RtsFlags.GcFlags.compact = rtsTrue;
+                      RtsFlags.GcFlags.compact = true;
                   }
                   break;
 
               case 'w':
                 OPTION_UNSAFE;
-                RtsFlags.GcFlags.sweep = rtsTrue;
-                break;
+                RtsFlags.GcFlags.sweep = true;
+                unchecked_arg_start++;
+                goto check_rest;
 
               case 'F':
                 OPTION_UNSAFE;
@@ -806,71 +1017,14 @@ error = rtsTrue;
 
               case 'D':
               OPTION_SAFE;
-              DEBUG_BUILD_ONLY(
-              {
-                  char *c;
-
-                  for (c  = rts_argv[arg] + 2; *c != '\0'; c++) {
-                      switch (*c) {
-                      case 's':
-                          RtsFlags.DebugFlags.scheduler = rtsTrue;
-                          break;
-                      case 'i':
-                          RtsFlags.DebugFlags.interpreter = rtsTrue;
-                          break;
-                      case 'w':
-                          RtsFlags.DebugFlags.weak = rtsTrue;
-                          break;
-                      case 'G':
-                          RtsFlags.DebugFlags.gccafs = rtsTrue;
-                          break;
-                      case 'g':
-                          RtsFlags.DebugFlags.gc = rtsTrue;
-                          break;
-                      case 'b':
-                          RtsFlags.DebugFlags.block_alloc = rtsTrue;
-                          break;
-                      case 'S':
-                          RtsFlags.DebugFlags.sanity = rtsTrue;
-                          break;
-                      case 't':
-                          RtsFlags.DebugFlags.stable = rtsTrue;
-                          break;
-                      case 'p':
-                          RtsFlags.DebugFlags.prof = rtsTrue;
-                          break;
-                      case 'l':
-                          RtsFlags.DebugFlags.linker = rtsTrue;
-                          break;
-                      case 'a':
-                          RtsFlags.DebugFlags.apply = rtsTrue;
-                          break;
-                      case 'm':
-                          RtsFlags.DebugFlags.stm = rtsTrue;
-                          break;
-                      case 'z':
-                          RtsFlags.DebugFlags.squeeze = rtsTrue;
-                          break;
-                      case 'c':
-                          RtsFlags.DebugFlags.hpc = rtsTrue;
-                          break;
-                      case 'r':
-                          RtsFlags.DebugFlags.sparks = rtsTrue;
-                          break;
-                      default:
-                          bad_option( rts_argv[arg] );
-                      }
-                  }
-                  // -Dx also turns on -v.  Use -l to direct trace
-                  // events to the .eventlog file instead.
-                  RtsFlags.TraceFlags.tracing = TRACE_STDERR;
-              })
+              DEBUG_BUILD_ONLY(read_debug_flags(rts_argv[arg]);)
               break;
 
               case 'K':
                   OPTION_UNSAFE;
                   RtsFlags.GcFlags.maxStkSize =
-                      decodeSize(rts_argv[arg], 2, sizeof(W_), HS_WORD_MAX) / sizeof(W_);
+                      decodeSize(rts_argv[arg], 2, 0, HS_WORD_MAX)
+                      / sizeof(W_);
                   break;
 
               case 'k':
@@ -878,39 +1032,81 @@ error = rtsTrue;
                 switch(rts_argv[arg][2]) {
                 case 'c':
                   RtsFlags.GcFlags.stkChunkSize =
-                      decodeSize(rts_argv[arg], 3, sizeof(W_), HS_WORD_MAX) / sizeof(W_);
+                      decodeSize(rts_argv[arg], 3, sizeof(W_), HS_WORD_MAX)
+                      / sizeof(W_);
                   break;
                 case 'b':
                   RtsFlags.GcFlags.stkChunkBufferSize =
-                      decodeSize(rts_argv[arg], 3, sizeof(W_), HS_WORD_MAX) / sizeof(W_);
+                      decodeSize(rts_argv[arg], 3, sizeof(W_), HS_WORD_MAX)
+                      / sizeof(W_);
                   break;
                 case 'i':
                   RtsFlags.GcFlags.initialStkSize =
-                      decodeSize(rts_argv[arg], 3, sizeof(W_), HS_WORD_MAX) / sizeof(W_);
+                      decodeSize(rts_argv[arg], 3, sizeof(W_), HS_WORD_MAX)
+                      / sizeof(W_);
                   break;
                 default:
                   RtsFlags.GcFlags.initialStkSize =
-                      decodeSize(rts_argv[arg], 2, sizeof(W_), HS_WORD_MAX) / sizeof(W_);
+                      decodeSize(rts_argv[arg], 2, sizeof(W_), HS_WORD_MAX)
+                      / sizeof(W_);
                   break;
                 }
                 break;
 
               case 'M':
                   OPTION_UNSAFE;
-                  RtsFlags.GcFlags.maxHeapSize =
-                      decodeSize(rts_argv[arg], 2, BLOCK_SIZE, HS_WORD_MAX) / BLOCK_SIZE;
-                  /* user give size in *bytes* but "maxHeapSize" is in *blocks* */
+                  if (0 == strncmp("grace=", rts_argv[arg] + 2, 6)) {
+                      RtsFlags.GcFlags.heapLimitGrace =
+                          decodeSize(rts_argv[arg], 8, BLOCK_SIZE, HS_WORD_MAX);
+                  } else {
+                      RtsFlags.GcFlags.maxHeapSize =
+                          decodeSize(rts_argv[arg], 2, BLOCK_SIZE, HS_WORD_MAX)
+                          / BLOCK_SIZE;
+                      // user give size in *bytes* but "maxHeapSize" is in
+                      // *blocks*
+                  }
                   break;
 
               case 'm':
-                  OPTION_UNSAFE;
-                  RtsFlags.GcFlags.pcFreeHeap = atof(rts_argv[arg]+2);
+                /* Case for maxN feature request ticket #10728, it's a little
+                   odd being so far from the N case. */
+#if !defined(NOSMP)
+                if (strncmp("maxN", &rts_argv[arg][1], 4) == 0) {
+                  OPTION_SAFE;
+                  THREADED_BUILD_ONLY(
+                    int nCapabilities;
+                    int proc = (int)getNumberOfProcessors();
 
-                  if (RtsFlags.GcFlags.pcFreeHeap < 0 ||
-                      RtsFlags.GcFlags.pcFreeHeap > 100)
+                    nCapabilities = strtol(rts_argv[arg]+5, (char **) NULL, 10);
+                    if (nCapabilities > proc) { nCapabilities = proc; }
+
+                    if (nCapabilities <= 0) {
+                      errorBelch("bad value for -maxN");
+                      error = true;
+                    }
+#if defined(PROFILING)
+                    RtsFlags.ParFlags.nCapabilities = 1;
+#else
+                    RtsFlags.ParFlags.nCapabilities = (uint32_t)nCapabilities;
+#endif
+                  ) break;
+                } else {
+#endif
+                    OPTION_UNSAFE;
+                    RtsFlags.GcFlags.pcFreeHeap = atof(rts_argv[arg]+2);
+
+                    /* -m was allowing bad flags to go unreported */
+                    if (RtsFlags.GcFlags.pcFreeHeap == 0.0 &&
+                           rts_argv[arg][2] != '0')
                       bad_option( rts_argv[arg] );
-                  break;
 
+                    if (RtsFlags.GcFlags.pcFreeHeap < 0 ||
+                        RtsFlags.GcFlags.pcFreeHeap > 100)
+                        bad_option( rts_argv[arg] );
+                    break;
+#if !defined(NOSMP)
+                }
+#endif
               case 'G':
                   OPTION_UNSAFE;
                   RtsFlags.GcFlags.generations =
@@ -920,11 +1116,20 @@ error = rtsTrue;
               case 'H':
                   OPTION_UNSAFE;
                   if (rts_argv[arg][2] == '\0') {
-                      RtsFlags.GcFlags.heapSizeSuggestionAuto = rtsTrue;
+                      RtsFlags.GcFlags.heapSizeSuggestionAuto = true;
                   } else {
-                      RtsFlags.GcFlags.heapSizeSuggestion =
-                          (nat)(decodeSize(rts_argv[arg], 2, BLOCK_SIZE, HS_WORD_MAX) / BLOCK_SIZE);
+                      RtsFlags.GcFlags.heapSizeSuggestion = (uint32_t)
+                          (decodeSize(rts_argv[arg], 2, BLOCK_SIZE, HS_WORD_MAX)
+                          / BLOCK_SIZE);
                   }
+                  break;
+
+              case 'O':
+                  OPTION_UNSAFE;
+                  RtsFlags.GcFlags.minOldGenSize =
+                      (uint32_t)(decodeSize(rts_argv[arg], 2, BLOCK_SIZE,
+                                       HS_WORD_MAX)
+                            / BLOCK_SIZE);
                   break;
 
               case 'I': /* idle GC delay */
@@ -934,9 +1139,9 @@ error = rtsTrue;
                 } else {
                     Time t = fsecondsToTime(atof(rts_argv[arg]+2));
                     if (t == 0) {
-                        RtsFlags.GcFlags.doIdleGC = rtsFalse;
+                        RtsFlags.GcFlags.doIdleGC = false;
                     } else {
-                        RtsFlags.GcFlags.doIdleGC = rtsTrue;
+                        RtsFlags.GcFlags.doIdleGC = true;
                         RtsFlags.GcFlags.idleGCDelayTime = t;
                     }
                 }
@@ -945,7 +1150,8 @@ error = rtsTrue;
               case 'T':
                   OPTION_SAFE;
                   RtsFlags.GcFlags.giveStats = COLLECT_GC_STATS;
-                  break; /* Don't initialize statistics file. */
+                  unchecked_arg_start++;
+                  goto check_rest; /* Don't initialize statistics file. */
 
               case 'S':
                   OPTION_SAFE; /* but see below */
@@ -970,14 +1176,15 @@ error = rtsTrue;
                     }
                     r = openStatsFile(rts_argv[arg]+2, NULL,
                                       &RtsFlags.GcFlags.statsFile);
-                    if (r == -1) { error = rtsTrue; }
+                    if (r == -1) { error = true; }
                 }
                 break;
 
               case 'Z':
                 OPTION_UNSAFE;
-                RtsFlags.GcFlags.squeezeUpdFrames = rtsFalse;
-                break;
+                RtsFlags.GcFlags.squeezeUpdFrames = false;
+                unchecked_arg_start++;
+                goto check_rest;
 
               /* =========== PROFILING ========================== */
 
@@ -988,23 +1195,42 @@ error = rtsTrue;
                 switch (rts_argv[arg][2]) {
                   case 'a':
                     RtsFlags.CcFlags.doCostCentres = COST_CENTRES_ALL;
+                    if (rts_argv[arg][3] != '\0') {
+                      errorBelch("flag -Pa given an argument"
+                                 " when none was expected: %s"
+                                ,rts_argv[arg]);
+                      error = true;
+                    }
                     break;
-                  default:
+                  case 'j':
+                      RtsFlags.CcFlags.doCostCentres = COST_CENTRES_JSON;
+                      break;
+                  case 'o':
+                      if (rts_argv[arg][3] == '\0') {
+                        errorBelch("flag -po expects an argument");
+                        error = true;
+                        break;
+                      }
+                      RtsFlags.CcFlags.outputFileNameStem = rts_argv[arg]+3;
+                      break;
+                  case '\0':
                       if (rts_argv[arg][1] == 'P') {
-                          RtsFlags.CcFlags.doCostCentres =
-                              COST_CENTRES_VERBOSE;
+                          RtsFlags.CcFlags.doCostCentres = COST_CENTRES_VERBOSE;
                       } else {
-                          RtsFlags.CcFlags.doCostCentres =
-                              COST_CENTRES_SUMMARY;
+                          RtsFlags.CcFlags.doCostCentres = COST_CENTRES_SUMMARY;
                       }
                       break;
+                  default:
+                    unchecked_arg_start++;
+                    goto check_rest;
                 }
                 ) break;
 
               case 'R':
                   OPTION_SAFE;
                   PROFILING_BUILD_ONLY(
-                      RtsFlags.ProfFlags.maxRetainerSetSize = atof(rts_argv[arg]+2);
+                      RtsFlags.ProfFlags.maxRetainerSetSize =
+                        atof(rts_argv[arg]+2);
                   ) break;
               case 'L':
                   OPTION_SAFE;
@@ -1016,122 +1242,21 @@ error = rtsTrue;
                   ) break;
               case 'h': /* serial heap profile */
 #if !defined(PROFILING)
-                OPTION_UNSAFE;
                 switch (rts_argv[arg][2]) {
                   case '\0':
                   case 'T':
+                    OPTION_UNSAFE;
                     RtsFlags.ProfFlags.doHeapProfile = HEAP_BY_CLOSURE_TYPE;
                     break;
                   default:
-                    errorBelch("invalid heap profile option: %s",rts_argv[arg]);
-                    error = rtsTrue;
+                    OPTION_SAFE;
+                    PROFILING_BUILD_ONLY();
                 }
 #else
                 OPTION_SAFE;
                 PROFILING_BUILD_ONLY(
-                switch (rts_argv[arg][2]) {
-                case '\0':
-                case 'C':
-                case 'c':
-                case 'M':
-                case 'm':
-                case 'D':
-                case 'd':
-                case 'Y':
-                case 'y':
-                case 'R':
-                case 'r':
-                case 'B':
-                case 'b':
-                    if (rts_argv[arg][2] != '\0' && rts_argv[arg][3] != '\0') {
-                        {
-                            char *left  = strchr(rts_argv[arg], '{');
-                            char *right = strrchr(rts_argv[arg], '}');
-
-                            // curly braces are optional, for
-                            // backwards compat.
-                            if (left)
-                                left = left+1;
-                            else
-                                left = rts_argv[arg] + 3;
-
-                            if (!right)
-                                right = rts_argv[arg] + strlen(rts_argv[arg]);
-
-                            *right = '\0';
-
-                            switch (rts_argv[arg][2]) {
-                            case 'c': // cost centre label select
-                                RtsFlags.ProfFlags.ccSelector = left;
-                                break;
-                            case 'C':
-                                RtsFlags.ProfFlags.ccsSelector = left;
-                                break;
-                            case 'M':
-                            case 'm': // cost centre module select
-                                RtsFlags.ProfFlags.modSelector = left;
-                                break;
-                            case 'D':
-                            case 'd': // closure descr select
-                                RtsFlags.ProfFlags.descrSelector = left;
-                                break;
-                            case 'Y':
-                            case 'y': // closure type select
-                                RtsFlags.ProfFlags.typeSelector = left;
-                                break;
-                            case 'R':
-                            case 'r': // retainer select
-                                RtsFlags.ProfFlags.retainerSelector = left;
-                                break;
-                            case 'B':
-                            case 'b': // biography select
-                                RtsFlags.ProfFlags.bioSelector = left;
-                                break;
-                            }
-                        }
-                        break;
-                    }
-
-                    if (RtsFlags.ProfFlags.doHeapProfile != 0) {
-                        errorBelch("multiple heap profile options");
-                        error = rtsTrue;
-                        break;
-                    }
-
-                    switch (rts_argv[arg][2]) {
-                    case '\0':
-                    case 'C':
-                    case 'c':
-                        RtsFlags.ProfFlags.doHeapProfile = HEAP_BY_CCS;
-                        break;
-                    case 'M':
-                    case 'm':
-                          RtsFlags.ProfFlags.doHeapProfile = HEAP_BY_MOD;
-                          break;
-                    case 'D':
-                    case 'd':
-                          RtsFlags.ProfFlags.doHeapProfile = HEAP_BY_DESCR;
-                          break;
-                    case 'Y':
-                    case 'y':
-                          RtsFlags.ProfFlags.doHeapProfile = HEAP_BY_TYPE;
-                          break;
-                    case 'R':
-                    case 'r':
-                          RtsFlags.ProfFlags.doHeapProfile = HEAP_BY_RETAINER;
-                          break;
-                    case 'B':
-                    case 'b':
-                          RtsFlags.ProfFlags.doHeapProfile = HEAP_BY_LDV;
-                          break;
-                    }
-                    break;
-
-                default:
-                    errorBelch("invalid heap profile option: %s",rts_argv[arg]);
-                    error = rtsTrue;
-                }
-                )
+                    error = read_heap_profiling_flag(rts_argv[arg]);
+                );
 #endif /* PROFILING */
                 break;
 
@@ -1172,25 +1297,23 @@ error = rtsTrue;
                 OPTION_SAFE;
                 THREADED_BUILD_ONLY(
                 if (rts_argv[arg][2] == '\0') {
-#if defined(PROFILING)
-                    RtsFlags.ParFlags.nNodes = 1;
-#else
-                    RtsFlags.ParFlags.nNodes = getNumberOfProcessors();
-#endif
+                    RtsFlags.ParFlags.nCapabilities = getNumberOfProcessors();
                 } else {
-                    int nNodes;
+                    int nCapabilities;
                     OPTION_SAFE; /* but see extra checks below... */
-                    nNodes = strtol(rts_argv[arg]+2, (char **) NULL, 10);
-                    if (nNodes <= 0) {
+
+                    nCapabilities = strtol(rts_argv[arg]+2, (char **) NULL, 10);
+
+                    if (nCapabilities <= 0) {
                       errorBelch("bad value for -N");
-                      error = rtsTrue;
+                      error = true;
                     }
                     if (rtsOptsEnabled == RtsOptsSafeOnly &&
-                        nNodes > (int)getNumberOfProcessors()) {
-                      errorRtsOptsDisabled(is_hs_main, "Using large values for -N is not allowed by default. %s");
+                      nCapabilities > (int)getNumberOfProcessors()) {
+                      errorRtsOptsDisabled("Using large values for -N is not allowed by default. %s");
                       stg_exit(EXIT_FAILURE);
                     }
-                    RtsFlags.ParFlags.nNodes = (nat)nNodes;
+                    RtsFlags.ParFlags.nCapabilities = (uint32_t)nCapabilities;
                 }
                 ) break;
 
@@ -1200,11 +1323,11 @@ error = rtsTrue;
                     switch (rts_argv[arg][2]) {
                     case '1':
                         // backwards compat only
-                        RtsFlags.ParFlags.parGcEnabled = rtsFalse;
+                        RtsFlags.ParFlags.parGcEnabled = false;
                         break;
                     default:
                         errorBelch("unknown RTS option: %s",rts_argv[arg]);
-                        error = rtsTrue;
+                        error = true;
                         break;
                     }
                     ) break;
@@ -1215,23 +1338,25 @@ error = rtsTrue;
                     switch (rts_argv[arg][2]) {
                     case '\0':
                         errorBelch("incomplete RTS option: %s",rts_argv[arg]);
-                        error = rtsTrue;
+                        error = true;
                         break;
                     case 'g':
                         if (rts_argv[arg][3] == '\0') {
-                            RtsFlags.ParFlags.parGcEnabled = rtsFalse;
+                            RtsFlags.ParFlags.parGcEnabled = false;
                         } else {
-                            RtsFlags.ParFlags.parGcEnabled = rtsTrue;
+                            RtsFlags.ParFlags.parGcEnabled = true;
                             RtsFlags.ParFlags.parGcGen
                                 = strtol(rts_argv[arg]+3, (char **) NULL, 10);
                         }
                         break;
                     case 'b':
                         if (rts_argv[arg][3] == '\0') {
-                            RtsFlags.ParFlags.parGcLoadBalancingEnabled = rtsFalse;
+                            RtsFlags.ParFlags.parGcLoadBalancingEnabled =
+                                false;
                         }
                         else {
-                            RtsFlags.ParFlags.parGcLoadBalancingEnabled = rtsTrue;
+                            RtsFlags.ParFlags.parGcLoadBalancingEnabled =
+                                true;
                             RtsFlags.ParFlags.parGcLoadBalancingGen
                                 = strtol(rts_argv[arg]+3, (char **) NULL, 10);
                         }
@@ -1240,18 +1365,29 @@ error = rtsTrue;
                         RtsFlags.ParFlags.parGcNoSyncWithIdle
                             = strtol(rts_argv[arg]+3, (char **) NULL, 10);
                         break;
+                    case 'n': {
+                        int threads;
+                        threads = strtol(rts_argv[arg]+3, (char **) NULL, 10);
+                        if (threads <= 0) {
+                            errorBelch("-qn must be 1 or greater");
+                            error = true;
+                        } else {
+                            RtsFlags.ParFlags.parGcThreads = threads;
+                        }
+                        break;
+                    }
                     case 'a':
-                        RtsFlags.ParFlags.setAffinity = rtsTrue;
+                        RtsFlags.ParFlags.setAffinity = true;
                         break;
                     case 'm':
-                        RtsFlags.ParFlags.migrate = rtsFalse;
+                        RtsFlags.ParFlags.migrate = false;
                         break;
                     case 'w':
                         // -qw was removed; accepted for backwards compat
                         break;
                     default:
                         errorBelch("unknown RTS option: %s",rts_argv[arg]);
-                        error = rtsTrue;
+                        error = true;
                         break;
                     }
                     ) break;
@@ -1265,7 +1401,7 @@ error = rtsTrue;
                       = strtol(rts_argv[arg]+2, (char **) NULL, 10);
                     if (RtsFlags.ParFlags.maxLocalSparks <= 0) {
                       errorBelch("bad value for -e");
-                      error = rtsTrue;
+                      error = true;
                     }
                 }
                 ) break;
@@ -1276,7 +1412,7 @@ error = rtsTrue;
                 OPTION_SAFE;
                 TICKY_BUILD_ONLY(
 
-                RtsFlags.TickyFlags.showTickyStats = rtsTrue;
+                RtsFlags.TickyFlags.showTickyStats = true;
 
                 {
                     int r;
@@ -1286,7 +1422,7 @@ error = rtsTrue;
                     r = openStatsFile(rts_argv[arg]+2,
                                       TICKY_FILENAME_FMT,
                                       &RtsFlags.TickyFlags.tickyFile);
-                    if (r == -1) { error = rtsTrue; }
+                    if (r == -1) { error = true; }
                 }
                 ) break;
 
@@ -1311,21 +1447,22 @@ error = rtsTrue;
               /* =========== EXTENDED OPTIONS =================== */
 
               case 'x': /* Extend the argument space */
+                unchecked_arg_start++;
                 switch(rts_argv[arg][2]) {
                   case '\0':
                     OPTION_SAFE;
                     errorBelch("incomplete RTS option: %s",rts_argv[arg]);
-                    error = rtsTrue;
+                    error = true;
                     break;
 
                 case 'b': /* heapBase in hex; undocumented */
                     OPTION_UNSAFE;
                     if (rts_argv[arg][3] != '\0') {
                         RtsFlags.GcFlags.heapBase
-                            = strtol(rts_argv[arg]+3, (char **) NULL, 16);
+                            = strToStgWord(rts_argv[arg]+3, (char **) NULL, 0);
                     } else {
                         errorBelch("-xb: requires argument");
-                        error = rtsTrue;
+                        error = true;
                     }
                     break;
 
@@ -1337,7 +1474,7 @@ error = rtsTrue;
                             = strtol(rts_argv[arg]+3, (char **) NULL, 16);
                         if (RtsFlags.MiscFlags.linkerMemBase > 0x80000000) {
                             errorBelch("-xm: value must be <80000000");
-                            error = rtsTrue;
+                            error = true;
                         }
                     } else {
                         RtsFlags.MiscFlags.linkerMemBase = 0;
@@ -1345,35 +1482,64 @@ error = rtsTrue;
                     break;
 #endif
 
-                case 'c': /* Debugging tool: show current cost centre on an exception */
+                case 'c': /* Debugging tool: show current cost centre on
+                           an exception */
                     OPTION_SAFE;
                     PROFILING_BUILD_ONLY(
-                        RtsFlags.ProfFlags.showCCSOnException = rtsTrue;
+                        RtsFlags.ProfFlags.showCCSOnException = true;
                         );
-                    break;
+                    unchecked_arg_start++;
+                    goto check_rest;
 
                 case 't':  /* Include memory used by TSOs in a heap profile */
                     OPTION_SAFE;
                     PROFILING_BUILD_ONLY(
-                        RtsFlags.ProfFlags.includeTSOs = rtsTrue;
+                        RtsFlags.ProfFlags.includeTSOs = true;
                         );
-                    break;
+                    unchecked_arg_start++;
+                    goto check_rest;
 
-                  /* The option prefix '-xx' is reserved for future extension.  KSW 1999-11. */
+                  /*
+                   * The option prefix '-xx' is reserved for future
+                   * extension.  KSW 1999-11.
+                   */
+
+                case 'q':
+                  OPTION_UNSAFE;
+                  RtsFlags.GcFlags.allocLimitGrace
+                      = decodeSize(rts_argv[arg], 3, BLOCK_SIZE, HS_INT_MAX)
+                          / BLOCK_SIZE;
+                  break;
 
                   default:
                     OPTION_SAFE;
                     errorBelch("unknown RTS option: %s",rts_argv[arg]);
-                    error = rtsTrue;
+                    error = true;
                     break;
                 }
                 break;  /* defensive programming */
+
+            /* check the rest to be sure there is nothing afterwards.*/
+            /* see Trac #9839 */
+            check_rest:
+                {
+                    /* start checking from the first unchecked position,
+                     * not from index 2*/
+                    /* see Trac #9839 */
+                    if (rts_argv[arg][unchecked_arg_start] != '\0') {
+                      errorBelch("flag -%c given an argument"
+                                 " when none was expected: %s",
+                                 rts_argv[arg][1],rts_argv[arg]);
+                      error = true;
+                    }
+                    break;
+                }
 
               /* =========== OH DEAR ============================ */
               default:
                 OPTION_SAFE;
                 errorBelch("unknown RTS option: %s",rts_argv[arg]);
-                error = rtsTrue;
+                error = true;
                 break;
             }
 
@@ -1446,8 +1612,48 @@ static void normaliseRtsOpts (void)
 
     if (RtsFlags.GcFlags.stkChunkBufferSize >
         RtsFlags.GcFlags.stkChunkSize / 2) {
-        errorBelch("stack chunk buffer size (-kb) must be less than 50%% of the stack chunk size (-kc)");
+        errorBelch("stack chunk buffer size (-kb) must be less than 50%%\n"
+                   "of the stack chunk size (-kc)");
         errorUsage();
+    }
+
+    if (RtsFlags.GcFlags.maxHeapSize != 0 &&
+        RtsFlags.GcFlags.heapSizeSuggestion >
+        RtsFlags.GcFlags.maxHeapSize) {
+        RtsFlags.GcFlags.maxHeapSize = RtsFlags.GcFlags.heapSizeSuggestion;
+    }
+
+    if (RtsFlags.GcFlags.maxHeapSize != 0 &&
+        RtsFlags.GcFlags.minAllocAreaSize >
+        RtsFlags.GcFlags.maxHeapSize) {
+        errorBelch("maximum heap size (-M) is smaller than minimum alloc area size (-A)");
+        RtsFlags.GcFlags.minAllocAreaSize = RtsFlags.GcFlags.maxHeapSize;
+    }
+
+    // If we have -A16m or larger, use -n4m.
+    if (RtsFlags.GcFlags.minAllocAreaSize >= (16*1024*1024) / BLOCK_SIZE) {
+        RtsFlags.GcFlags.nurseryChunkSize = (4*1024*1024) / BLOCK_SIZE;
+    }
+
+    if (RtsFlags.ParFlags.parGcLoadBalancingGen == ~0u) {
+        StgWord alloc_area_bytes
+            = RtsFlags.GcFlags.minAllocAreaSize * BLOCK_SIZE;
+
+        // If allocation area is larger that CPU cache
+        // we can finish scanning quicker doing work-stealing
+        // scan. Trac #9221
+        // 32M looks big enough not to fit into L2 cache
+        // of popular modern CPUs.
+        if (alloc_area_bytes >= 32 * 1024 * 1024) {
+            RtsFlags.ParFlags.parGcLoadBalancingGen = 0;
+        } else {
+            RtsFlags.ParFlags.parGcLoadBalancingGen = 1;
+        }
+    }
+
+    // We can't generate dumps without signal handlers
+    if (RtsFlags.MiscFlags.generate_dump_file) {
+        RtsFlags.MiscFlags.install_seh_handlers = true;
     }
 }
 
@@ -1493,11 +1699,17 @@ openStatsFile (char *filename,           // filename, or NULL
         f = NULL; /* NULL means use debugBelch */
     } else {
         if (*filename != '\0') {  /* stats file specified */
-            f = fopen(filename,"w");
+            f = __rts_fopen (filename,"w");
         } else {
-            char stats_filename[STATS_FILENAME_MAXLEN]; /* default <program>.<ext> */
-            sprintf(stats_filename, filename_fmt, prog_name);
-            f = fopen(stats_filename,"w");
+            if (filename_fmt == NULL) {
+                errorBelch("Invalid stats filename format (NULL)\n");
+                return -1;
+            }
+            /* default <program>.<ext> */
+            char stats_filename[STATS_FILENAME_MAXLEN];
+            snprintf(stats_filename, STATS_FILENAME_MAXLEN, filename_fmt,
+                prog_name);
+            f = __rts_fopen (stats_filename,"w");
         }
         if (f == NULL) {
             errorBelch("Can't open stats file %s\n", filename);
@@ -1532,7 +1744,7 @@ static void initStatsFile (FILE *f)
 -------------------------------------------------------------------------- */
 
 static StgWord64
-decodeSize(const char *flag, nat offset, StgWord64 min, StgWord64 max)
+decodeSize(const char *flag, uint32_t offset, StgWord64 min, StgWord64 max)
 {
     char c;
     const char *s;
@@ -1572,11 +1784,192 @@ decodeSize(const char *flag, nat offset, StgWord64 min, StgWord64 max)
     return val;
 }
 
-#if defined(TRACING)
-static void read_trace_flags(char *arg)
+#if defined(DEBUG)
+static void read_debug_flags(const char* arg)
 {
-    char *c;
-    rtsBool enabled = rtsTrue;
+    // Already parsed "-D"
+    const char *c;
+    for (c  = arg + 2; *c != '\0'; c++) {
+        switch (*c) {
+        case 's':
+            RtsFlags.DebugFlags.scheduler = true;
+            break;
+        case 'i':
+            RtsFlags.DebugFlags.interpreter = true;
+            break;
+        case 'w':
+            RtsFlags.DebugFlags.weak = true;
+            break;
+        case 'G':
+            RtsFlags.DebugFlags.gccafs = true;
+            break;
+        case 'g':
+            RtsFlags.DebugFlags.gc = true;
+            break;
+        case 'b':
+            RtsFlags.DebugFlags.block_alloc = true;
+            break;
+        case 'S':
+            RtsFlags.DebugFlags.sanity = true;
+            break;
+        case 't':
+            RtsFlags.DebugFlags.stable = true;
+            break;
+        case 'p':
+            RtsFlags.DebugFlags.prof = true;
+            break;
+        case 'l':
+            RtsFlags.DebugFlags.linker = true;
+            break;
+        case 'a':
+            RtsFlags.DebugFlags.apply = true;
+            break;
+        case 'm':
+            RtsFlags.DebugFlags.stm = true;
+            break;
+        case 'z':
+            RtsFlags.DebugFlags.squeeze = true;
+            break;
+        case 'c':
+            RtsFlags.DebugFlags.hpc = true;
+            break;
+        case 'r':
+            RtsFlags.DebugFlags.sparks = true;
+            break;
+        case 'C':
+            RtsFlags.DebugFlags.compact = true;
+            break;
+        default:
+            bad_option( arg );
+        }
+    }
+    // -Dx also turns on -v.  Use -l to direct trace
+    // events to the .eventlog file instead.
+    RtsFlags.TraceFlags.tracing = TRACE_STDERR;
+}
+#endif
+
+#if defined(PROFILING)
+// Parse a "-h" flag, returning whether the parse resulted in an error.
+static bool read_heap_profiling_flag(const char *arg)
+{
+    // Already parsed "-h"
+
+    bool error = false;
+    switch (arg[2]) {
+    case '\0':
+    case 'C':
+    case 'c':
+    case 'M':
+    case 'm':
+    case 'D':
+    case 'd':
+    case 'Y':
+    case 'y':
+    case 'R':
+    case 'r':
+    case 'B':
+    case 'b':
+        if (arg[2] != '\0' && arg[3] != '\0') {
+            {
+                const char *left  = strchr(arg, '{');
+                const char *right = strrchr(arg, '}');
+
+                // curly braces are optional, for
+                // backwards compat.
+                if (left)
+                    left = left+1;
+                else
+                    left = arg + 3;
+
+                if (!right)
+                    right = arg + strlen(arg);
+
+                char *selector = stgStrndup(left, right - left + 1);
+
+                switch (arg[2]) {
+                case 'c': // cost centre label select
+                    RtsFlags.ProfFlags.ccSelector = selector;
+                    break;
+                case 'C':
+                    RtsFlags.ProfFlags.ccsSelector = selector;
+                    break;
+                case 'M':
+                case 'm': // cost centre module select
+                    RtsFlags.ProfFlags.modSelector = selector;
+                    break;
+                case 'D':
+                case 'd': // closure descr select
+                    RtsFlags.ProfFlags.descrSelector = selector;
+                    break;
+                case 'Y':
+                case 'y': // closure type select
+                    RtsFlags.ProfFlags.typeSelector = selector;
+                    break;
+                case 'R':
+                case 'r': // retainer select
+                    RtsFlags.ProfFlags.retainerSelector = selector;
+                    break;
+                case 'B':
+                case 'b': // biography select
+                    RtsFlags.ProfFlags.bioSelector = selector;
+                    break;
+                default:
+                    free(selector);
+                }
+            }
+            break;
+        }
+
+        if (RtsFlags.ProfFlags.doHeapProfile != 0) {
+            errorBelch("multiple heap profile options");
+            error = true;
+            break;
+        }
+
+        switch (arg[2]) {
+        case '\0':
+        case 'C':
+        case 'c':
+            RtsFlags.ProfFlags.doHeapProfile = HEAP_BY_CCS;
+            break;
+        case 'M':
+        case 'm':
+            RtsFlags.ProfFlags.doHeapProfile = HEAP_BY_MOD;
+            break;
+        case 'D':
+        case 'd':
+            RtsFlags.ProfFlags.doHeapProfile = HEAP_BY_DESCR;
+            break;
+        case 'Y':
+        case 'y':
+            RtsFlags.ProfFlags.doHeapProfile = HEAP_BY_TYPE;
+            break;
+        case 'R':
+        case 'r':
+            RtsFlags.ProfFlags.doHeapProfile = HEAP_BY_RETAINER;
+            break;
+        case 'B':
+        case 'b':
+            RtsFlags.ProfFlags.doHeapProfile = HEAP_BY_LDV;
+            break;
+        }
+        break;
+
+    default:
+        errorBelch("invalid heap profile option: %s", arg);
+        error = true;
+    }
+
+    return error;
+}
+#endif
+
+#if defined(TRACING)
+static void read_trace_flags(const char *arg)
+{
+    const char *c;
+    bool enabled = true;
     /* Syntax for tracing flags currently looks like:
      *
      *   -l    To turn on eventlog tracing with default trace classes
@@ -1596,17 +1989,17 @@ static void read_trace_flags(char *arg)
      * Similarly, in future we might default to slightly less verbose
      * scheduler or GC tracing.
      */
-    RtsFlags.TraceFlags.scheduler      = rtsTrue;
-    RtsFlags.TraceFlags.gc             = rtsTrue;
-    RtsFlags.TraceFlags.sparks_sampled = rtsTrue;
-    RtsFlags.TraceFlags.user           = rtsTrue;
+    RtsFlags.TraceFlags.scheduler      = true;
+    RtsFlags.TraceFlags.gc             = true;
+    RtsFlags.TraceFlags.sparks_sampled = true;
+    RtsFlags.TraceFlags.user           = true;
 
     for (c  = arg; *c != '\0'; c++) {
         switch(*c) {
         case '\0':
             break;
         case '-':
-            enabled = rtsFalse;
+            enabled = false;
             break;
         case 'a':
             RtsFlags.TraceFlags.scheduler      = enabled;
@@ -1614,32 +2007,32 @@ static void read_trace_flags(char *arg)
             RtsFlags.TraceFlags.sparks_sampled = enabled;
             RtsFlags.TraceFlags.sparks_full    = enabled;
             RtsFlags.TraceFlags.user           = enabled;
-            enabled = rtsTrue;
+            enabled = true;
             break;
 
         case 's':
             RtsFlags.TraceFlags.scheduler = enabled;
-            enabled = rtsTrue;
+            enabled = true;
             break;
         case 'p':
             RtsFlags.TraceFlags.sparks_sampled = enabled;
-            enabled = rtsTrue;
+            enabled = true;
             break;
         case 'f':
             RtsFlags.TraceFlags.sparks_full = enabled;
-            enabled = rtsTrue;
+            enabled = true;
             break;
         case 't':
             RtsFlags.TraceFlags.timestamp = enabled;
-            enabled = rtsTrue;
+            enabled = true;
             break;
         case 'g':
             RtsFlags.TraceFlags.gc        = enabled;
-            enabled = rtsTrue;
+            enabled = true;
             break;
         case 'u':
             RtsFlags.TraceFlags.user      = enabled;
-            enabled = rtsTrue;
+            enabled = true;
             break;
         default:
             errorBelch("unknown trace option: %c",*c);
@@ -1737,6 +2130,7 @@ getProgArgv(int *argc, char **argv[])
 void
 setProgArgv(int argc, char *argv[])
 {
+    freeArgv(prog_argc,prog_argv);
     prog_argc = argc;
     prog_argv = copyArgv(argc,argv);
     setProgName(prog_argv);
@@ -1789,48 +2183,18 @@ void freeWin32ProgArgv (void);
 void
 freeWin32ProgArgv (void)
 {
-    int i;
-
-    if (win32_prog_argv != NULL) {
-        for (i = 0; i < win32_prog_argc; i++) {
-            stgFree(win32_prog_argv[i]);
-        }
-        stgFree(win32_prog_argv);
+    if(win32_utf8_argv == NULL) {
+        return;
+    }
+    else
+    {
+        freeArgv(win32_full_utf8_argc, win32_full_utf8_argv);
+        stgFree(win32_utf8_argv);
     }
 
-    win32_prog_argc = 0;
-    win32_prog_argv = NULL;
+
 }
 
-void
-getWin32ProgArgv(int *argc, wchar_t **argv[])
-{
-    *argc = win32_prog_argc;
-    *argv = win32_prog_argv;
-}
-
-void
-setWin32ProgArgv(int argc, wchar_t *argv[])
-{
-        int i;
-
-        freeWin32ProgArgv();
-
-    win32_prog_argc = argc;
-        if (argv == NULL) {
-                win32_prog_argv = NULL;
-                return;
-        }
-
-    win32_prog_argv = stgCallocBytes(argc + 1, sizeof (wchar_t *),
-                                    "setWin32ProgArgv 1");
-    for (i = 0; i < argc; i++) {
-        win32_prog_argv[i] = stgMallocBytes((wcslen(argv[i]) + 1) * sizeof(wchar_t),
-                                           "setWin32ProgArgv 2");
-        wcscpy(win32_prog_argv[i], argv[i]);
-    }
-    win32_prog_argv[argc] = NULL;
-}
 #endif
 
 /* ----------------------------------------------------------------------------
@@ -1860,10 +2224,40 @@ void freeRtsArgs(void)
     freeRtsArgv();
 }
 
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:
+
+/*
+Note [OPTION_SAFE vs OPTION_UNSAFE]
+
+Ticket #3910 originally pointed out that the RTS options are a potential
+security problem. For example the -t -s or -S flags can be used to
+overwrite files. This would be bad in the context of CGI scripts or
+setuid binaries. So we introduced a system where +RTS processing is more
+or less disabled unless you pass the -rtsopts flag at link time.
+
+This scheme is safe enough but it also really annoyes users. They have
+to use -rtsopts in many circumstances: with -threaded to use -N, with
+-eventlog to use -l, with -prof to use any of the profiling flags. Many
+users just set -rtsopts globally or in project .cabal files. Apart from
+annoying users it reduces security because it means that deployed
+binaries will have all RTS options enabled rather than just profiling
+ones.
+
+So now, we relax the set of RTS options that are available in the
+default -rtsopts=some case. For "deployment" ways like vanilla and
+-threaded we remain quite conservative. Only --info -? --help are
+allowed for vanilla. For -threaded, -N and -N<x> are allowed with a
+check that x <= num cpus.
+
+For "developer" ways like -debug, -eventlog, -prof, we allow all the
+options that are special to that way. Some of these allow writing files,
+but the file written is not directly under the control of the attacker.
+For the setuid case (where the attacker would have control over binary
+name, current dir, local symlinks etc) we check if the process is
+running setuid/setgid and refuse all RTS option processing. Users would
+need to use -rtsopts=all in this case.
+
+We are making the assumption that developers will not deploy binaries
+built in the -debug, -eventlog, -prof ways. And even if they do, the
+damage should be limited to DOS, information disclosure and writing
+files like <progname>.eventlog, not arbitrary files.
+*/

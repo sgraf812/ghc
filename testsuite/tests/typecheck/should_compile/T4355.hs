@@ -1,10 +1,11 @@
+{-# OPTIONS_GHC -fno-warn-redundant-constraints -fno-warn-missing-methods #-}
 {-# LANGUAGE DeriveDataTypeable, ExistentialQuantification, RankNTypes, MultiParamTypeClasses, FunctionalDependencies, FlexibleInstances, FlexibleContexts, PatternGuards, DatatypeContexts #-}
 
 module T4355 where
 
 import Control.Arrow
-import Control.Monad.Trans	-- From mtl
-import Control.Monad.Reader	-- Ditto
+import Control.Monad.Trans      -- From mtl
+import Control.Monad.Reader     -- Ditto
 import Data.Typeable
 import Data.Maybe
 

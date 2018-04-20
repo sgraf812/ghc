@@ -8,6 +8,8 @@ module Llvm.Types where
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import Data.Char
 import Data.Int
 import Numeric
@@ -50,7 +52,8 @@ data LlvmType
   | LMVector Int LlvmType -- ^ A vector of 'LlvmType'
   | LMLabel               -- ^ A 'LlvmVar' can represent a label (address)
   | LMVoid                -- ^ Void type
-  | LMStruct [LlvmType]   -- ^ Structure type
+  | LMStruct [LlvmType]   -- ^ Packed structure type
+  | LMStructU [LlvmType]  -- ^ Unpacked structure type
   | LMAlias LlvmAlias     -- ^ A type alias
   | LMMetadata            -- ^ LLVM Metadata
 
@@ -70,6 +73,7 @@ instance Outputable LlvmType where
   ppr (LMLabel        ) = text "label"
   ppr (LMVoid         ) = text "void"
   ppr (LMStruct tys   ) = text "<{" <> ppCommaJoin tys <> text "}>"
+  ppr (LMStructU tys  ) = text "{" <> ppCommaJoin tys <> text "}"
   ppr (LMMetadata     ) = text "metadata"
 
   ppr (LMFunction (LlvmFunctionDecl _ _ _ r varg p _))
@@ -173,6 +177,14 @@ instance Outputable LlvmStatic where
   ppr (LMSub s1 s2)
       = pprStaticArith s1 s2 (sLit "sub") (sLit "fsub") "LMSub"
 
+
+pprSpecialStatic :: LlvmStatic -> SDoc
+pprSpecialStatic (LMBitc v t) =
+    ppr (pLower t) <> text ", bitcast (" <> ppr v <> text " to " <> ppr t
+        <> char ')'
+pprSpecialStatic stat = ppr stat
+
+
 pprStaticArith :: LlvmStatic -> LlvmStatic -> LitString -> LitString -> String -> SDoc
 pprStaticArith s1 s2 int_op float_op op_name =
   let ty1 = getStatType s1
@@ -215,7 +227,31 @@ ppLit f@(LMFloatLit _ _)       = sdocWithDynFlags (\dflags ->
                                    error $ "Can't print this float literal!" ++ showSDoc dflags (ppr f))
 ppLit (LMVectorLit ls  )       = char '<' <+> ppCommaJoin ls <+> char '>'
 ppLit (LMNullLit _     )       = text "null"
-ppLit (LMUndefLit _    )       = text "undef"
+-- Trac 11487 was an issue where we passed undef for some arguments
+-- that were actually live. By chance the registers holding those
+-- arguments usually happened to have the right values anyways, but
+-- that was not guaranteed. To find such bugs reliably, we set the
+-- flag below when validating, which replaces undef literals (at
+-- common types) with values that are likely to cause a crash or test
+-- failure.
+ppLit (LMUndefLit t    )       = sdocWithDynFlags f
+  where f dflags
+          | gopt Opt_LlvmFillUndefWithGarbage dflags,
+            Just lit <- garbageLit t   = ppLit lit
+          | otherwise                  = text "undef"
+
+garbageLit :: LlvmType -> Maybe LlvmLit
+garbageLit t@(LMInt w)     = Just (LMIntLit (0xbbbbbbbbbbbbbbb0 `mod` (2^w)) t)
+  -- Use a value that looks like an untagged pointer, so we are more
+  -- likely to try to enter it
+garbageLit t
+  | isFloat t              = Just (LMFloatLit 12345678.9 t)
+garbageLit t@(LMPointer _) = Just (LMNullLit t)
+  -- Using null isn't totally ideal, since some functions may check for null.
+  -- But producing another value is inconvenient since it needs a cast,
+  -- and the knowledge for how to format casts is in PpLlvm.
+garbageLit _               = Nothing
+  -- More cases could be added, but this should do for now.
 
 -- | Return the 'LlvmType' of the 'LlvmVar'
 getVarType :: LlvmVar -> LlvmType
@@ -260,7 +296,7 @@ pLift LMVoid     = error "Voids are unliftable"
 pLift LMMetadata = error "Metadatas are unliftable"
 pLift x          = LMPointer x
 
--- | Lower a variable of 'LMPointer' type.
+-- | Lift a variable to 'LMPointer' type.
 pVarLift :: LlvmVar -> LlvmVar
 pVarLift (LMGlobalVar s t l x a c) = LMGlobalVar s (pLift t) l x a c
 pVarLift (LMLocalVar  s t        ) = LMLocalVar  s (pLift t)
@@ -271,7 +307,8 @@ pVarLift (LMLitVar    _          ) = error $ "Can't lower a literal type!"
 -- constructors can be lowered.
 pLower :: LlvmType -> LlvmType
 pLower (LMPointer x) = x
-pLower x  = error $ showSDoc undefined (ppr x) ++ " is a unlowerable type, need a pointer"
+pLower x  = pprPanic "llvmGen(pLower)"
+            $ ppr x <+> text " is a unlowerable type, need a pointer"
 
 -- | Lower a variable of 'LMPointer' type.
 pVarLower :: LlvmVar -> LlvmVar
@@ -325,6 +362,16 @@ llvmWidthInBits dflags (LMVector n ty) = n * llvmWidthInBits dflags ty
 llvmWidthInBits _      LMLabel         = 0
 llvmWidthInBits _      LMVoid          = 0
 llvmWidthInBits dflags (LMStruct tys)  = sum $ map (llvmWidthInBits dflags) tys
+llvmWidthInBits _      (LMStructU _)   =
+    -- It's not trivial to calculate the bit width of the unpacked structs,
+    -- since they will be aligned depending on the specified datalayout (
+    -- http://llvm.org/docs/LangRef.html#data-layout ). One way we could support
+    -- this could be to make the LlvmCodeGen.Ppr.moduleLayout be a data type
+    -- that exposes the alignment information. However, currently the only place
+    -- we use unpacked structs is LLVM intrinsics that return them (e.g.,
+    -- llvm.sadd.with.overflow.*), so we don't actually need to compute their
+    -- bit width.
+    panic "llvmWidthInBits: not implemented for LMStructU"
 llvmWidthInBits _      (LMFunction  _) = 0
 llvmWidthInBits dflags (LMAlias (_,t)) = llvmWidthInBits dflags t
 llvmWidthInBits _      LMMetadata      = panic "llvmWidthInBits: Meta-data has no runtime representation!"
@@ -555,6 +602,8 @@ data LlvmCallConvention
   -- does not support varargs and requires the prototype of all callees to
   -- exactly match the prototype of the function definition.
   | CC_Coldcc
+  -- | The GHC-specific 'registerised' calling convention.
+  | CC_Ghc
   -- | Any calling convention may be specified by number, allowing
   -- target-specific calling conventions to be used. Target specific calling
   -- conventions start at 64.
@@ -568,6 +617,7 @@ instance Outputable LlvmCallConvention where
   ppr CC_Ccc       = text "ccc"
   ppr CC_Fastcc    = text "fastcc"
   ppr CC_Coldcc    = text "coldcc"
+  ppr CC_Ghc       = text "ghccc"
   ppr (CC_Ncc i)   = text "cc " <> ppr i
   ppr CC_X86_Stdcc = text "x86_stdcallcc"
 
@@ -820,7 +870,7 @@ ppFloat = ppDouble . widenFp
 
 -- | Reverse or leave byte data alone to fix endianness on this target.
 fixEndian :: [a] -> [a]
-#ifdef WORDS_BIGENDIAN
+#if defined(WORDS_BIGENDIAN)
 fixEndian = id
 #else
 fixEndian = reverse

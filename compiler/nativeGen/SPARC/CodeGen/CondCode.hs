@@ -6,6 +6,8 @@ module SPARC.CodeGen.CondCode (
 
 where
 
+import GhcPrelude
+
 import {-# SOURCE #-} SPARC.CodeGen.Gen32
 import SPARC.CodeGen.Base
 import SPARC.Instr
@@ -14,7 +16,7 @@ import SPARC.Cond
 import SPARC.Imm
 import SPARC.Base
 import NCGMonad
-import Size
+import Format
 
 import Cmm
 
@@ -98,7 +100,7 @@ condFltCode cond x y = do
         code__2 =
                 if pk1 `cmmEqType` pk2 then
                     code1 `appOL` code2 `snocOL`
-                    FCMP True (cmmTypeSize pk1) src1 src2
+                    FCMP True (cmmTypeFormat pk1) src1 src2
                 else if typeWidth pk1 == W32 then
                     code1 `snocOL` promote src1 `appOL` code2 `snocOL`
                     FCMP True FF64 tmp src2

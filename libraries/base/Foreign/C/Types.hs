@@ -1,12 +1,12 @@
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP
-           , NoImplicitPrelude
-           , MagicHash
-           , GeneralizedNewtypeDeriving
-  #-}
-{-# OPTIONS_GHC -fno-warn-unused-binds #-}
-{-# LANGUAGE AutoDeriveTypeable, StandaloneDeriving #-}
--- XXX -fno-warn-unused-binds stops us warning about unused constructors,
+{-# OPTIONS_GHC -Wno-unused-binds #-}
+-- XXX -Wno-unused-binds stops us warning about unused constructors,
 -- but really we should just remove them if we don't want them
 
 -----------------------------------------------------------------------------
@@ -14,7 +14,7 @@
 -- Module      :  Foreign.C.Types
 -- Copyright   :  (c) The FFI task force 2001
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  ffi@haskell.org
 -- Stability   :  provisional
 -- Portability :  portable
@@ -27,8 +27,14 @@ module Foreign.C.Types
         ( -- * Representations of C types
           -- $ctypes
 
+          -- ** Platform differences
+          -- | This module contains platform specific information about types.
+          --   __/As such the types presented on this page reflect the platform
+          --   on which the documentation was generated and may not coincide with
+          --   the types on your platform./__
+
           -- ** Integral types
-          -- | These types are are represented as @newtype@s of
+          -- | These types are represented as @newtype@s of
           -- types in "Data.Int" and "Data.Word", and are instances of
           -- 'Prelude.Eq', 'Prelude.Ord', 'Prelude.Num', 'Prelude.Read',
           -- 'Prelude.Show', 'Prelude.Enum', 'Typeable', 'Storable',
@@ -38,7 +44,7 @@ module Foreign.C.Types
         , CShort(..),   CUShort(..),  CInt(..),      CUInt(..)
         , CLong(..),    CULong(..)
         , CPtrdiff(..), CSize(..),    CWchar(..),    CSigAtomic(..)
-        , CLLong(..),   CULLong(..)
+        , CLLong(..),   CULLong(..), CBool(..)
         , CIntPtr(..),  CUIntPtr(..), CIntMax(..),   CUIntMax(..)
 
           -- ** Numeric types
@@ -57,7 +63,7 @@ module Foreign.C.Types
         --
 
           -- ** Floating types
-          -- | These types are are represented as @newtype@s of
+          -- | These types are represented as @newtype@s of
           -- 'Prelude.Float' and 'Prelude.Double', and are instances of
           -- 'Prelude.Eq', 'Prelude.Ord', 'Prelude.Num', 'Prelude.Read',
           -- 'Prelude.Show', 'Prelude.Enum', 'Typeable', 'Storable',
@@ -66,6 +72,10 @@ module Foreign.C.Types
         , CFloat(..),   CDouble(..)
         -- XXX GHC doesn't support CLDouble yet
         -- , CLDouble(..)
+
+          -- See Note [Exporting constructors of marshallable foreign types]
+          -- in Foreign.Ptr for why the constructors for these newtypes are
+          -- exported.
 
           -- ** Other types
 
@@ -77,7 +87,6 @@ import Foreign.Storable
 import Data.Bits        ( Bits(..), FiniteBits(..) )
 import Data.Int         ( Int8,  Int16,  Int32,  Int64  )
 import Data.Word        ( Word8, Word16, Word32, Word64 )
-import Data.Typeable
 
 import GHC.Base
 import GHC.Float
@@ -117,6 +126,11 @@ INTEGRAL_TYPE(CLLong,HTYPE_LONG_LONG)
 -- | Haskell type representing the C @unsigned long long@ type.
 INTEGRAL_TYPE(CULLong,HTYPE_UNSIGNED_LONG_LONG)
 
+-- | Haskell type representing the C @bool@ type.
+--
+-- @since 4.10.0.0
+INTEGRAL_TYPE_WITH_CTYPE(CBool,bool,HTYPE_BOOL)
+
 {-# RULES
 "fromIntegral/a->CChar"   fromIntegral = \x -> CChar   (fromIntegral x)
 "fromIntegral/a->CSChar"  fromIntegral = \x -> CSChar  (fromIntegral x)
@@ -141,6 +155,7 @@ INTEGRAL_TYPE(CULLong,HTYPE_UNSIGNED_LONG_LONG)
 "fromIntegral/CULong->a"  fromIntegral = \(CULong  x) -> fromIntegral x
 "fromIntegral/CLLong->a"  fromIntegral = \(CLLong  x) -> fromIntegral x
 "fromIntegral/CULLong->a" fromIntegral = \(CULLong x) -> fromIntegral x
+"fromIntegral/CBool->a"   fromIntegral = \(CBool   x) -> fromIntegral x
  #-}
 
 -- | Haskell type representing the C @float@ type.
@@ -188,11 +203,12 @@ ARITHMETIC_TYPE(CClock,HTYPE_CLOCK_T)
 ARITHMETIC_TYPE(CTime,HTYPE_TIME_T)
 -- | Haskell type representing the C @useconds_t@ type.
 --
--- /Since: 4.4.0.0/
+-- @since 4.4.0.0
+
 ARITHMETIC_TYPE(CUSeconds,HTYPE_USECONDS_T)
 -- | Haskell type representing the C @suseconds_t@ type.
 --
--- /Since: 4.4.0.0/
+-- @since 4.4.0.0
 ARITHMETIC_TYPE(CSUSeconds,HTYPE_SUSECONDS_T)
 
 -- FIXME: Implement and provide instances for Eq and Storable

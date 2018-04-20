@@ -6,8 +6,7 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef RTSSIGNALS_H
-#define RTSSIGNALS_H
+#pragma once
 
 #if !defined(mingw32_HOST_OS)
 
@@ -19,7 +18,7 @@
 
 #else
 
-#define signals_pending() (rtsFalse)
+#define signals_pending() (false)
 
 #endif
 
@@ -52,24 +51,6 @@ void freeSignalHandlers(void);
  */
 void awaitUserSignals(void);
 
-/*
- * Function: markSignalHandlers()
- *
- * Evacuate the handler queue. _Assumes_ that console event delivery
- * has already been blocked.
- */
-void markSignalHandlers (evac_fn evac, void *user);
-
 #include "EndPrivate.h"
 
 #endif /* RTS_USER_SIGNALS */
-
-#endif /* RTSSIGNALS_H */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

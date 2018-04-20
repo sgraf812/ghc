@@ -7,29 +7,21 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef RTSFLAGS_H
-#define RTSFLAGS_H
+#pragma once
 
 #include "BeginPrivate.h"
 
 /* Routines that operate-on/to-do-with RTS flags: */
 
+#if defined(mingw32_HOST_OS)
+//The returned buffer has to be freed with stgFree()
+char* lpcwstrToUTF8(const wchar_t* utf16_str);
+char** getUTF8Args(int* argc);
+#endif
 void initRtsFlagsDefaults (void);
-void setupRtsFlags        (int *argc, char *argv[],
-                           RtsOptsEnabledEnum rtsOptsEnabled,
-                           const char *ghc_rts_opts,
-                           HsBool is_hs_main);
-void setProgName          (char *argv[]);
+void setupRtsFlags        (int *argc, char *argv[], RtsConfig rtsConfig);
 void freeRtsArgs          (void);
 
+extern RtsConfig rtsConfig;
+
 #include "EndPrivate.h"
-
-#endif /* RTSFLAGS_H */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

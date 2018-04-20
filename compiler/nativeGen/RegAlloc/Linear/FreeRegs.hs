@@ -9,6 +9,8 @@ module RegAlloc.Linear.FreeRegs (
 
 where
 
+import GhcPrelude
+
 import Reg
 import RegClass
 
@@ -74,9 +76,10 @@ maxSpillSlots dflags
                 ArchX86_64    -> X86.Instr.maxSpillSlots dflags
                 ArchPPC       -> PPC.Instr.maxSpillSlots dflags
                 ArchSPARC     -> SPARC.Instr.maxSpillSlots dflags
+                ArchSPARC64   -> panic "maxSpillSlots ArchSPARC64"
                 ArchARM _ _ _ -> panic "maxSpillSlots ArchARM"
                 ArchARM64     -> panic "maxSpillSlots ArchARM64"
-                ArchPPC_64    -> panic "maxSpillSlots ArchPPC_64"
+                ArchPPC_64 _  -> PPC.Instr.maxSpillSlots dflags
                 ArchAlpha     -> panic "maxSpillSlots ArchAlpha"
                 ArchMipseb    -> panic "maxSpillSlots ArchMipseb"
                 ArchMipsel    -> panic "maxSpillSlots ArchMipsel"

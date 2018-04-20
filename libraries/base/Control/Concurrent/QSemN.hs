@@ -1,5 +1,5 @@
-{-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE AutoDeriveTypeable, BangPatterns #-}
+{-# LANGUAGE Safe #-}
+{-# LANGUAGE BangPatterns #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 
 -----------------------------------------------------------------------------
@@ -28,11 +28,10 @@ module Control.Concurrent.QSemN
 import Control.Concurrent.MVar ( MVar, newEmptyMVar, takeMVar, tryTakeMVar
                           , putMVar, newMVar
                           , tryPutMVar, isEmptyMVar)
-import Data.Typeable
 import Control.Exception
 import Data.Maybe
 
--- | 'QSemN' is a quantity semaphore in which the resource is aqcuired
+-- | 'QSemN' is a quantity semaphore in which the resource is acquired
 -- and released in units of one. It provides guaranteed FIFO ordering
 -- for satisfying blocked `waitQSemN` calls.
 --
@@ -43,7 +42,6 @@ import Data.Maybe
 -- is safe; it never loses any of the resource.
 --
 data QSemN = QSemN !(MVar (Int, [(Int, MVar ())], [(Int, MVar ())]))
-  deriving Typeable
 
 -- The semaphore state (i, xs, ys):
 --

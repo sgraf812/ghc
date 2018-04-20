@@ -8,7 +8,7 @@
 
 /*
  * The interval timer is used for profiling and for context switching in the
- * threaded build. 
+ * threaded build.
  *
  * This file defines the platform-independent view of interval timing, relying
  * on platform-specific services to install and run the timers.
@@ -45,7 +45,7 @@ handle_tick(int unused STG_UNUSED)
   if (RtsFlags.ConcFlags.ctxtSwitchTicks > 0) {
       ticks_to_ctxt_switch--;
       if (ticks_to_ctxt_switch <= 0) {
-	  ticks_to_ctxt_switch = RtsFlags.ConcFlags.ctxtSwitchTicks;
+          ticks_to_ctxt_switch = RtsFlags.ConcFlags.ctxtSwitchTicks;
           contextSwitchAllCapabilities(); /* schedule a context switch */
       }
   }
@@ -65,16 +65,23 @@ handle_tick(int unused STG_UNUSED)
       if (ticks_to_gc == 0) {
           if (RtsFlags.GcFlags.doIdleGC) {
               recent_activity = ACTIVITY_INACTIVE;
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
               wakeUpRts();
               // The scheduler will call stopTimer() when it has done
               // the GC.
 #endif
           } else {
               recent_activity = ACTIVITY_DONE_GC;
-              // disable timer signals (see #1623, #5991)
-              // but only if we're not profiling
-#ifndef PROFILING
+              // disable timer signals (see #1623, #5991, #9105)
+              // but only if we're not profiling (e.g. passed -h or -p RTS
+              // flags). If we are profiling we need to keep the timer active
+              // so that samples continue to be collected.
+#if defined(PROFILING)
+              if (!(RtsFlags.ProfFlags.doHeapProfile
+                    || RtsFlags.CcFlags.doCostCentres)) {
+                  stopTimer();
+              }
+#else
               stopTimer();
 #endif
           }
@@ -88,7 +95,7 @@ handle_tick(int unused STG_UNUSED)
 }
 
 // This global counter is used to allow multiple threads to stop the
-// timer temporarily with a stopTimer()/startTimer() pair.  If 
+// timer temporarily with a stopTimer()/startTimer() pair.  If
 //      timer_enabled  == 0          timer is enabled
 //      timer_disabled == N, N > 0   timer is disabled by N threads
 // When timer_enabled makes a transition to 0, we enable the timer,
@@ -127,17 +134,9 @@ stopTimer(void)
 }
 
 void
-exitTimer (rtsBool wait)
+exitTimer (bool wait)
 {
     if (RtsFlags.MiscFlags.tickInterval != 0) {
         exitTicker(wait);
     }
 }
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

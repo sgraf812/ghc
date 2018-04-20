@@ -1,8 +1,9 @@
-{-# LANGUAGE ConstraintKinds, TemplateHaskell, PolyKinds, TypeFamilies #-}
+{-# OPTIONS_GHC -fno-warn-redundant-constraints #-}
+{-# LANGUAGE ConstraintKinds, TemplateHaskell, PolyKinds, TypeFamilies, RankNTypes #-}
 
 module T7021a where
 
-import GHC.Prim
+import GHC.Exts
 import Language.Haskell.TH
 
 type IOable a = (Show a, Read a)
@@ -27,5 +28,5 @@ test = do
     reify fooName
     reify bazName
     reify barName
-    [t| (Show a, (Read a, Num a)) => a -> a |]
+    [t| forall a. (Show a, (Read a, Num a)) => a -> a |]
     [| \_ -> 0 |]

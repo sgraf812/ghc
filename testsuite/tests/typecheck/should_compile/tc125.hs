@@ -1,10 +1,11 @@
+{-# OPTIONS_GHC -fno-warn-redundant-constraints #-}
 {-# LANGUAGE MultiParamTypeClasses, FunctionalDependencies,
              FlexibleInstances, UndecidableInstances #-}
 -- UndecidableInstances now needed because the Coverage Condition fails
 
 -- !!! Functional dependency test. Hugs [Apr 2001] fails to typecheck this
 -- We should infer this type for foo
---	foo :: Q (S (S Z)) (S Z)
+--      foo :: Q (S (S Z)) (S Z)
 
 module ShouldCompile where
 

@@ -23,18 +23,15 @@
 #include "win32/IOManager.h"
 #endif
 
-static StgTSO* raiseAsync (Capability *cap,
-                           StgTSO *tso,
-                           StgClosure *exception,
-                           rtsBool stop_at_atomically,
-                           StgUpdateFrame *stop_here);
+static void blockedThrowTo (Capability *cap,
+                            StgTSO *target, MessageThrowTo *msg);
 
 static void removeFromQueues(Capability *cap, StgTSO *tso);
 
 static void removeFromMVarBlockedQueue (StgTSO *tso);
 
 static void throwToSendMsg (Capability *cap USED_IF_THREADS,
-                            Capability *target_cap USED_IF_THREADS, 
+                            Capability *target_cap USED_IF_THREADS,
                             MessageThrowTo *msg USED_IF_THREADS);
 
 /* -----------------------------------------------------------------------------
@@ -42,7 +39,7 @@ static void throwToSendMsg (Capability *cap USED_IF_THREADS,
 
    This version of throwTo is safe to use if and only if one of the
    following holds:
-   
+
      - !THREADED_RTS
 
      - all the other threads in the system are stopped (eg. during GC).
@@ -55,8 +52,8 @@ static void throwToSendMsg (Capability *cap USED_IF_THREADS,
    -------------------------------------------------------------------------- */
 
 static void
-throwToSingleThreaded__ (Capability *cap, StgTSO *tso, StgClosure *exception, 
-                         rtsBool stop_at_atomically, StgUpdateFrame *stop_here)
+throwToSingleThreaded__ (Capability *cap, StgTSO *tso, StgClosure *exception,
+                         bool stop_at_atomically, StgUpdateFrame *stop_here)
 {
     // Thread already dead?
     if (tso->what_next == ThreadComplete || tso->what_next == ThreadKilled) {
@@ -72,12 +69,12 @@ throwToSingleThreaded__ (Capability *cap, StgTSO *tso, StgClosure *exception,
 void
 throwToSingleThreaded (Capability *cap, StgTSO *tso, StgClosure *exception)
 {
-    throwToSingleThreaded__(cap, tso, exception, rtsFalse, NULL);
+    throwToSingleThreaded__(cap, tso, exception, false, NULL);
 }
 
 void
 throwToSingleThreaded_ (Capability *cap, StgTSO *tso, StgClosure *exception,
-                        rtsBool stop_at_atomically)
+                        bool stop_at_atomically)
 {
     throwToSingleThreaded__ (cap, tso, exception, stop_at_atomically, NULL);
 }
@@ -85,7 +82,61 @@ throwToSingleThreaded_ (Capability *cap, StgTSO *tso, StgClosure *exception,
 void // cannot return a different TSO
 suspendComputation (Capability *cap, StgTSO *tso, StgUpdateFrame *stop_here)
 {
-    throwToSingleThreaded__ (cap, tso, NULL, rtsFalse, stop_here);
+    throwToSingleThreaded__ (cap, tso, NULL, false, stop_here);
+}
+
+/* -----------------------------------------------------------------------------
+   throwToSelf
+
+   Useful for throwing an async exception in a thread from the
+   runtime.  It handles unlocking the throwto message returned by
+   throwTo().
+
+   Note [Throw to self when masked]
+   
+   When a StackOverflow occurs when the thread is masked, we want to
+   defer the exception to when the thread becomes unmasked/hits an
+   interruptible point.  We already have a mechanism for doing this,
+   the blocked_exceptions list, but the use here is a bit unusual,
+   because an exception is normally only added to this list upon
+   an asynchronous 'throwTo' call (with all of the relevant
+   multithreaded nonsense). Morally, a stack overflow should be an
+   asynchronous exception sent by a thread to itself, and it should
+   have the same semantics.  But there are a few key differences:
+   
+   - If you actually tried to send an asynchronous exception to
+     yourself using throwTo, the exception would actually immediately
+     be delivered.  This is because throwTo itself is considered an
+     interruptible point, so the exception is always deliverable. Thus,
+     ordinarily, we never end up with a message to oneself in the
+     blocked_exceptions queue.
+   
+   - In the case of a StackOverflow, we don't actually care about the
+     wakeup semantics; when an exception is delivered, the thread that
+     originally threw the exception should be woken up, since throwTo
+     blocks until the exception is successfully thrown.  Fortunately,
+     it is harmless to wakeup a thread that doesn't actually need waking
+     up, e.g. ourselves.
+   
+   - No synchronization is necessary, because we own the TSO and the
+     capability.  You can observe this by tracing through the execution
+     of throwTo.  We skip synchronizing the message and inter-capability
+     communication.
+   
+   We think this doesn't break any invariants, but do be careful!
+   -------------------------------------------------------------------------- */
+
+void
+throwToSelf (Capability *cap, StgTSO *tso, StgClosure *exception)
+{
+    MessageThrowTo *m;
+
+    m = throwTo(cap, tso, tso, exception);
+
+    if (m != NULL) {
+        // throwTo leaves it locked
+        unlockClosure((StgClosure*)m, &stg_MSG_THROWTO_info);
+    }
 }
 
 /* -----------------------------------------------------------------------------
@@ -128,13 +179,13 @@ suspendComputation (Capability *cap, StgTSO *tso, StgUpdateFrame *stop_here)
    its parent container (e.g. the MVar) and then raise the exception.
    We might change these cases to be more message-passing-like in the
    future.
-  
-   Returns: 
+
+   Returns:
 
    NULL               exception was raised, ok to continue
 
    MessageThrowTo *   exception was not raised; the source TSO
-                      should now put itself in the state 
+                      should now put itself in the state
                       BlockedOnMsgThrowTo, and when it is ready
                       it should unlock the mssage using
                       unlockClosure(msg, &stg_MSG_THROWTO_info);
@@ -145,10 +196,10 @@ suspendComputation (Capability *cap, StgTSO *tso, StgUpdateFrame *stop_here)
    -------------------------------------------------------------------------- */
 
 MessageThrowTo *
-throwTo (Capability *cap,	// the Capability we hold 
-	 StgTSO *source,	// the TSO sending the exception (or NULL)
-	 StgTSO *target,        // the TSO receiving the exception
-	 StgClosure *exception) // the exception closure
+throwTo (Capability *cap,       // the Capability we hold
+         StgTSO *source,        // the TSO sending the exception (or NULL)
+         StgTSO *target,        // the TSO receiving the exception
+         StgClosure *exception) // the exception closure
 {
     MessageThrowTo *msg;
 
@@ -175,9 +226,9 @@ throwTo (Capability *cap,	// the Capability we hold
         return msg;
     }
 }
-    
 
-nat
+
+uint32_t
 throwToMsg (Capability *cap, MessageThrowTo *msg)
 {
     StgWord status;
@@ -194,17 +245,17 @@ check_target:
     ASSERT(target != END_TSO_QUEUE);
 
     // Thread already dead?
-    if (target->what_next == ThreadComplete 
-	|| target->what_next == ThreadKilled) {
-	return THROWTO_SUCCESS;
+    if (target->what_next == ThreadComplete
+        || target->what_next == ThreadKilled) {
+        return THROWTO_SUCCESS;
     }
 
     debugTraceCap(DEBUG_sched, cap,
                   "throwTo: from thread %lu to thread %lu",
-                  (unsigned long)msg->source->id, 
+                  (unsigned long)msg->source->id,
                   (unsigned long)msg->target->id);
 
-#ifdef DEBUG
+#if defined(DEBUG)
     traceThreadStatus(DEBUG_sched, target);
 #endif
 
@@ -215,13 +266,13 @@ check_target:
     }
 
     status = target->why_blocked;
-    
+
     switch (status) {
     case NotBlocked:
     {
         if ((target->flags & TSO_BLOCKEX) == 0) {
             // It's on our run queue and not blocking exceptions
-            raiseAsync(cap, target, msg->exception, rtsFalse, NULL);
+            raiseAsync(cap, target, msg->exception, false, NULL);
             return THROWTO_SUCCESS;
         } else {
             blockedThrowTo(cap,target,msg);
@@ -276,8 +327,8 @@ check_target:
             goto retry;
         }
 
-	if ((target->flags & TSO_BLOCKEX) &&
-	    ((target->flags & TSO_INTERRUPTIBLE) == 0)) {
+        if ((target->flags & TSO_BLOCKEX) &&
+            ((target->flags & TSO_INTERRUPTIBLE) == 0)) {
             unlockClosure((StgClosure*)m, i);
             blockedThrowTo(cap,target,msg);
             return THROWTO_BLOCKED;
@@ -286,24 +337,24 @@ check_target:
         // nobody else can wake up this TSO after we claim the message
         doneWithMsgThrowTo(m);
 
-        raiseAsync(cap, target, msg->exception, rtsFalse, NULL);
+        raiseAsync(cap, target, msg->exception, false, NULL);
         return THROWTO_SUCCESS;
     }
 
     case BlockedOnMVar:
     case BlockedOnMVarRead:
     {
-	/*
-	  To establish ownership of this TSO, we need to acquire a
-	  lock on the MVar that it is blocked on.
-	*/
-	StgMVar *mvar;
-	StgInfoTable *info USED_IF_THREADS;
-	
-	mvar = (StgMVar *)target->block_info.closure;
+        /*
+          To establish ownership of this TSO, we need to acquire a
+          lock on the MVar that it is blocked on.
+        */
+        StgMVar *mvar;
+        StgInfoTable *info USED_IF_THREADS;
 
-	// ASSUMPTION: tso->block_info must always point to a
-	// closure.  In the threaded RTS it does.
+        mvar = (StgMVar *)target->block_info.closure;
+
+        // ASSUMPTION: tso->block_info must always point to a
+        // closure.  In the threaded RTS it does.
         switch (get_itbl((StgClosure *)mvar)->type) {
         case MVAR_CLEAN:
         case MVAR_DIRTY:
@@ -312,79 +363,79 @@ check_target:
             goto retry;
         }
 
-	info = lockClosure((StgClosure *)mvar);
+        info = lockClosure((StgClosure *)mvar);
 
         // we have the MVar, let's check whether the thread
-	// is still blocked on the same MVar.
-	if ((target->why_blocked != BlockedOnMVar && target->why_blocked != BlockedOnMVarRead)
-	    || (StgMVar *)target->block_info.closure != mvar) {
-	    unlockClosure((StgClosure *)mvar, info);
-	    goto retry;
-	}
+        // is still blocked on the same MVar.
+        if ((target->why_blocked != BlockedOnMVar && target->why_blocked != BlockedOnMVarRead)
+            || (StgMVar *)target->block_info.closure != mvar) {
+            unlockClosure((StgClosure *)mvar, info);
+            goto retry;
+        }
 
         if (target->_link == END_TSO_QUEUE) {
             // the MVar operation has already completed.  There is a
             // MSG_TRY_WAKEUP on the way, but we can just wake up the
             // thread now anyway and ignore the message when it
             // arrives.
-	    unlockClosure((StgClosure *)mvar, info);
+            unlockClosure((StgClosure *)mvar, info);
             tryWakeupThread(cap, target);
             goto retry;
         }
 
-	if ((target->flags & TSO_BLOCKEX) &&
-	    ((target->flags & TSO_INTERRUPTIBLE) == 0)) {
+        if ((target->flags & TSO_BLOCKEX) &&
+            ((target->flags & TSO_INTERRUPTIBLE) == 0)) {
             blockedThrowTo(cap,target,msg);
-	    unlockClosure((StgClosure *)mvar, info);
-	    return THROWTO_BLOCKED;
-	} else {
+            unlockClosure((StgClosure *)mvar, info);
+            return THROWTO_BLOCKED;
+        } else {
             // revoke the MVar operation
             removeFromMVarBlockedQueue(target);
-	    raiseAsync(cap, target, msg->exception, rtsFalse, NULL);
-	    unlockClosure((StgClosure *)mvar, info);
-	    return THROWTO_SUCCESS;
-	}
+            raiseAsync(cap, target, msg->exception, false, NULL);
+            unlockClosure((StgClosure *)mvar, info);
+            return THROWTO_SUCCESS;
+        }
     }
 
     case BlockedOnBlackHole:
     {
-	if (target->flags & TSO_BLOCKEX) {
+        if (target->flags & TSO_BLOCKEX) {
             // BlockedOnBlackHole is not interruptible.
             blockedThrowTo(cap,target,msg);
-	    return THROWTO_BLOCKED;
-	} else {
+            return THROWTO_BLOCKED;
+        } else {
             // Revoke the message by replacing it with IND. We're not
             // locking anything here, so we might still get a TRY_WAKEUP
             // message from the owner of the blackhole some time in the
             // future, but that doesn't matter.
             ASSERT(target->block_info.bh->header.info == &stg_MSG_BLACKHOLE_info);
             OVERWRITE_INFO(target->block_info.bh, &stg_IND_info);
-            raiseAsync(cap, target, msg->exception, rtsFalse, NULL);
+            raiseAsync(cap, target, msg->exception, false, NULL);
             return THROWTO_SUCCESS;
         }
     }
 
     case BlockedOnSTM:
-	lockTSO(target);
-	// Unblocking BlockedOnSTM threads requires the TSO to be
-	// locked; see STM.c:unpark_tso().
-	if (target->why_blocked != BlockedOnSTM) {
-	    unlockTSO(target);
-	    goto retry;
-	}
-	if ((target->flags & TSO_BLOCKEX) &&
-	    ((target->flags & TSO_INTERRUPTIBLE) == 0)) {
+        lockTSO(target);
+        // Unblocking BlockedOnSTM threads requires the TSO to be
+        // locked; see STM.c:unpark_tso().
+        if (target->why_blocked != BlockedOnSTM) {
+            unlockTSO(target);
+            goto retry;
+        }
+        if ((target->flags & TSO_BLOCKEX) &&
+            ((target->flags & TSO_INTERRUPTIBLE) == 0)) {
             blockedThrowTo(cap,target,msg);
-	    unlockTSO(target);
-	    return THROWTO_BLOCKED;
-	} else {
-	    raiseAsync(cap, target, msg->exception, rtsFalse, NULL);
-	    unlockTSO(target);
-	    return THROWTO_SUCCESS;
-	}
+            unlockTSO(target);
+            return THROWTO_BLOCKED;
+        } else {
+            raiseAsync(cap, target, msg->exception, false, NULL);
+            unlockTSO(target);
+            return THROWTO_SUCCESS;
+        }
 
     case BlockedOnCCall_Interruptible:
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     {
         Task *task = NULL;
         // walk suspended_ccalls to find the correct worker thread
@@ -408,30 +459,31 @@ check_target:
         // fall to next
     }
 #endif
+    /* fallthrough */
     case BlockedOnCCall:
-	blockedThrowTo(cap,target,msg);
-	return THROWTO_BLOCKED;
+        blockedThrowTo(cap,target,msg);
+        return THROWTO_BLOCKED;
 
-#ifndef THREADEDED_RTS
+#if !defined(THREADEDED_RTS)
     case BlockedOnRead:
     case BlockedOnWrite:
     case BlockedOnDelay:
 #if defined(mingw32_HOST_OS)
     case BlockedOnDoProc:
 #endif
-	if ((target->flags & TSO_BLOCKEX) &&
-	    ((target->flags & TSO_INTERRUPTIBLE) == 0)) {
-	    blockedThrowTo(cap,target,msg);
-	    return THROWTO_BLOCKED;
-	} else {
-	    removeFromQueues(cap,target);
-	    raiseAsync(cap, target, msg->exception, rtsFalse, NULL);
-	    return THROWTO_SUCCESS;
-	}
+        if ((target->flags & TSO_BLOCKEX) &&
+            ((target->flags & TSO_INTERRUPTIBLE) == 0)) {
+            blockedThrowTo(cap,target,msg);
+            return THROWTO_BLOCKED;
+        } else {
+            removeFromQueues(cap,target);
+            raiseAsync(cap, target, msg->exception, false, NULL);
+            return THROWTO_SUCCESS;
+        }
 #endif
 
     case ThreadMigrating:
-        // if is is ThreadMigrating and tso->cap is ours, then it
+        // if it is ThreadMigrating and tso->cap is ours, then it
         // *must* be migrating *to* this capability.  If it were
         // migrating away from the capability, then tso->cap would
         // point to the destination.
@@ -450,11 +502,11 @@ check_target:
 
 static void
 throwToSendMsg (Capability *cap STG_UNUSED,
-                Capability *target_cap USED_IF_THREADS, 
+                Capability *target_cap USED_IF_THREADS,
                 MessageThrowTo *msg USED_IF_THREADS)
-            
+
 {
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     debugTraceCap(DEBUG_sched, cap, "throwTo: sending a throwto message to cap %lu", (unsigned long)target_cap->no);
 
     sendMessage(cap, target_cap, (Message*)msg);
@@ -510,17 +562,17 @@ maybePerformBlockedException (Capability *cap, StgTSO *tso)
         }
     }
 
-    if (tso->blocked_exceptions != END_BLOCKED_EXCEPTIONS_QUEUE && 
+    if (tso->blocked_exceptions != END_BLOCKED_EXCEPTIONS_QUEUE &&
         (tso->flags & TSO_BLOCKEX) != 0) {
         debugTraceCap(DEBUG_sched, cap, "throwTo: thread %lu has blocked exceptions but is inside block", (unsigned long)tso->id);
     }
 
     if (tso->blocked_exceptions != END_BLOCKED_EXCEPTIONS_QUEUE
-	&& ((tso->flags & TSO_BLOCKEX) == 0
-	    || ((tso->flags & TSO_INTERRUPTIBLE) && interruptible(tso)))) {
+        && ((tso->flags & TSO_BLOCKEX) == 0
+            || ((tso->flags & TSO_INTERRUPTIBLE) && interruptible(tso)))) {
 
-	// We unblock just the first thread on the queue, and perform
-	// its throw immediately.
+        // We unblock just the first thread on the queue, and perform
+        // its throw immediately.
     loop:
         msg = tso->blocked_exceptions;
         if (msg == END_BLOCKED_EXCEPTIONS_QUEUE) return 0;
@@ -562,7 +614,7 @@ awakenBlockedExceptionQueue (Capability *cap, StgTSO *tso)
         }
     }
     tso->blocked_exceptions = END_BLOCKED_EXCEPTIONS_QUEUE;
-}    
+}
 
 /* -----------------------------------------------------------------------------
    Remove a thread from blocking queues.
@@ -673,7 +725,7 @@ removeFromQueues(Capability *cap, StgTSO *tso)
 
   case BlockedOnDelay:
         removeThreadFromQueue(cap, &sleeping_queue, tso);
-	goto done;
+        goto done;
 #endif
 
   default:
@@ -696,11 +748,11 @@ removeFromQueues(Capability *cap, StgTSO *tso)
  * TSO blocked_exception queues.
  *
  * We strip the stack down to the innermost CATCH_FRAME, building
- * thunks in the heap for all the active computations, so they can 
+ * thunks in the heap for all the active computations, so they can
  * be restarted if necessary.  When we reach a CATCH_FRAME, we build
  * an application of the handler to the exception, and push it on
  * the top of the stack.
- * 
+ *
  * How exactly do we save all the active computations?  We create an
  * AP_STACK for every UpdateFrame on the stack.  Entering one of these
  * AP_STACKs pushes everything from the corresponding update frame
@@ -711,7 +763,7 @@ removeFromQueues(Capability *cap, StgTSO *tso)
  * exactly as it did when we killed the TSO and we can continue
  * execution by entering the closure on top of the stack.
  *
- * We can also kill a thread entirely - this happens if either (a) the 
+ * We can also kill a thread entirely - this happens if either (a) the
  * exception passed to raiseAsync is NULL, or (b) there's no
  * CATCH_FRAME on the stack.  In either case, we strip the entire
  * stack and replace the thread with a zombie.
@@ -723,24 +775,24 @@ removeFromQueues(Capability *cap, StgTSO *tso)
  *
  * -------------------------------------------------------------------------- */
 
-static StgTSO *
-raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception, 
-	   rtsBool stop_at_atomically, StgUpdateFrame *stop_here)
+StgTSO *
+raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
+           bool stop_at_atomically, StgUpdateFrame *stop_here)
 {
-    StgRetInfoTable *info;
+    const StgRetInfoTable *info;
     StgPtr sp, frame;
     StgClosure *updatee;
-    nat i;
+    uint32_t i;
     StgStack *stack;
 
     debugTraceCap(DEBUG_sched, cap,
                   "raising exception in thread %ld.", (long)tso->id);
-    
+
 #if defined(PROFILING)
-    /* 
+    /*
      * Debugging tool: on raising an  exception, show where we are.
      * See also Exception.cmm:stg_raisezh.
-     * This wasn't done for asynchronous exceptions originally; see #1450 
+     * This wasn't done for asynchronous exceptions originally; see #1450
      */
     if (RtsFlags.ProfFlags.showCCSOnException && exception != NULL)
     {
@@ -749,10 +801,10 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
 #endif
     // ASSUMES: the thread is not already complete or dead
     // Upper layers should deal with that.
-    ASSERT(tso->what_next != ThreadComplete && 
+    ASSERT(tso->what_next != ThreadComplete &&
            tso->what_next != ThreadKilled);
 
-    // only if we own this TSO (except that deleteThread() calls this 
+    // only if we own this TSO (except that deleteThread() calls this
     ASSERT(tso->cap == cap);
 
     stack = tso->stackobj;
@@ -762,7 +814,7 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
     dirty_STACK(cap, stack);
 
     sp = stack->sp;
-    
+
     if (stop_here != NULL) {
         updatee = stop_here->updatee;
     } else {
@@ -773,69 +825,70 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
     // the top of the stack, so we have to arrange that this is the case...
     //
     if (sp[0] == (W_)&stg_enter_info) {
-	sp++;
+        sp++;
     } else {
-	sp--;
-	sp[0] = (W_)&stg_dummy_ret_closure;
+        sp--;
+        sp[0] = (W_)&stg_dummy_ret_closure;
     }
 
     frame = sp + 1;
     while (stop_here == NULL || frame < (StgPtr)stop_here) {
 
-	// 1. Let the top of the stack be the "current closure"
-	//
-	// 2. Walk up the stack until we find either an UPDATE_FRAME or a
-	// CATCH_FRAME.
-	//
-	// 3. If it's an UPDATE_FRAME, then make an AP_STACK containing the
-	// current closure applied to the chunk of stack up to (but not
-	// including) the update frame.  This closure becomes the "current
-	// closure".  Go back to step 2.
-	//
-	// 4. If it's a CATCH_FRAME, then leave the exception handler on
-	// top of the stack applied to the exception.
-	// 
-	// 5. If it's a STOP_FRAME, then kill the thread.
-        // 
+        // 1. Let the top of the stack be the "current closure"
+        //
+        // 2. Walk up the stack until we find either an UPDATE_FRAME or a
+        // CATCH_FRAME.
+        //
+        // 3. If it's an UPDATE_FRAME, then make an AP_STACK containing the
+        // current closure applied to the chunk of stack up to (but not
+        // including) the update frame.  This closure becomes the "current
+        // closure".  Go back to step 2.
+        //
+        // 4. If it's a CATCH_FRAME, then leave the exception handler on
+        // top of the stack applied to the exception.
+        //
+        // 5. If it's a STOP_FRAME, then kill the thread.
+        //
         // 6. If it's an UNDERFLOW_FRAME, then continue with the next
         //    stack chunk.
         //
         // NB: if we pass an ATOMICALLY_FRAME then abort the associated
         // transaction
-       
+
         info = get_ret_itbl((StgClosure *)frame);
 
-	switch (info->i.type) {
+        switch (info->i.type) {
 
-	case UPDATE_FRAME:
-	{
-	    StgAP_STACK * ap;
-	    nat words;
-	    
-	    // First build an AP_STACK consisting of the stack chunk above the
-	    // current update frame, with the top word on the stack as the
-	    // fun field.
-	    //
-	    words = frame - sp - 1;
-	    ap = (StgAP_STACK *)allocate(cap,AP_STACK_sizeW(words));
-	    
-	    ap->size = words;
-	    ap->fun  = (StgClosure *)sp[0];
-	    sp++;
-	    for(i=0; i < (nat)words; ++i) {
-		ap->payload[i] = (StgClosure *)*sp++;
-	    }
-	    
-	    SET_HDR(ap,&stg_AP_STACK_info,
-		    ((StgClosure *)frame)->header.prof.ccs /* ToDo */); 
-	    TICK_ALLOC_UP_THK(WDS(words+1),0);
-	    
-	    //IF_DEBUG(scheduler,
-	    //	     debugBelch("sched: Updating ");
-	    //	     printPtr((P_)((StgUpdateFrame *)frame)->updatee); 
-	    //	     debugBelch(" with ");
-	    //	     printObj((StgClosure *)ap);
-	    //	);
+        case UPDATE_FRAME:
+        {
+            StgAP_STACK * ap;
+            uint32_t words;
+
+            // First build an AP_STACK consisting of the stack chunk above the
+            // current update frame, with the top word on the stack as the
+            // fun field.
+            //
+            words = frame - sp - 1;
+            ap = (StgAP_STACK *)allocate(cap,AP_STACK_sizeW(words));
+
+            ap->size = words;
+            ap->fun  = (StgClosure *)sp[0];
+
+            sp++;
+            for(i=0; i < words; ++i) {
+                ap->payload[i] = (StgClosure *)*sp++;
+            }
+
+            SET_HDR(ap,&stg_AP_STACK_info,
+                    ((StgClosure *)frame)->header.prof.ccs /* ToDo */);
+            TICK_ALLOC_UP_THK(WDS(words+1),0);
+
+            //IF_DEBUG(scheduler,
+            //       debugBelch("sched: Updating ");
+            //       printPtr((P_)((StgUpdateFrame *)frame)->updatee);
+            //       debugBelch(" with ");
+            //       printObj((StgClosure *)ap);
+            //  );
 
             if (((StgUpdateFrame *)frame)->updatee == updatee) {
                 // If this update frame points to the same closure as
@@ -848,37 +901,37 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
                 // Perform the update
                 // TODO: this may waste some work, if the thunk has
                 // already been updated by another thread.
-                updateThunk(cap, tso, 
+                updateThunk(cap, tso,
                             ((StgUpdateFrame *)frame)->updatee, (StgClosure *)ap);
             }
 
-	    sp += sizeofW(StgUpdateFrame) - 1;
-	    sp[0] = (W_)ap; // push onto stack
-	    frame = sp + 1;
-	    continue; //no need to bump frame
-	}
+            sp += sizeofW(StgUpdateFrame) - 1;
+            sp[0] = (W_)ap; // push onto stack
+            frame = sp + 1;
+            continue; //no need to bump frame
+        }
 
         case UNDERFLOW_FRAME:
         {
-	    StgAP_STACK * ap;
-	    nat words;
-	    
-	    // First build an AP_STACK consisting of the stack chunk above the
-	    // current update frame, with the top word on the stack as the
-	    // fun field.
-	    //
-	    words = frame - sp - 1;
-	    ap = (StgAP_STACK *)allocate(cap,AP_STACK_sizeW(words));
-	    
-	    ap->size = words;
-	    ap->fun  = (StgClosure *)sp[0];
-	    sp++;
-	    for(i=0; i < (nat)words; ++i) {
-		ap->payload[i] = (StgClosure *)*sp++;
-	    }
-	    
+            StgAP_STACK * ap;
+            uint32_t words;
+
+            // First build an AP_STACK consisting of the stack chunk above the
+            // current update frame, with the top word on the stack as the
+            // fun field.
+            //
+            words = frame - sp - 1;
+            ap = (StgAP_STACK *)allocate(cap,AP_STACK_sizeW(words));
+
+            ap->size = words;
+            ap->fun  = (StgClosure *)sp[0];
+            sp++;
+            for(i=0; i < words; ++i) {
+                ap->payload[i] = (StgClosure *)*sp++;
+            }
+
             SET_HDR(ap,&stg_AP_STACK_NOUPD_info,
-		    ((StgClosure *)frame)->header.prof.ccs /* ToDo */); 
+                    ((StgClosure *)frame)->header.prof.ccs /* ToDo */);
             TICK_ALLOC_SE_THK(WDS(words+1),0);
 
             stack->sp = sp;
@@ -893,40 +946,40 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
         }
 
         case STOP_FRAME:
-	{
-	    // We've stripped the entire stack, the thread is now dead.
-	    tso->what_next = ThreadKilled;
+        {
+            // We've stripped the entire stack, the thread is now dead.
+            tso->what_next = ThreadKilled;
             stack->sp = frame + sizeofW(StgStopFrame);
             goto done;
-	}
+        }
 
-	case CATCH_FRAME:
-	    // If we find a CATCH_FRAME, and we've got an exception to raise,
-	    // then build the THUNK raise(exception), and leave it on
-	    // top of the CATCH_FRAME ready to enter.
-	    //
-	{
-	    StgCatchFrame *cf = (StgCatchFrame *)frame;
-	    StgThunk *raise;
-	    
-	    if (exception == NULL) break;
+        case CATCH_FRAME:
+            // If we find a CATCH_FRAME, and we've got an exception to raise,
+            // then build the THUNK raise(exception), and leave it on
+            // top of the CATCH_FRAME ready to enter.
+            //
+        {
+            StgCatchFrame *cf = (StgCatchFrame *)frame;
+            StgThunk *raise;
 
-	    // we've got an exception to raise, so let's pass it to the
-	    // handler in this frame.
-	    //
-	    raise = (StgThunk *)allocate(cap,sizeofW(StgThunk)+1);
-	    TICK_ALLOC_SE_THK(WDS(1),0);
-	    SET_HDR(raise,&stg_raise_info,cf->header.prof.ccs);
-	    raise->payload[0] = exception;
-	    
-	    // throw away the stack from Sp up to the CATCH_FRAME.
-	    //
-	    sp = frame - 1;
-	    
-	    /* Ensure that async exceptions are blocked now, so we don't get
-	     * a surprise exception before we get around to executing the
-	     * handler.
-	     */
+            if (exception == NULL) break;
+
+            // we've got an exception to raise, so let's pass it to the
+            // handler in this frame.
+            //
+            raise = (StgThunk *)allocate(cap,sizeofW(StgThunk)+1);
+            TICK_ALLOC_SE_THK(WDS(1),0);
+            SET_HDR(raise,&stg_raise_info,cf->header.prof.ccs);
+            raise->payload[0] = exception;
+
+            // throw away the stack from Sp up to the CATCH_FRAME.
+            //
+            sp = frame - 1;
+
+            /* Ensure that async exceptions are blocked now, so we don't get
+             * a surprise exception before we get around to executing the
+             * handler.
+             */
             tso->flags |= TSO_BLOCKEX;
             if ((cf->exceptions_blocked & TSO_INTERRUPTIBLE) == 0) {
                 tso->flags &= ~TSO_INTERRUPTIBLE;
@@ -934,20 +987,20 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
                 tso->flags |= TSO_INTERRUPTIBLE;
             }
 
-	    /* Put the newly-built THUNK on top of the stack, ready to execute
-	     * when the thread restarts.
-	     */
-	    sp[0] = (W_)raise;
-	    sp[-1] = (W_)&stg_enter_info;
+            /* Put the newly-built THUNK on top of the stack, ready to execute
+             * when the thread restarts.
+             */
+            sp[0] = (W_)raise;
+            sp[-1] = (W_)&stg_enter_info;
             stack->sp = sp-1;
-	    tso->what_next = ThreadRunGHC;
+            tso->what_next = ThreadRunGHC;
             goto done;
-	}
-	    
-	case ATOMICALLY_FRAME:
-	    if (stop_at_atomically) {
-		ASSERT(tso->trec->enclosing_trec == NO_TREC);
-		stmCondemnTransaction(cap, tso -> trec);
+        }
+
+        case ATOMICALLY_FRAME:
+            if (stop_at_atomically) {
+                ASSERT(tso->trec->enclosing_trec == NO_TREC);
+                stmCondemnTransaction(cap, tso -> trec);
                 stack->sp = frame - 2;
                 // The ATOMICALLY_FRAME expects to be returned a
                 // result from the transaction, which it stores in the
@@ -961,7 +1014,7 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
                 stack->sp[0] = (W_)&stg_ret_p_info;
                 tso->what_next = ThreadRunGHC;
                 goto done;
-	    }
+            }
             else
             {
                 // Freezing an STM transaction.  Just aborting the
@@ -1009,33 +1062,33 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
             }
 
         case CATCH_STM_FRAME:
-	case CATCH_RETRY_FRAME:
+        case CATCH_RETRY_FRAME:
             // CATCH frames within an atomically block: abort the
             // inner transaction and continue.  Eventually we will
             // hit the outer transaction that will get frozen (see
             // above).
             //
             // In this case (unlike ordinary exceptions) we do not care
-	    // whether the transaction is valid or not because its
-	    // possible validity cannot have caused the exception
-	    // and will not be visible after the abort.
+            // whether the transaction is valid or not because its
+            // possible validity cannot have caused the exception
+            // and will not be visible after the abort.
         {
             StgTRecHeader *trec = tso -> trec;
             StgTRecHeader *outer = trec -> enclosing_trec;
-	    debugTraceCap(DEBUG_stm, cap,
+            debugTraceCap(DEBUG_stm, cap,
                           "found atomically block delivering async exception");
             stmAbortTransaction(cap, trec);
-	    stmFreeAbortedTRec(cap, trec);
+            stmFreeAbortedTRec(cap, trec);
             tso -> trec = outer;
             break;
         };
 
-	default:
-	    break;
-	}
+        default:
+            break;
+        }
 
-	// move on to the next stack frame
-	frame += stack_frame_sizeW((StgClosure *)frame);
+        // move on to the next stack frame
+        frame += stack_frame_sizeW((StgClosure *)frame);
     }
 
 done:
@@ -1045,17 +1098,7 @@ done:
     if (tso->why_blocked != NotBlocked) {
         tso->why_blocked = NotBlocked;
         appendToRunQueue(cap,tso);
-    }        
+    }
 
     return tso;
 }
-
-
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

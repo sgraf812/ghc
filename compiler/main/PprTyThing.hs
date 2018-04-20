@@ -19,18 +19,20 @@ module PprTyThing (
 
 #include "HsVersions.h"
 
-import TypeRep ( TyThing(..) )
+import GhcPrelude
+
+import Type    ( TyThing(..) )
+import IfaceSyn ( ShowSub(..), ShowHowMuch(..), AltPpr(..)
+  , showToHeader, pprIfaceDecl )
 import CoAxiom ( coAxiomTyCon )
 import HscTypes( tyThingParent_maybe )
 import MkIface ( tyThingToIfaceDecl )
 import Type ( tidyOpenType )
-import IfaceSyn ( pprIfaceDecl, ShowSub(..), ShowHowMuch(..) )
-import FamInstEnv( FamInst( .. ), FamFlavor(..) )
-import TcType
+import FamInstEnv( FamInst(..), FamFlavor(..) )
+import Type( Type, pprTypeApp, pprSigmaType )
 import Name
 import VarEnv( emptyTidyEnv )
 import Outputable
-import FastString
 
 -- -----------------------------------------------------------------------------
 -- Pretty-printing entities that we get from the GHC API
@@ -74,7 +76,7 @@ See #7730, #8776 for details   -}
 --------------------
 -- | Pretty-prints a 'FamInst' (type/data family instance) with its defining location.
 pprFamInst :: FamInst -> SDoc
---  * For data instances we go via pprTyThing of the represntational TyCon,
+--  * For data instances we go via pprTyThing of the representational TyCon,
 --    because there is already much cleverness associated with printing
 --    data type declarations that I don't want to duplicate
 --  * For type instances we print directly here; there is no TyCon
@@ -88,77 +90,75 @@ pprFamInst (FamInst { fi_flavor = DataFamilyInst rep_tc })
 pprFamInst (FamInst { fi_flavor = SynFamilyInst, fi_axiom = axiom
                     , fi_tys = lhs_tys, fi_rhs = rhs })
   = showWithLoc (pprDefinedAt (getName axiom)) $
-    hang (ptext (sLit "type instance") <+> pprTypeApp (coAxiomTyCon axiom) lhs_tys)
+    hang (text "type instance" <+> pprTypeApp (coAxiomTyCon axiom) lhs_tys)
        2 (equals <+> ppr rhs)
 
 ----------------------------
 -- | Pretty-prints a 'TyThing' with its defining location.
 pprTyThingLoc :: TyThing -> SDoc
 pprTyThingLoc tyThing
-  = showWithLoc (pprDefinedAt (getName tyThing)) (pprTyThing tyThing)
-
--- | Pretty-prints a 'TyThing'.
-pprTyThing :: TyThing -> SDoc
-pprTyThing = ppr_ty_thing False []
+  = showWithLoc (pprDefinedAt (getName tyThing))
+                (pprTyThing showToHeader tyThing)
 
 -- | Pretty-prints the 'TyThing' header. For functions and data constructors
 -- the function is equivalent to 'pprTyThing' but for type constructors
 -- and classes it prints only the header part of the declaration.
 pprTyThingHdr :: TyThing -> SDoc
-pprTyThingHdr = ppr_ty_thing True []
+pprTyThingHdr = pprTyThing showToHeader
 
 -- | Pretty-prints a 'TyThing' in context: that is, if the entity
 -- is a data constructor, record selector, or class method, then
 -- the entity's parent declaration is pretty-printed with irrelevant
 -- parts omitted.
-pprTyThingInContext :: TyThing -> SDoc
-pprTyThingInContext thing
+pprTyThingInContext :: ShowSub -> TyThing -> SDoc
+pprTyThingInContext show_sub thing
   = go [] thing
   where
-    go ss thing = case tyThingParent_maybe thing of
-                    Just parent -> go (getOccName thing : ss) parent
-                    Nothing     -> ppr_ty_thing False ss thing
+    go ss thing
+      = case tyThingParent_maybe thing of
+          Just parent ->
+            go (getOccName thing : ss) parent
+          Nothing ->
+            pprTyThing
+              (show_sub { ss_how_much = ShowSome ss (AltPpr Nothing) })
+              thing
 
 -- | Like 'pprTyThingInContext', but adds the defining location.
 pprTyThingInContextLoc :: TyThing -> SDoc
 pprTyThingInContextLoc tyThing
   = showWithLoc (pprDefinedAt (getName tyThing))
-                (pprTyThingInContext tyThing)
+                (pprTyThingInContext showToHeader tyThing)
 
-------------------------
-ppr_ty_thing :: Bool -> [OccName] -> TyThing -> SDoc
+-- | Pretty-prints a 'TyThing'.
+pprTyThing :: ShowSub -> TyThing -> SDoc
 -- We pretty-print 'TyThing' via 'IfaceDecl'
--- See Note [Pretty-pringint TyThings]
-ppr_ty_thing hdr_only path ty_thing
-  = pprIfaceDecl ss (tyThingToIfaceDecl ty_thing)
+-- See Note [Pretty-printing TyThings]
+pprTyThing ss ty_thing
+  = pprIfaceDecl ss' (tyThingToIfaceDecl ty_thing)
   where
-    ss = ShowSub { ss_how_much = how_much, ss_ppr_bndr = ppr_bndr }
-    how_much | hdr_only  = ShowHeader
-             | otherwise = ShowSome path
-    name    = getName ty_thing
-    ppr_bndr :: OccName -> SDoc
-    ppr_bndr | isBuiltInSyntax name
-             = ppr
-             | otherwise
-             = case nameModule_maybe name of
-                 Just mod -> \ occ -> getPprStyle $ \sty ->
-                                      pprModulePrefix sty mod occ <> ppr occ
-                 Nothing  -> WARN( True, ppr name ) ppr
-                 -- Nothing is unexpected here; TyThings have External names
+    ss' = case ss_how_much ss of
+      ShowHeader (AltPpr Nothing)  -> ss { ss_how_much = ShowHeader ppr' }
+      ShowSome xs (AltPpr Nothing) -> ss { ss_how_much = ShowSome xs ppr' }
+      _                   -> ss
+
+    ppr' = AltPpr $ ppr_bndr $ getName ty_thing
+
+    ppr_bndr :: Name -> Maybe (OccName -> SDoc)
+    ppr_bndr name
+      | isBuiltInSyntax name
+         = Nothing
+      | otherwise
+         = case nameModule_maybe name of
+             Just mod -> Just $ \occ -> getPprStyle $ \sty ->
+               pprModulePrefix sty mod occ <> ppr occ
+             Nothing  -> WARN( True, ppr name ) Nothing
+             -- Nothing is unexpected here; TyThings have External names
 
 pprTypeForUser :: Type -> SDoc
--- We do two things here.
--- a) We tidy the type, regardless
--- b) Swizzle the foralls to the top, so that without
---    -fprint-explicit-foralls we'll suppress all the foralls
--- Prime example: a class op might have type
---      forall a. C a => forall b. Ord b => stuff
--- Then we want to display
---      (C a, Ord b) => stuff
+-- The type is tidied
 pprTypeForUser ty
-  = pprSigmaType (mkSigmaTy tvs ctxt tau)
+  = pprSigmaType tidy_ty
   where
-    (tvs, ctxt, tau) = tcSplitSigmaTy tidy_ty
     (_, tidy_ty)     = tidyOpenType emptyTidyEnv ty
      -- Often the types/kinds we print in ghci are fully generalised
      -- and have no free variables, but it turns out that we sometimes
@@ -170,4 +170,4 @@ showWithLoc loc doc
     = hang doc 2 (char '\t' <> comment <+> loc)
                 -- The tab tries to make them line up a bit
   where
-    comment = ptext (sLit "--")
+    comment = text "--"

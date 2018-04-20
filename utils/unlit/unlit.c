@@ -7,7 +7,7 @@
  * column on each line.  It is hoped that this style of programming will
  * encourage the writing of accurate and clearly documented programs
  * in which the writer may include motivating arguments, examples
- * and explanations.  
+ * and explanations.
  *
  * Unlit is a filter that can be used to strip all of the comment lines
  * out of a literate script file.  The command format for unlit is:
@@ -40,6 +40,7 @@
  * And \begin{pseudocode} ... \end{pseudocode}.  -- LA
  */
 
+#include "fs.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,7 +62,7 @@
 #define LENBEGINCODE 12
 #define ENDCODE "\\end{code}"
 #define LENENDCODE 10
-#ifdef PSEUDOCODE
+#if defined(PSEUDOCODE)
 /* According to Will Partain, the inventor of pseudocode, this gone now. */
 #define MISSINGENDPSEUDOCODE "unlit: missing \\end{pseudocode}\n"
 #define BEGINPSEUDOCODE "\\begin{pseudocode}"
@@ -91,7 +92,7 @@ static char *ofilename = NULL;
  * if noisy is not set.
  */
 
-void complain(char *file, int lin, char *what)
+static void complain(char *file, int lin, char *what)
 {
     if (noisy) {
         if (file)
@@ -101,7 +102,7 @@ void complain(char *file, int lin, char *what)
     }
 }
 
-void writeerror(void)
+static void writeerror(void)
 {
     if (!strcmp(ofilename,"-")) {
 	fprintf(stderr, CANNOTWRITESTDOUT);
@@ -111,18 +112,17 @@ void writeerror(void)
     exit(1);
 }
 
-void myputc(char c, FILE *ostream)
+static void myputc(char c, FILE *ostream)
 {
     if (putc(c,ostream) == EOF) {
 	writeerror();
-    }	
+    }
 }
 
 #define TABPOS 8
 
 /* As getc, but does TAB expansion */
-int
-egetc(FILE *istream)
+static int egetc(FILE *istream)
 {
     static int spleft = 0;
     static int linepos = 0;
@@ -171,7 +171,7 @@ egetc(FILE *istream)
  * stream.
  */
 
-line readline(FILE *istream, FILE *ostream) {
+static line readline(FILE *istream, FILE *ostream) {
     int c, c1;
     char buf[100];
     int i;
@@ -180,7 +180,7 @@ line readline(FILE *istream, FILE *ostream) {
 
     if (c==EOF)
         return ENDFILE;
-  
+
     if ( c == '#' ) {
       if ( ignore_shebang ) {
          c1 = egetc(istream);
@@ -228,7 +228,7 @@ line readline(FILE *istream, FILE *ostream) {
 	return BEGIN;
     if (strcmp(buf, ENDCODE) == 0)
 	return END;
-#ifdef PSEUDOCODE
+#if defined(PSEUDOCODE)
     else if (strcmp(buf, BEGINPSEUDOCODE) == 0)
 	return PSEUDO;
 #endif
@@ -246,7 +246,7 @@ line readline(FILE *istream, FILE *ostream) {
  *  - there should be at least one DEFN line in a script.
  */
 
-void unlit(char *file, FILE *istream, FILE *ostream)
+static void unlit(char *file, FILE *istream, FILE *ostream)
 {
     line last, this=START;
     int  linesread=0;
@@ -281,7 +281,7 @@ void unlit(char *file, FILE *istream, FILE *ostream)
 	    }
 	    defnsread++;
 	}
-#ifdef PSEUDOCODE
+#if defined(PSEUDOCODE)
 	if (this == PSEUDO) {
 	    char lineb[1000];
 	    for(;;) {
@@ -297,6 +297,9 @@ void unlit(char *file, FILE *istream, FILE *ostream)
 	    }
 	}
 #endif
+	if (this == SHEBANG) {
+	    myputc('\n', ostream);
+	}
     } while(this!=ENDFILE);
 
     if (defnsread==0)
@@ -333,10 +336,10 @@ int main(int argc,char **argv)
         else if (strcmp(*argv,"-h")==0) {
 	  if (argc > 1) {
 	    argc--; argv++;
-	    if (prefix_str) 
+	    if (prefix_str)
 	      free(prefix_str);
 	    prefix_str = (char*)malloc(sizeof(char)*(1+strlen(*argv)));
-	    if (prefix_str) 
+	    if (prefix_str)
 	      strcpy(prefix_str, *argv);
 	  }
         } else if (strcmp(*argv,"-#")==0)
@@ -360,16 +363,16 @@ int main(int argc,char **argv)
         file    = "stdin";
     }
     else
-        if ((istream=fopen(argv[0], "r")) == NULL) {
+        if ((istream=__hs_fopen(argv[0], "r")) == NULL) {
             fprintf(stderr, CANNOTOPEN, argv[0]);
             exit(1);
         }
 
     ofilename=argv[1];
-    if (strcmp(argv[1], "-")==0) 
-        ostream = stdout; 
+    if (strcmp(argv[1], "-")==0)
+        ostream = stdout;
     else
-        if ((ostream=fopen(argv[1], "w")) == NULL)  {
+        if ((ostream=__hs_fopen(argv[1], "w")) == NULL)  {
             fprintf(stderr, CANNOTOPEN, argv[1]);
             exit(1);
         }

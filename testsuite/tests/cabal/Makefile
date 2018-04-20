@@ -127,43 +127,80 @@ T1750:
 
 PKGCONFSHADOW1=localshadow1.package.conf
 PKGCONFSHADOW2=localshadow2.package.conf
+PKGCONFSHADOW3=localshadow3.package.conf
 LOCAL_GHC_PKGSHADOW1 = '$(GHC_PKG)' --no-user-package-db -f $(PKGCONFSHADOW1)
 LOCAL_GHC_PKGSHADOW2 = '$(GHC_PKG)' --no-user-package-db -f $(PKGCONFSHADOW2)
-LOCAL_GHC_PKGSHADOW3 = '$(GHC_PKG)' --no-user-package-db -f $(PKGCONFSHADOW1) -f $(PKGCONFSHADOW2)
+LOCAL_GHC_PKGSHADOW3 = '$(GHC_PKG)' --no-user-package-db -f $(PKGCONFSHADOW3)
+LOCAL_GHC_PKGSHADOW12 = '$(GHC_PKG)' --no-user-package-db -f $(PKGCONFSHADOW1) -f $(PKGCONFSHADOW2)
+LOCAL_GHC_PKGSHADOW13 = '$(GHC_PKG)' --no-user-package-db -f $(PKGCONFSHADOW1) -f $(PKGCONFSHADOW3)
 
 # Test package shadowing behaviour.
 #
-#     localshadow1.package.conf:  shadowdep-1-XXX <- shadow-1-XXX
-#     localshadow2.package.conf:                     shadow-1-YYY
-# 
-# shadow-1-XXX will be shadowed by shadow-1-YYY, thus invalidating
-# shadowdep-1-XXX.
+# The general principle is that we shadow in order of declarations,
+# but we determine what gets overridden based on ABI dependencies.
+#
+# Here is the structure of our databases (unitid=abi):
+#
+#     localshadow1.package.conf:  shadowdep-1-XXX=ddd -> shadow-1-XXX=aaa
+#     localshadow2.package.conf:                         shadow-1-XXX=bbb
+#     localshadow3.package.conf:                         shadow-1-XXX=aaa
 shadow:
-	rm -rf $(PKGCONFSHADOW1) $(PKGCONFSHADOW2) shadow.hs shadow.o shadow.hi shadow.out shadow.hs shadow.hi
+	rm -rf $(PKGCONFSHADOW1) $(PKGCONFSHADOW2) $(PKGCONFSHADOW3) shadow.hs shadow.o shadow.hi shadow.out shadow.hs shadow.hi
 	$(LOCAL_GHC_PKGSHADOW1) init $(PKGCONFSHADOW1)
 	$(LOCAL_GHC_PKGSHADOW2) init $(PKGCONFSHADOW2)
+	$(LOCAL_GHC_PKGSHADOW3) init $(PKGCONFSHADOW3)
 	$(LOCAL_GHC_PKGSHADOW1) register -v0 --force shadow1.pkg
 	$(LOCAL_GHC_PKGSHADOW1) register -v0 --force shadow2.pkg
 	$(LOCAL_GHC_PKGSHADOW2) register -v0 --force shadow3.pkg
-	$(LOCAL_GHC_PKGSHADOW3) list
+	$(LOCAL_GHC_PKGSHADOW3) register -v0 --force shadow1.pkg
+	@echo "databases 1 and 2:"
+	$(LOCAL_GHC_PKGSHADOW12) list
+	@echo "databases 1 and 3:"
+	$(LOCAL_GHC_PKGSHADOW13) list
 	echo "main = return ()" >shadow.hs
-# 
-# In this test, shadow-1-XXX is shadowed by shadow-1-YYY, which causes
-# shadowdep-1-XXX to be unavailable:
+#
+# In this test, the later database defines a new shadow-1-XXX which
+# shadows the old one, making shadowdep unsatisfiable.
 #
 	@echo "should FAIL:"
-	'$(TEST_HC)' $(TEST_HC_OPTS) -package-db $(PKGCONFSHADOW1) -package-db $(PKGCONFSHADOW2) -package shadowdep -c shadow.hs -fno-code || true
-# 
-# Reversing the order of the package.conf files should fix the problem:
+	if '$(TEST_HC)' $(TEST_HC_OPTS) -package-db $(PKGCONFSHADOW1) -package-db $(PKGCONFSHADOW2) -package shadowdep -c shadow.hs -fno-code; then false; else true; fi
+#
+# Reversing the orders of the configs fixes the problem, because now
+# we prefer the shadow-1 from the first database, which has the correct
+# ABI hash for shadowdep-1.
 #
 	@echo "should SUCCEED:"
-	'$(TEST_HC)' $(TEST_HC_OPTS) -package-db $(PKGCONFSHADOW2) -package-db $(PKGCONFSHADOW1) -package shadowdep -c shadow.hs -fno-code || true
+	'$(TEST_HC)' $(TEST_HC_OPTS) -package-db $(PKGCONFSHADOW2) -package-db $(PKGCONFSHADOW1) -package shadowdep -c shadow.hs -fno-code
 #
-# We can also fix the problem by using an explicit -package-id flag to
-# specify a package we really want to use:
+# When the ABIs are the same, dependencies don't break, we just swap it in
 #
 	@echo "should SUCCEED:"
-	'$(TEST_HC)' $(TEST_HC_OPTS) -package-db $(PKGCONFSHADOW1) -package-db $(PKGCONFSHADOW2) -package-id shadowdep-1-XXX -c shadow.hs -fno-code
+	'$(TEST_HC)' $(TEST_HC_OPTS) -package-db $(PKGCONFSHADOW3) -package-db $(PKGCONFSHADOW1) -package shadowdep -c shadow.hs -fno-code
+
+# Test that order we pass databases doesn't matter
+#
+#     1. shadow-1-XXX=aaa
+#     2. shadowdep-1-XXX=ddd (shadow-1-XXX=aaa)
+#     3. shadow-1-XXX=bbb
+.PHONY: T12485a
+T12485a:
+	rm -rf T12485a.package.conf T12485b.package.conf T12485c.package.conf
+	'$(GHC_PKG)' --no-user-package-db init T12485a.package.conf
+	'$(GHC_PKG)' --no-user-package-db init T12485b.package.conf
+	'$(GHC_PKG)' --no-user-package-db init T12485c.package.conf
+	'$(GHC_PKG)' --no-user-package-db -f T12485a.package.conf register -v0 --force shadow1.pkg
+	'$(GHC_PKG)' --no-user-package-db -f T12485b.package.conf register -v0 --force shadow2.pkg
+	'$(GHC_PKG)' --no-user-package-db -f T12485c.package.conf register -v0 --force shadow3.pkg
+	echo "main = return ()" > T12485a.hs
+	# Normal test
+	@echo "should SUCCEED"
+	'$(TEST_HC)' $(TEST_HC_OPTS) -package-db T12485a.package.conf -package-db T12485b.package.conf -package shadowdep -c T12485a.hs -fno-code
+	# Reversed test
+	@echo "should SUCCEED"
+	'$(TEST_HC)' $(TEST_HC_OPTS) -package-db T12485b.package.conf -package-db T12485a.package.conf -package shadowdep -c T12485a.hs -fno-code
+	# Shadow OK, as long as correct one is chosen eventually, even when reversed
+	@echo "should SUCCEED"
+	'$(TEST_HC)' $(TEST_HC_OPTS) -package-db T12485b.package.conf -package-db T12485c.package.conf -package-db T12485a.package.conf -package shadowdep -c T12485a.hs -fno-code
 
 # If we pass --global, we should ignore instances in the user database
 T5442a:
@@ -210,7 +247,7 @@ T5442d:
 	'$(GHC_PKG)' init package.conf.T5442d.user
 	'$(GHC_PKG)' init package.conf.T5442d.extra
 	'$(GHC_PKG)' -f package.conf.T5442d.global register --force-files shadow1.pkg 2>/dev/null
-	'$(GHC_PKG)' -f package.conf.T5442d.user register --force-files shadow3.pkg 2>/dev/null
+	'$(GHC_PKG)' -f package.conf.T5442d.user register --force-files shadow4.pkg 2>/dev/null
 	'$(GHC_PKG)' --global-package-db=package.conf.T5442d.global -f package.conf.T5442d.extra register --force-files shadow2.pkg 2>/dev/null
 	'$(GHC_PKG)' --global-package-db=package.conf.T5442d.global --user-package-db=package.conf.T5442d.user -f package.conf.T5442d.extra --global unregister shadow --force
 	@echo "global (should be empty):"
@@ -232,9 +269,8 @@ ghcpkg02:
 	rm -rf $(PACKAGE_CONF_ghcpkg02)
 	$(GHC_PKG_ghcpkg02) init $(PACKAGE_CONF_ghcpkg02)
 	set -e; \
-	for i in `$(GHC_PKG) list --global --simple-output -v0`; do \
-		echo Updating $$i; \
-		$(GHC_PKG) describe --global $$i | $(GHC_PKG_ghcpkg02) update --global --force -; \
+	for i in `'$(GHC_PKG)' list --global --simple-output -v0`; do \
+		'$(GHC_PKG)' describe --global $$i | $(GHC_PKG_ghcpkg02) -v0 update --global --force -; \
 	done
 
 PKGCONF07=local07.package.conf
@@ -243,11 +279,19 @@ ghcpkg07:
 	@rm -rf $(PKGCONF07)
 	$(LOCAL_GHC_PKG07) init $(PKGCONF07)
 	$(LOCAL_GHC_PKG07) register --force test.pkg 2>/dev/null
-	$(LOCAL_GHC_PKG07) register --force test7a.pkg 2>/dev/null
-	$(LOCAL_GHC_PKG07) field testpkg7a reexported-modules
-	$(LOCAL_GHC_PKG07) register --force test7b.pkg 2>/dev/null
-	$(LOCAL_GHC_PKG07) field testpkg7b reexported-modules
+	$(LOCAL_GHC_PKG07) register --force test7a.pkg 2>&1 | grep "module" || :
+	$(LOCAL_GHC_PKG07) field testpkg7a exposed-modules
+	$(LOCAL_GHC_PKG07) register --force test7b.pkg 2>&1 | grep "module" || :
+	$(LOCAL_GHC_PKG07) field testpkg7b exposed-modules
 
 recache_reexport:
 	@rm -rf recache_reexport_db/package.cache
 	'$(GHC_PKG)' --no-user-package-db --global-package-db=recache_reexport_db recache
+
+T13703:
+	@rm -rf T13703.package.conf
+	'$(GHC_PKG)' init T13703.package.conf
+	'$(GHC_PKG)' --no-user-package-db -f T13703.package.conf register --force test13703a.pkg 2>/dev/null
+	'$(GHC_PKG)' --no-user-package-db -f T13703.package.conf register --force test13703b.pkg 2>/dev/null
+	'$(GHC_PKG)' --no-user-package-db -f T13703.package.conf field z-p-z-q lib-name
+	'$(GHC_PKG)' --no-user-package-db -f T13703.package.conf field z-p-z-r lib-name

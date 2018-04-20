@@ -62,8 +62,6 @@ module System.Console.GetOpt (
    -- $example2
 ) where
 
-import Prelude -- necessary to get dependencies right
-
 import Data.List ( isPrefixOf, find )
 
 -- |What to do with options following non-options
@@ -98,14 +96,17 @@ data ArgDescr a
    | ReqArg (String       -> a) String -- ^   option requires argument
    | OptArg (Maybe String -> a) String -- ^   optional argument
 
+-- | @since 4.6.0.0
 instance Functor ArgOrder where
     fmap _ RequireOrder      = RequireOrder
     fmap _ Permute           = Permute
     fmap f (ReturnInOrder g) = ReturnInOrder (f . g)
 
+-- | @since 4.6.0.0
 instance Functor OptDescr where
     fmap f (Option a b argDescr c) = Option a b (fmap f argDescr) c
 
+-- | @since 4.6.0.0
 instance Functor ArgDescr where
     fmap f (NoArg a)    = NoArg (f a)
     fmap f (ReqArg g s) = ReqArg (f . g) s
@@ -123,7 +124,7 @@ data OptKind a                -- kind of cmd line arg (internal use only):
 -- second argument.
 usageInfo :: String                    -- header
           -> [OptDescr a]              -- option descriptors
-          -> String                    -- nicely formatted decription of options
+          -> String                    -- nicely formatted description of options
 usageInfo header optDescr = unlines (header:table)
    where (ss,ls,ds)     = (unzip3 . concatMap fmtOpt) optDescr
          table          = zipWith3 paste (sameLen ss) (sameLen ls) ds

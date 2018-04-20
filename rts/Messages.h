@@ -6,18 +6,21 @@
  *
  * --------------------------------------------------------------------------*/
 
+#pragma once
+
 #include "BeginPrivate.h"
 
-nat messageBlackHole(Capability *cap, MessageBlackHole *msg);
+uint32_t messageBlackHole(Capability *cap, MessageBlackHole *msg);
 StgTSO * blackHoleOwner (StgClosure *bh);
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
 void executeMessage (Capability *cap, Message *m);
 void sendMessage    (Capability *from_cap, Capability *to_cap, Message *msg);
 #endif
 
 #include "Capability.h"
 #include "Updates.h" // for DEBUG_FILL_SLOP
+#include "SMPClosureOps.h"
 
 INLINE_HEADER void
 doneWithMsgThrowTo (MessageThrowTo *m)
@@ -29,10 +32,6 @@ doneWithMsgThrowTo (MessageThrowTo *m)
 
 #include "EndPrivate.h"
 
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:
+#if defined(THREADED_RTS) && defined(PROF_SPIN)
+extern volatile StgWord64 whitehole_executeMessage_spin;
+#endif

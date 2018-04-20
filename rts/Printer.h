@@ -6,44 +6,30 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef PRINTER_H
-#define PRINTER_H
+#pragma once
 
 #include "BeginPrivate.h"
 
-extern void   	   printPtr        ( StgPtr p );
-extern void   	   printObj        ( StgClosure *obj );
+extern void        printPtr        ( StgPtr p );
+extern void        printObj        ( StgClosure *obj );
 
-extern char *      closure_type_names[];
+extern const char *  closure_type_names[];
 
-void   	           info_hdr_type   ( StgClosure *closure, char *res );
-char  *	           info_type       ( StgClosure *closure );
-char  *	           info_type_by_ip ( StgInfoTable *ip );
-char  *            info_update_frame ( StgClosure *closure );
+void               info_hdr_type   ( const StgClosure *closure, char *res );
+const char  *      info_type       ( const StgClosure *closure );
+const char  *      info_type_by_ip ( const StgInfoTable *ip );
+const char  *      info_update_frame ( const StgClosure *closure );
 
-#ifdef DEBUG
-extern void        prettyPrintClosure (StgClosure *obj);
-extern void   	   printClosure    ( StgClosure *obj );
-extern StgPtr      printStackObj   ( StgPtr sp );
+#if defined(DEBUG)
+extern void        printClosure    ( const StgClosure *obj );
 extern void        printStackChunk ( StgPtr sp, StgPtr spLim );
 extern void        printTSO        ( StgTSO *tso );
 
-extern void DEBUG_LoadSymbols( char *name );
+extern void DEBUG_LoadSymbols( const char *name );
 
 extern const char *lookupGHCName( void *addr );
 
-extern char *what_next_strs[];
+extern const char *what_next_strs[];
 #endif
 
 #include "EndPrivate.h"
-
-#endif /* PRINTER_H */
-
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

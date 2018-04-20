@@ -17,7 +17,6 @@
 #include "Prelude.h"
 #include "RaiseAsync.h"
 #include "RtsUtils.h"
-#include "Itimer.h"
 #include "Capability.h"
 #include "Select.h"
 #include "AwaitEvent.h"
@@ -94,10 +93,10 @@ LowResTime getDelayTarget (HsInt us)
  * if this is true, then our time has expired.
  * (idea due to Andy Gill).
  */
-static rtsBool wakeUpSleepingThreads (LowResTime now)
+static bool wakeUpSleepingThreads (LowResTime now)
 {
     StgTSO *tso;
-    rtsBool flag = rtsFalse;
+    bool flag = false;
 
     while (sleeping_queue != END_TSO_QUEUE) {
         tso = sleeping_queue;
@@ -111,7 +110,7 @@ static rtsBool wakeUpSleepingThreads (LowResTime now)
                                        (unsigned long)tso->id));
         // MainCapability: this code is !THREADED_RTS
         pushOnRunQueue(&MainCapability,tso);
-        flag = rtsTrue;
+        flag = true;
     }
     return flag;
 }
@@ -218,13 +217,13 @@ static enum FdState fdPollWriteState (int fd)
  *
  */
 void
-awaitEvent(rtsBool wait)
+awaitEvent(bool wait)
 {
     StgTSO *tso, *prev, *next;
     fd_set rfd,wfd;
     int numFound;
     int maxfd = -1;
-    rtsBool seen_bad_fd = rtsFalse;
+    bool seen_bad_fd = false;
     struct timeval tv, *ptv;
     LowResTime now;
 
@@ -257,9 +256,14 @@ awaitEvent(rtsBool wait)
       for(tso = blocked_queue_hd; tso != END_TSO_QUEUE; tso = next) {
         next = tso->_link;
 
-      /* On FreeBSD FD_SETSIZE is unsigned. Cast it to signed int
+      /* On older FreeBSDs, FD_SETSIZE is unsigned. Cast it to signed int
        * in order to switch off the 'comparison between signed and
        * unsigned error message
+       * Newer versions of FreeBSD have switched to unsigned int:
+       *   https://github.com/freebsd/freebsd/commit/12ae7f74a071f0439763986026525094a7032dfd
+       *   http://fa.freebsd.cvs-all.narkive.com/bCWNHbaC/svn-commit-r265051-head-sys-sys
+       * So the (int) cast should be removed across the code base once
+       * GHC requires a version of FreeBSD that has that change in it.
        */
         switch (tso->why_blocked) {
         case BlockedOnRead:
@@ -295,9 +299,32 @@ awaitEvent(rtsBool wait)
           tv.tv_usec = 0;
           ptv = &tv;
       } else if (sleeping_queue != END_TSO_QUEUE) {
+          /* SUSv2 allows implementations to have an implementation defined
+           * maximum timeout for select(2). The standard requires
+           * implementations to silently truncate values exceeding this maximum
+           * to the maximum. Unfortunately, OSX and the BSD don't comply with
+           * SUSv2, instead opting to return EINVAL for values exceeding a
+           * timeout of 1e8.
+           *
+           * Select returning an error crashes the runtime in a bad way. To
+           * play it safe we truncate any timeout to 31 days, as SUSv2 requires
+           * any implementations maximum timeout to be larger than this.
+           *
+           * Truncating the timeout is not an issue, because if nothing
+           * interesting happens when the timeout expires, we'll see that the
+           * thread still wants to be blocked longer and simply block on a new
+           * iteration of select(2).
+           */
+          const time_t max_seconds = 2678400; // 31 * 24 * 60 * 60
+
           Time min = LowResTimeToTime(sleeping_queue->block_info.target - now);
           tv.tv_sec  = TimeToSeconds(min);
-          tv.tv_usec = TimeToUS(min) % 1000000;
+          if (tv.tv_sec < max_seconds) {
+              tv.tv_usec = TimeToUS(min) % 1000000;
+          } else {
+              tv.tv_sec = max_seconds;
+              tv.tv_usec = 0;
+          }
           ptv = &tv;
       } else {
           ptv = NULL;
@@ -308,7 +335,7 @@ awaitEvent(rtsBool wait)
       while ((numFound = select(maxfd+1, &rfd, &wfd, NULL, ptv)) < 0) {
           if (errno != EINTR) {
             if ( errno == EBADF ) {
-                seen_bad_fd = rtsTrue;
+                seen_bad_fd = true;
                 break;
             } else {
                 sysErrorBelch("select");
@@ -352,6 +379,12 @@ awaitEvent(rtsBool wait)
 
       prev = NULL;
       {
+          /*
+           * The queue is being rebuilt in this loop:
+           * 'blocked_queue_hd' will contain already
+           * traversed blocked TSOs. As a result you
+           * can't use functions accessing 'blocked_queue_hd'.
+           */
           for(tso = blocked_queue_hd; tso != END_TSO_QUEUE; tso = next) {
               next = tso->_link;
               int fd;
@@ -389,8 +422,8 @@ awaitEvent(rtsBool wait)
                   IF_DEBUG(scheduler,
                       debugBelch("Killing blocked thread %lu on bad fd=%i\n",
                                  (unsigned long)tso->id, fd));
-                  throwToSingleThreaded(&MainCapability, tso,
-                                        (StgClosure *)blockedOnBadFD_closure);
+                  raiseAsync(&MainCapability, tso,
+                      (StgClosure *)blockedOnBadFD_closure, false, NULL);
                   break;
               case RTS_FD_IS_READY:
                   IF_DEBUG(scheduler,
@@ -423,11 +456,3 @@ awaitEvent(rtsBool wait)
 }
 
 #endif /* THREADED_RTS */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

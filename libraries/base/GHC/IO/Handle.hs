@@ -4,14 +4,14 @@
            , RecordWildCards
            , NondecreasingIndentation
   #-}
-{-# OPTIONS_GHC -fno-warn-unused-matches #-}
+{-# OPTIONS_GHC -Wno-unused-matches #-}
 
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.IO.Handle
 -- Copyright   :  (c) The University of Glasgow, 1994-2009
 -- License     :  see libraries/base/LICENSE
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  provisional
 -- Portability :  non-portable
@@ -23,21 +23,23 @@
 module GHC.IO.Handle (
    Handle,
    BufferMode(..),
- 
+
    mkFileHandle, mkDuplexHandle,
- 
-   hFileSize, hSetFileSize, hIsEOF, hLookAhead,
+
+   hFileSize, hSetFileSize, hIsEOF, isEOF, hLookAhead,
    hSetBuffering, hSetBinaryMode, hSetEncoding, hGetEncoding,
    hFlush, hFlushAll, hDuplicate, hDuplicateTo,
- 
+
    hClose, hClose_help,
- 
+
+   LockMode(..), hLock, hTryLock,
+
    HandlePosition, HandlePosn(..), hGetPosn, hSetPosn,
    SeekMode(..), hSeek, hTell,
- 
+
    hIsOpen, hIsClosed, hIsReadable, hIsWritable, hGetBuffering, hIsSeekable,
    hSetEcho, hGetEcho, hIsTerminalDevice,
- 
+
    hSetNewlineMode, Newline(..), NewlineMode(..), nativeNewline,
    noNewlineTranslation, universalNewlineMode, nativeNewlineMode,
 
@@ -54,6 +56,8 @@ import GHC.IO.Encoding
 import GHC.IO.Buffer
 import GHC.IO.BufferedIO ( BufferedIO )
 import GHC.IO.Device as IODevice
+import GHC.IO.Handle.FD
+import GHC.IO.Handle.Lock
 import GHC.IO.Handle.Types
 import GHC.IO.Handle.Internals
 import GHC.IO.Handle.Text
@@ -68,7 +72,6 @@ import GHC.Num
 import GHC.Real
 import Data.Maybe
 import Data.Typeable
-import Control.Monad
 
 -- ---------------------------------------------------------------------------
 -- Closing a handle
@@ -76,14 +79,14 @@ import Control.Monad
 -- | Computation 'hClose' @hdl@ makes handle @hdl@ closed.  Before the
 -- computation finishes, if @hdl@ is writable its buffer is flushed as
 -- for 'hFlush'.
--- Performing 'hClose' on a handle that has already been closed has no effect; 
+-- Performing 'hClose' on a handle that has already been closed has no effect;
 -- doing so is not an error.  All other operations on a closed handle will fail.
 -- If 'hClose' fails for any reason, any further operations (apart from
 -- 'hClose') on the handle will still fail as if @hdl@ had been successfully
 -- closed.
 
 hClose :: Handle -> IO ()
-hClose h@(FileHandle _ m)     = do 
+hClose h@(FileHandle _ m)     = do
   mb_exc <- hClose' h m
   hClose_maybethrow mb_exc h
 hClose h@(DuplexHandle _ r w) = do
@@ -95,7 +98,7 @@ hClose_maybethrow Nothing  h = return ()
 hClose_maybethrow (Just e) h = hClose_rethrow e h
 
 hClose_rethrow :: SomeException -> Handle -> IO ()
-hClose_rethrow e h = 
+hClose_rethrow e h =
   case fromException e of
     Just ioe -> ioError (augmentIOError ioe "hClose" h)
     Nothing  -> throwIO e
@@ -112,9 +115,9 @@ hClose' h m = withHandle' "hClose" h m $ hClose_help
 hFileSize :: Handle -> IO Integer
 hFileSize handle =
     withHandle_ "hFileSize" handle $ \ handle_@Handle__{haDevice=dev} -> do
-    case haType handle_ of 
+    case haType handle_ of
       ClosedHandle              -> ioe_closedHandle
-      SemiClosedHandle          -> ioe_closedHandle
+      SemiClosedHandle          -> ioe_semiclosedHandle
       _ -> do flushWriteBuffer handle_
               r <- IODevice.getSize dev
               if r /= -1
@@ -128,9 +131,9 @@ hFileSize handle =
 hSetFileSize :: Handle -> Integer -> IO ()
 hSetFileSize handle size =
     withHandle_ "hSetFileSize" handle $ \ handle_@Handle__{haDevice=dev} -> do
-    case haType handle_ of 
+    case haType handle_ of
       ClosedHandle              -> ioe_closedHandle
-      SemiClosedHandle          -> ioe_closedHandle
+      SemiClosedHandle          -> ioe_semiclosedHandle
       _ -> do flushWriteBuffer handle_
               IODevice.setSize dev size
               return ()
@@ -161,6 +164,15 @@ hIsEOF handle = wantReadableHandle_ "hIsEOF" handle $ \Handle__{..} -> do
      then return True
      else do writeIORef haByteBuffer bbuf'
              return False
+
+-- ---------------------------------------------------------------------------
+-- isEOF
+
+-- | The computation 'isEOF' is identical to 'hIsEOF',
+-- except that it works only on 'stdin'.
+
+isEOF :: IO Bool
+isEOF = hIsEOF stdin
 
 -- ---------------------------------------------------------------------------
 -- Looking ahead
@@ -220,7 +232,7 @@ hSetBuffering handle mode =
           is_tty <- IODevice.isTerminal haDevice
           when (is_tty && isReadableHandleType haType) $
                 case mode of
-#ifndef mingw32_HOST_OS
+#if !defined(mingw32_HOST_OS)
         -- 'raw' mode under win32 is a bit too specialised (and troublesome
         -- for most common uses), so simply disable its use here.
                   NoBuffering -> IODevice.setRaw haDevice True
@@ -256,9 +268,9 @@ hSetEncoding hdl encoding = do
     closeTextCodecs h_
     openTextEncoding (Just encoding) haType $ \ mb_encoder mb_decoder -> do
     bbuf <- readIORef haByteBuffer
-    ref <- newIORef (error "last_decode")
-    return (Handle__{ haLastDecode = ref, 
-                      haDecoder = mb_decoder, 
+    ref <- newIORef (errorWithoutStackTrace "last_decode")
+    return (Handle__{ haLastDecode = ref,
+                      haDecoder = mb_decoder,
                       haEncoder = mb_encoder,
                       haCodec   = Just encoding, .. })
 
@@ -289,7 +301,7 @@ hGetEncoding hdl =
 --    It is unspecified whether the characters in the buffer are discarded
 --    or retained under these circumstances.
 
-hFlush :: Handle -> IO () 
+hFlush :: Handle -> IO ()
 hFlush handle = wantWritableHandle "hFlush" handle flushWriteBuffer
 
 -- | The action 'hFlushAll' @hdl@ flushes all buffered data in @hdl@,
@@ -309,7 +321,7 @@ hFlush handle = wantWritableHandle "hFlush" handle flushWriteBuffer
 --  * 'isIllegalOperation' if @hdl@ has buffered read data, and is not
 --    seekable.
 
-hFlushAll :: Handle -> IO () 
+hFlushAll :: Handle -> IO ()
 hFlushAll handle = withHandle_ "hFlushAll" handle flushBuffer
 
 -- -----------------------------------------------------------------------------
@@ -317,11 +329,13 @@ hFlushAll handle = withHandle_ "hFlushAll" handle flushBuffer
 
 data HandlePosn = HandlePosn Handle HandlePosition
 
+-- | @since 4.1.0.0
 instance Eq HandlePosn where
     (HandlePosn h1 p1) == (HandlePosn h2 p2) = p1==p2 && h1==h2
 
+-- | @since 4.1.0.0
 instance Show HandlePosn where
-   showsPrec p (HandlePosn h pos) = 
+   showsPrec p (HandlePosn h pos) =
         showsPrec p h . showString " at position " . shows pos
 
   -- HandlePosition is the Haskell equivalent of POSIX' off_t.
@@ -346,13 +360,13 @@ hGetPosn handle = do
 --
 --  * 'isPermissionError' if a system resource limit would be exceeded.
 
-hSetPosn :: HandlePosn -> IO () 
+hSetPosn :: HandlePosn -> IO ()
 hSetPosn (HandlePosn h i) = hSeek h AbsoluteSeek i
 
 -- ---------------------------------------------------------------------------
 -- hSeek
 
-{- Note: 
+{- Note:
  - when seeking using `SeekFromEnd', positive offsets (>=0) means
    seeking at or past EOF.
 
@@ -382,7 +396,7 @@ hSetPosn (HandlePosn h i) = hSeek h AbsoluteSeek i
 --
 --  * 'isPermissionError' if a system resource limit would be exceeded.
 
-hSeek :: Handle -> SeekMode -> Integer -> IO () 
+hSeek :: Handle -> SeekMode -> Integer -> IO ()
 hSeek handle mode offset =
     wantSeekableHandle "hSeek" handle $ \ handle_@Handle__{..} -> do
     debugIO ("hSeek " ++ show (mode,offset))
@@ -394,10 +408,10 @@ hSeek handle mode offset =
         else do
 
     let r = bufL buf; w = bufR buf
-    if mode == RelativeSeek && isNothing haDecoder && 
+    if mode == RelativeSeek && isNothing haDecoder &&
        offset >= 0 && offset < fromIntegral (w - r)
         then writeIORef haCharBuffer buf{ bufL = r + fromIntegral offset }
-        else do 
+        else do
 
     flushCharReadBuffer handle_
     flushByteReadBuffer handle_
@@ -408,13 +422,13 @@ hSeek handle mode offset =
 -- handle @hdl@, as the number of bytes from the beginning of
 -- the file.  The value returned may be subsequently passed to
 -- 'hSeek' to reposition the handle to the current position.
--- 
+--
 -- This operation may fail with:
 --
 --  * 'isIllegalOperationError' if the Handle is not seekable.
 --
 hTell :: Handle -> IO Integer
-hTell handle = 
+hTell handle =
     wantSeekableHandle "hGetPosn" handle $ \ handle_@Handle__{..} -> do
 
       posn <- IODevice.tell haDevice
@@ -446,7 +460,7 @@ hTell handle =
 hIsOpen :: Handle -> IO Bool
 hIsOpen handle =
     withHandle_ "hIsOpen" handle $ \ handle_ -> do
-    case haType handle_ of 
+    case haType handle_ of
       ClosedHandle         -> return False
       SemiClosedHandle     -> return False
       _                    -> return True
@@ -454,7 +468,7 @@ hIsOpen handle =
 hIsClosed :: Handle -> IO Bool
 hIsClosed handle =
     withHandle_ "hIsClosed" handle $ \ handle_ -> do
-    case haType handle_ of 
+    case haType handle_ of
       ClosedHandle         -> return True
       _                    -> return False
 
@@ -472,29 +486,29 @@ hIsReadable :: Handle -> IO Bool
 hIsReadable (DuplexHandle _ _ _) = return True
 hIsReadable handle =
     withHandle_ "hIsReadable" handle $ \ handle_ -> do
-    case haType handle_ of 
+    case haType handle_ of
       ClosedHandle         -> ioe_closedHandle
-      SemiClosedHandle     -> ioe_closedHandle
+      SemiClosedHandle     -> ioe_semiclosedHandle
       htype                -> return (isReadableHandleType htype)
 
 hIsWritable :: Handle -> IO Bool
 hIsWritable (DuplexHandle _ _ _) = return True
 hIsWritable handle =
     withHandle_ "hIsWritable" handle $ \ handle_ -> do
-    case haType handle_ of 
+    case haType handle_ of
       ClosedHandle         -> ioe_closedHandle
-      SemiClosedHandle     -> ioe_closedHandle
+      SemiClosedHandle     -> ioe_semiclosedHandle
       htype                -> return (isWritableHandleType htype)
 
 -- | Computation 'hGetBuffering' @hdl@ returns the current buffering mode
 -- for @hdl@.
 
 hGetBuffering :: Handle -> IO BufferMode
-hGetBuffering handle = 
+hGetBuffering handle =
     withHandle_ "hGetBuffering" handle $ \ handle_ -> do
-    case haType handle_ of 
+    case haType handle_ of
       ClosedHandle         -> ioe_closedHandle
-      _ -> 
+      _ ->
            -- We're being non-standard here, and allow the buffering
            -- of a semi-closed handle to be queried.   -- sof 6/98
           return (haBufferMode handle_)  -- could be stricter..
@@ -502,14 +516,14 @@ hGetBuffering handle =
 hIsSeekable :: Handle -> IO Bool
 hIsSeekable handle =
     withHandle_ "hIsSeekable" handle $ \ handle_@Handle__{..} -> do
-    case haType of 
+    case haType of
       ClosedHandle         -> ioe_closedHandle
-      SemiClosedHandle     -> ioe_closedHandle
+      SemiClosedHandle     -> ioe_semiclosedHandle
       AppendHandle         -> return False
       _                    -> IODevice.isSeekable haDevice
 
 -- -----------------------------------------------------------------------------
--- Changing echo status (Non-standard GHC extensions)
+-- Changing echo status
 
 -- | Set the echoing status of a handle connected to a terminal.
 
@@ -520,7 +534,7 @@ hSetEcho handle on = do
      then return ()
      else
       withHandle_ "hSetEcho" handle $ \ Handle__{..} -> do
-      case haType of 
+      case haType of
          ClosedHandle -> ioe_closedHandle
          _            -> IODevice.setEcho haDevice on
 
@@ -533,7 +547,7 @@ hGetEcho handle = do
      then return False
      else
        withHandle_ "hGetEcho" handle $ \ Handle__{..} -> do
-       case haType of 
+       case haType of
          ClosedHandle -> ioe_closedHandle
          _            -> IODevice.getEcho haDevice
 
@@ -542,7 +556,7 @@ hGetEcho handle = do
 hIsTerminalDevice :: Handle -> IO Bool
 hIsTerminalDevice handle = do
     withHandle_ "hIsTerminalDevice" handle $ \ Handle__{..} -> do
-     case haType of 
+     case haType of
        ClosedHandle -> ioe_closedHandle
        _            -> IODevice.isTerminal haDevice
 
@@ -558,7 +572,7 @@ hIsTerminalDevice handle = do
 hSetBinaryMode :: Handle -> Bool -> IO ()
 hSetBinaryMode handle bin =
   withAllHandles__ "hSetBinaryMode" handle $ \ h_@Handle__{..} ->
-    do 
+    do
          flushCharBuffer h_
          closeTextCodecs h_
 
@@ -572,15 +586,15 @@ hSetBinaryMode handle bin =
                    | otherwise = nativeNewlineMode
 
          bbuf <- readIORef haByteBuffer
-         ref <- newIORef (error "codec_state", bbuf)
+         ref <- newIORef (errorWithoutStackTrace "codec_state", bbuf)
 
          return Handle__{ haLastDecode = ref,
-                          haEncoder  = mb_encoder, 
+                          haEncoder  = mb_encoder,
                           haDecoder  = mb_decoder,
                           haCodec    = mb_te,
                           haInputNL  = inputNL nl,
                           haOutputNL = outputNL nl, .. }
-  
+
 -- -----------------------------------------------------------------------------
 -- hSetNewlineMode
 
@@ -606,10 +620,10 @@ hDuplicate h@(FileHandle path m) = do
   withHandle_' "hDuplicate" h m $ \h_ ->
       dupHandle path h Nothing h_ (Just handleFinalizer)
 hDuplicate h@(DuplexHandle path r w) = do
-  write_side@(FileHandle _ write_m) <- 
+  write_side@(FileHandle _ write_m) <-
      withHandle_' "hDuplicate" h w $ \h_ ->
         dupHandle path h Nothing h_ (Just handleFinalizer)
-  read_side@(FileHandle _ read_m) <- 
+  read_side@(FileHandle _ read_m) <-
     withHandle_' "hDuplicate" h r $ \h_ ->
         dupHandle path h (Just write_m) h_  Nothing
   return (DuplexHandle path read_m write_m)
@@ -627,7 +641,7 @@ dupHandle filepath h other_side h_@Handle__{..} mb_finalizer = do
     Nothing -> do
        new_dev <- IODevice.dup haDevice
        dupHandle_ new_dev filepath other_side h_ mb_finalizer
-    Just r  -> 
+    Just r  ->
        withHandle_' "dupHandle" h r $ \Handle__{haDevice=dev} -> do
          dupHandle_ dev filepath other_side h_ mb_finalizer
 
@@ -648,7 +662,7 @@ dupHandle_ new_dev filepath other_side h_@Handle__{..} mb_finalizer = do
 -- Replacing a Handle
 
 {- |
-Makes the second handle a duplicate of the first handle.  The second 
+Makes the second handle a duplicate of the first handle.  The second
 handle will be closed first, if it is not already.
 
 This can be used to retarget the standard Handles, for example:
@@ -672,29 +686,29 @@ hDuplicateTo h1@(DuplexHandle path r1 w1) h2@(DuplexHandle _ r2 w2)  = do
    _ <- hClose_help r2_
    withHandle_' "hDuplicateTo" h1 r1 $ \r1_ -> do
      dupHandleTo path h1 (Just w1) r2_ r1_ Nothing
-hDuplicateTo h1 _ = 
+hDuplicateTo h1 _ =
   ioe_dupHandlesNotCompatible h1
 
 
 ioe_dupHandlesNotCompatible :: Handle -> IO a
 ioe_dupHandlesNotCompatible h =
-   ioException (IOError (Just h) IllegalOperation "hDuplicateTo" 
+   ioException (IOError (Just h) IllegalOperation "hDuplicateTo"
                 "handles are incompatible" Nothing Nothing)
 
-dupHandleTo :: FilePath 
+dupHandleTo :: FilePath
             -> Handle
             -> Maybe (MVar Handle__)
             -> Handle__
             -> Handle__
             -> Maybe HandleFinalizer
             -> IO Handle__
-dupHandleTo filepath h other_side 
+dupHandleTo filepath h other_side
             hto_@Handle__{haDevice=devTo,..}
             h_@Handle__{haDevice=dev} mb_finalizer = do
   flushBuffer h_
   case cast devTo of
     Nothing   -> ioe_dupHandlesNotCompatible h
-    Just dev' -> do 
+    Just dev' -> do
       _ <- IODevice.dup2 dev dev'
       FileHandle _ m <- dupHandle_ dev' filepath other_side h_ mb_finalizer
       takeMVar m
@@ -710,15 +724,15 @@ hShow h@(FileHandle path _) = showHandle' path False h
 hShow h@(DuplexHandle path _ _) = showHandle' path True h
 
 showHandle' :: String -> Bool -> Handle -> IO String
-showHandle' filepath is_duplex h = 
+showHandle' filepath is_duplex h =
   withHandle_ "showHandle" h $ \hdl_ ->
     let
      showType | is_duplex = showString "duplex (read-write)"
               | otherwise = shows (haType hdl_)
     in
-    return 
-      (( showChar '{' . 
-        showHdl (haType hdl_) 
+    return
+      (( showChar '{' .
+        showHdl (haType hdl_)
             (showString "loc=" . showString filepath . showChar ',' .
              showString "type=" . showType . showChar ',' .
              showString "buffering=" . showBufMode (unsafePerformIO (readIORef (haCharBuffer hdl_))) (haBufferMode hdl_) . showString "}" )
@@ -726,7 +740,7 @@ showHandle' filepath is_duplex h =
    where
 
     showHdl :: HandleType -> ShowS -> ShowS
-    showHdl ht cont = 
+    showHdl ht cont =
        case ht of
         ClosedHandle  -> shows ht . showString "}"
         _ -> cont
@@ -739,6 +753,6 @@ showHandle' filepath is_duplex h =
         BlockBuffering (Just n) -> showString "block " . showParen True (shows n)
         BlockBuffering Nothing  -> showString "block " . showParen True (shows def)
       where
-       def :: Int 
+       def :: Int
        def = bufSize buf
 

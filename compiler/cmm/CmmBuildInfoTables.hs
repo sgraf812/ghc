@@ -1,17 +1,18 @@
-{-# LANGUAGE CPP, GADTs #-}
+{-# LANGUAGE BangPatterns, GADTs #-}
 
--- See Note [Deprecations in Hoopl] in Hoopl module
-{-# OPTIONS_GHC -fno-warn-warnings-deprecations #-}
 module CmmBuildInfoTables
     ( CAFSet, CAFEnv, cafAnal
     , doSRTs, TopSRT, emptySRT, isEmptySRT, srtToData )
 where
 
-#include "HsVersions.h"
+import GhcPrelude hiding (succ)
 
-import Hoopl
+import Hoopl.Block
+import Hoopl.Graph
+import Hoopl.Label
+import Hoopl.Collections
+import Hoopl.Dataflow
 import Digraph
-import BlockId
 import Bitmap
 import CLabel
 import PprCmmDecl ()
@@ -32,9 +33,6 @@ import qualified Data.Map as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Control.Monad
-
-import qualified Prelude as P
-import Prelude hiding (succ)
 
 foldSet :: (a -> b -> b) -> b -> Set a -> b
 foldSet = Set.foldr
@@ -85,40 +83,49 @@ This is what flattenCAFSets is doing.
 -- Finding the CAFs used by a procedure
 
 type CAFSet = Set CLabel
-type CAFEnv = BlockEnv CAFSet
+type CAFEnv = LabelMap CAFSet
 
--- First, an analysis to find live CAFs.
 cafLattice :: DataflowLattice CAFSet
-cafLattice = DataflowLattice "live cafs" Set.empty add
-  where add _ (OldFact old) (NewFact new) = case old `Set.union` new of
-                                              new' -> (changeIf $ Set.size new' > Set.size old, new')
+cafLattice = DataflowLattice Set.empty add
+  where
+    add (OldFact old) (NewFact new) =
+        let !new' = old `Set.union` new
+        in changedIf (Set.size new' > Set.size old) new'
 
-cafTransfers :: BwdTransfer CmmNode CAFSet
-cafTransfers = mkBTransfer3 first middle last
-  where first  _ live = live
-        middle m live = foldExpDeep addCaf m live
-        last   l live = foldExpDeep addCaf l (joinOutFacts cafLattice l live)
-        addCaf e set = case e of
-               CmmLit (CmmLabel c)              -> add c set
-               CmmLit (CmmLabelOff c _)         -> add c set
-               CmmLit (CmmLabelDiffOff c1 c2 _) -> add c1 $ add c2 set
-               _ -> set
-        add l s = if hasCAF l then Set.insert (toClosureLbl l) s
-                              else s
+cafTransfers :: TransferFun CAFSet
+cafTransfers (BlockCC eNode middle xNode) fBase =
+    let joined = cafsInNode xNode $! joinOutFacts cafLattice xNode fBase
+        !result = foldNodesBwdOO cafsInNode middle joined
+    in mapSingleton (entryLabel eNode) result
 
+cafsInNode :: CmmNode e x -> CAFSet -> CAFSet
+cafsInNode node set = foldExpDeep addCaf node set
+  where
+    addCaf expr !set =
+        case expr of
+            CmmLit (CmmLabel c) -> add c set
+            CmmLit (CmmLabelOff c _) -> add c set
+            CmmLit (CmmLabelDiffOff c1 c2 _) -> add c1 $! add c2 set
+            _ -> set
+    add l s | hasCAF l  = Set.insert (toClosureLbl l) s
+            | otherwise = s
+
+-- | An analysis to find live CAFs.
 cafAnal :: CmmGraph -> CAFEnv
-cafAnal g = dataflowAnalBwd g [] $ analBwd cafLattice cafTransfers
+cafAnal cmmGraph = analyzeCmmBwd cafLattice cafTransfers cmmGraph mapEmpty
 
 -----------------------------------------------------------------------
 -- Building the SRTs
 
 -- Description of the SRT for a given module.
 -- Note that this SRT may grow as we greedily add new CAFs to it.
-data TopSRT = TopSRT { lbl      :: CLabel
-                     , next_elt :: Int -- the next entry in the table
-                     , rev_elts :: [CLabel]
-                     , elt_map  :: Map CLabel Int }
-                        -- map: CLabel -> its last entry in the table
+data TopSRT = TopSRT
+  { lbl      :: CLabel
+  , next_elt :: {-# UNPACK #-} !Int -- the next entry in the table
+  , rev_elts :: [CLabel]
+  , elt_map  :: !(Map CLabel Int) -- CLabel -> its last entry in the table
+  }
+
 instance Outputable TopSRT where
   ppr (TopSRT lbl next elts eltmap) =
     text "TopSRT:" <+> ppr lbl
@@ -148,8 +155,9 @@ addCAF caf srt =
     where last  = next_elt srt
 
 srtToData :: TopSRT -> CmmGroup
-srtToData srt = [CmmData RelocatableReadOnlyData (Statics (lbl srt) tbl)]
+srtToData srt = [CmmData sec (Statics (lbl srt) tbl)]
     where tbl = map (CmmStaticLit . CmmLabel) (reverse (rev_elts srt))
+          sec = Section RelocatableReadOnlyData (lbl srt)
 
 -- Once we have found the CAFs, we need to do two things:
 -- 1. Build a table of all the CAFs used in the procedure.
@@ -169,8 +177,8 @@ buildSRT dflags topSRT cafs =
                mkSRT topSRT =
                  do localSRTs <- procpointSRT dflags (lbl topSRT) (elt_map topSRT) cafs
                     return (topSRT, localSRTs)
-           in if length cafs > maxBmpSize dflags then
-                mkSRT (foldl add_if_missing topSRT cafs)
+           in if cafs `lengthExceeds` maxBmpSize dflags then
+                mkSRT (foldl' add_if_missing topSRT cafs)
               else -- make sure all the cafs are near the bottom of the srt
                 mkSRT (add_if_too_far topSRT cafs)
          add_if_missing srt caf =
@@ -198,7 +206,7 @@ buildSRT dflags topSRT cafs =
      return (topSRT, sub_tbls, blockSRTs)
 
 -- Construct an SRT bitmap.
--- Adapted from simpleStg/SRT.lhs, which expects Id's.
+-- Adapted from simpleStg/SRT.hs, which expects Id's.
 procpointSRT :: DynFlags -> CLabel -> Map CLabel Int -> [CLabel] ->
                 UniqSM (Maybe CmmDecl, C_SRT)
 procpointSRT _ _ _ [] =
@@ -211,7 +219,7 @@ procpointSRT dflags top_srt top_table entries =
     sorted_ints = sort ints
     offset = head sorted_ints
     bitmap_entries = map (subtract offset) sorted_ints
-    len = P.last bitmap_entries + 1
+    len = GhcPrelude.last bitmap_entries + 1
     bitmap = intsToBitmap dflags len bitmap_entries
 
 maxBmpSize :: DynFlags -> Int
@@ -223,7 +231,8 @@ to_SRT dflags top_srt off len bmp
   | len > maxBmpSize dflags || bmp == [toStgWord dflags (fromStgHalfWord (srtEscape dflags))]
   = do id <- getUniqueM
        let srt_desc_lbl = mkLargeSRTLabel id
-           tbl = CmmData RelocatableReadOnlyData $
+           section = Section RelocatableReadOnlyData srt_desc_lbl
+           tbl = CmmData section $
                    Statics srt_desc_lbl $ map CmmStaticLit
                      ( cmmLabelOffW dflags top_srt off
                      : mkWordCLit dflags (fromIntegral len)
@@ -262,17 +271,18 @@ localCAFInfo cafEnv proc@(CmmProc _ top_l _ (CmmGraph {g_entry=entry})) =
 -- To do this replacement efficiently, we gather strongly connected
 -- components, then we sort the components in topological order.
 mkTopCAFInfo :: [(CAFSet, Maybe CLabel)] -> Map CLabel CAFSet
-mkTopCAFInfo localCAFs = foldl addToTop Map.empty g
+mkTopCAFInfo localCAFs = foldl' addToTop Map.empty g
   where
-        addToTop env (AcyclicSCC (l, cafset)) =
+        addToTop !env (AcyclicSCC (l, cafset)) =
           Map.insert l (flatten env cafset) env
-        addToTop env (CyclicSCC nodes) =
+        addToTop !env (CyclicSCC nodes) =
           let (lbls, cafsets) = unzip nodes
-              cafset  = foldr Set.delete (foldl Set.union Set.empty cafsets) lbls
-          in foldl (\env l -> Map.insert l (flatten env cafset) env) env lbls
+              cafset = Set.unions cafsets `Set.difference` Set.fromList lbls
+          in foldl' (\env l -> Map.insert l (flatten env cafset) env) env lbls
 
-        g = stronglyConnCompFromEdgedVertices
-              [ ((l,cafs), l, Set.elems cafs) | (cafs, Just l) <- localCAFs ]
+        g = stronglyConnCompFromEdgedVerticesOrd
+              [ DigraphNode (l,cafs) l (Set.elems cafs)
+              | (cafs, Just l) <- localCAFs ]
 
 flatten :: Map CLabel CAFSet -> CAFSet -> CAFSet
 flatten env cafset = foldSet (lookup env) Set.empty cafset
@@ -285,7 +295,7 @@ flatten env cafset = foldSet (lookup env) Set.empty cafset
 bundle :: Map CLabel CAFSet
        -> (CAFEnv, CmmDecl)
        -> (CAFSet, Maybe CLabel)
-       -> (BlockEnv CAFSet, CmmDecl)
+       -> (LabelMap CAFSet, CmmDecl)
 bundle flatmap (env, decl@(CmmProc infos _lbl _ g)) (closure_cafs, mb_lbl)
   = ( mapMapWithKey get_cafs (info_tbls infos), decl )
  where
@@ -309,7 +319,7 @@ bundle _flatmap (_, decl) _
   = ( mapEmpty, decl )
 
 
-flattenCAFSets :: [(CAFEnv, [CmmDecl])] -> [(BlockEnv CAFSet, CmmDecl)]
+flattenCAFSets :: [(CAFEnv, [CmmDecl])] -> [(LabelMap CAFSet, CmmDecl)]
 flattenCAFSets cpsdecls = zipWith (bundle flatmap) zipped localCAFs
    where
      zipped    = [ (env,decl) | (env,decls) <- cpsdecls, decl <- decls ]
@@ -335,8 +345,8 @@ doSRTs dflags topSRT tops
     setSRT (topSRT, rst) (_, decl) =
       return (topSRT, decl : rst)
 
-buildSRTs :: DynFlags -> TopSRT -> BlockEnv CAFSet
-          -> UniqSM (TopSRT, [CmmDecl], BlockEnv C_SRT)
+buildSRTs :: DynFlags -> TopSRT -> LabelMap CAFSet
+          -> UniqSM (TopSRT, [CmmDecl], LabelMap C_SRT)
 buildSRTs dflags top_srt caf_map
   = foldM doOne (top_srt, [], mapEmpty) (mapToList caf_map)
   where
@@ -352,7 +362,7 @@ buildSRTs dflags top_srt caf_map
 - Each one needs an SRT.
 - We get the CAFSet for each one from the CAFEnv
 - flatten gives us
-    [(BlockEnv CAFSet, CmmDecl)]
+    [(LabelMap CAFSet, CmmDecl)]
 -
 -}
 
@@ -365,7 +375,7 @@ buildSRTs dflags top_srt caf_map
    instructions for forward refs.  --SDM
 -}
 
-updInfoSRTs :: BlockEnv C_SRT -> CmmDecl -> CmmDecl
+updInfoSRTs :: LabelMap C_SRT -> CmmDecl -> CmmDecl
 updInfoSRTs srt_env (CmmProc top_info top_l live g) =
   CmmProc (top_info {info_tbls = mapMapWithKey updInfoTbl (info_tbls top_info)}) top_l live g
   where updInfoTbl l info_tbl

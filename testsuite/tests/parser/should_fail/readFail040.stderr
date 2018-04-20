@@ -1,2 +1,4 @@
 
-readFail040.hs:7:11: parse error on input ‘<-’
+readFail040.hs:7:11: error:
+    parse error on input ‘<-’
+    Perhaps you intended to use RecursiveDo

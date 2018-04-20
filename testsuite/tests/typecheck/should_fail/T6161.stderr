@@ -1,5 +1,7 @@
 
-T6161.hs:29:12:
-    No instance for (Super (Fam Float)) arising from a use of ‘testDup’
-    In the expression: testDup (FamFloat 3.0)
-    In an equation for ‘testProg’: testProg = testDup (FamFloat 3.0)
+T6161.hs:19:10:
+    Could not deduce (Super (Fam a))
+      arising from the superclasses of an instance declaration
+    from the context: Foo a
+      bound by the instance declaration at T6161.hs:19:10-31
+    In the instance declaration for ‘Duper (Fam a)’

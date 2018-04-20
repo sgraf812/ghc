@@ -12,7 +12,7 @@ extern void *getNextMBlock(void *mblock);
 #include <stdio.h>
 #include <string.h>
 
-extern bdescr *allocGroup_lock_lock(nat n);
+extern bdescr *allocGroup_lock_lock(uint32_t n);
 extern void freeGroup_lock(bdescr *p);
 
 const int ARRSIZE  = 2000;
@@ -21,7 +21,7 @@ const int MAXALLOC = ((8 * 1024 * 1024) / BLOCK_SIZE - 1);
 //const int MAXALLOC = ((4 * 1024 * 1024) / BLOCK_SIZE - 1);
 const int SEED     = 0xf00f00;
 
-extern lnat mblocks_allocated;
+extern StgWord mblocks_allocated;
 
 int main (int argc, char *argv[])
 {
@@ -85,7 +85,7 @@ int main (int argc, char *argv[])
         printf("%d\n", j);
     }
 
-    printf("misses: %ld, %ld%\n", mpc_misses, mpc_misses / (LOOPS*20));
+    printf("misses: %ld, %ld%%\n", mpc_misses, mpc_misses / (LOOPS*20));
 
     for (i=0; i < ARRSIZE; i++)
     {

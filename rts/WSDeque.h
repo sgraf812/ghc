@@ -6,8 +6,7 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef WSDEQUE_H
-#define WSDEQUE_H
+#pragma once
 
 typedef struct WSDeque_ {
     // Size of elements array. Used for modulo calculation: we round up
@@ -67,7 +66,7 @@ typedef struct WSDeque_ {
  * -------------------------------------------------------------------------- */
 
 // Allocation, deallocation
-WSDeque * newWSDeque  (nat size);
+WSDeque * newWSDeque  (uint32_t size);
 void      freeWSDeque (WSDeque *q);
 
 // Take an element from the "write" end of the pool.  Can be called
@@ -76,7 +75,7 @@ void* popWSDeque (WSDeque *q);
 
 // Push onto the "write" end of the pool.  Return true if the push
 // succeeded, or false if the deque is full.
-rtsBool pushWSDeque (WSDeque *q, void *elem);
+bool pushWSDeque (WSDeque *q, void *elem);
 
 // Removes all elements from the deque
 EXTERN_INLINE void discardElements (WSDeque *q);
@@ -93,7 +92,7 @@ void * stealWSDeque (WSDeque *q);
 // "guesses" whether a deque is empty. Can return false negatives in
 //  presence of concurrent steal() calls, and false positives in
 //  presence of a concurrent pushBottom().
-EXTERN_INLINE rtsBool looksEmptyWSDeque (WSDeque* q);
+EXTERN_INLINE bool looksEmptyWSDeque (WSDeque* q);
 
 EXTERN_INLINE long dequeElements   (WSDeque *q);
 
@@ -110,7 +109,7 @@ dequeElements (WSDeque *q)
     return ((long)b - (long)t);
 }
 
-EXTERN_INLINE rtsBool
+EXTERN_INLINE bool
 looksEmptyWSDeque (WSDeque *q)
 {
     return (dequeElements(q) <= 0);
@@ -122,13 +121,3 @@ discardElements (WSDeque *q)
     q->top = q->bottom;
 //    pool->topBound = pool->top;
 }
-
-#endif // WSDEQUE_H
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

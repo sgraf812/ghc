@@ -16,10 +16,13 @@ stepName = mkName "step"
 -- data Large = Large Int ... Int  -- generate 'size' fields, not strict
 largeData =
   dataD
-    (return [])
+    (cxt [])
     (dataName)
     []
-    [normalC dataName (replicate size (((,) <$> notStrict) `ap` [t| Int |]))]
+    Nothing
+    [normalC dataName
+             (replicate size (((,) <$> bang noSourceUnpackedness
+                                       noSourceStrictness) `ap` [t| Int |]))]
     []
 
 conE' :: Name -> [ExpQ] -> ExpQ

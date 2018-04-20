@@ -1,17 +1,17 @@
-[1 of 3] Compiling Visible          ( Visible.hs, Visible.o )
-
-==================== Parser ====================
-module Visible where
-visible :: Int -> Int
-visible a = a
-
-
-[2 of 3] Compiling Hidden           ( Hidden.hs, Hidden.o )
+[1 of 3] Compiling Hidden           ( Hidden.hs, Hidden.o )
 
 ==================== Parser ====================
 module Hidden where
 hidden :: Int -> Int
 hidden a = a
+
+
+[2 of 3] Compiling Visible          ( Visible.hs, Visible.o )
+
+==================== Parser ====================
+module Visible where
+visible :: Int -> Int
+visible a = a
 
 
 [3 of 3] Compiling Test             ( Test.hs, Test.o )
@@ -21,7 +21,7 @@ hidden a = a
  Module      :  Test
  Copyright   :  (c) Simon Marlow 2002
  License     :  BSD-style
- 
+
  Maintainer  :  libraries@haskell.org
  Stability   :  provisional
  Portability :  portable
@@ -77,7 +77,7 @@ newtype N1 a = N1 a
 <document comment>
 newtype N2 a b = N2 {n :: a b}
 <document comment>
-newtype N3 a b = N3 {n3 :: a b  this is the 'n3' field }
+newtype N3 a b = N3 {n3 :: a b  this is the 'n3' field}
 <document comment>
 newtype N4 a b = N4 a
 newtype N5 a b
@@ -110,13 +110,11 @@ data R
   =  This is the 'C1' record constructor, with the following fields:
     C1 {p :: Int  This comment applies to the 'p' field,
         q :: forall a. a -> a  This comment applies to the 'q' field,
-        r :: Int  This comment applies to both 'r' and 's',
-        s :: Int  This comment applies to both 'r' and 's'} |
+        r, s :: Int  This comment applies to both 'r' and 's'} |
      This is the 'C2' record constructor, also with some fields:
     C2 {t :: T1
              -> (T2 Int Int) -> (T3 Bool Bool) -> (T4 Float Float) -> T5 () (),
-        u :: Int,
-        v :: Int}
+        u, v :: Int}
 <document comment>
 data R1
   =  This is the 'C3' record constructor
@@ -129,7 +127,7 @@ data R1
 <document comment>
 f :: C a => a -> Int
 <document comment>
-foreign import ccall safe "static header.h g" g :: Int -> IO CInt
+foreign import ccall safe "header.h" g :: Int -> IO CInt
 <document comment>
 h :: Int
 h = 42
@@ -171,7 +169,7 @@ newn ::
   -> N1 ()  one of the arguments -> IO Int
 newn = undefined
 <document comment>
-foreign import ccall unsafe "static header.h o" o
+foreign import ccall unsafe "header.h" o
   :: Float  The input float -> IO Float  The output float
 <document comment>
 newp :: Int
@@ -188,10 +186,14 @@ m = undefined
 
 
 
-Test.hs:32:9: Warning: ‘p’ is exported by ‘p’ and ‘R(..)’
+Test.hs:33:9: warning: [-Wduplicate-exports (in -Wdefault)]
+    ‘p’ is exported by ‘p’ and ‘R(..)’
 
-Test.hs:32:12: Warning: ‘q’ is exported by ‘q’ and ‘R(..)’
+Test.hs:33:12: warning: [-Wduplicate-exports (in -Wdefault)]
+    ‘q’ is exported by ‘q’ and ‘R(..)’
 
-Test.hs:32:15: Warning: ‘u’ is exported by ‘u’ and ‘R(..)’
+Test.hs:33:15: warning: [-Wduplicate-exports (in -Wdefault)]
+    ‘u’ is exported by ‘u’ and ‘R(..)’
 
-Test.hs:38:9: Warning: ‘a’ is exported by ‘a’ and ‘C(a, b)’
+Test.hs:39:9: warning: [-Wduplicate-exports (in -Wdefault)]
+    ‘a’ is exported by ‘a’ and ‘C(a, b)’

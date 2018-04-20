@@ -2,7 +2,7 @@
  *
  * (c) The GHC Team, 2000-2008
  *
- * Sparking support for PARALLEL_HASKELL and THREADED_RTS versions of the RTS.
+ * Sparking support for THREADED_RTS version of the RTS.
  *
  -------------------------------------------------------------------------*/
 
@@ -14,6 +14,8 @@
 #include "Trace.h"
 #include "Prelude.h"
 #include "Sparks.h"
+#include "ThreadLabels.h"
+#include "sm/HeapAlloc.h"
 
 #if defined(THREADED_RTS)
 
@@ -30,7 +32,7 @@ freeSparkPool (SparkPool *pool)
 }
 
 /* -----------------------------------------------------------------------------
- * 
+ *
  * Turn a spark into a real thread
  *
  * -------------------------------------------------------------------------- */
@@ -40,9 +42,9 @@ createSparkThread (Capability *cap)
 {
     StgTSO *tso;
 
-    tso = createIOThread (cap, RtsFlags.GcFlags.initialStkSize, 
+    tso = createIOThread (cap, RtsFlags.GcFlags.initialStkSize,
                           (StgClosure *)runSparks_closure);
-
+    labelThread(cap, tso, "spark evaluator");
     traceEventCreateSparkThread(cap, tso->id);
 
     appendToRunQueue(cap,tso);
@@ -67,7 +69,7 @@ newSpark (StgRegTable *reg, StgClosure *p)
             /* overflowing the spark pool */
             cap->spark_stats.overflowed++;
             traceEventSparkOverflow(cap);
-	}
+        }
     } else {
         cap->spark_stats.dud++;
         traceEventSparkDud(cap);
@@ -85,18 +87,18 @@ newSpark (StgRegTable *reg, StgClosure *p)
 
 void
 pruneSparkQueue (Capability *cap)
-{ 
+{
     SparkPool *pool;
     StgClosurePtr spark, tmp, *elements;
-    nat n, pruned_sparks; // stats only
+    uint32_t n, pruned_sparks; // stats only
     StgWord botInd,oldBotInd,currInd; // indices in array (always < size)
     const StgInfoTable *info;
-    
+
     n = 0;
     pruned_sparks = 0;
-    
+
     pool = cap->sparks;
-    
+
     // it is possible that top > bottom, indicating an empty pool.  We
     // fix that here; this is only necessary because the loop below
     // assumes it.
@@ -158,11 +160,11 @@ pruneSparkQueue (Capability *cap)
 
     while (currInd != oldBotInd ) {
       /* must use != here, wrap-around at size
-	 subtle: loop not entered if queue empty
+         subtle: loop not entered if queue empty
        */
 
       /* check element at currInd. if valuable, evacuate and move to
-	 botInd, otherwise move on */
+         botInd, otherwise move on */
       spark = elements[currInd];
 
       // We have to be careful here: in the parallel GC, another
@@ -210,15 +212,12 @@ pruneSparkQueue (Capability *cap)
               }
           } else {
               if (INFO_PTR_TO_STRUCT(info)->type == THUNK_STATIC) {
-                  if (*THUNK_STATIC_LINK(spark) != NULL) {
-                      elements[botInd] = spark; // keep entry (new address)
-                      botInd++;
-                      n++;
-                  } else {
-                      pruned_sparks++; // discard spark
-                      cap->spark_stats.gcd++;
-                      traceEventSparkGC(cap);
-                  }
+                  // We can't tell whether a THUNK_STATIC is garbage or not.
+                  // See also Note [STATIC_LINK fields]
+                  // isAlive() also ignores static closures (see GCAux.c)
+                  elements[botInd] = spark; // keep entry (new address)
+                  botInd++;
+                  n++;
               } else {
                   pruned_sparks++; // discard spark
                   cap->spark_stats.fizzled++;
@@ -241,11 +240,11 @@ pruneSparkQueue (Capability *cap)
     pool->top = oldBotInd; // where we started writing
     pool->topBound = pool->top;
 
-    pool->bottom = (oldBotInd <= botInd) ? botInd : (botInd + pool->size); 
+    pool->bottom = (oldBotInd <= botInd) ? botInd : (botInd + pool->size);
     // first free place we did not use (corrected by wraparound)
 
     debugTrace(DEBUG_sparks, "pruned %d sparks", pruned_sparks);
-    
+
     debugTrace(DEBUG_sparks,
                "new spark queue len=%ld; (hd=%ld; tl=%ld)",
                sparkPoolSize(pool), pool->bottom, pool->top);
@@ -261,7 +260,7 @@ traverseSparkQueue (evac_fn evac, void *user, Capability *cap)
     StgClosure **sparkp;
     SparkPool *pool;
     StgWord top,bottom, modMask;
-    
+
     pool = cap->sparks;
 
     ASSERT_WSDEQUE_INVARIANTS(pool);
@@ -276,28 +275,13 @@ traverseSparkQueue (evac_fn evac, void *user, Capability *cap)
      * In GHC-6.10, evac takes an additional 1st argument to hold a
      * GC-specific register, see rts/sm/GC.c::mark_root()
      */
-      evac( user , sparkp + (top & modMask) ); 
+      evac( user , sparkp + (top & modMask) );
       top++;
     }
 
     debugTrace(DEBUG_sparks,
                "traversed spark queue, len=%ld; (hd=%ld; tl=%ld)",
                sparkPoolSize(pool), pool->bottom, pool->top);
-}
-
-/* ----------------------------------------------------------------------------
- * balanceSparkPoolsCaps: takes an array of capabilities (usually: all
- * capabilities) and its size. Accesses all spark pools and equally
- * distributes the sparks among them.
- *
- * Could be called after GC, before Cap. release, from scheduler. 
- * -------------------------------------------------------------------------- */
-void balanceSparkPoolsCaps(nat n_caps, Capability caps[])
-   GNUC3_ATTRIBUTE(__noreturn__);
-
-void balanceSparkPoolsCaps(nat n_caps STG_UNUSED, 
-                           Capability caps[] STG_UNUSED) {
-  barf("not implemented");
 }
 
 #else
@@ -310,11 +294,3 @@ newSpark (StgRegTable *reg STG_UNUSED, StgClosure *p STG_UNUSED)
 }
 
 #endif /* THREADED_RTS */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

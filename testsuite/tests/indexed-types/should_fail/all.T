@@ -1,6 +1,3 @@
-setTestOpts(only_compiler_types(['ghc']))
-setTestOpts(omit_ways(['optasm']))
-
 test('SimpleFail1a', normal, compile_fail, [''])
 test('SimpleFail1b', normal, compile_fail, [''])
 test('SimpleFail2a', normal, compile_fail, [''])
@@ -12,7 +9,7 @@ test('SimpleFail5b', normal, compile_fail, [''])
 test('SimpleFail6', normal, compile_fail, [''])
 test('SimpleFail7', normal, compile_fail, [''])
 test('SimpleFail8', normal, compile_fail, [''])
-test('SimpleFail9', normal, compile, [''])
+test('SimpleFail9', normal, compile_fail, [''])
 test('SimpleFail10', normal, compile, [''])
 test('SimpleFail11a', normal, compile_fail, [''])
 test('SimpleFail11b', normal, compile_fail, [''])
@@ -32,12 +29,9 @@ test('NonLinearSigErr', normal, compile, [''])
 
 test('GADTwrong1', normal, compile_fail, [''])
 
-test('Over',
-     extra_clean(['OverA.hi', 'OverA.o',
-                  'OverB.hi', 'OverB.o',
-                  'OverC.hi', 'OverC.o']),
-     multimod_compile_fail,
-     ['OverD', '-no-hs-main -c -v0'])
+test('Over', [], multimod_compile_fail, ['OverD', '-no-hs-main -c -v0'])
+test('OverDirectThisMod', [], multimod_compile_fail, ['OverDirectThisModC', '-no-hs-main -c -v0'])
+test('OverIndirectThisMod', [], multimod_compile_fail, ['OverIndirectThisModD', '-no-hs-main -c -v0'])
 
 test('SkolemOccursLoop', expect_fail, compile_fail, [''])
 
@@ -61,11 +55,11 @@ test('T3330b', normal, compile_fail, [''])
 test('T3330c', normal, compile_fail, [''])
 test('T4179', normal, compile_fail, [''])
 test('T4254', normal, compile, [''])
-test('T2239', normal, compile_fail, [''])
+test('T2239', normal, compile, [''])
 test('T3440', normal, compile_fail, [''])
 test('T4485', normal, compile_fail, [''])
 test('T4174', normal, compile_fail, [''])
-test('DerivUnsatFam', when(compiler_lt('ghc', '7.1'), expect_fail), compile_fail, [''])
+test('DerivUnsatFam', normal, compile_fail, [''])
 test('T2664', normal, compile_fail, [''])
 test('T2664a', normal, compile, [''])
 test('T2544', normal, compile_fail, [''])
@@ -88,10 +82,7 @@ test('Overlap11', normal, compile_fail, [''])
 test('Overlap15', normal, compile_fail, [''])
 test('T7194', normal, compile_fail, [''])
 test('T7354', normal, compile_fail, [''])
-test('T7354a',
-     extra_clean(['T7354b.o', 'T7354b.hi']),
-     run_command,
-     ['$MAKE -s --no-print-directory T7354a'])
+test('T7354a', [extra_files(['T7354b.hs'])], run_command, ['$MAKE -s --no-print-directory T7354a'])
 test('T7536', normal, compile_fail, [''])
 
 test('T7729', normal, compile_fail, [''])
@@ -103,14 +94,10 @@ test('T7967', normal, compile_fail, [''])
 
 test('T7938', normal, compile_fail, [''])
 
-test('ClosedFam3', extra_clean(['ClosedFam3.o-boot', 'ClosedFam3.hi-boot']),
-     multimod_compile_fail, ['ClosedFam3', '-v0'])
+test('ClosedFam3', [], multimod_compile_fail, ['ClosedFam3', '-v0'])
 test('ClosedFam4', normal, compile_fail, [''])
 test('T8155', normal, compile_fail, [''])
-test('T8227',
-     extra_clean(['T8227a.o', 'T8227a.hi']),
-     run_command,
-     ['$MAKE -s --no-print-directory T8227'])
+test('T8227', [], run_command, ['$MAKE -s --no-print-directory T8227'])
 test('T8129',
      normal,
      run_command,
@@ -126,3 +113,31 @@ test('T9097', normal, compile_fail, [''])
 test('T9160', normal, compile_fail, [''])
 test('T9357', normal, compile_fail, [''])
 test('T9371', normal, compile_fail, [''])
+test('T9433', normal, compile_fail, [''])
+test('BadSock', normal, compile_fail, [''])
+test('T9580', normal, multimod_compile_fail, ['T9580', ''])
+test('T9662', normal, compile_fail, [''])
+test('T7862', normal, compile, [''])
+test('T9896', normal, compile_fail, [''])
+test('T8550', normal, compile_fail, [''])
+test('T9554', normal, compile_fail, [''])
+test('T10141', normal, compile_fail, [''])
+test('T10817', normal, compile_fail, [''])
+test('T10899', normal, compile_fail, [''])
+test('T11136', normal, compile_fail, [''])
+test('T7788', normal, compile_fail, [''])
+test('T11450', normal, compile_fail, [''])
+test('T12041', normal, compile_fail, [''])
+test('T12522a', normal, compile_fail, [''])
+test('T12867', normal, compile_fail, [''])
+test('T7102', [ expect_broken(7102) ], ghci_script, ['T7102.script'])
+test('T7102a', normal, ghci_script, ['T7102a.script'])
+test('T13271', normal, compile_fail, [''])
+test('T13674', normal, compile_fail, [''])
+test('T13784', normal, compile_fail, [''])
+test('T13877', normal, compile_fail, [''])
+test('T13972', normal, compile_fail, [''])
+test('T14033', normal, compile_fail, [''])
+test('T14045a', normal, compile_fail, [''])
+test('T14175', normal, compile_fail, [''])
+test('T14369', normal, compile_fail, [''])

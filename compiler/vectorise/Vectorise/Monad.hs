@@ -10,13 +10,15 @@ module Vectorise.Monad (
   liftBuiltinDs,
   builtin,
   builtins,
-  
+
   -- * Variables
   lookupVar,
   lookupVar_maybe,
-  addGlobalParallelVar, 
-  addGlobalParallelTyCon, 
+  addGlobalParallelVar,
+  addGlobalParallelTyCon,
 ) where
+
+import GhcPrelude
 
 import Vectorise.Monad.Base
 import Vectorise.Monad.Naming
@@ -27,10 +29,10 @@ import Vectorise.Builtins
 import Vectorise.Env
 
 import CoreSyn
+import TcRnMonad
 import DsMonad
 import HscTypes hiding ( MonadThings(..) )
 import DynFlags
-import MonadUtils (liftIO)
 import InstEnv
 import Class
 import TyCon
@@ -42,7 +44,9 @@ import Id
 import Name
 import ErrUtils
 import Outputable
+import Module
 
+import Control.Monad (join)
 
 -- |Run a vectorisation computation.
 --
@@ -54,30 +58,26 @@ initV :: HscEnv
 initV hsc_env guts info thing_inside
   = do { dumpIfVtTrace "Incoming VectInfo" (ppr info)
 
-       ; let type_env = typeEnvFromEntities ids (mg_tcs guts) (mg_fam_insts guts)
-       ; (_, Just res) <- initDs hsc_env (mg_module guts)
-                                         (mg_rdr_env guts) type_env
-                                         (mg_fam_inst_env guts) go
-
-       ; case res of
+       ; (_, res) <- initDsWithModGuts hsc_env guts go
+       ; case join res of
            Nothing
              -> dumpIfVtTrace "Vectorisation FAILED!" empty
            Just (info', _)
              -> dumpIfVtTrace "Outgoing VectInfo" (ppr info')
 
-       ; return res
+       ; return $ join res
        }
   where
     dflags = hsc_dflags hsc_env
 
     dumpIfVtTrace = dumpIfSet_dyn dflags Opt_D_dump_vt_trace
-    
+
     bindsToIds (NonRec v _)   = [v]
     bindsToIds (Rec    binds) = map fst binds
-    
+
     ids = concatMap bindsToIds (mg_binds guts)
 
-    go 
+    go
       = do {   -- set up tables of builtin entities
            ; builtins        <- initBuiltins
            ; builtin_vars    <- initBuiltinVars builtins
@@ -85,7 +85,9 @@ initV hsc_env guts info thing_inside
                -- set up class and type family envrionments
            ; eps <- liftIO $ hscEPS hsc_env
            ; let famInstEnvs = (eps_fam_inst_env eps, mg_fam_inst_env guts)
-                 instEnvs    = (eps_inst_env     eps, mg_inst_env     guts)
+                 instEnvs    = InstEnvs (eps_inst_env     eps)
+                                        (mg_inst_env     guts)
+                                        (mkModuleSet (dep_orphs (mg_deps guts)))
                  builtin_pas = initClassDicts instEnvs (paClass builtins)  -- grab all 'PA' and..
                  builtin_prs = initClassDicts instEnvs (prClass builtins)  -- ..'PR' class instances
 
@@ -93,16 +95,16 @@ initV hsc_env guts info thing_inside
            ; let genv = extendImportedVarsEnv builtin_vars
                         . setPAFunsEnv        builtin_pas
                         . setPRFunsEnv        builtin_prs
-                        $ initGlobalEnv (gopt Opt_VectorisationAvoidance dflags) 
+                        $ initGlobalEnv (gopt Opt_VectorisationAvoidance dflags)
                                         info (mg_vect_decls guts) instEnvs famInstEnvs
- 
+
                -- perform vectorisation
            ; r <- runVM thing_inside builtins genv emptyLocalEnv
            ; case r of
                Yes genv _ x -> return $ Just (new_info genv, x)
                No reason    -> do { unqual <- mkPrintUnqualifiedDs
-                                  ; liftIO $ 
-                                      printInfoForUser dflags unqual $ 
+                                  ; liftIO $
+                                      printOutputForUser dflags unqual $
                                         mkDumpDoc "Warning: vectorisation failure:" reason
                                   ; return Nothing
                                   }
@@ -114,14 +116,13 @@ initV hsc_env guts info thing_inside
     -- instance dfun for that type constructor and class.  (DPH class instances cannot overlap in
     -- head constructors.)
     --
-    initClassDicts :: (InstEnv, InstEnv) -> Class -> [(Name, Var)]
+    initClassDicts :: InstEnvs -> Class -> [(Name, Var)]
     initClassDicts insts cls = map find $ classInstances insts cls
       where
         find i | [Just tc] <- instanceRoughTcs i = (tc, instanceDFunId i)
                | otherwise                       = pprPanic invalidInstance (ppr i)
 
     invalidInstance = "Invalid DPH instance (overlapping in head constructor)"
-
 
 -- Builtins -------------------------------------------------------------------
 
@@ -182,7 +183,7 @@ dumpVar dflags var
 addGlobalParallelVar :: Var -> VM ()
 addGlobalParallelVar var
   = do { traceVt "addGlobalParallelVar" (ppr var)
-       ; updGEnv $ \env -> env{global_parallel_vars = extendVarSet (global_parallel_vars env) var}
+       ; updGEnv $ \env -> env{global_parallel_vars = extendDVarSet (global_parallel_vars env) var}
        }
 
 -- |Mark the given type constructor as parallel — i.e., its values might embed parallel arrays.
@@ -190,6 +191,6 @@ addGlobalParallelVar var
 addGlobalParallelTyCon :: TyCon -> VM ()
 addGlobalParallelTyCon tycon
   = do { traceVt "addGlobalParallelTyCon" (ppr tycon)
-       ; updGEnv $ \env -> 
-           env{global_parallel_tycons = addOneToNameSet (global_parallel_tycons env) (tyConName tycon)}
+       ; updGEnv $ \env ->
+           env{global_parallel_tycons = extendNameSet (global_parallel_tycons env) (tyConName tycon)}
        }

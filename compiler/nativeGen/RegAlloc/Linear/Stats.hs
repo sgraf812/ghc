@@ -6,6 +6,8 @@ module RegAlloc.Linear.Stats (
 
 where
 
+import GhcPrelude
+
 import RegAlloc.Linear.Base
 import RegAlloc.Liveness
 import Instruction
@@ -33,7 +35,7 @@ binSpillReasons reasons
 
 
 -- | Count reg-reg moves remaining in this code.
-countRegRegMovesNat 
+countRegRegMovesNat
         :: Instruction instr
         => NatCmmDecl statics instr -> Int
 
@@ -54,8 +56,8 @@ countRegRegMovesNat cmm
 
 
 -- | Pretty print some RegAllocStats
-pprStats 
-        :: Instruction instr 
+pprStats
+        :: Instruction instr
         => [NatCmmDecl statics instr] -> [RegAllocStats] -> SDoc
 
 pprStats code statss
@@ -66,7 +68,8 @@ pprStats code statss
 
         spillTotals     = foldl' (zipWith (+))
                                 [0, 0, 0, 0, 0]
-                        $ eltsUFM spills
+                        $ nonDetEltsUFM spills
+                        -- See Note [Unique Determinism and code generation]
 
         -- count how many reg-reg-moves remain in the code
         moves           = sum $ map countRegRegMovesNat code
@@ -80,7 +83,6 @@ pprStats code statss
         $$ text ""
         $$ text "-- spills-added"
         $$ text "--    (reg_name, allocs, clobbers, loads, joinRR, joinRM)"
-        $$ (vcat $ map pprSpill
-                 $ ufmToList spills)
+        $$ (pprUFMWithKeys spills (vcat . map pprSpill))
         $$ text "")
 

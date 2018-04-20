@@ -18,13 +18,26 @@ $(call profStart, build-package-data($1,$2,$3))
 # $2 = distdir
 # $3 = GHC stage to use (0 == bootstrapping compiler)
 
+ifeq "$(V)" "0"
+$1_$2_CONFIGURE_OPTS += -v0 --configure-option=--quiet
+
+# Cabal always passes --with-compiler and --with-gcc to library configure
+# scripts, resulting in the following useless (for us) warning in the logs:
+# "configure: WARNING: unrecognized options: --with-compiler, --with-gcc"
+$1_$2_CONFIGURE_OPTS += --configure-option=--disable-option-checking
+
+$1_$2_GHC_PKG_OPTS += -v0
+endif
+
 $1_$2_CONFIGURE_OPTS += --disable-library-for-ghci
 ifeq "$$(filter v,$$($1_$2_WAYS))" "v"
 $1_$2_CONFIGURE_OPTS += --enable-library-vanilla
+# Build the GHCi lib even if GHCi is dynamic (and therefore won't use
+# these by default), because they will be used by
+#  (a) ghci -fexternal-interpreter
+#  (b) statically-linked binaries that use the GHC package
 ifeq "$$(GhcWithInterpreter)" "YES"
-ifneq "$$(DYNAMIC_GHC_PROGRAMS)" "YES"
 $1_$2_CONFIGURE_OPTS += --enable-library-for-ghci
-endif
 endif
 else
 $1_$2_CONFIGURE_OPTS += --disable-library-vanilla
@@ -50,7 +63,7 @@ endif
 # for a feature it may not generate warning-free C code, and thus may
 # think that the feature doesn't exist if -Werror is on.
 $1_$2_CONFIGURE_CFLAGS = $$(filter-out -Werror,$$(SRC_CC_OPTS)) $$(CONF_CC_OPTS_STAGE$3) $$($1_CC_OPTS) $$($1_$2_CC_OPTS) $$(SRC_CC_WARNING_OPTS)
-$1_$2_CONFIGURE_LDFLAGS = $$(SRC_LD_OPTS) $$(CONF_GCC_LINKER_OPTS_STAGE$3) $$($1_LD_OPTS) $$($1_$2_LD_OPTS)
+$1_$2_CONFIGURE_LDFLAGS = $$(SRC_LD_OPTS) $$($1_LD_OPTS) $$($1_$2_LD_OPTS)
 $1_$2_CONFIGURE_CPPFLAGS = $$(SRC_CPP_OPTS) $$(CONF_CPP_OPTS_STAGE$3) $$($1_CPP_OPTS) $$($1_$2_CPP_OPTS)
 
 $1_$2_CONFIGURE_OPTS += --configure-option=CFLAGS="$$($1_$2_CONFIGURE_CFLAGS)"
@@ -77,6 +90,10 @@ ifneq "$$(GMP_LIB_DIRS)" ""
 $1_$2_CONFIGURE_OPTS += --configure-option=--with-gmp-libraries="$$(GMP_LIB_DIRS)"
 endif
 
+ifneq "$$(CURSES_LIB_DIRS)" ""
+$1_$2_CONFIGURE_OPTS += --configure-option=--with-curses-libraries="$$(CURSES_LIB_DIRS)"
+endif
+
 ifeq "$$(CrossCompiling)" "YES"
 $1_$2_CONFIGURE_OPTS += --configure-option=--host=$(TargetPlatformFull)
 endif
@@ -86,13 +103,7 @@ $1_$2_CONFIGURE_OPTS += $$(BOOT_PKG_CONSTRAINTS)
 endif
 
 $1_$2_CONFIGURE_OPTS += --with-gcc="$$(CC_STAGE$3)"
-
-ifneq "$3" "0"
-# There is no LD_STAGE0, Cabal will figure it out
 $1_$2_CONFIGURE_OPTS += --with-ld="$$(LD_STAGE$3)"
-endif
-
-$1_$2_CONFIGURE_OPTS += --configure-option=--with-cc="$$(CC_STAGE$3)"
 $1_$2_CONFIGURE_OPTS += --with-ar="$$(AR_STAGE$3)"
 $1_$2_CONFIGURE_OPTS += $$(if $$(ALEX),--with-alex="$$(ALEX)")
 $1_$2_CONFIGURE_OPTS += $$(if $$(HAPPY),--with-happy="$$(HAPPY)")
@@ -100,7 +111,7 @@ $1_$2_CONFIGURE_OPTS += $$(if $$(HAPPY),--with-happy="$$(HAPPY)")
 ifneq "$$(BINDIST)" "YES"
 ifneq "$$(NO_GENERATED_MAKEFILE_RULES)" "YES"
 $1/$2/inplace-pkg-config : $1/$2/package-data.mk
-$1/$2/build/autogen/cabal_macros.h : $1/$2/package-data.mk
+$1/$2/build/$$(or $$($1_EXECUTABLE),$$($1_$2_PROGNAME),.)/autogen/cabal_macros.h : $1/$2/package-data.mk
 
 # This rule configures the package, generates the package-data.mk file
 # for our build system, and registers the package for use in-place in
@@ -114,14 +125,12 @@ ifneq "$$($1_NO_CHECK)" "YES"
 	"$$(ghc-cabal_INPLACE)" check $1
 endif
 endif
-	"$$(ghc-cabal_INPLACE)" configure $1 $2 "$$($1_$2_dll0_MODULES)" --with-ghc="$$($1_$2_HC_CONFIG)" --with-ghc-pkg="$$($1_$2_GHC_PKG)" $$($1_CONFIGURE_OPTS) $$($1_$2_CONFIGURE_OPTS)
+	"$$(ghc-cabal_INPLACE)" configure $1 $2 --with-ghc="$$($1_$2_HC_CONFIG)" --with-ghc-pkg="$$($1_$2_GHC_PKG)" $$($1_CONFIGURE_OPTS) $$($1_$2_CONFIGURE_OPTS)
 ifeq "$$($1_$2_PROG)" ""
-ifneq "$$($1_$2_REGISTER_PACKAGE)" "NO"
-	$$(call cmd,$1_$2_GHC_PKG) update --force $$($1_$2_GHC_PKG_OPTS) $1/$2/inplace-pkg-config
+	$$(call cmd,$1_$2_GHC_PKG) update -v0 --force $$($1_$2_GHC_PKG_OPTS) $1/$2/inplace-pkg-config
 endif
-endif
-endif
-endif
+endif # NO_GENERATED_MAKEFILE_RULES
+endif # BINDIST
 
 PACKAGE_DATA_MKS += $1/$2/package-data.mk
 

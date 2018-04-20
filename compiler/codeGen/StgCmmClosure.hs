@@ -13,16 +13,19 @@
 
 module StgCmmClosure (
         DynTag,  tagForCon, isSmallFamily,
-        ConTagZ, dataConTagZ,
 
         idPrimRep, isVoidRep, isGcPtrRep, addIdReps, addArgReps,
         argPrimRep,
+
+        NonVoid(..), fromNonVoid, nonVoidIds, nonVoidStgArgs,
+        assertNonVoidIds, assertNonVoidStgArgs,
 
         -- * LambdaFormInfo
         LambdaFormInfo,         -- Abstract
         StandardFormInfo,        -- ...ditto...
         mkLFThunk, mkLFReEntrant, mkConLFInfo, mkSelectorLFInfo,
         mkApLFInfo, mkLFImported, mkLFArgument, mkLFLetNoEscape,
+        mkLFStringLit,
         lfDynTag,
         maybeIsLFCon, isLFThunk, isLFReEntrant, lfUpdatable,
 
@@ -61,8 +64,9 @@ module StgCmmClosure (
 
 #include "../includes/MachDeps.h"
 
-#define FAST_STRING_NOT_NEEDED
 #include "HsVersions.h"
+
+import GhcPrelude
 
 import StgSyn
 import SMRep
@@ -74,16 +78,18 @@ import CLabel
 import Id
 import IdInfo
 import DataCon
-import FastString
 import Name
 import Type
-import TypeRep
+import TyCoRep
 import TcType
 import TyCon
+import RepType
 import BasicTypes
 import Outputable
 import DynFlags
 import Util
+
+import Data.Coerce (coerce)
 
 -----------------------------------------------------------------------------
 --                Data types and synonyms
@@ -104,16 +110,52 @@ data CgLoc
         -- and branch to the block id
 
 instance Outputable CgLoc where
-  ppr (CmmLoc e)    = ptext (sLit "cmm") <+> ppr e
-  ppr (LneLoc b rs) = ptext (sLit "lne") <+> ppr b <+> ppr rs
+  ppr (CmmLoc e)    = text "cmm" <+> ppr e
+  ppr (LneLoc b rs) = text "lne" <+> ppr b <+> ppr rs
 
 type SelfLoopInfo = (Id, BlockId, [LocalReg])
 
 -- used by ticky profiling
 isKnownFun :: LambdaFormInfo -> Bool
-isKnownFun (LFReEntrant _ _ _ _) = True
-isKnownFun LFLetNoEscape         = True
-isKnownFun _ = False
+isKnownFun LFReEntrant{} = True
+isKnownFun LFLetNoEscape = True
+isKnownFun _             = False
+
+
+-------------------------------------
+--        Non-void types
+-------------------------------------
+-- We frequently need the invariant that an Id or a an argument
+-- is of a non-void type. This type is a witness to the invariant.
+
+newtype NonVoid a = NonVoid a
+  deriving (Eq, Show)
+
+fromNonVoid :: NonVoid a -> a
+fromNonVoid (NonVoid a) = a
+
+instance (Outputable a) => Outputable (NonVoid a) where
+  ppr (NonVoid a) = ppr a
+
+nonVoidIds :: [Id] -> [NonVoid Id]
+nonVoidIds ids = [NonVoid id | id <- ids, not (isVoidTy (idType id))]
+
+-- | Used in places where some invariant ensures that all these Ids are
+-- non-void; e.g. constructor field binders in case expressions.
+-- See Note [Post-unarisation invariants] in UnariseStg.
+assertNonVoidIds :: [Id] -> [NonVoid Id]
+assertNonVoidIds ids = ASSERT(not (any (isVoidTy . idType) ids))
+                       coerce ids
+
+nonVoidStgArgs :: [StgArg] -> [NonVoid StgArg]
+nonVoidStgArgs args = [NonVoid arg | arg <- args, not (isVoidTy (stgArgType arg))]
+
+-- | Used in places where some invariant ensures that all these arguments are
+-- non-void; e.g. constructor arguments.
+-- See Note [Post-unarisation invariants] in UnariseStg.
+assertNonVoidStgArgs :: [StgArg] -> [NonVoid StgArg]
+assertNonVoidStgArgs args = ASSERT(not (any (isVoidTy . stgArgType) args))
+                            coerce args
 
 
 -----------------------------------------------------------------------------
@@ -123,18 +165,20 @@ isKnownFun _ = False
 -- Why are these here?
 
 idPrimRep :: Id -> PrimRep
-idPrimRep id = typePrimRep (idType id)
-    -- NB: typePrimRep fails on unboxed tuples,
+idPrimRep id = typePrimRep1 (idType id)
+    -- NB: typePrimRep1 fails on unboxed tuples,
     --     but by StgCmm no Ids have unboxed tuple type
 
-addIdReps :: [Id] -> [(PrimRep, Id)]
-addIdReps ids = [(idPrimRep id, id) | id <- ids]
+addIdReps :: [NonVoid Id] -> [NonVoid (PrimRep, Id)]
+addIdReps = map (\id -> let id' = fromNonVoid id
+                         in NonVoid (idPrimRep id', id'))
 
-addArgReps :: [StgArg] -> [(PrimRep, StgArg)]
-addArgReps args = [(argPrimRep arg, arg) | arg <- args]
+addArgReps :: [NonVoid StgArg] -> [NonVoid (PrimRep, StgArg)]
+addArgReps = map (\arg -> let arg' = fromNonVoid arg
+                           in NonVoid (argPrimRep arg', arg'))
 
 argPrimRep :: StgArg -> PrimRep
-argPrimRep arg = typePrimRep (stgArgType arg)
+argPrimRep arg = typePrimRep1 (stgArgType arg)
 
 
 -----------------------------------------------------------------------------
@@ -149,6 +193,7 @@ argPrimRep arg = typePrimRep (stgArgType arg)
 data LambdaFormInfo
   = LFReEntrant         -- Reentrant closure (a function)
         TopLevelFlag    -- True if top level
+        OneShotInfo
         !RepArity       -- Arity. Invariant: always > 0
         !Bool           -- True <=> no fvs
         ArgDescr        -- Argument descriptor (should really be in ClosureInfo)
@@ -169,12 +214,12 @@ data LambdaFormInfo
                         -- Imported things which we *do* know something about use
                         -- one of the other LF constructors (eg LFReEntrant for
                         -- known functions)
-        !Bool                -- True <=> *might* be a function type
+        !Bool           -- True <=> *might* be a function type
                         --      The False case is good when we want to enter it,
                         --        because then we know the entry code will do
                         --        For a function, the entry code is the fast entry point
 
-  | LFUnLifted          -- A value of unboxed type;
+  | LFUnlifted          -- A value of unboxed type;
                         -- always a value, needs evaluation
 
   | LFLetNoEscape       -- See LetNoEscape module for precise description
@@ -212,9 +257,9 @@ data StandardFormInfo
 
 mkLFArgument :: Id -> LambdaFormInfo
 mkLFArgument id
-  | isUnLiftedType ty             = LFUnLifted
+  | isUnliftedType ty      = LFUnlifted
   | might_be_a_function ty = LFUnknown True
-  | otherwise                    = LFUnknown False
+  | otherwise              = LFUnknown False
   where
     ty = idType id
 
@@ -229,13 +274,16 @@ mkLFReEntrant :: TopLevelFlag    -- True of top level
               -> ArgDescr        -- Argument descriptor
               -> LambdaFormInfo
 
+mkLFReEntrant _ _ [] _
+  = pprPanic "mkLFReEntrant" empty
 mkLFReEntrant top fvs args arg_descr
-  = LFReEntrant top (length args) (null fvs) arg_descr
+  = LFReEntrant top os_info (length args) (null fvs) arg_descr
+  where os_info = idOneShotInfo (head args)
 
 -------------
 mkLFThunk :: Type -> TopLevelFlag -> [Id] -> UpdateFlag -> LambdaFormInfo
 mkLFThunk thunk_ty top fvs upd_flag
-  = ASSERT( not (isUpdatable upd_flag) || not (isUnLiftedType thunk_ty) )
+  = ASSERT( not (isUpdatable upd_flag) || not (isUnliftedType thunk_ty) )
     LFThunk top (null fvs)
             (isUpdatable upd_flag)
             NonStandardThunk
@@ -246,8 +294,8 @@ might_be_a_function :: Type -> Bool
 -- Return False only if we are *sure* it's a data type
 -- Look through newtypes etc as much as poss
 might_be_a_function ty
-  | UnaryRep rep <- repType ty
-  , Just tc <- tyConAppTyCon_maybe rep
+  | [LiftedRep] <- typePrimRep ty
+  , Just tc <- tyConAppTyCon_maybe (unwrapType ty)
   , isDataTyCon tc
   = False
   | otherwise
@@ -279,18 +327,20 @@ mkLFImported id
                 -- the id really does point directly to the constructor
 
   | arity > 0
-  = LFReEntrant TopLevel arity True (panic "arg_descr")
+  = LFReEntrant TopLevel noOneShotInfo arity True (panic "arg_descr")
 
   | otherwise
   = mkLFArgument id -- Not sure of exact arity
   where
-    arity = idRepArity id
+    arity = idFunRepArity id
+
+-------------
+mkLFStringLit :: LambdaFormInfo
+mkLFStringLit = LFUnlifted
 
 -----------------------------------------------------
 --                Dynamic pointer tagging
 -----------------------------------------------------
-
-type ConTagZ = Int      -- A *zero-indexed* contructor tag
 
 type DynTag = Int       -- The tag on a *pointer*
                         -- (from the dynamic-tagging paper)
@@ -311,17 +361,12 @@ type DynTag = Int       -- The tag on a *pointer*
 isSmallFamily :: DynFlags -> Int -> Bool
 isSmallFamily dflags fam_size = fam_size <= mAX_PTR_TAG dflags
 
--- We keep the *zero-indexed* tag in the srt_len field of the info
--- table of a data constructor.
-dataConTagZ :: DataCon -> ConTagZ
-dataConTagZ con = dataConTag con - fIRST_TAG
-
 tagForCon :: DynFlags -> DataCon -> DynTag
 tagForCon dflags con
-  | isSmallFamily dflags fam_size = con_tag + 1
+  | isSmallFamily dflags fam_size = con_tag
   | otherwise                     = 1
   where
-    con_tag  = dataConTagZ con
+    con_tag  = dataConTag con -- NB: 1-indexed
     fam_size = tyConFamilySize (dataConTyCon con)
 
 tagForArity :: DynFlags -> RepArity -> DynTag
@@ -332,9 +377,9 @@ tagForArity dflags arity
 lfDynTag :: DynFlags -> LambdaFormInfo -> DynTag
 -- Return the tag in the low order bits of a variable bound
 -- to this LambdaForm
-lfDynTag dflags (LFCon con)               = tagForCon dflags con
-lfDynTag dflags (LFReEntrant _ arity _ _) = tagForArity dflags arity
-lfDynTag _      _other                    = 0
+lfDynTag dflags (LFCon con)                 = tagForCon dflags con
+lfDynTag dflags (LFReEntrant _ _ arity _ _) = tagForArity dflags arity
+lfDynTag _      _other                      = 0
 
 
 -----------------------------------------------------------------------------
@@ -360,11 +405,11 @@ isLFReEntrant _                = False
 -----------------------------------------------------------------------------
 
 lfClosureType :: LambdaFormInfo -> ClosureTypeInfo
-lfClosureType (LFReEntrant _ arity _ argd) = Fun arity argd
-lfClosureType (LFCon con)                  = Constr (dataConTagZ con)
-                                                    (dataConIdentity con)
-lfClosureType (LFThunk _ _ _ is_sel _)     = thunkClosureType is_sel
-lfClosureType _                            = panic "lfClosureType"
+lfClosureType (LFReEntrant _ _ arity _ argd) = Fun arity argd
+lfClosureType (LFCon con)                    = Constr (dataConTagZ con)
+                                                      (dataConIdentity con)
+lfClosureType (LFThunk _ _ _ is_sel _)       = thunkClosureType is_sel
+lfClosureType _                              = panic "lfClosureType"
 
 thunkClosureType :: StandardFormInfo -> ClosureTypeInfo
 thunkClosureType (SelectorThunk off) = ThunkSelector off
@@ -384,7 +429,7 @@ nodeMustPointToIt :: DynFlags -> LambdaFormInfo -> Bool
 -- this closure has R1 (the "Node" register) pointing to the
 -- closure itself --- the "self" argument
 
-nodeMustPointToIt _ (LFReEntrant top _ no_fvs _)
+nodeMustPointToIt _ (LFReEntrant top _ _ no_fvs _)
   =  not no_fvs          -- Certainly if it has fvs we need to point to it
   || isNotTopLevel top   -- See Note [GC recovery]
         -- For lex_profiling we also access the cost centre for a
@@ -422,7 +467,7 @@ nodeMustPointToIt _ (LFCon _) = True
         -- 27/11/92.
 
 nodeMustPointToIt _ (LFUnknown _)   = True
-nodeMustPointToIt _ LFUnLifted      = False
+nodeMustPointToIt _ LFUnlifted      = False
 nodeMustPointToIt _ LFLetNoEscape   = False
 
 {- Note [GC recovery]
@@ -439,7 +484,7 @@ floated them out.  Well, a clever optimiser might leave one there to
 avoid a space leak, deliberately recomputing a thunk.  Also (and this
 really does happen occasionally) let-floating may make a function f smaller
 so it can be inlined, so now (f True) may generate a local no-fv closure.
-This actually happened during bootsrapping GHC itself, with f=mkRdrFunBind
+This actually happened during bootstrapping GHC itself, with f=mkRdrFunBind
 in TcGenDeriv.) -}
 
 -----------------------------------------------------------------------------
@@ -497,6 +542,7 @@ getCallMethod :: DynFlags
                                 -- itself
               -> LambdaFormInfo -- Its info
               -> RepArity       -- Number of available arguments
+              -> RepArity       -- Number of them being void arguments
               -> CgLoc          -- Passed in from cgIdApp so that we can
                                 -- handle let-no-escape bindings and self-recursive
                                 -- tail calls using the same data constructor,
@@ -505,37 +551,38 @@ getCallMethod :: DynFlags
               -> Maybe SelfLoopInfo -- can we perform a self-recursive tail call?
               -> CallMethod
 
-getCallMethod dflags _ id _ n_args _cg_loc (Just (self_loop_id, block_id, args))
-  | gopt Opt_Loopification dflags, id == self_loop_id, n_args == length args
+getCallMethod dflags _ id _ n_args v_args _cg_loc
+              (Just (self_loop_id, block_id, args))
+  | gopt Opt_Loopification dflags
+  , id == self_loop_id
+  , args `lengthIs` (n_args - v_args)
   -- If these patterns match then we know that:
   --   * loopification optimisation is turned on
   --   * function is performing a self-recursive call in a tail position
-  --   * number of parameters of the function matches functions arity.
-  -- See Note [Self-recursive tail calls] in StgCmmExpr for more details
+  --   * number of non-void parameters of the function matches functions arity.
+  -- See Note [Self-recursive tail calls] and Note [Void arguments in
+  -- self-recursive tail calls] in StgCmmExpr for more details
   = JumpToIt block_id args
 
-getCallMethod dflags _name _ lf_info _n_args _cg_loc _self_loop_info
-  | nodeMustPointToIt dflags lf_info && gopt Opt_Parallel dflags
-  =     -- If we're parallel, then we must always enter via node.
-        -- The reason is that the closure may have been
-        -- fetched since we allocated it.
-    EnterIt
-
-getCallMethod dflags name id (LFReEntrant _ arity _ _) n_args _cg_loc
+getCallMethod dflags name id (LFReEntrant _ _ arity _ _) n_args _v_args _cg_loc
               _self_loop_info
-  | n_args == 0    = ASSERT( arity /= 0 )
-                     ReturnIt        -- No args at all
+  | n_args == 0 -- No args at all
+  && not (gopt Opt_SccProfilingOn dflags)
+     -- See Note [Evaluating functions with profiling] in rts/Apply.cmm
+  = ASSERT( arity /= 0 ) ReturnIt
   | n_args < arity = SlowCall        -- Not enough args
   | otherwise      = DirectEntry (enterIdLabel dflags name (idCafInfo id)) arity
 
-getCallMethod _ _name _ LFUnLifted n_args _cg_loc _self_loop_info
+getCallMethod _ _name _ LFUnlifted n_args _v_args _cg_loc _self_loop_info
   = ASSERT( n_args == 0 ) ReturnIt
 
-getCallMethod _ _name _ (LFCon _) n_args _cg_loc _self_loop_info
+getCallMethod _ _name _ (LFCon _) n_args _v_args _cg_loc _self_loop_info
   = ASSERT( n_args == 0 ) ReturnIt
+    -- n_args=0 because it'd be ill-typed to apply a saturated
+    --          constructor application to anything
 
 getCallMethod dflags name id (LFThunk _ _ updatable std_form_info is_fun)
-              n_args _cg_loc _self_loop_info
+              n_args _v_args _cg_loc _self_loop_info
   | is_fun      -- it *might* be a function, so we must "call" it (which is always safe)
   = SlowCall    -- We cannot just enter it [in eval/apply, the entry code
                 -- is the fast-entry code]
@@ -566,18 +613,18 @@ getCallMethod dflags name id (LFThunk _ _ updatable std_form_info is_fun)
     DirectEntry (thunkEntryLabel dflags name (idCafInfo id) std_form_info
                 updatable) 0
 
-getCallMethod _ _name _ (LFUnknown True) _n_arg _cg_locs _self_loop_info
+getCallMethod _ _name _ (LFUnknown True) _n_arg _v_args _cg_locs _self_loop_info
   = SlowCall -- might be a function
 
-getCallMethod _ name _ (LFUnknown False) n_args _cg_loc _self_loop_info
+getCallMethod _ name _ (LFUnknown False) n_args _v_args _cg_loc _self_loop_info
   = ASSERT2( n_args == 0, ppr name <+> ppr n_args )
     EnterIt -- Not a function
 
-getCallMethod _ _name _ LFLetNoEscape _n_args (LneLoc blk_id lne_regs)
+getCallMethod _ _name _ LFLetNoEscape _n_args _v_args (LneLoc blk_id lne_regs)
               _self_loop_info
   = JumpToIt blk_id lne_regs
 
-getCallMethod _ _ _ _ _ _ _ = panic "Unknown call method"
+getCallMethod _ _ _ _ _ _ _ _ = panic "Unknown call method"
 
 -----------------------------------------------------------------------------
 --                staticClosureRequired
@@ -657,7 +704,7 @@ staticClosureRequired
         -> LambdaFormInfo
         -> Bool
 staticClosureRequired binder bndr_info
-                      (LFReEntrant top_level _ _ _)        -- It's a function
+                      (LFReEntrant top_level _ _ _ _)        -- It's a function
   = ASSERT( isTopLevel top_level )
         -- Assumption: it's a top-level, no-free-var binding
         not (satCallsOnly bndr_info)
@@ -749,12 +796,11 @@ mkClosureInfo dflags is_static id lf_info tot_wds ptr_wds val_descr
 -- need.  We have a patch for this from Andy Cheadle, but not
 -- incorporated yet. --SDM [6/2004]
 --
---
 -- Previously, eager blackholing was enabled when ticky-ticky
 -- was on. But it didn't work, and it wasn't strictly necessary
 -- to bring back minimal ticky-ticky, so now EAGER_BLACKHOLING
 -- is unconditionally disabled. -- krc 1/2007
-
+--
 -- Static closures are never themselves black-holed.
 
 blackHoleOnEntry :: ClosureInfo -> Bool
@@ -764,10 +810,77 @@ blackHoleOnEntry cl_info
 
   | otherwise
   = case closureLFInfo cl_info of
-        LFReEntrant _ _ _ _          -> False
-        LFLetNoEscape                   -> False
-        LFThunk _ _no_fvs _updatable _ _ -> True
-        _other -> panic "blackHoleOnEntry"      -- Should never happen
+      LFReEntrant {}            -> False
+      LFLetNoEscape             -> False
+      LFThunk _ _no_fvs upd _ _ -> upd   -- See Note [Black-holing non-updatable thunks]
+      _other -> panic "blackHoleOnEntry"
+
+{- Note [Black-holing non-updatable thunks]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We must not black-hole non-updatable (single-entry) thunks otherwise
+we run into issues like Trac #10414. Specifically:
+
+  * There is no reason to black-hole a non-updatable thunk: it should
+    not be competed for by multiple threads
+
+  * It could, conceivably, cause a space leak if we don't black-hole
+    it, if there was a live but never-followed pointer pointing to it.
+    Let's hope that doesn't happen.
+
+  * It is dangerous to black-hole a non-updatable thunk because
+     - is not updated (of course)
+     - hence, if it is black-holed and another thread tries to evaluate
+       it, that thread will block forever
+    This actually happened in Trac #10414.  So we do not black-hole
+    non-updatable thunks.
+
+  * How could two threads evaluate the same non-updatable (single-entry)
+    thunk?  See Reid Barton's example below.
+
+  * Only eager blackholing could possibly black-hole a non-updatable
+    thunk, because lazy black-holing only affects thunks with an
+    update frame on the stack.
+
+Here is and example due to Reid Barton (Trac #10414):
+    x = \u []  concat [[1], []]
+with the following definitions,
+
+    concat x = case x of
+        []       -> []
+        (:) x xs -> (++) x (concat xs)
+
+    (++) xs ys = case xs of
+        []         -> ys
+        (:) x rest -> (:) x ((++) rest ys)
+
+Where we use the syntax @\u []@ to denote an updatable thunk and @\s []@ to
+denote a single-entry (i.e. non-updatable) thunk. After a thread evaluates @x@
+to WHNF and calls @(++)@ the heap will contain the following thunks,
+
+    x = 1 : y
+    y = \u []  (++) [] z
+    z = \s []  concat []
+
+Now that the stage is set, consider the follow evaluations by two racing threads
+A and B,
+
+  1. Both threads enter @y@ before either is able to replace it with an
+     indirection
+
+  2. Thread A does the case analysis in @(++)@ and consequently enters @z@,
+     replacing it with a black-hole
+
+  3. At some later point thread B does the same case analysis and also attempts
+     to enter @z@. However, it finds that it has been replaced with a black-hole
+     so it blocks.
+
+  4. Thread A eventually finishes evaluating @z@ (to @[]@) and updates @y@
+     accordingly. It does *not* update @z@, however, as it is single-entry. This
+     leaves Thread B blocked forever on a black-hole which will never be
+     updated.
+
+To avoid this sort of condition we never black-hole non-updatable thunks.
+-}
 
 isStaticClosure :: ClosureInfo -> Bool
 isStaticClosure cl_info = isStaticRep (closureSMRep cl_info)
@@ -781,18 +894,19 @@ lfUpdatable _ = False
 
 closureSingleEntry :: ClosureInfo -> Bool
 closureSingleEntry (ClosureInfo { closureLFInfo = LFThunk _ _ upd _ _}) = not upd
+closureSingleEntry (ClosureInfo { closureLFInfo = LFReEntrant _ OneShotLam _ _ _}) = True
 closureSingleEntry _ = False
 
 closureReEntrant :: ClosureInfo -> Bool
-closureReEntrant (ClosureInfo { closureLFInfo = LFReEntrant _ _ _ _ }) = True
+closureReEntrant (ClosureInfo { closureLFInfo = LFReEntrant {} }) = True
 closureReEntrant _ = False
 
 closureFunInfo :: ClosureInfo -> Maybe (RepArity, ArgDescr)
 closureFunInfo (ClosureInfo { closureLFInfo = lf_info }) = lfFunInfo lf_info
 
 lfFunInfo :: LambdaFormInfo ->  Maybe (RepArity, ArgDescr)
-lfFunInfo (LFReEntrant _ arity _ arg_desc)  = Just (arity, arg_desc)
-lfFunInfo _                                 = Nothing
+lfFunInfo (LFReEntrant _ _ arity _ arg_desc)  = Just (arity, arg_desc)
+lfFunInfo _                                   = Nothing
 
 funTag :: DynFlags -> ClosureInfo -> DynTag
 funTag dflags (ClosureInfo { closureLFInfo = lf_info })
@@ -801,9 +915,9 @@ funTag dflags (ClosureInfo { closureLFInfo = lf_info })
 isToplevClosure :: ClosureInfo -> Bool
 isToplevClosure (ClosureInfo { closureLFInfo = lf_info })
   = case lf_info of
-      LFReEntrant TopLevel _ _ _ -> True
-      LFThunk TopLevel _ _ _ _   -> True
-      _other                         -> False
+      LFReEntrant TopLevel _ _ _ _ -> True
+      LFThunk TopLevel _ _ _ _     -> True
+      _other                       -> False
 
 --------------------------------------
 --   Label generation
@@ -898,16 +1012,18 @@ getTyDescription :: Type -> String
 getTyDescription ty
   = case (tcSplitSigmaTy ty) of { (_, _, tau_ty) ->
     case tau_ty of
-      TyVarTy _                            -> "*"
-      AppTy fun _                   -> getTyDescription fun
-      FunTy _ res                   -> '-' : '>' : fun_result res
-      TyConApp tycon _              -> getOccString tycon
-      ForAllTy _ ty          -> getTyDescription ty
+      TyVarTy _              -> "*"
+      AppTy fun _            -> getTyDescription fun
+      TyConApp tycon _       -> getOccString tycon
+      FunTy _ res            -> '-' : '>' : fun_result res
+      ForAllTy _  ty         -> getTyDescription ty
       LitTy n                -> getTyLitDescription n
+      CastTy ty _            -> getTyDescription ty
+      CoercionTy co          -> pprPanic "getTyDescription" (ppr co)
     }
   where
     fun_result (FunTy _ res) = '>' : fun_result res
-    fun_result other             = getTyDescription other
+    fun_result other         = getTyDescription other
 
 getTyLitDescription :: TyLit -> String
 getTyLitDescription l =
@@ -927,13 +1043,11 @@ mkDataConInfoTable dflags data_con is_static ptr_wds nonptr_wds
                 , cit_srt  = NoC_SRT }
  where
    name = dataConName data_con
-
-   info_lbl | is_static = mkStaticInfoTableLabel name NoCafRefs
-            | otherwise = mkConInfoTableLabel    name NoCafRefs
-
+   info_lbl = mkConInfoTableLabel name NoCafRefs
    sm_rep = mkHeapRep dflags is_static ptr_wds nonptr_wds cl_type
-
    cl_type = Constr (dataConTagZ data_con) (dataConIdentity data_con)
+                  -- We keep the *zero-indexed* tag in the srt_len field
+                  -- of the info table of a data constructor.
 
    prof | not (gopt Opt_SccProfilingOn dflags) = NoProfilingInfo
         | otherwise                            = ProfilingInfo ty_descr val_descr
@@ -961,16 +1075,10 @@ indStaticInfoTable
 staticClosureNeedsLink :: Bool -> CmmInfoTable -> Bool
 -- A static closure needs a link field to aid the GC when traversing
 -- the static closure graph.  But it only needs such a field if either
---         a) it has an SRT
+--        a) it has an SRT
 --        b) it's a constructor with one or more pointer fields
 -- In case (b), the constructor's fields themselves play the role
 -- of the SRT.
---
--- At this point, the cit_srt field has not been calculated (that
--- happens right at the end of the Cmm pipeline), but we do have the
--- VarSet of CAFs that CoreToStg attached, and if that is empty there
--- will definitely not be an SRT.
---
 staticClosureNeedsLink has_srt CmmInfoTable{ cit_rep = smrep }
   | isConRep smrep         = not (isStaticNoCafCon smrep)
   | otherwise              = has_srt -- needsSRT (cit_srt info_tbl)

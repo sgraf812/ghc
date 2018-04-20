@@ -3,16 +3,20 @@ module Vectorise.Type.TyConDecl (
   vectTyConDecls
 ) where
 
+import GhcPrelude
+
 import Vectorise.Type.Type
 import Vectorise.Monad
 import Vectorise.Env( GlobalEnv( global_fam_inst_env ) )
-import BuildTyCl( buildClass, buildDataCon )
+import BuildTyCl( TcMethInfo, buildClass, buildDataCon, newTyConRepName )
+import OccName
 import Class
 import Type
 import TyCon
 import DataCon
-import BasicTypes
 import DynFlags
+import BasicTypes( DefMethSpec(..) )
+import SrcLoc( SrcSpan, noSrcSpan )
 import Var
 import Name
 import Outputable
@@ -50,9 +54,6 @@ vectTyConDecl tycon name'
              opTys        = drop (length argTys - length opItems) argTys  -- only method types
        ; methods' <- sequence [ vectMethod id meth ty | ((id, meth), ty) <- zip opItems opTys]
 
-           -- keep the original recursiveness flag
-       ; let rec_flag = boolToRecFlag (isRecursiveTyCon tycon)
-
            -- construct the vectorised class (this also creates the class type constructors and its
            -- data constructor)
            --
@@ -60,14 +61,14 @@ vectTyConDecl tycon name'
        ; cls' <- liftDs $
                    buildClass
                      name'                      -- new name: "V:Class"
-                     (tyConTyVars tycon)        -- keep original type vars
+                     (tyConBinders tycon)       -- keep original kind
                      (map (const Nominal) (tyConRoles tycon)) -- all role are N for safety
-                     theta'                     -- superclasses
                      (snd . classTvsFds $ cls)  -- keep the original functional dependencies
-                     []                         -- no associated types (for the moment)
-                     methods'                   -- method info
-                     (classMinimalDef cls)      -- Inherit minimal complete definition from cls
-                     rec_flag                   -- whether recursive
+                     (Just (
+                         theta',                 -- superclasses
+                         [],                     -- no associated types (for the moment)
+                         methods',               -- method info
+                         (classMinimalDef cls))) -- Inherit minimal complete definition from cls
 
            -- the original dictionary constructor must map to the vectorised one
        ; let tycon'        = classTyCon cls'
@@ -83,32 +84,31 @@ vectTyConDecl tycon name'
            -- return the type constructor of the vectorised class
        ; return tycon'
        }
-                      
+
        -- Regular algebraic type constructor — for now, Haskell 2011-style only
   | isAlgTyCon tycon
   = do { unless (all isVanillaDataCon (tyConDataCons tycon)) $
            do dflags <- getDynFlags
               cantVectorise dflags "Currently only Haskell 2011 datatypes are supported" (ppr tycon)
-  
+
            -- vectorise the data constructor of the class tycon
        ; rhs' <- vectAlgTyConRhs tycon (algTyConRhs tycon)
 
-           -- keep the original recursiveness and GADT flags
-       ; let rec_flag  = boolToRecFlag (isRecursiveTyCon tycon)
-             gadt_flag = isGadtSyntaxTyCon tycon
+           -- keep the original GADT flags
+       ; let gadt_flag = isGadtSyntaxTyCon tycon
 
            -- build the vectorised type constructor
-       ; return $ buildAlgTyCon 
+       ; tc_rep_name <- mkDerivedName mkTyConRepOcc name'
+       ; return $ mkAlgTyCon
                     name'                   -- new name
-                    (tyConTyVars tycon)     -- keep original type vars
+                    (tyConBinders tycon)
+                    (tyConResKind tycon)    -- keep original kind
                     (map (const Nominal) (tyConRoles tycon)) -- all roles are N for safety
                     Nothing
                     []                      -- no stupid theta
                     rhs'                    -- new constructor defs
-                    rec_flag                -- whether recursive
-                    False                   -- Not promotable
+                    (VanillaAlgTyCon tc_rep_name)
                     gadt_flag               -- whether in GADT syntax
-                    NoParentTyCon           
        }
 
   -- some other crazy thing that we don't handle
@@ -118,7 +118,7 @@ vectTyConDecl tycon name'
 
 -- |Vectorise a class method.  (Don't enter it into the vectorisation map yet.)
 --
-vectMethod :: Id -> DefMeth -> Type -> VM (Name, DefMethSpec, Type)
+vectMethod :: Id -> DefMethInfo -> Type -> VM TcMethInfo
 vectMethod id defMeth ty
  = do {   -- Vectorise the method type.
       ; ty' <- vectType ty
@@ -126,8 +126,15 @@ vectMethod id defMeth ty
           -- Create a name for the vectorised method.
       ; id' <- mkVectId id ty'
 
-      ; return  (Var.varName id', defMethSpecOfDefMeth defMeth, ty')
+      ; return  (Var.varName id', ty', defMethSpecOfDefMeth defMeth)
       }
+
+-- | Convert a `DefMethInfo` to a `DefMethSpec`, which discards the name field in
+--   the `DefMeth` constructor of the `DefMeth`.
+defMethSpecOfDefMeth :: DefMethInfo -> Maybe (DefMethSpec (SrcSpan, Type))
+defMethSpecOfDefMeth Nothing = Nothing
+defMethSpecOfDefMeth (Just (_, VanillaDM))    = Just VanillaDM
+defMethSpecOfDefMeth (Just (_, GenericDM ty)) = Just (GenericDM (noSrcSpan, ty))
 
 -- |Vectorise the RHS of an algebraic type.
 --
@@ -135,17 +142,32 @@ vectAlgTyConRhs :: TyCon -> AlgTyConRhs -> VM AlgTyConRhs
 vectAlgTyConRhs tc (AbstractTyCon {})
   = do dflags <- getDynFlags
        cantVectorise dflags "Can't vectorise imported abstract type" (ppr tc)
-vectAlgTyConRhs _tc DataFamilyTyCon
-  = return DataFamilyTyCon
 vectAlgTyConRhs _tc (DataTyCon { data_cons = data_cons
+                               , data_cons_size = data_cons_size
                                , is_enum   = is_enum
                                })
   = do { data_cons' <- mapM vectDataCon data_cons
        ; zipWithM_ defDataCon data_cons data_cons'
        ; return $ DataTyCon { data_cons = data_cons'
+                            , data_cons_size = data_cons_size
                             , is_enum   = is_enum
                             }
        }
+
+vectAlgTyConRhs tc (TupleTyCon { data_con = con })
+  = vectAlgTyConRhs tc (mkDataTyConRhs [con])
+    -- I'm not certain this is what you want to do for tuples,
+    -- but it's the behaviour we had before I refactored the
+    -- representation of AlgTyConRhs to add tuples
+
+vectAlgTyConRhs tc (SumTyCon { data_cons = cons
+                             , data_cons_size = data_cons_size })
+  = -- FIXME (osa): I'm pretty sure this is broken.. TupleTyCon case is probably
+    -- also broken when the tuple is unboxed.
+    vectAlgTyConRhs tc (DataTyCon { data_cons = cons
+                                  , data_cons_size = data_cons_size
+                                  , is_enum = all (((==) 0) . dataConRepArity) cons })
+
 vectAlgTyConRhs tc (NewTyCon {})
   = do dflags <- getDynFlags
        cantVectorise dflags noNewtypeErr (ppr tc)
@@ -174,21 +196,28 @@ vectDataCon dc
        ; arg_tys <- mapM vectType rep_arg_tys
        ; let ret_ty = mkFamilyTyConApp tycon' (mkTyVarTys univ_tvs)
        ; fam_envs  <- readGEnv global_fam_inst_env
+       ; rep_nm    <- liftDs $ newTyConRepName name'
+       ; let tag_map = mkTyConTagMap tycon'
        ; liftDs $ buildDataCon fam_envs
                     name'
                     (dataConIsInfix dc)            -- infix if the original is
-                    (dataConStrictMarks dc)        -- strictness as original constructor
+                    rep_nm
+                    (dataConSrcBangs dc)           -- strictness as original constructor
+                    (Just $ dataConImplBangs dc)
                     []                             -- no labelled fields for now
                     univ_tvs                       -- universally quantified vars
                     []                             -- no existential tvs for now
+                    user_bndrs
                     []                             -- no equalities for now
                     []                             -- no context for now
                     arg_tys                        -- argument types
                     ret_ty                         -- return type
                     tycon'                         -- representation tycon
+                    tag_map
        }
   where
     name        = dataConName dc
     rep_arg_tys = dataConRepArgTys dc
     tycon       = dataConTyCon dc
     (univ_tvs, ex_tvs, eq_spec, theta, _arg_tys, _res_ty) = dataConFullSig dc
+    user_bndrs  = dataConUserTyVarBinders dc

@@ -14,9 +14,12 @@
 #include "Signals.h"
 #include "RtsUtils.h"
 #include "Prelude.h"
+#include "Ticker.h"
 #include "Stable.h"
+#include "ThreadLabels.h"
+#include "Libdw.h"
 
-#ifdef alpha_HOST_ARCH
+#if defined(alpha_HOST_ARCH)
 # if defined(linux_HOST_OS)
 #  include <asm/fpu.h>
 # else
@@ -24,23 +27,23 @@
 # endif
 #endif
 
-#ifdef HAVE_UNISTD_H
+#if defined(HAVE_UNISTD_H)
 # include <unistd.h>
 #endif
 
-#ifdef HAVE_SIGNAL_H
+#if defined(HAVE_SIGNAL_H)
 # include <signal.h>
 #endif
 
-#ifdef HAVE_ERRNO_H
+#if defined(HAVE_ERRNO_H)
 # include <errno.h>
 #endif
 
-#ifdef HAVE_EVENTFD_H
+#if defined(HAVE_EVENTFD_H)
 # include <sys/eventfd.h>
 #endif
 
-#ifdef HAVE_TERMIOS_H
+#if defined(HAVE_TERMIOS_H)
 #include <termios.h>
 #endif
 
@@ -63,12 +66,12 @@ HsInt nocldstop = 0;
 StgInt *signal_handlers = NULL; /* Dynamically grown array of signal handlers */
 static StgInt nHandlers = 0;    /* Size of handlers array */
 
-static nat n_haskell_handlers = 0;
+static uint32_t n_haskell_handlers = 0;
 
 static sigset_t userSignals;
 static sigset_t savedSignals;
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
 static Mutex sig_mutex; // protects signal_handlers, nHandlers
 #endif
 
@@ -80,7 +83,7 @@ void
 initUserSignals(void)
 {
     sigemptyset(&userSignals);
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     initMutex(&sig_mutex);
 #endif
 }
@@ -93,7 +96,7 @@ freeSignalHandlers(void) {
         nHandlers = 0;
         n_haskell_handlers = 0;
     }
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     closeMutex(&sig_mutex);
 #endif
 }
@@ -126,7 +129,7 @@ more_handlers(int sig)
 }
 
 // Here's the pipe into which we will send our signals
-static int io_manager_wakeup_fd = -1;
+static volatile int io_manager_wakeup_fd = -1;
 static int timer_manager_control_wr_fd = -1;
 
 #define IO_MANAGER_WAKEUP 0xff
@@ -161,7 +164,20 @@ ioManagerWakeup (void)
         StgWord8 byte = (StgWord8)IO_MANAGER_WAKEUP;
         r = write(io_manager_wakeup_fd, &byte, 1);
 #endif
-        if (r == -1) { sysErrorBelch("ioManagerWakeup: write"); }
+        /* N.B. If the TimerManager is shutting down as we run this
+         * then there is a possiblity that our first read of
+         * io_manager_wakeup_fd is non-negative, but before we get to the
+         * write the file is closed. If this occurs, io_manager_wakeup_fd
+         * will be written into with -1 (GHC.Event.Control does this prior
+         * to closing), so checking this allows us to distinguish this case.
+         * To ensure we observe the correct ordering, we declare the
+         * io_manager_wakeup_fd as volatile.
+         * Since this is not an error condition, we do not print the error
+         * message in this case.
+         */
+        if (r == -1 && io_manager_wakeup_fd >= 0) {
+            sysErrorBelch("ioManagerWakeup: write");
+        }
     }
 }
 
@@ -170,7 +186,7 @@ void
 ioManagerDie (void)
 {
     StgWord8 byte = (StgWord8)IO_MANAGER_DIE;
-    nat i;
+    uint32_t i;
     int fd;
     int r;
 
@@ -251,18 +267,6 @@ generic_handler(int sig USED_IF_THREADS,
         }
     }
 
-    nat i;
-    int fd;
-    for (i=0; i < n_capabilities; i++) {
-        fd = capabilities[i]->io_manager_control_wr_fd;
-        if (0 <= fd) {
-            r = write(fd, buf, sizeof(siginfo_t)+1);
-            if (r == -1 && errno == EAGAIN) {
-                errorBelch("lost signal due to full pipe: %d\n", sig);
-            }
-        }
-    }
-
     // If the IO manager hasn't told us what the FD of the write end
     // of its pipe is, there's not much we can do here, so just ignore
     // the signal..
@@ -328,7 +332,7 @@ unblockUserSignals(void)
     sigprocmask(SIG_SETMASK, &savedSignals, NULL);
 }
 
-rtsBool
+bool
 anyUserHandlers(void)
 {
     return n_haskell_handlers != 0;
@@ -468,29 +472,21 @@ startSignalHandlers(Capability *cap)
            // freed by runHandler
     memcpy(info, next_pending_handler, sizeof(siginfo_t));
 
-    scheduleThread(cap,
+    StgTSO *t =
         createIOThread(cap,
-          RtsFlags.GcFlags.initialStkSize,
-              rts_apply(cap,
-                  rts_apply(cap,
-                      &base_GHCziConcziSignal_runHandlers_closure,
-                      rts_mkPtr(cap, info)),
-                  rts_mkInt(cap, info->si_signo))));
+                       RtsFlags.GcFlags.initialStkSize,
+                       rts_apply(cap,
+                                 rts_apply(cap,
+                                           &base_GHCziConcziSignal_runHandlersPtr_closure,
+                                           rts_mkPtr(cap, info)),
+                                 rts_mkInt(cap, info->si_signo)));
+    scheduleThread(cap, t);
+    labelThread(cap, t, "signal handler thread");
   }
 
   unblockUserSignals();
 }
 #endif
-
-/* ----------------------------------------------------------------------------
- * Mark signal handlers during GC.
- * -------------------------------------------------------------------------- */
-
-void
-markSignalHandlers (evac_fn evac STG_UNUSED, void *user STG_UNUSED)
-{
-    // nothing to do
-}
 
 #else /* !RTS_USER_SIGNALS */
 StgInt
@@ -525,6 +521,27 @@ shutdown_handler(int sig STG_UNUSED)
 }
 
 /* -----------------------------------------------------------------------------
+ * SIGQUIT handler.
+ *
+ * We try to give the user an indication of what we are currently doing
+ * in response to SIGQUIT.
+ * -------------------------------------------------------------------------- */
+static void
+backtrace_handler(int sig STG_UNUSED)
+{
+#if USE_LIBDW
+    LibdwSession *session = libdwInit();
+    Backtrace *bt = libdwGetBacktrace(session);
+    fprintf(stderr, "\nCaught SIGQUIT; Backtrace:\n");
+    libdwPrintBacktrace(session, stderr, bt);
+    backtraceFree(bt);
+    libdwFree(session);
+#else
+    fprintf(stderr, "This build does not support backtraces.\n");
+#endif
+}
+
+/* -----------------------------------------------------------------------------
  * An empty signal handler, currently used for SIGPIPE
  * -------------------------------------------------------------------------- */
 static void
@@ -538,7 +555,7 @@ empty_handler (int sig STG_UNUSED)
 
    When a process is suspeended with ^Z and resumed again, the shell
    makes no attempt to save and restore the terminal settings.  So on
-   resume, any terminal setting modificaions we made (e.g. turning off
+   resume, any terminal setting modifications we made (e.g. turning off
    ICANON due to hSetBuffering NoBuffering) may well be lost.  Hence,
    we arrange to save and restore the terminal settings ourselves.
 
@@ -562,7 +579,7 @@ empty_handler (int sig STG_UNUSED)
    -------------------------------------------------------------------------- */
 
 static void sigtstp_handler(int sig);
-static void set_sigtstp_action (rtsBool handle);
+static void set_sigtstp_action (bool handle);
 
 static void
 sigtstp_handler (int sig STG_UNUSED)
@@ -589,7 +606,7 @@ sigtstp_handler (int sig STG_UNUSED)
 }
 
 static void
-set_sigtstp_action (rtsBool handle)
+set_sigtstp_action (bool handle)
 {
     struct sigaction sa;
     if (handle) {
@@ -601,6 +618,34 @@ set_sigtstp_action (rtsBool handle)
     sigemptyset(&sa.sa_mask);
     if (sigaction(SIGTSTP, &sa, NULL) != 0) {
         sysErrorBelch("warning: failed to install SIGTSTP handler");
+    }
+}
+
+/* Used by ItimerTimerCreate and ItimerSetitimer implementations */
+void
+install_vtalrm_handler(int sig, TickProc handle_tick)
+{
+    struct sigaction action;
+
+    action.sa_handler = handle_tick;
+
+    sigemptyset(&action.sa_mask);
+
+#if defined(SA_RESTART)
+    // specify SA_RESTART.  One consequence if we don't do this is
+    // that readline gets confused by the -threaded RTS.  It seems
+    // that if a SIGALRM handler is installed without SA_RESTART,
+    // readline installs its own SIGALRM signal handler (see
+    // readline's signals.c), and this somehow causes readline to go
+    // wrong when the input exceeds a single line (try it).
+    action.sa_flags = SA_RESTART;
+#else
+    action.sa_flags = 0;
+#endif
+
+    if (sigaction(sig, &action, NULL) == -1) {
+        sysErrorBelch("sigaction");
+        stg_exit(EXIT_FAILURE);
     }
 }
 
@@ -655,7 +700,7 @@ initDefaultHandlers(void)
     }
 #endif
 
-#ifdef alpha_HOST_ARCH
+#if defined(alpha_HOST_ARCH)
     ieee_set_fp_control(0);
 #endif
 
@@ -669,7 +714,15 @@ initDefaultHandlers(void)
         sysErrorBelch("warning: failed to install SIGPIPE handler");
     }
 
-    set_sigtstp_action(rtsTrue);
+    // Print a backtrace on SIGQUIT
+    action.sa_handler = backtrace_handler;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = 0;
+    if (sigaction(SIGQUIT, &action, &oact) != 0) {
+        sysErrorBelch("warning: failed to install SIGQUIT handler");
+    }
+
+    set_sigtstp_action(true);
 }
 
 void
@@ -690,15 +743,7 @@ resetDefaultHandlers(void)
         sysErrorBelch("warning: failed to uninstall SIGPIPE handler");
     }
 
-    set_sigtstp_action(rtsFalse);
+    set_sigtstp_action(false);
 }
 
 #endif /* RTS_USER_SIGNALS */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

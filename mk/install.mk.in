@@ -40,7 +40,7 @@
 #
 # NOTE: The default e.g. ${docdir} above means that autoconf substitutes the
 # string "${docdir}", not the value of docdir! This is crucial for the GNU
-# coding standards.
+# coding standards. See Trac #1924.
 
 define set_default
 # $1 = variable to set
@@ -51,9 +51,6 @@ ifneq "$$(filter @%,$$($1))" ""
 $1 = $2
 endif
 endef
-
-# This gets used in the default docdir when autoconf >= 2.60 is used
-PACKAGE_TARNAME = @PACKAGE_TARNAME@
 
 prefix          = @prefix@
 
@@ -67,8 +64,10 @@ libdir          = @libdir@
 includedir      = @includedir@
 mandir          = @mandir@
 
+# Note that `./configure --docdir=/foo/bar` should work.
 docdir = @docdir@
-$(eval $(call set_default,docdir,$${datarootdir}/doc/ghc))
+PACKAGE_TARNAME = ghc-${ProjectVersion}
+$(eval $(call set_default,docdir,$${datarootdir}/doc/$${PACKAGE_TARNAME}))
 
 htmldir = @htmldir@
 dvidir  = @dvidir@
@@ -94,19 +93,12 @@ pdfdir    = $(docdir)
 psdir     = $(docdir)
 
 ghclibdir = $(libdir)
-ghcdocdir = $(datarootdir)/doc
 
 else
 
 # Unix: override libdir and datadir to put ghc-specific stuff in
 # a subdirectory with the version number included.
-#
-# datadir is set to libdir here as GHC needs package.conf and unlit
-# to be in the same place (and things like ghc-pkg need to agree on
-# where package.conf is, so we just set it globally).
-#
 ghclibdir     = $(libdir)/$(CrossCompilePrefix)ghc-$(ProjectVersion)
-ghcdocdir     = $(datarootdir)/doc/ghc
 endif
 
 ghclibexecdir = $(ghclibdir)
@@ -132,43 +124,16 @@ INSTALL_GROUP =
 #
 CREATE_SCRIPT   = create () { touch "$$1" && chmod 755 "$$1" ; } && create
 CREATE_DATA     = create () { touch "$$1" && chmod 644 "$$1" ; } && create
-# These takes 3 arguments:
-# $1 = flags
-# $2 = files
-# $3 = dest
-INSTALL_PROGRAM = $(INSTALL) -m 755 $1 $2 $(call MK_INSTALL_DEST,$3)
-INSTALL_SCRIPT  = $(INSTALL) -m 755 $1 $2 $(call MK_INSTALL_DEST,$3)
-INSTALL_SHLIB   = $(INSTALL) -m 755 $1 $2 $(call MK_INSTALL_DEST,$3)
-INSTALL_DATA    = $(INSTALL) -m 644 $1 $2 $(call MK_INSTALL_DEST,$3)
-INSTALL_HEADER  = $(INSTALL) -m 644 $1 $2 $(call MK_INSTALL_DEST,$3)
-INSTALL_MAN     = $(INSTALL) -m 644 $1 $2 $(call MK_INSTALL_DEST,$3)
-INSTALL_DOC     = $(INSTALL) -m 644 $1 $2 $(call MK_INSTALL_DEST,$3)
-# Only 1 argument, the directory to create:
-INSTALL_DIR     = $(INSTALL) -m 755 -d $(call MK_INSTALL_DEST,$1)
 
-# cygwin's /bin/install doesn't set file modes correctly if the
-# destination path is a C: style path:
-#
-# $ /bin/install -c -m 644 foo /cygdrive/c/cygwin/home/ian/foo2
-# $ /bin/install -c -m 644 foo c:/cygwin/home/ian/foo3
-# $ ls -l foo*
-# -rw-r--r-- 1 ian None 0 2011-01-06 18:28 foo
-# -rw-r--r-- 1 ian None 0 2011-01-06 18:29 foo2
-# -rwxrwxrwx 1 ian None 0 2011-01-06 18:29 foo3
-#
-# This causes problems for bindisttest/checkBinaries.sh which then
-# thinks that e.g. the userguide HTML files are binaries.
-#
-# We therefore use a /cygdrive path if we are on cygwin (only)
-#   (This will make a Cygwin build run slowly 
-#    because of all those shell invocations.)
-ifeq "$(OSTYPE)" "cygwin"
-MK_INSTALL_DEST = $$(cygpath $1)
-else
-MK_INSTALL_DEST = $1
-endif
+INSTALL_PROGRAM = $(INSTALL) -m 755
+INSTALL_SCRIPT  = $(INSTALL) -m 755
+INSTALL_SHLIB   = $(INSTALL) -m 755
+INSTALL_DATA    = $(INSTALL) -m 644
+INSTALL_HEADER  = $(INSTALL) -m 644
+INSTALL_MAN     = $(INSTALL) -m 644
+INSTALL_DOC     = $(INSTALL) -m 644
+INSTALL_DIR     = $(INSTALL) -m 755 -d
 
-#
 # runhaskell and hsc2hs are special, in that other compilers besides
 # GHC might provide them.  Systems with a package manager often come
 # with tools to manage this kind of clash, e.g. RPM's

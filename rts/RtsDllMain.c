@@ -11,7 +11,7 @@
 #include "RtsAPI.h"
 #include "RtsDllMain.h"
 
-#ifdef HAVE_WINDOWS_H
+#if defined(HAVE_WINDOWS_H)
 #include <windows.h>
 #endif
 
@@ -37,15 +37,7 @@ DllMain ( HINSTANCE hInstance STG_UNUSED
 
   //case DLL_PROCESS_DETACH: shutdownHaskell();
   }
-  return TRUE;
+  return true;
 }
 
 #endif
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

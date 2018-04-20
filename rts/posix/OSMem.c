@@ -13,36 +13,43 @@
 
 #include "RtsUtils.h"
 #include "sm/OSMem.h"
+#include "sm/HeapAlloc.h"
 
-#ifdef HAVE_UNISTD_H
+#if defined(HAVE_UNISTD_H)
 #include <unistd.h>
 #endif
-#ifdef HAVE_SYS_TYPES_H
+#if defined(HAVE_SYS_TYPES_H)
 #include <sys/types.h>
 #endif
-#ifdef HAVE_SYS_MMAN_H
+#if defined(HAVE_SYS_MMAN_H)
 #include <sys/mman.h>
 #endif
-#ifdef HAVE_STRING_H
+#if defined(HAVE_STRING_H)
 #include <string.h>
 #endif
-#ifdef HAVE_FCNTL_H
+#if defined(HAVE_FCNTL_H)
 #include <fcntl.h>
+#endif
+#if defined(HAVE_NUMA_H)
+#include <numa.h>
+#endif
+#if defined(HAVE_NUMAIF_H)
+#include <numaif.h>
 #endif
 
 #include <errno.h>
 
-#if darwin_HOST_OS
+#if defined(darwin_HOST_OS) || defined(ios_HOST_OS)
 #include <mach/mach.h>
 #include <mach/vm_map.h>
 #include <sys/sysctl.h>
 #endif
 
-static caddr_t next_request = 0;
+static void *next_request = 0;
 
 void osMemInit(void)
 {
-    next_request = (caddr_t)RtsFlags.GcFlags.heapBase;
+    next_request = (void *)RtsFlags.GcFlags.heapBase;
 }
 
 /* -----------------------------------------------------------------------------
@@ -72,24 +79,42 @@ void osMemInit(void)
 
    -------------------------------------------------------------------------- */
 
-// A wrapper around mmap(), to abstract away from OS differences in
-// the mmap() interface.
+/*
+ A wrapper around mmap(), to abstract away from OS differences in
+ the mmap() interface.
 
+ It supports the following operations:
+ - reserve: find a new chunk of available address space, and make it so
+            that we own it (no other library will get it), but don't actually
+            allocate memory for it
+            the addr is a hint for where to place the memory (and most
+            of the time the OS happily ignores!)
+ - commit: given a chunk of address space that we know we own, make sure
+           there is some memory backing it
+           the addr is not a hint, it must point into previously reserved
+           address space, or bad things happen
+ - reserve&commit: do both at the same time
+
+ The naming is chosen from the Win32 API (VirtualAlloc) which does the
+ same thing and has done so forever, while support for this in Unix systems
+ has only been added recently and is hidden in the posix portability mess.
+ It is confusing because to get the reserve behavior we need MAP_NORESERVE
+ (which tells the kernel not to allocate backing space), but heh...
+*/
+enum
+{
+    MEM_RESERVE = 1,
+    MEM_COMMIT = 2,
+    MEM_RESERVE_AND_COMMIT = MEM_RESERVE | MEM_COMMIT
+};
+
+/* Returns NULL on failure; errno set */
 static void *
-my_mmap (void *addr, W_ size)
+my_mmap (void *addr, W_ size, int operation)
 {
     void *ret;
 
-#if defined(solaris2_HOST_OS) || defined(irix_HOST_OS)
-    {
-        int fd = open("/dev/zero",O_RDONLY);
-        ret = mmap(addr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
-        close(fd);
-    }
-#elif hpux_HOST_OS
-    ret = mmap(addr, size, PROT_READ | PROT_WRITE,
-               MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-#elif darwin_HOST_OS
+#if defined(darwin_HOST_OS)
     // Without MAP_FIXED, Apple's mmap ignores addr.
     // With MAP_FIXED, it overwrites already mapped regions, whic
     // mmap(0, ... MAP_FIXED ...) is worst of all: It unmaps the program text
@@ -100,10 +125,16 @@ my_mmap (void *addr, W_ size)
 
     kern_return_t err = 0;
     ret = addr;
-    if(addr)    // try to allocate at address
-        err = vm_allocate(mach_task_self(),(vm_address_t*) &ret, size, FALSE);
-    if(!addr || err)    // try to allocate anywhere
-        err = vm_allocate(mach_task_self(),(vm_address_t*) &ret, size, TRUE);
+
+    if(operation & MEM_RESERVE)
+    {
+        if(addr)    // try to allocate at address
+            err = vm_allocate(mach_task_self(),(vm_address_t*) &ret,
+                              size, false);
+        if(!addr || err)    // try to allocate anywhere
+            err = vm_allocate(mach_task_self(),(vm_address_t*) &ret,
+                              size, true);
+    }
 
     if(err) {
         // don't know what the error codes mean exactly, assume it's
@@ -111,23 +142,47 @@ my_mmap (void *addr, W_ size)
         errorBelch("memory allocation failed (requested %" FMT_Word " bytes)",
                    size);
         stg_exit(EXIT_FAILURE);
-    } else {
-        vm_protect(mach_task_self(), (vm_address_t)ret, size, FALSE,
+    }
+
+    if(operation & MEM_COMMIT) {
+        vm_protect(mach_task_self(), (vm_address_t)ret, size, false,
                    VM_PROT_READ|VM_PROT_WRITE);
     }
-#elif linux_HOST_OS
-    ret = mmap(addr, size, PROT_READ | PROT_WRITE,
-               MAP_ANON | MAP_PRIVATE, -1, 0);
+
+#else
+
+    int prot, flags;
+    if (operation & MEM_COMMIT)
+        prot = PROT_READ | PROT_WRITE;
+    else
+        prot = PROT_NONE;
+    if (operation == MEM_RESERVE)
+# if defined(MAP_NORESERVE)
+        flags = MAP_NORESERVE;
+# else
+#  if defined(USE_LARGE_ADDRESS_SPACE)
+#   error USE_LARGE_ADDRESS_SPACE needs MAP_NORESERVE
+#  endif
+        errorBelch("my_mmap(,,MEM_RESERVE) not supported on this platform");
+# endif
+    else if (operation == MEM_COMMIT)
+        flags = MAP_FIXED;
+    else
+        flags = 0;
+
+#if defined(hpux_HOST_OS)
+    ret = mmap(addr, size, prot, flags | MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+#elif defined(linux_HOST_OS)
+    ret = mmap(addr, size, prot, flags | MAP_ANON | MAP_PRIVATE, -1, 0);
     if (ret == (void *)-1 && errno == EPERM) {
         // Linux may return EPERM if it tried to give us
         // a chunk of address space below mmap_min_addr,
         // See Trac #7500.
-        if (addr != 0) {
+        if (addr != 0 && (operation & MEM_RESERVE)) {
             // Try again with no hint address.
             // It's not clear that this can ever actually help,
             // but since our alternative is to abort, we may as well try.
-            ret = mmap(0, size, PROT_READ | PROT_WRITE,
-                       MAP_ANON | MAP_PRIVATE, -1, 0);
+            ret = mmap(0, size, prot, flags | MAP_ANON | MAP_PRIVATE, -1, 0);
         }
         if (ret == (void *)-1 && errno == EPERM) {
             // Linux is not willing to give us any mapping,
@@ -136,18 +191,44 @@ my_mmap (void *addr, W_ size)
             errno = ENOMEM;
         }
     }
+
+    if (operation & MEM_COMMIT) {
+        madvise(ret, size, MADV_WILLNEED);
+#if defined(MADV_DODUMP)
+        madvise(ret, size, MADV_DODUMP);
+#endif
+    } else {
+        madvise(ret, size, MADV_DONTNEED);
+#if defined(MADV_DONTDUMP)
+        madvise(ret, size, MADV_DONTDUMP);
+#endif
+    }
+
 #else
-    ret = mmap(addr, size, PROT_READ | PROT_WRITE,
-               MAP_ANON | MAP_PRIVATE, -1, 0);
+    ret = mmap(addr, size, prot, flags | MAP_ANON | MAP_PRIVATE, -1, 0);
+#endif
 #endif
 
     if (ret == (void *)-1) {
+        return NULL;
+    }
+
+    return ret;
+}
+
+/* Variant of my_mmap which aborts in the case of an error */
+static void *
+my_mmap_or_barf (void *addr, W_ size, int operation)
+{
+    void *ret = my_mmap(addr, size, operation);
+
+    if (ret == NULL) {
         if (errno == ENOMEM ||
             (errno == EINVAL && sizeof(void*)==4 && size >= 0xc0000000)) {
             // If we request more than 3Gig, then we get EINVAL
             // instead of ENOMEM (at least on Linux).
             errorBelch("out of memory (requested %" FMT_Word " bytes)", size);
-            stg_exit(EXIT_FAILURE);
+            stg_exit(EXIT_HEAPOVERFLOW);
         } else {
             barf("getMBlock: mmap: %s", strerror(errno));
         }
@@ -168,7 +249,7 @@ gen_map_mblocks (W_ size)
     // Try to map a larger block, and take the aligned portion from
     // it (unmap the rest).
     size += MBLOCK_SIZE;
-    ret = my_mmap(0, size);
+    ret = my_mmap_or_barf(0, size, MEM_RESERVE_AND_COMMIT);
 
     // unmap the slop bits around the chunk we allocated
     slop = (W_)ret & MBLOCK_MASK;
@@ -198,16 +279,16 @@ gen_map_mblocks (W_ size)
 }
 
 void *
-osGetMBlocks(nat n)
+osGetMBlocks(uint32_t n)
 {
-  caddr_t ret;
+  void *ret;
   W_ size = MBLOCK_SIZE * (W_)n;
 
   if (next_request == 0) {
       // use gen_map_mblocks the first time.
       ret = gen_map_mblocks(size);
   } else {
-      ret = my_mmap(next_request, size);
+      ret = my_mmap_or_barf(next_request, size, MEM_RESERVE_AND_COMMIT);
 
       if (((W_)ret & MBLOCK_MASK) != 0) {
           // misaligned block!
@@ -225,14 +306,40 @@ osGetMBlocks(nat n)
           ret = gen_map_mblocks(size);
       }
   }
+
   // Next time, we'll try to allocate right after the block we just got.
   // ToDo: check that we haven't already grabbed the memory at next_request
-  next_request = ret + size;
+  next_request = (char *)ret + size;
 
   return ret;
 }
 
-void osFreeMBlocks(char *addr, nat n)
+void osBindMBlocksToNode(
+    void *addr STG_UNUSED,
+    StgWord size STG_UNUSED,
+    uint32_t node STG_UNUSED)
+{
+#if HAVE_LIBNUMA
+    int ret;
+    StgWord mask = 0;
+    mask |= 1 << node;
+    if (RtsFlags.GcFlags.numa) {
+        ret = mbind(addr, (unsigned long)size,
+                    MPOL_BIND, &mask, sizeof(StgWord)*8, MPOL_MF_STRICT);
+        // paranoia: MPOL_BIND guarantees memory on the correct node;
+        // MPOL_MF_STRICT will tell us if it didn't work.  We might want to
+        // relax these in due course, but I want to be sure it's doing what we
+        // want first.
+        if (ret != 0) {
+            sysErrorBelch("mbind");
+            stg_exit(EXIT_FAILURE);
+        }
+    }
+#endif
+}
+
+
+void osFreeMBlocks(void *addr, uint32_t n)
 {
     munmap(addr, n * MBLOCK_SIZE);
 }
@@ -244,28 +351,29 @@ void osReleaseFreeMemory(void) {
 void osFreeAllMBlocks(void)
 {
     void *mblock;
+    void *state;
 
-    for (mblock = getFirstMBlock();
+    for (mblock = getFirstMBlock(&state);
          mblock != NULL;
-         mblock = getNextMBlock(mblock)) {
+         mblock = getNextMBlock(&state, mblock)) {
         munmap(mblock, MBLOCK_SIZE);
     }
 }
 
-W_ getPageSize (void)
+size_t getPageSize (void)
 {
-    static W_ pageSize = 0;
-    if (pageSize) {
-        return pageSize;
-    } else {
+    static size_t pageSize = 0;
+
+    if (pageSize == 0) {
         long ret;
         ret = sysconf(_SC_PAGESIZE);
         if (ret == -1) {
            barf("getPageSize: cannot get page size");
         }
         pageSize = ret;
-        return ret;
     }
+
+    return pageSize;
 }
 
 /* Returns 0 if physical memory size cannot be identified */
@@ -304,7 +412,7 @@ StgWord64 getPhysicalMemorySize (void)
     return physMemSize;
 }
 
-void setExecutable (void *p, W_ len, rtsBool exec)
+void setExecutable (void *p, W_ len, bool exec)
 {
     StgWord pageSize = getPageSize();
 
@@ -319,10 +427,200 @@ void setExecutable (void *p, W_ len, rtsBool exec)
     }
 }
 
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:
+#if defined(USE_LARGE_ADDRESS_SPACE)
+
+static void *
+osTryReserveHeapMemory (W_ len, void *hint)
+{
+    void *base, *top;
+    void *start, *end;
+
+    /* We try to allocate len + MBLOCK_SIZE,
+       because we need memory which is MBLOCK_SIZE aligned,
+       and then we discard what we don't need */
+
+    base = my_mmap(hint, len + MBLOCK_SIZE, MEM_RESERVE);
+    if (base == NULL)
+        return NULL;
+
+    top = (void*)((W_)base + len + MBLOCK_SIZE);
+
+    if (((W_)base & MBLOCK_MASK) != 0) {
+        start = MBLOCK_ROUND_UP(base);
+        end = MBLOCK_ROUND_DOWN(top);
+        ASSERT(((W_)end - (W_)start) == len);
+
+        if (munmap(base, (W_)start-(W_)base) < 0) {
+            sysErrorBelch("unable to release slop before heap");
+        }
+        if (munmap(end, (W_)top-(W_)end) < 0) {
+            sysErrorBelch("unable to release slop after heap");
+        }
+    } else {
+        start = base;
+    }
+
+    return start;
+}
+
+void *osReserveHeapMemory(void *startAddressPtr, W_ *len)
+{
+    int attempt;
+    void *at;
+
+    /* We want to ensure the heap starts at least 8 GB inside the address space,
+       since we want to reserve the address space below that address for code.
+       Specifically, we need to make sure that any dynamically loaded code will
+       be close enough to the original code so that short relocations will work.
+       This is in particular important on Darwin/Mach-O, because object files
+       not compiled as shared libraries are position independent but cannot be
+       loaded above 4GB.
+
+       We do so with a hint to the mmap, and we verify the OS satisfied our
+       hint. We loop, shifting our hint by 1 BLOCK_SIZE every time, in case
+       there is already something allocated there.
+
+       Some systems impose resource limits restricting the amount of memory we
+       can request (see, e.g. #10877). If mmap fails we halve our allocation
+       request and try again. If our request size gets absurdly small we simply
+       give up.
+
+    */
+
+    W_ minimumAddress = (W_)8 * (1 << 30);
+    // We don't use minimumAddress (0x200000000) as default because we know
+    // it can clash with third-party libraries. See ticket #12573.
+    W_ startAddress = 0x4200000000;
+    if (startAddressPtr) {
+        startAddress = (W_)startAddressPtr;
+    }
+    if (startAddress < minimumAddress) {
+        errorBelch(
+            "Provided heap start address %p is lower than minimum address %p",
+            (void*)startAddress, (void*)minimumAddress);
+    }
+
+    attempt = 0;
+    while (1) {
+        if (*len < MBLOCK_SIZE) {
+            // Give up if the system won't even give us 16 blocks worth of heap
+            barf("osReserveHeapMemory: Failed to allocate heap storage");
+        }
+
+        void *hint = (void*)(startAddress + attempt * BLOCK_SIZE);
+        at = osTryReserveHeapMemory(*len, hint);
+        if (at == NULL) {
+            // This means that mmap failed which we take to mean that we asked
+            // for too much memory. This can happen due to POSIX resource
+            // limits. In this case we reduce our allocation request by a factor
+            // of two and try again.
+            *len /= 2;
+        } else if ((W_)at >= minimumAddress) {
+            // Success! We were given a block of memory starting above the 8 GB
+            // mark, which is what we were looking for.
+            break;
+        } else {
+            // We got addressing space but it wasn't above the 8GB mark.
+            // Try again.
+            if (munmap(at, *len) < 0) {
+                sysErrorBelch("unable to release reserved heap");
+            }
+        }
+        attempt++;
+    }
+
+    return at;
+}
+
+void osCommitMemory(void *at, W_ size)
+{
+    void *r = my_mmap(at, size, MEM_COMMIT);
+    if (r == NULL) {
+        barf("Unable to commit %" FMT_Word " bytes of memory", size);
+    }
+}
+
+void osDecommitMemory(void *at, W_ size)
+{
+    int r;
+
+    // First make the memory unaccessible (so that we get a segfault
+    // at the next attempt to touch it)
+    // We only do this in DEBUG because it forces the OS to remove
+    // all MMU entries for this page range, and there is no reason
+    // to do so unless there is memory pressure
+#if defined(DEBUG)
+    r = mprotect(at, size, PROT_NONE);
+    if(r < 0)
+        sysErrorBelch("unable to make released memory unaccessible");
+#endif
+
+#if defined(MADV_FREE)
+    // Try MADV_FREE first, FreeBSD has both and MADV_DONTNEED
+    // just swaps memory out. Linux >= 4.5 has both DONTNEED and FREE; either
+    // will work as they both allow the system to free anonymous pages.
+    // It is important that we try both methods as the kernel which we were
+    // built on may differ from the kernel we are now running on.
+    r = madvise(at, size, MADV_FREE);
+    if(r < 0) {
+        if (errno == EINVAL) {
+            // Perhaps the system doesn't support MADV_FREE; fall-through and
+            // try MADV_DONTNEED.
+        } else {
+            sysErrorBelch("unable to decommit memory");
+        }
+    } else {
+        return;
+    }
+#endif
+
+    r = madvise(at, size, MADV_DONTNEED);
+    if(r < 0)
+        sysErrorBelch("unable to decommit memory");
+}
+
+void osReleaseHeapMemory(void)
+{
+    int r;
+
+    r = munmap((void*)mblock_address_space.begin,
+               mblock_address_space.end - mblock_address_space.begin);
+    if(r < 0)
+        sysErrorBelch("unable to release address space");
+}
+
+#endif
+
+bool osNumaAvailable(void)
+{
+#if HAVE_LIBNUMA
+    return (numa_available() != -1);
+#else
+    return false;
+#endif
+}
+
+uint32_t osNumaNodes(void)
+{
+#if HAVE_LIBNUMA
+    return numa_num_configured_nodes();
+#else
+    return 1;
+#endif
+}
+
+uint64_t osNumaMask(void)
+{
+#if HAVE_LIBNUMA
+    struct bitmask *mask;
+    mask = numa_get_mems_allowed();
+    if (osNumaNodes() > sizeof(StgWord)*8) {
+        barf("osNumaMask: too many NUMA nodes (%d)", osNumaNodes());
+    }
+    uint64_t r = mask->maskp[0];
+    numa_bitmask_free(mask);
+    return r;
+#else
+    return 1;
+#endif
+}

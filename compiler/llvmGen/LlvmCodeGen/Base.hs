@@ -12,30 +12,32 @@ module LlvmCodeGen.Base (
         LiveGlobalRegs,
         LlvmUnresData, LlvmData, UnresLabel, UnresStatic,
 
-        LlvmVersion, defaultLlvmVersion, minSupportLlvmVersion,
-        maxSupportLlvmVersion,
+        LlvmVersion, supportedLlvmVersion, llvmVersionStr,
 
         LlvmM,
         runLlvm, liftStream, withClearVars, varLookup, varInsert,
         markStackReg, checkStackReg,
         funLookup, funInsert, getLlvmVer, getDynFlags, getDynFlag, getLlvmPlatform,
-        dumpIfSetLlvm, renderLlvm, runUs, markUsedVar, getUsedVars,
+        dumpIfSetLlvm, renderLlvm, markUsedVar, getUsedVars,
         ghcInternalFunctions,
 
         getMetaUniqueId,
         setUniqMeta, getUniqMeta,
-        freshSectionId,
 
         cmmToLlvmType, widthToLlvmFloat, widthToLlvmInt, llvmFunTy,
-        llvmFunSig, llvmStdFunAttrs, llvmFunAlign, llvmInfAlign,
-        llvmPtrBits, mkLlvmFunc, tysToParams,
+        llvmFunSig, llvmFunArgs, llvmStdFunAttrs, llvmFunAlign, llvmInfAlign,
+        llvmPtrBits, tysToParams, llvmFunSection,
 
         strCLabel_llvm, strDisplayName_llvm, strProcedureName_llvm,
-        getGlobalPtr, generateAliases,
+        getGlobalPtr, generateExternDecls,
 
+        aliasify,
     ) where
 
 #include "HsVersions.h"
+#include "ghcautoconf.h"
+
+import GhcPrelude
 
 import Llvm
 import LlvmCodeGen.Regs
@@ -44,9 +46,8 @@ import CLabel
 import CodeGen.Platform ( activeStgRegs )
 import DynFlags
 import FastString
-import Cmm
-import qualified Outputable as Outp
-import qualified Pretty as Prt
+import Cmm              hiding ( succ )
+import Outputable as Outp
 import Platform
 import UniqFM
 import Unique
@@ -57,7 +58,6 @@ import ErrUtils
 import qualified Stream
 
 import Control.Monad (ap)
-import Control.Applicative (Applicative(..))
 
 -- ----------------------------------------------------------------------------
 -- * Some Data Types
@@ -109,7 +109,7 @@ widthToLlvmInt w = LMInt $ widthInBits w
 llvmGhcCC :: DynFlags -> LlvmCallConvention
 llvmGhcCC dflags
  | platformUnregisterised (targetPlatform dflags) = CC_Ccc
- | otherwise                                      = CC_Ncc 10
+ | otherwise                                      = CC_Ghc
 
 -- | Llvm Function type for Cmm function
 llvmFunTy :: LiveGlobalRegs -> LlvmM LlvmType
@@ -130,15 +130,6 @@ llvmFunSig' live lbl link
                                  (map (toParams . getVarType) (llvmFunArgs dflags live))
                                  (llvmFunAlign dflags)
 
--- | Create a Haskell function in LLVM.
-mkLlvmFunc :: LiveGlobalRegs -> CLabel -> LlvmLinkageType -> LMSection -> LlvmBlocks
-           -> LlvmM LlvmFunction
-mkLlvmFunc live lbl link sec blks
-  = do funDec <- llvmFunSig live lbl link
-       dflags <- getDynFlags
-       let funArgs = map (fsLit . Outp.showSDoc dflags . ppPlainName) (llvmFunArgs dflags live)
-       return $ LlvmFunction funDec funArgs llvmStdFunAttrs sec blks
-
 -- | Alignment to use for functions
 llvmFunAlign :: DynFlags -> LMAlign
 llvmFunAlign dflags = Just (wORD_SIZE dflags)
@@ -146,6 +137,12 @@ llvmFunAlign dflags = Just (wORD_SIZE dflags)
 -- | Alignment to use for into tables
 llvmInfAlign :: DynFlags -> LMAlign
 llvmInfAlign dflags = Just (wORD_SIZE dflags)
+
+-- | Section to use for a function
+llvmFunSection :: DynFlags -> LMString -> LMSection
+llvmFunSection dflags lbl
+    | gopt Opt_SplitSections dflags = Just (concatFS [fsLit ".text.", lbl])
+    | otherwise                     = Nothing
 
 -- | A Function's arguments
 llvmFunArgs :: DynFlags -> LiveGlobalRegs -> [LlvmVar]
@@ -179,17 +176,14 @@ llvmPtrBits dflags = widthInBits $ typeWidth $ gcWord dflags
 --
 
 -- | LLVM Version Number
-type LlvmVersion = Int
+type LlvmVersion = (Int, Int)
 
--- | The LLVM Version we assume if we don't know
-defaultLlvmVersion :: LlvmVersion
-defaultLlvmVersion = 30
+-- | The LLVM Version that is currently supported.
+supportedLlvmVersion :: LlvmVersion
+supportedLlvmVersion = sUPPORTED_LLVM_VERSION
 
-minSupportLlvmVersion :: LlvmVersion
-minSupportLlvmVersion = 28
-
-maxSupportLlvmVersion :: LlvmVersion
-maxSupportLlvmVersion = 34
+llvmVersionStr :: LlvmVersion -> String
+llvmVersionStr (major, minor) = show major ++ "." ++ show minor
 
 -- ----------------------------------------------------------------------------
 -- * Environment Handling
@@ -200,9 +194,8 @@ data LlvmEnv = LlvmEnv
   , envDynFlags :: DynFlags        -- ^ Dynamic flags
   , envOutput :: BufHandle         -- ^ Output buffer
   , envUniq :: UniqSupply          -- ^ Supply of unique values
-  , envNextSection :: Int          -- ^ Supply of fresh section IDs
-  , envFreshMeta :: Int            -- ^ Supply of fresh metadata IDs
-  , envUniqMeta :: UniqFM Int      -- ^ Global metadata nodes
+  , envFreshMeta :: MetaId         -- ^ Supply of fresh metadata IDs
+  , envUniqMeta :: UniqFM MetaId   -- ^ Global metadata nodes
   , envFunMap :: LlvmEnvMap        -- ^ Global functions so far, with type
   , envAliases :: UniqSet LMString -- ^ Globals that we had to alias, see [Llvm Forward References]
   , envUsedVars :: [LlvmVar]       -- ^ Pointers to be added to llvm.used (see @cmmUsedLlvmGens@)
@@ -222,16 +215,28 @@ instance Functor LlvmM where
                                   return (f x, env')
 
 instance Applicative LlvmM where
-    pure = return
+    pure x = LlvmM $ \env -> return (x, env)
     (<*>) = ap
 
 instance Monad LlvmM where
-    return x = LlvmM $ \env -> return (x, env)
     m >>= f  = LlvmM $ \env -> do (x, env') <- runLlvmM m env
                                   runLlvmM (f x) env'
 
 instance HasDynFlags LlvmM where
     getDynFlags = LlvmM $ \env -> return (envDynFlags env, env)
+
+instance MonadUnique LlvmM where
+    getUniqueSupplyM = do
+        us <- getEnv envUniq
+        let (us1, us2) = splitUniqSupply us
+        modifyEnv (\s -> s { envUniq = us2 })
+        return us1
+
+    getUniqueM = do
+        us <- getEnv envUniq
+        let (u,us') = takeUniqFromSupply us
+        modifyEnv (\s -> s { envUniq = us' })
+        return u
 
 -- | Lifting of IO actions. Not exported, as we want to encapsulate IO.
 liftIO :: IO a -> LlvmM a
@@ -252,9 +257,8 @@ runLlvm dflags ver out us m = do
                       , envDynFlags = dflags
                       , envOutput = out
                       , envUniq = us
-                      , envFreshMeta = 0
+                      , envFreshMeta = MetaId 0
                       , envUniqMeta = emptyUFM
-                      , envNextSection = 1
                       }
 
 -- | Get environment (internal)
@@ -298,8 +302,9 @@ checkStackReg :: GlobalReg -> LlvmM Bool
 checkStackReg r = getEnv ((elem r) . envStackRegs)
 
 -- | Allocate a new global unnamed metadata identifier
-getMetaUniqueId :: LlvmM Int
-getMetaUniqueId = LlvmM $ \env -> return (envFreshMeta env, env { envFreshMeta = envFreshMeta env + 1})
+getMetaUniqueId :: LlvmM MetaId
+getMetaUniqueId = LlvmM $ \env ->
+    return (envFreshMeta env, env { envFreshMeta = succ $ envFreshMeta env })
 
 -- | Get the LLVM version we are generating code for
 getLlvmVer :: LlvmM LlvmVersion
@@ -326,18 +331,12 @@ renderLlvm sdoc = do
     -- Write to output
     dflags <- getDynFlags
     out <- getEnv envOutput
-    let doc = Outp.withPprStyleDoc dflags (Outp.mkCodeStyle Outp.CStyle) sdoc
-    liftIO $ Prt.bufLeftRender out doc
+    liftIO $ Outp.bufLeftRenderSDoc dflags out
+               (Outp.mkCodeStyle Outp.CStyle) sdoc
 
     -- Dump, if requested
     dumpIfSetLlvm Opt_D_dump_llvm "LLVM Code" sdoc
     return ()
-
--- | Run a @UniqSM@ action with our unique supply
-runUs :: UniqSM a -> LlvmM a
-runUs m = LlvmM $ \env -> do
-    let (x, us') = initUs (envUniq env) m
-    return (x, env { envUniq = us' })
 
 -- | Marks a variable as "used"
 markUsedVar :: LlvmVar -> LlvmM ()
@@ -353,15 +352,12 @@ saveAlias :: LMString -> LlvmM ()
 saveAlias lbl = modifyEnv $ \env -> env { envAliases = addOneToUniqSet (envAliases env) lbl }
 
 -- | Sets metadata node for a given unique
-setUniqMeta :: Unique -> Int -> LlvmM ()
+setUniqMeta :: Unique -> MetaId -> LlvmM ()
 setUniqMeta f m = modifyEnv $ \env -> env { envUniqMeta = addToUFM (envUniqMeta env) f m }
--- | Gets metadata node for given unique
-getUniqMeta :: Unique -> LlvmM (Maybe Int)
-getUniqMeta s = getEnv (flip lookupUFM s . envUniqMeta)
 
--- | Returns a fresh section ID
-freshSectionId :: LlvmM Int
-freshSectionId = LlvmM $ \env -> return (envNextSection env, env { envNextSection = envNextSection env + 1})
+-- | Gets metadata node for given unique
+getUniqMeta :: Unique -> LlvmM (Maybe MetaId)
+getUniqMeta s = getEnv (flip lookupUFM s . envUniqMeta)
 
 -- ----------------------------------------------------------------------------
 -- * Internal functions
@@ -381,7 +377,7 @@ ghcInternalFunctions = do
     mk "newSpark" (llvmWord dflags) [i8Ptr, i8Ptr]
   where
     mk n ret args = do
-      let n' = fsLit n
+      let n' = fsLit n `appendFS` fsLit "$def"
           decl = LlvmFunctionDecl n' ExternallyVisible CC_Ccc ret
                                  FixedArgs (tysToParams args) Nothing
       renderLlvm $ ppLlvmFunctionDecl decl
@@ -406,7 +402,7 @@ strDisplayName_llvm lbl = do
     dflags <- getDynFlags
     let sdoc = pprCLabel platform lbl
         depth = Outp.PartWay 1
-        style = Outp.mkUserStyle Outp.reallyAlwaysQualify depth
+        style = Outp.mkUserStyle dflags Outp.reallyAlwaysQualify depth
         str = Outp.renderWithStyle dflags sdoc style
     return (fsLit (dropInfoSuffix str))
 
@@ -424,7 +420,7 @@ strProcedureName_llvm lbl = do
     dflags <- getDynFlags
     let sdoc = pprCLabel platform lbl
         depth = Outp.PartWay 1
-        style = Outp.mkUserStyle Outp.neverQualify depth
+        style = Outp.mkUserStyle dflags Outp.neverQualify depth
         str = Outp.renderWithStyle dflags sdoc style
     return (fsLit str)
 
@@ -441,33 +437,61 @@ getGlobalPtr llvmLbl = do
   let mkGlbVar lbl ty = LMGlobalVar lbl (LMPointer ty) Private Nothing Nothing
   case m_ty of
     -- Directly reference if we have seen it already
-    Just ty -> return $ mkGlbVar llvmLbl ty Global
+    Just ty -> return $ mkGlbVar (llvmLbl `appendFS` fsLit "$def") ty Global
     -- Otherwise use a forward alias of it
     Nothing -> do
       saveAlias llvmLbl
-      return $ mkGlbVar (llvmLbl `appendFS` fsLit "$alias") i8 Alias
+      return $ mkGlbVar llvmLbl i8 Alias
 
 -- | Generate definitions for aliases forward-referenced by @getGlobalPtr@.
 --
 -- Must be called at a point where we are sure that no new global definitions
 -- will be generated anymore!
-generateAliases :: LlvmM ([LMGlobal], [LlvmType])
-generateAliases = do
-  delayed <- fmap uniqSetToList $ getEnv envAliases
+generateExternDecls :: LlvmM ([LMGlobal], [LlvmType])
+generateExternDecls = do
+  delayed <- fmap nonDetEltsUniqSet $ getEnv envAliases
+  -- This is non-deterministic but we do not
+  -- currently support deterministic code-generation.
+  -- See Note [Unique Determinism and code generation]
   defss <- flip mapM delayed $ \lbl -> do
-    let var      ty = LMGlobalVar lbl (LMPointer ty) External Nothing Nothing Global
-        aliasLbl    = lbl `appendFS` fsLit "$alias"
-        aliasVar    = LMGlobalVar aliasLbl i8Ptr Private Nothing Nothing Alias
-    -- If we have a definition, set the alias value using a
-    -- cost. Otherwise, declare it as an undefined external symbol.
     m_ty <- funLookup lbl
     case m_ty of
-      Just ty -> return [LMGlobal aliasVar $ Just $ LMBitc (LMStaticPointer (var ty)) i8Ptr]
-      Nothing -> return [LMGlobal (var i8) Nothing,
-                         LMGlobal aliasVar $ Just $ LMStaticPointer (var i8) ]
+      -- If we have a definition we've already emitted the proper aliases
+      -- when the symbol itself was emitted by @aliasify@
+      Just _ -> return []
+
+      -- If we don't have a definition this is an external symbol and we
+      -- need to emit a declaration
+      Nothing ->
+        let var = LMGlobalVar lbl i8Ptr External Nothing Nothing Global
+        in return [LMGlobal var Nothing]
+
   -- Reset forward list
   modifyEnv $ \env -> env { envAliases = emptyUniqSet }
   return (concat defss, [])
+
+-- | Here we take a global variable definition, rename it with a
+-- @$def@ suffix, and generate the appropriate alias.
+aliasify :: LMGlobal -> LlvmM [LMGlobal]
+aliasify (LMGlobal var val) = do
+    let i8Ptr = LMPointer (LMInt 8)
+        LMGlobalVar lbl ty link sect align const = var
+
+        defLbl = lbl `appendFS` fsLit "$def"
+        defVar = LMGlobalVar defLbl ty Internal sect align const
+
+        defPtrVar = LMGlobalVar defLbl (LMPointer ty) link Nothing Nothing const
+        aliasVar = LMGlobalVar lbl (LMPointer i8Ptr) link Nothing Nothing Alias
+        aliasVal = LMBitc (LMStaticPointer defPtrVar) i8Ptr
+
+    -- we need to mark the $def symbols as used so LLVM doesn't forget which
+    -- section they need to go in. This will vanish once we switch away from
+    -- mangling sections for TNTC.
+    markUsedVar defVar
+
+    return [ LMGlobal defVar val
+           , LMGlobal aliasVar (Just aliasVal)
+           ]
 
 -- Note [Llvm Forward References]
 --
@@ -481,12 +505,48 @@ generateAliases = do
 -- these kind of situations, which we later tell LLVM to be either
 -- references to their actual local definitions (involving a cast) or
 -- an external reference. This obviously only works for pointers.
-
--- ----------------------------------------------------------------------------
--- * Misc
 --
-
--- | Error function
-panic :: String -> a
-panic s = Outp.panic $ "LlvmCodeGen.Base." ++ s
-
+-- In particular when we encounter a reference to a symbol in a chunk of
+-- C-- there are three possible scenarios,
+--
+--   1. We have already seen a definition for the referenced symbol. This
+--      means we already know its type.
+--
+--   2. We have not yet seen a definition but we will find one later in this
+--      compilation unit. Since we want to be a good consumer of the
+--      C-- streamed to us from upstream, we don't know the type of the
+--      symbol at the time when we must emit the reference.
+--
+--   3. We have not yet seen a definition nor will we find one in this
+--      compilation unit. In this case the reference refers to an
+--      external symbol for which we do not know the type.
+--
+-- Let's consider case (2) for a moment: say we see a reference to
+-- the symbol @fooBar@ for which we have not seen a definition. As we
+-- do not know the symbol's type, we assume it is of type @i8*@ and emit
+-- the appropriate casts in @getSymbolPtr@. Later on, when we
+-- encounter the definition of @fooBar@ we emit it but with a modified
+-- name, @fooBar$def@ (which we'll call the definition symbol), to
+-- since we have already had to assume that the symbol @fooBar@
+-- is of type @i8*@. We then emit @fooBar@ itself as an alias
+-- of @fooBar$def@ with appropriate casts. This all happens in
+-- @aliasify@.
+--
+-- Case (3) is quite similar to (2): References are emitted assuming
+-- the referenced symbol is of type @i8*@. When we arrive at the end of
+-- the compilation unit and realize that the symbol is external, we emit
+-- an LLVM @external global@ declaration for the symbol @fooBar@
+-- (handled in @generateExternDecls@). This takes advantage of the
+-- fact that the aliases produced by @aliasify@ for exported symbols
+-- have external linkage and can therefore be used as normal symbols.
+--
+-- Historical note: As of release 3.5 LLVM does not allow aliases to
+-- refer to declarations. This the reason why aliases are produced at the
+-- point of definition instead of the point of usage, as was previously
+-- done. See #9142 for details.
+--
+-- Finally, case (1) is trival. As we already have a definition for
+-- and therefore know the type of the referenced symbol, we can do
+-- away with casting the alias to the desired type in @getSymbolPtr@
+-- and instead just emit a reference to the definition symbol directly.
+-- This is the @Just@ case in @getSymbolPtr@.

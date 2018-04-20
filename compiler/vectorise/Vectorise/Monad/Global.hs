@@ -4,34 +4,36 @@ module Vectorise.Monad.Global (
   readGEnv,
   setGEnv,
   updGEnv,
-  
+
   -- * Configuration
   isVectAvoidanceAggressive,
-  
+
   -- * Vars
   defGlobalVar, undefGlobalVar,
-  
+
   -- * Vectorisation declarations
-  lookupVectDecl, 
-  
+  lookupVectDecl,
+
   -- * Scalars
   globalParallelVars, globalParallelTyCons,
-  
+
   -- * TyCons
   lookupTyCon,
   defTyConName, defTyCon, globalVectTyCons,
-  
+
   -- * Datacons
   lookupDataCon,
   defDataCon,
-  
+
   -- * PA Dictionaries
   lookupTyConPA,
   defTyConPAs,
-  
+
   -- * PR Dictionaries
   lookupTyConPR
 ) where
+
+import GhcPrelude
 
 import Vectorise.Monad.Base
 import Vectorise.Env
@@ -47,7 +49,6 @@ import Name
 import VarEnv
 import VarSet
 import Var as Var
-import FastString
 import Outputable
 
 
@@ -85,7 +86,7 @@ isVectAvoidanceAggressive = readGEnv global_vect_avoid
 --
 defGlobalVar :: Var -> Var -> VM ()
 defGlobalVar v v'
-  = do { traceVt "add global var mapping:" (ppr v <+> text "-->" <+> ppr v') 
+  = do { traceVt "add global var mapping:" (ppr v <+> text "-->" <+> ppr v')
 
            -- check for duplicate vectorisation
        ; currentDef <- readGEnv $ \env -> lookupVarEnv (global_vars env) v
@@ -100,17 +101,17 @@ defGlobalVar v v'
        }
   where
     moduleOf var var' | var == var'
-                      = ptext (sLit "vectorises to itself")
-                      | Just mod <- nameModule_maybe (Var.varName var') 
-                      = ptext (sLit "in module") <+> ppr mod
+                      = text "vectorises to itself"
+                      | Just mod <- nameModule_maybe (Var.varName var')
+                      = text "in module" <+> ppr mod
                       | otherwise
-                      = ptext (sLit "in the current module")
+                      = text "in the current module"
 
 -- |Remove the mapping of a variable in the vectorisation map.
 --
 undefGlobalVar :: Var -> VM ()
 undefGlobalVar v
-  = do 
+  = do
     { traceVt "REMOVING global var mapping:" (ppr v)
     ; updGEnv  $ \env -> env { global_vars = delVarEnv (global_vars env) v }
     }
@@ -124,8 +125,8 @@ undefGlobalVar v
 -- The second component contains the given type and expression in case of a 'VECTORISE' declaration.
 --
 lookupVectDecl :: Var -> VM (Bool, Maybe (Type, CoreExpr))
-lookupVectDecl var 
-  = readGEnv $ \env -> 
+lookupVectDecl var
+  = readGEnv $ \env ->
       case lookupVarEnv (global_vect_decls env) var of
         Nothing -> (False, Nothing)
         Just Nothing  -> (True, Nothing)
@@ -136,7 +137,7 @@ lookupVectDecl var
 
 -- |Get the set of global parallel variables.
 --
-globalParallelVars :: VM VarSet
+globalParallelVars :: VM DVarSet
 globalParallelVars = readGEnv global_parallel_vars
 
 -- |Get the set of all parallel type constructors (those that may embed parallelism) including both
@@ -164,7 +165,7 @@ lookupTyCon tc
 --
 defTyConName :: TyCon -> Name -> TyCon -> VM ()
 defTyConName tc nameOfTc' tc'
-  = do { traceVt "add global tycon mapping:" (ppr tc <+> text "-->" <+> ppr nameOfTc') 
+  = do { traceVt "add global tycon mapping:" (ppr tc <+> text "-->" <+> ppr nameOfTc')
 
            -- check for duplicate vectorisation
        ; currentDef <- readGEnv $ \env -> lookupNameEnv (global_tycons env) (tyConName tc)
@@ -175,16 +176,16 @@ defTyConName tc nameOfTc' tc'
                             ppr tc <+> moduleOf tc old_tc'
            Nothing     -> return ()
 
-       ; updGEnv $ \env -> 
+       ; updGEnv $ \env ->
            env { global_tycons = extendNameEnv (global_tycons env) (tyConName tc) tc' }
        }
   where
     moduleOf tc tc' | tc == tc'
-                    = ptext (sLit "vectorises to itself")
-                    | Just mod <- nameModule_maybe (tyConName tc') 
-                    = ptext (sLit "in module") <+> ppr mod
+                    = text "vectorises to itself"
+                    | Just mod <- nameModule_maybe (tyConName tc')
+                    = text "in module" <+> ppr mod
                     | otherwise
-                    = ptext (sLit "in the current module")
+                    = text "in the current module"
 
 -- |Add a mapping between plain and vectorised `TyCon`s to the global environment.
 --
@@ -203,9 +204,9 @@ globalVectTyCons = readGEnv global_tycons
 --
 lookupDataCon :: DataCon -> VM (Maybe DataCon)
 lookupDataCon dc
-  | isTupleTyCon (dataConTyCon dc) 
+  | isTupleTyCon (dataConTyCon dc)
   = return (Just dc)
-  | otherwise 
+  | otherwise
   = readGEnv $ \env -> lookupNameEnv (global_datacons env) (dataConName dc)
 
 -- |Add the mapping between plain and vectorised `DataCon`s to the global environment.

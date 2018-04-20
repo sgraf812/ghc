@@ -1,7 +1,8 @@
+{-# LANGUAGE CPP #-}
+
 module Main where
 
 import Data.Bits
-import Data.Word
 
 test_and1 :: Word -> Word
 test_and1 x = x .&. 0

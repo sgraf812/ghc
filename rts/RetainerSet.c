@@ -7,7 +7,7 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifdef PROFILING
+#if defined(PROFILING)
 
 #include "PosixSource.h"
 #include "Rts.h"
@@ -40,11 +40,11 @@ static int nextId;              // id of next retainer set
  * from growing too large.
  * -------------------------------------------------------------------------- */
 RetainerSet rs_MANY = {
-    num : 0,
-    hashKey : 0,
-    link : NULL,
-    id : 1,
-    element : {}
+    .num     = 0,
+    .hashKey = 0,
+    .link    = NULL,
+    .id      = 1,
+    .element = {}
 };
 
 /* -----------------------------------------------------------------------------
@@ -78,7 +78,7 @@ initializeAllRetainerSet(void)
 void
 refreshAllRetainerSet(void)
 {
-#ifdef FIRST_APPROACH
+#if defined(FIRST_APPROACH)
     int i;
 
     // first approach: completely refresh
@@ -130,7 +130,7 @@ singleton(retainer r)
 /* -----------------------------------------------------------------------------
  *   Finds or creates a retainer set *rs augmented with r.
  *   Invariants:
- *     r is not a member of rs, i.e., isMember(r, rs) returns rtsFalse.
+ *     r is not a member of rs, i.e., isMember(r, rs) returns false.
  *     rs is not NULL.
  *   Note:
  *     We could check if rs is NULL, in which case this function call
@@ -140,12 +140,12 @@ singleton(retainer r)
 RetainerSet *
 addElement(retainer r, RetainerSet *rs)
 {
-    nat i;
-    nat nl;             // Number of retainers in *rs Less than r
+    uint32_t i;
+    uint32_t nl;        // Number of retainers in *rs Less than r
     RetainerSet *nrs;   // New Retainer Set
     StgWord hk;         // Hash Key
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     // debugBelch("addElement(%p, %p) = ", r, rs);
 #endif
 
@@ -185,7 +185,7 @@ addElement(retainer r, RetainerSet *rs)
             if (rs->element[i] != nrs->element[i + 1]) break;
         if (i < rs->num) continue;
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
         // debugBelch("%p\n", nrs);
 #endif
         // The set we are seeking already exists!
@@ -208,114 +208,33 @@ addElement(retainer r, RetainerSet *rs)
 
     hashTable[hash(hk)] = nrs;
 
-#ifdef DEBUG_RETAINER
+#if defined(DEBUG_RETAINER)
     // debugBelch("%p\n", nrs);
 #endif
     return nrs;
 }
 
 /* -----------------------------------------------------------------------------
- *  Call f() for each retainer set.
- * -------------------------------------------------------------------------- */
-void
-traverseAllRetainerSet(void (*f)(RetainerSet *))
-{
-    int i;
-    RetainerSet *rs;
-
-    (*f)(&rs_MANY);
-    for (i = 0; i < HASH_TABLE_SIZE; i++)
-        for (rs = hashTable[i]; rs != NULL; rs = rs->link)
-            (*f)(rs);
-}
-
-
-/* -----------------------------------------------------------------------------
  *  printRetainer() prints the full information on a given retainer,
  *  not a retainer set.
  * -------------------------------------------------------------------------- */
-#if defined(RETAINER_SCHEME_INFO)
-// Retainer scheme 1: retainer = info table
-void
-printRetainer(FILE *f, retainer itbl)
-{
-    fprintf(f, "%s[%s]", GET_PROF_DESC(itbl), itbl->prof.closure_type);
-}
-#elif defined(RETAINER_SCHEME_CCS)
-// Retainer scheme 2: retainer = cost centre stack
-void
+static void
 printRetainer(FILE *f, retainer ccs)
 {
     fprintCCS(f, ccs);
 }
-#elif defined(RETAINER_SCHEME_CC)
-// Retainer scheme 3: retainer = cost centre
-void
-printRetainer(FILE *f, retainer cc)
-{
-    fprintf(f,"%s.%s", cc->module, cc->label);
-}
-#endif
 
 /* -----------------------------------------------------------------------------
  *  printRetainerSetShort() should always display the same output for
  *  a given retainer set regardless of the time of invocation.
  * -------------------------------------------------------------------------- */
-#ifdef SECOND_APPROACH
-#if defined(RETAINER_SCHEME_INFO)
-// Retainer scheme 1: retainer = info table
+#if defined(SECOND_APPROACH)
 void
-printRetainerSetShort(FILE *f, RetainerSet *rs, nat max_length)
+printRetainerSetShort(FILE *f, RetainerSet *rs, uint32_t max_length)
 {
     char tmp[max_length + 1];
-    int size;
-    nat j;
-
-    ASSERT(rs->id < 0);
-
-    tmp[max_length] = '\0';
-
-    // No blank characters are allowed.
-    sprintf(tmp + 0, "(%d)", -(rs->id));
-    size = strlen(tmp);
-    ASSERT(size < max_length);
-
-    for (j = 0; j < rs->num; j++) {
-        if (j < rs->num - 1) {
-            strncpy(tmp + size, GET_PROF_DESC(rs->element[j]), max_length - size);
-            size = strlen(tmp);
-            if (size == max_length)
-                break;
-            strncpy(tmp + size, ",", max_length - size);
-            size = strlen(tmp);
-            if (size == max_length)
-                break;
-        }
-        else {
-            strncpy(tmp + size, GET_PROF_DESC(rs->element[j]), max_length - size);
-            // size = strlen(tmp);
-        }
-    }
-    fprintf(f, tmp);
-}
-#elif defined(RETAINER_SCHEME_CC)
-// Retainer scheme 3: retainer = cost centre
-void
-printRetainerSetShort(FILE *f, RetainerSet *rs, nat max_length)
-{
-    char tmp[max_length + 1];
-    int size;
-    nat j;
-
-}
-#elif defined(RETAINER_SCHEME_CCS)
-// Retainer scheme 2: retainer = cost centre stack
-void
-printRetainerSetShort(FILE *f, RetainerSet *rs, nat max_length)
-{
-    char tmp[max_length + 1];
-    nat size;
-    nat j;
+    uint32_t size;
+    uint32_t j;
 
     ASSERT(rs->id < 0);
 
@@ -344,82 +263,6 @@ printRetainerSetShort(FILE *f, RetainerSet *rs, nat max_length)
     }
     fputs(tmp, f);
 }
-#elif defined(RETAINER_SCHEME_CC)
-// Retainer scheme 3: retainer = cost centre
-static void
-printRetainerSetShort(FILE *f, retainerSet *rs, nat max_length)
-{
-    char tmp[max_length + 1];
-    int size;
-    nat j;
-
-    ASSERT(rs->id < 0);
-
-    tmp[max_length] = '\0';
-
-    // No blank characters are allowed.
-    sprintf(tmp + 0, "(%d)", -(rs->id));
-    size = strlen(tmp);
-    ASSERT(size < max_length);
-
-    for (j = 0; j < rs->num; j++) {
-        if (j < rs->num - 1) {
-            strncpy(tmp + size, rs->element[j]->label,
-                    max_length - size);
-            size = strlen(tmp);
-            if (size == max_length)
-                break;
-            strncpy(tmp + size, ",", max_length - size);
-            size = strlen(tmp);
-            if (size == max_length)
-                break;
-        }
-        else {
-            strncpy(tmp + size, rs->element[j]->label,
-                    max_length - size);
-            // size = strlen(tmp);
-        }
-    }
-    fprintf(f, tmp);
-/*
-  #define DOT_NUMBER              3
-  // 1. 32 > max_length + 1 (1 for '\0')
-  // 2. (max_length - DOT_NUMBER ) characters should be enough for
-  //    printing one natural number (plus '(' and ')').
-  char tmp[32];
-  int size, ts;
-  nat j;
-
-  ASSERT(rs->id < 0);
-
-  // No blank characters are allowed.
-  sprintf(tmp + 0, "(%d)", -(rs->id));
-  size = strlen(tmp);
-  ASSERT(size < max_length - DOT_NUMBER);
-
-  for (j = 0; j < rs->num; j++) {
-    ts = strlen(rs->element[j]->label);
-    if (j < rs->num - 1) {
-      if (size + ts + 1 > max_length - DOT_NUMBER) {
-        sprintf(tmp + size, "...");
-        break;
-      }
-      sprintf(tmp + size, "%s,", rs->element[j]->label);
-      size += ts + 1;
-    }
-    else {
-      if (size + ts > max_length - DOT_NUMBER) {
-        sprintf(tmp + size, "...");
-        break;
-      }
-      sprintf(tmp + size, "%s", rs->element[j]->label);
-      size += ts;
-    }
-  }
-  fprintf(f, tmp);
-*/
-}
-#endif /* RETAINER_SCHEME_CC */
 #endif /* SECOND_APPROACH */
 
 /* -----------------------------------------------------------------------------
@@ -427,12 +270,12 @@ printRetainerSetShort(FILE *f, retainerSet *rs, nat max_length)
  * of the run, so the user can find out for a given retainer set ID
  * the full contents of that set.
  * -------------------------------------------------------------------------- */
-#ifdef SECOND_APPROACH
+#if defined(SECOND_APPROACH)
 void
 outputAllRetainerSet(FILE *prof_file)
 {
-    nat i, j;
-    nat numSet;
+    uint32_t i, j;
+    uint32_t numSet;
     RetainerSet *rs, **rsArray, *tmp;
 
     // find out the number of retainer sets which have had a non-zero cost at
@@ -491,11 +334,3 @@ outputAllRetainerSet(FILE *prof_file)
 #endif /* SECOND_APPROACH */
 
 #endif /* PROFILING */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

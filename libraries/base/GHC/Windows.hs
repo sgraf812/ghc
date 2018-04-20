@@ -1,12 +1,13 @@
 {-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.Windows
 -- Copyright   :  (c) The University of Glasgow, 2009
 -- License     :  see libraries/base/LICENSE
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  internal
 -- Portability :  non-portable
@@ -58,7 +59,7 @@ module GHC.Windows (
     ) where
 
 import Data.Char
-import Data.List
+import Data.OldList
 import Data.Maybe
 import Data.Word
 import Foreign.C.Error
@@ -120,7 +121,7 @@ errCodeToIOError fn_name err_code = do
     -- XXX we should really do this directly.
     let errno = c_maperrno_func err_code
 
-    let msg' = reverse $ dropWhile isSpace $ reverse msg -- drop trailing \n
+    let msg' = dropWhileEnd isSpace msg -- drop trailing \n
         ioerror = errnoToIOError fn_name errno Nothing Nothing
                     `ioeSetErrorString` msg'
     return ioerror

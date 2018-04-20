@@ -10,8 +10,9 @@
 
 module StgCmm ( codeGen ) where
 
-#define FAST_STRING_NOT_NEEDED
 #include "HsVersions.h"
+
+import GhcPrelude as Prelude
 
 import StgCmmProf (initCostCentres, ldvEnter)
 import StgCmmMonad
@@ -25,6 +26,7 @@ import StgCmmHpc
 import StgCmmTicky
 
 import Cmm
+import CmmUtils
 import CLabel
 
 import StgSyn
@@ -34,7 +36,7 @@ import HscTypes
 import CostCentre
 import Id
 import IdInfo
-import Type
+import RepType
 import DataCon
 import Name
 import TyCon
@@ -46,6 +48,7 @@ import BasicTypes
 import OrdList
 import MkGraph
 
+import qualified Data.ByteString as BS
 import Data.IORef
 import Control.Monad (when,void)
 import Util
@@ -54,7 +57,7 @@ codeGen :: DynFlags
         -> Module
         -> [TyCon]
         -> CollectedCCs                -- (Local/global) cost-centres needing declaring/registering.
-        -> [StgBinding]                -- Bindings to convert
+        -> [StgTopBinding]             -- Bindings to convert
         -> HpcInfo
         -> Stream IO CmmGroup ()       -- Output as a stream, so codegen can
                                         -- be interleaved with output
@@ -114,8 +117,8 @@ This is so that we can write the top level processing in a compositional
 style, with the increasing static environment being plumbed as a state
 variable. -}
 
-cgTopBinding :: DynFlags -> StgBinding -> FCode ()
-cgTopBinding dflags (StgNonRec id rhs)
+cgTopBinding :: DynFlags -> StgTopBinding -> FCode ()
+cgTopBinding dflags (StgTopLifted (StgNonRec id rhs))
   = do  { id' <- maybeExternaliseId dflags id
         ; let (info, fcode) = cgTopRhs dflags NonRecursive id' rhs
         ; fcode
@@ -123,7 +126,7 @@ cgTopBinding dflags (StgNonRec id rhs)
                         -- so we find it when we look up occurrences
         }
 
-cgTopBinding dflags (StgRec pairs)
+cgTopBinding dflags (StgTopLifted (StgRec pairs))
   = do  { let (bndrs, rhss) = unzip pairs
         ; bndrs' <- Prelude.mapM (maybeExternaliseId dflags) bndrs
         ; let pairs' = zip bndrs' rhss
@@ -133,15 +136,24 @@ cgTopBinding dflags (StgRec pairs)
         ; sequence_ fcodes
         }
 
+cgTopBinding dflags (StgTopStringLit id str)
+  = do  { id' <- maybeExternaliseId dflags id
+        ; let label = mkBytesLabel (idName id')
+        ; let (lit, decl) = mkByteStringCLit label (BS.unpack str)
+        ; emitDecl decl
+        ; addBindC (litIdInfo dflags id' mkLFStringLit lit)
+        }
 
 cgTopRhs :: DynFlags -> RecFlag -> Id -> StgRhs -> (CgIdInfo, FCode ())
         -- The Id is passed along for setting up a binding...
         -- It's already been externalised if necessary
 
 cgTopRhs dflags _rec bndr (StgRhsCon _cc con args)
-  = cgTopRhsCon dflags bndr con args
+  = cgTopRhsCon dflags bndr con (assertNonVoidStgArgs args)
+      -- con args are always non-void,
+      -- see Note [Post-unarisation invariants] in UnariseStg
 
-cgTopRhs dflags rec bndr (StgRhsClosure cc bi fvs upd_flag _srt args body)
+cgTopRhs dflags rec bndr (StgRhsClosure cc bi fvs upd_flag args body)
   = ASSERT(null fvs)    -- There should be no free variables
     cgTopRhsClosure dflags rec bndr cc bi upd_flag args body
 
@@ -149,39 +161,6 @@ cgTopRhs dflags rec bndr (StgRhsClosure cc bi fvs upd_flag _srt args body)
 ---------------------------------------------------------------
 --      Module initialisation code
 ---------------------------------------------------------------
-
-{- The module initialisation code looks like this, roughly:
-
-        FN(__stginit_Foo) {
-          JMP_(__stginit_Foo_1_p)
-        }
-
-        FN(__stginit_Foo_1_p) {
-        ...
-        }
-
-   We have one version of the init code with a module version and the
-   'way' attached to it.  The version number helps to catch cases
-   where modules are not compiled in dependency order before being
-   linked: if a module has been compiled since any modules which depend on
-   it, then the latter modules will refer to a different version in their
-   init blocks and a link error will ensue.
-
-   The 'way' suffix helps to catch cases where modules compiled in different
-   ways are linked together (eg. profiled and non-profiled).
-
-   We provide a plain, unadorned, version of the module init code
-   which just jumps to the version with the label and way attached.  The
-   reason for this is that when using foreign exports, the caller of
-   startupHaskell() must supply the name of the init function for the "top"
-   module in the program, and we don't want to require that this name
-   has the version and way info appended to it.
-
-We initialise the module tree by keeping a work-stack,
-        * pointed to by Sp
-        * that grows downward
-        * Sp points to the last occupied slot
--}
 
 mkModuleInit
         :: CollectedCCs         -- cost centre info
@@ -192,9 +171,6 @@ mkModuleInit
 mkModuleInit cost_centre_info this_mod hpc_info
   = do  { initHpc this_mod hpc_info
         ; initCostCentres cost_centre_info
-            -- For backwards compatibility: user code may refer to this
-            -- label for calling hs_add_root().
-        ; emitDecl (CmmData Data (Statics (mkPlainModuleInitLabel this_mod) []))
         }
 
 
@@ -219,43 +195,36 @@ cgDataCon data_con
   = do  { dflags <- getDynFlags
         ; let
             (tot_wds, --  #ptr_wds + #nonptr_wds
-             ptr_wds, --  #ptr_wds
-             arg_things) = mkVirtConstrOffsets dflags arg_reps
+             ptr_wds) --  #ptr_wds
+              = mkVirtConstrSizes dflags arg_reps
 
             nonptr_wds   = tot_wds - ptr_wds
 
-            sta_info_tbl = mkDataConInfoTable dflags data_con True  ptr_wds nonptr_wds
-            dyn_info_tbl = mkDataConInfoTable dflags data_con False ptr_wds nonptr_wds
+            dyn_info_tbl =
+              mkDataConInfoTable dflags data_con False ptr_wds nonptr_wds
 
-            emit_info info_tbl ticky_code
-                = emitClosureAndInfoTable info_tbl NativeDirectCall []
-                             $ mk_code ticky_code
+            -- We're generating info tables, so we don't know and care about
+            -- what the actual arguments are. Using () here as the place holder.
+            arg_reps :: [NonVoid PrimRep]
+            arg_reps = [ NonVoid rep_ty
+                       | ty <- dataConRepArgTys data_con
+                       , rep_ty <- typePrimRep ty
+                       , not (isVoidRep rep_ty) ]
 
-            mk_code ticky_code
-              = -- NB: the closure pointer is assumed *untagged* on
-                -- entry to a constructor.  If the pointer is tagged,
-                -- then we should not be entering it.  This assumption
-                -- is used in ldvEnter and when tagging the pointer to
-                -- return it.
-                -- NB 2: We don't set CC when entering data (WDP 94/06)
-                do { _ <- ticky_code
-                   ; ldvEnter (CmmReg nodeReg)
-                   ; tickyReturnOldCon (length arg_things)
-                   ; void $ emitReturn [cmmOffsetB dflags (CmmReg nodeReg)
-                                            (tagForCon dflags data_con)]
-                   }
-                        -- The case continuation code expects a tagged pointer
-
-            arg_reps :: [(PrimRep, UnaryType)]
-            arg_reps = [(typePrimRep rep_ty, rep_ty) | ty <- dataConRepArgTys data_con, rep_ty <- flattenRepType (repType ty)]
-
-            -- Dynamic closure code for non-nullary constructors only
-        ; when (not (isNullaryRepDataCon data_con))
-                (emit_info dyn_info_tbl tickyEnterDynCon)
-
-                -- Dynamic-Closure first, to reduce forward references
-        ; emit_info sta_info_tbl tickyEnterStaticCon }
-
+        ; emitClosureAndInfoTable dyn_info_tbl NativeDirectCall [] $
+            -- NB: the closure pointer is assumed *untagged* on
+            -- entry to a constructor.  If the pointer is tagged,
+            -- then we should not be entering it.  This assumption
+            -- is used in ldvEnter and when tagging the pointer to
+            -- return it.
+            -- NB 2: We don't set CC when entering data (WDP 94/06)
+            do { tickyEnterDynCon
+               ; ldvEnter (CmmReg nodeReg)
+               ; tickyReturnOldCon (length arg_reps)
+               ; void $ emitReturn [cmmOffsetB dflags (CmmReg nodeReg) (tagForCon dflags data_con)]
+               }
+                    -- The case continuation code expects a tagged pointer
+        }
 
 ---------------------------------------------------------------
 --      Stuff to support splitting
@@ -266,8 +235,8 @@ maybeExternaliseId dflags id
   | gopt Opt_SplitObjs dflags,  -- See Note [Externalise when splitting]
                                 -- in StgCmmMonad
     isInternalName name = do { mod <- getModuleName
-                             ; returnFC (setIdName id (externalise mod)) }
-  | otherwise           = returnFC id
+                             ; return (setIdName id (externalise mod)) }
+  | otherwise           = return id
   where
     externalise mod = mkExternalName uniq mod new_occ loc
     name    = idName id

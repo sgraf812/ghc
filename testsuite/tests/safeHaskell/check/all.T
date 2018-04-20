@@ -7,13 +7,8 @@ def f( name, opts ):
 
 setTestOpts(f)
 
-def normaliseBytestringPackage(str):
-    return re.sub('bytestring-[0-9]+(\.[0-9]+)*', 'bytestring-<VERSION>', str)
-
 test('CheckA', normal, compile, [''])
-test('CheckB',
-     extra_clean(['CheckB_Aux.hi', 'CheckB_Aux.o']),
-     multimod_compile, ['CheckB', '-trust base'])
+test('CheckB', [], multimod_compile, ['CheckB', '-trust base'])
 
 # fail as we don't trust base when compiling Check01
 test('Check01', normal, multi_compile_fail, ['Check01 -distrust base', [
@@ -21,13 +16,13 @@ test('Check01', normal, multi_compile_fail, ['Check01 -distrust base', [
                                             ('Check01_B.hs', '-trust base')
                                             ], '-fpackage-trust'])
 
-# suceed this time since we trust base when we compile AND use CheckB
+# succeed this time since we trust base when we compile AND use CheckB
 test('Check02', normal, multi_compile, ['Check02', [
                                        ('Check02_A.hs', ''),
                                        ('Check02_B.hs', '')
                                        ], '-trust base -fpackage-trust'])
 
-# suceed as while like Check01_fail we don't import CheckB as a safe
+# succeed as while like Check01_fail we don't import CheckB as a safe
 # import this time, so don't require base trusted when used.
 test('Check03', normal, multi_compile, ['Check03', [
                                        ('Check03_A.hs', ''),
@@ -46,23 +41,17 @@ test('Check04', normal, multi_compile, ['Check04', [
 test('Check05', normal, compile, [''])
 
 # Check safe-infered modules have correct pkg trust requirements
-test('Check06',
-     extra_clean(['Check06_A.hi', 'Check06_A.o']),
-     multimod_compile_fail, ['Check06', ''])
+test('Check06', [], multimod_compile_fail, ['Check06', ''])
 
 # Check selective safe imports bring in correct pkg trust requirements
-test('Check07',
-     extra_clean(['Check07_A.hi', 'Check07_A.o', 'Check07_B.hi', 'Check07_B.o']),
-     multimod_compile, ['Check07', ''])
+test('Check07', [], multimod_compile, ['Check07', ''])
 
 # Check selective safe imports bring in correct pkg trust requirements
-test('Check08',
-     extra_clean(['Check08_A.hi', 'Check08_A.o', 'Check08_B.hi', 'Check08_B.o']),
-     multimod_compile_fail, ['Check08', ''])
+test('Check08', [], multimod_compile_fail, ['Check08', ''])
 
 # check -distrust-all-packages flag works
 test('Check09',
-     normalise_errmsg_fun(normaliseBytestringPackage),
+     normalise_version("bytestring"),
      compile_fail,
      ['-fpackage-trust -distrust-all-packages'])
 

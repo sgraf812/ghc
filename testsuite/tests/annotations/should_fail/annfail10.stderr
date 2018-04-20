@@ -1,25 +1,28 @@
 
-annfail10.hs:9:1:
-    No instance for (Data.Data.Data a0) arising from an annotation
-    The type variable ‘a0’ is ambiguous
-    Note: there are several potential instances:
-      instance Data.Data.Data () -- Defined in ‘Data.Data’
-      instance (Data.Data.Data a, Data.Data.Data b) =>
-               Data.Data.Data (a, b)
-        -- Defined in ‘Data.Data’
-      instance (Data.Data.Data a, Data.Data.Data b, Data.Data.Data c) =>
-               Data.Data.Data (a, b, c)
-        -- Defined in ‘Data.Data’
-      ...plus 31 others
-    In the annotation: {-# ANN f 1 #-}
+annfail10.hs:9:1: error:
+    • Ambiguous type variable ‘p0’ arising from an annotation
+      prevents the constraint ‘(Data.Data.Data p0)’ from being solved.
+      Probable fix: use a type annotation to specify what ‘p0’ should be.
+      These potential instances exist:
+        instance (Data.Data.Data a, Data.Data.Data b) =>
+                 Data.Data.Data (Either a b)
+          -- Defined in ‘Data.Data’
+        instance Data.Data.Data Ordering -- Defined in ‘Data.Data’
+        instance Data.Data.Data Integer -- Defined in ‘Data.Data’
+        ...plus 15 others
+        ...plus 45 instances involving out-of-scope types
+        (use -fprint-potential-instances to see them all)
+    • In the annotation: {-# ANN f 1 #-}
 
-annfail10.hs:9:11:
-    No instance for (Num a0) arising from the literal ‘1’
-    The type variable ‘a0’ is ambiguous
-    Note: there are several potential instances:
-      instance Num Double -- Defined in ‘GHC.Float’
-      instance Num Float -- Defined in ‘GHC.Float’
-      instance Integral a => Num (GHC.Real.Ratio a)
-        -- Defined in ‘GHC.Real’
-      ...plus 11 others
-    In the annotation: {-# ANN f 1 #-}
+annfail10.hs:9:11: error:
+    • Ambiguous type variable ‘p0’ arising from the literal ‘1’
+      prevents the constraint ‘(Num p0)’ from being solved.
+      Probable fix: use a type annotation to specify what ‘p0’ should be.
+      These potential instances exist:
+        instance Num Integer -- Defined in ‘GHC.Num’
+        instance Num Double -- Defined in ‘GHC.Float’
+        instance Num Float -- Defined in ‘GHC.Float’
+        ...plus two others
+        ...plus 17 instances involving out-of-scope types
+        (use -fprint-potential-instances to see them all)
+    • In the annotation: {-# ANN f 1 #-}

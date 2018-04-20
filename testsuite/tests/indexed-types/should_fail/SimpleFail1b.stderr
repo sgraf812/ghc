@@ -1,4 +1,4 @@
 
-SimpleFail1b.hs:4:1:
-    Number of parameters must match family declaration; expected 2
-    In the data instance declaration for ‘T1’
+SimpleFail1b.hs:4:1: error:
+    • Expected kind ‘* -> *’, but ‘T1 Int Bool’ has kind ‘*’
+    • In the data instance declaration for ‘T1’

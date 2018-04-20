@@ -11,8 +11,7 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef SM_EVAC_H
-#define SM_EVAC_H
+#pragma once
 
 #include "BeginPrivate.h"
 
@@ -35,17 +34,9 @@
 REGPARM1 void evacuate  (StgClosure **p);
 REGPARM1 void evacuate1 (StgClosure **p);
 
+void evacuate_BLACKHOLE(StgClosure **p);
+void evacuate_BLACKHOLE1(StgClosure **p);
+
 extern W_ thunk_selector_depth;
 
 #include "EndPrivate.h"
-
-#endif /* SM_EVAC_H */
-
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

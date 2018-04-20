@@ -1,5 +1,6 @@
 {-# LANGUAGE Unsafe #-}
-{-# LANGUAGE MagicHash, UnboxedTuples, AutoDeriveTypeable, TypeFamilies, MultiParamTypeClasses, FlexibleInstances #-}
+{-# LANGUAGE MagicHash, UnboxedTuples, TypeFamilies, DeriveDataTypeable,
+             MultiParamTypeClasses, FlexibleInstances, NoImplicitPrelude #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -43,14 +44,23 @@ module GHC.Exts
         breakpoint, breakpointCond,
 
         -- * Ids with special behaviour
-        lazy, inline,
+        lazy, inline, oneShot,
+
+        -- * Running 'RealWorld' state transformers
+        runRW#,
 
         -- * Safe coercions
         --
         -- | These are available from the /Trustworthy/ module "Data.Coerce" as well
         --
-        -- /Since: 4.7.0.0/
+        -- @since 4.7.0.0
         Data.Coerce.coerce, Data.Coerce.Coercible,
+
+        -- * Equality
+        type (~~),
+
+        -- * Representation polymorphism
+        GHC.Prim.TYPE, RuntimeRep(..), VecCount(..), VecElem(..),
 
         -- * Transform comprehensions
         Down(..), groupWith, sortWith, the,
@@ -67,23 +77,27 @@ module GHC.Exts
         -- * The Constraint kind
         Constraint,
 
+        -- * The Any type
+        Any,
+
         -- * Overloaded lists
         IsList(..)
        ) where
 
-import Prelude
-
-import GHC.Prim hiding (coerce)
-import GHC.Base hiding (coerce) -- implicitly comes from GHC.Prim
+import GHC.Prim hiding ( coerce, TYPE )
+import qualified GHC.Prim
+import GHC.Base hiding ( coerce )
 import GHC.Word
 import GHC.Int
 import GHC.Ptr
 import GHC.Stack
+
 import qualified Data.Coerce
 import Data.String
-import Data.List
+import Data.OldList
 import Data.Data
 import Data.Ord
+import Data.Version ( Version(..), makeVersion )
 import qualified Debug.Trace
 
 -- XXX This should really be in Data.Tuple, where the definitions are
@@ -95,8 +109,8 @@ maxTupleSize = 62
 the :: Eq a => [a] -> a
 the (x:xs)
   | all (x ==) xs = x
-  | otherwise     = error "GHC.Exts.the: non-identical elements"
-the []            = error "GHC.Exts.the: empty list"
+  | otherwise     = errorWithoutStackTrace "GHC.Exts.the: non-identical elements"
+the []            = errorWithoutStackTrace "GHC.Exts.the: empty list"
 
 -- | The 'sortWith' function sorts a list of elements using the
 -- user supplied function to project something out of each element
@@ -110,6 +124,7 @@ sortWith f = sortBy (\x y -> compare (f x) (f y))
 groupWith :: Ord b => (a -> b) -> [a] -> [[a]]
 groupWith f xs = build (\c n -> groupByFB c n (\x y -> f x == f y) (sortWith f xs))
 
+{-# INLINE [0] groupByFB #-} -- See Note [Inline FB functions] in GHC.List
 groupByFB :: ([a] -> lst -> lst) -> lst -> (a -> a -> Bool) -> [a] -> lst
 groupByFB c n eq xs0 = groupByFBCore xs0
   where groupByFBCore [] = n
@@ -126,9 +141,9 @@ traceEvent = Debug.Trace.traceEventIO
 
 
 {- **********************************************************************
-*									*
+*                                                                       *
 *              SpecConstr annotation                                    *
-*									*
+*                                                                       *
 ********************************************************************** -}
 
 -- Annotating a type with NoSpecConstr will make SpecConstr
@@ -139,19 +154,21 @@ traceEvent = Debug.Trace.traceEventIO
 -- entire ghc package at runtime
 
 data SpecConstrAnnotation = NoSpecConstr | ForceSpecConstr
-                deriving( Data, Typeable, Eq )
+                deriving ( Data -- ^ @since 4.3.0.0
+                         , Eq   -- ^ @since 4.3.0.0
+                         )
 
 
 {- **********************************************************************
-*									*
+*                                                                       *
 *              The IsList class                                         *
-*									*
+*                                                                       *
 ********************************************************************** -}
 
 -- | The 'IsList' class and its methods are intended to be used in
 --   conjunction with the OverloadedLists extension.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 class IsList l where
   -- | The 'Item' type function returns the type of items of the structure
   --   @l@.
@@ -173,7 +190,32 @@ class IsList l where
   --   It should satisfy fromList . toList = id.
   toList :: l -> [Item l]
 
+-- | @since 4.7.0.0
 instance IsList [a] where
   type (Item [a]) = a
   fromList = id
   toList = id
+
+-- | @since 4.9.0.0
+instance IsList (NonEmpty a) where
+  type Item (NonEmpty a) = a
+
+  fromList (a:as) = a :| as
+  fromList [] = errorWithoutStackTrace "NonEmpty.fromList: empty list"
+
+  toList ~(a :| as) = a : as
+
+-- | @since 4.8.0.0
+instance IsList Version where
+  type (Item Version) = Int
+  fromList = makeVersion
+  toList = versionBranch
+
+-- | Be aware that 'fromList . toList = id' only for unfrozen 'CallStack's,
+-- since 'toList' removes frozenness information.
+--
+-- @since 4.9.0.0
+instance IsList CallStack where
+  type (Item CallStack) = (String, SrcLoc)
+  fromList = fromCallSiteList
+  toList   = getCallStack

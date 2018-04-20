@@ -6,8 +6,7 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef RTS_STORAGE_BLOCK_H
-#define RTS_STORAGE_BLOCK_H
+#pragma once
 
 #include "ghcconfig.h"
 
@@ -25,7 +24,7 @@
 #error "Size of pointer is suspicious."
 #endif
 
-#ifdef CMINUSMINUS
+#if defined(CMINUSMINUS)
 #define BLOCK_SIZE   (1<<BLOCK_SHIFT)
 #else
 #define BLOCK_SIZE   (UNIT<<BLOCK_SHIFT)
@@ -40,7 +39,7 @@
 
 /* Megablock related constants (MBLOCK_SHIFT is defined in Constants.h) */
 
-#ifdef CMINUSMINUS
+#if defined(CMINUSMINUS)
 #define MBLOCK_SIZE    (1<<MBLOCK_SHIFT)
 #else
 #define MBLOCK_SIZE    (UNIT<<MBLOCK_SHIFT)
@@ -57,7 +56,7 @@
  * own and treat it as an immovable object during GC, expressed as a
  * fraction of BLOCK_SIZE.
  */
-#define LARGE_OBJECT_THRESHOLD ((nat)(BLOCK_SIZE * 8 / 10))
+#define LARGE_OBJECT_THRESHOLD ((uint32_t)(BLOCK_SIZE * 8 / 10))
 
 /*
  * Note [integer overflow]
@@ -84,12 +83,13 @@
 // client of the block allocator API.  All other fields can be
 // freely modified.
 
-#ifndef CMINUSMINUS
+#if !defined(CMINUSMINUS)
 typedef struct bdescr_ {
 
     StgPtr start;              // [READ ONLY] start addr of memory
 
-    StgPtr free;               // first free byte of memory.
+    StgPtr free;               // First free byte of memory.
+                               // allocGroup() sets this to the value of start.
                                // NB. during use this value should lie
                                // between start and start + blocks *
                                // BLOCK_SIZE.  Values outside this
@@ -110,7 +110,7 @@ typedef struct bdescr_ {
 
     StgWord16 gen_no;          // gen->no, cached
     StgWord16 dest_no;         // number of destination generation
-    StgWord16 _pad1;
+    StgWord16 node;            // which memory node does this block live on?
 
     StgWord16 flags;           // block flags, see below
 
@@ -143,20 +143,22 @@ typedef struct bdescr_ {
 #define BF_PINNED    4
 /* Block is to be marked, not copied */
 #define BF_MARKED    8
-/* Block is free, and on the free list  (TODO: is this used?) */
-#define BF_FREE      16
 /* Block is executable */
-#define BF_EXEC	     32
+#define BF_EXEC      32
 /* Block contains only a small amount of live data */
 #define BF_FRAGMENTED 64
 /* we know about this block (for finding leaks) */
 #define BF_KNOWN     128
 /* Block was swept in the last generation */
 #define BF_SWEPT     256
+/* Block is part of a Compact */
+#define BF_COMPACT   512
+/* Maximum flag value (do not define anything higher than this!) */
+#define BF_FLAG_MAX  (1 << 15)
 
 /* Finding the block descriptor for a given block -------------------------- */
 
-#ifdef CMINUSMINUS
+#if defined(CMINUSMINUS)
 
 #define Bdescr(p) \
     ((((p) &  MBLOCK_MASK & ~BLOCK_MASK) >> (BLOCK_SHIFT-BDESCR_SHIFT)) \
@@ -168,7 +170,7 @@ EXTERN_INLINE bdescr *Bdescr(StgPtr p);
 EXTERN_INLINE bdescr *Bdescr(StgPtr p)
 {
   return (bdescr *)
-    ((((W_)p &  MBLOCK_MASK & ~BLOCK_MASK) >> (BLOCK_SHIFT-BDESCR_SHIFT)) 
+    ((((W_)p &  MBLOCK_MASK & ~BLOCK_MASK) >> (BLOCK_SHIFT-BDESCR_SHIFT))
      | ((W_)p & ~MBLOCK_MASK)
      );
 }
@@ -185,7 +187,7 @@ EXTERN_INLINE bdescr *Bdescr(StgPtr p)
 /* First data block in a given megablock */
 
 #define FIRST_BLOCK(m) ((void *)(FIRST_BLOCK_OFF + (W_)(m)))
-   
+
 /* Last data block in a given megablock */
 
 #define LAST_BLOCK(m)  ((void *)(MBLOCK_SIZE-BLOCK_SIZE + (W_)(m)))
@@ -202,7 +204,7 @@ EXTERN_INLINE bdescr *Bdescr(StgPtr p)
 
 /* Number of usable blocks in a megablock */
 
-#ifndef CMINUSMINUS // already defined in DerivedConstants.h
+#if !defined(CMINUSMINUS) // already defined in DerivedConstants.h
 #define BLOCKS_PER_MBLOCK ((MBLOCK_SIZE - FIRST_BLOCK_OFF) / BLOCK_SIZE)
 #endif
 
@@ -217,7 +219,7 @@ EXTERN_INLINE bdescr *Bdescr(StgPtr p)
    (1 + (W_)MBLOCK_ROUND_UP((n-BLOCKS_PER_MBLOCK) * BLOCK_SIZE) / MBLOCK_SIZE)
 
 
-#ifndef CMINUSMINUS 
+#if !defined(CMINUSMINUS)
 /* to the end... */
 
 /* Double-linked block lists: --------------------------------------------- */
@@ -279,11 +281,27 @@ extern void initBlockAllocator(void);
 /* Allocation -------------------------------------------------------------- */
 
 bdescr *allocGroup(W_ n);
-bdescr *allocBlock(void);
+
+EXTERN_INLINE bdescr* allocBlock(void);
+EXTERN_INLINE bdescr* allocBlock(void)
+{
+    return allocGroup(1);
+}
+
+bdescr *allocGroupOnNode(uint32_t node, W_ n);
+
+EXTERN_INLINE bdescr* allocBlockOnNode(uint32_t node);
+EXTERN_INLINE bdescr* allocBlockOnNode(uint32_t node)
+{
+    return allocGroupOnNode(node,1);
+}
 
 // versions that take the storage manager lock for you:
 bdescr *allocGroup_lock(W_ n);
 bdescr *allocBlock_lock(void);
+
+bdescr *allocGroupOnNode_lock(uint32_t node, W_ n);
+bdescr *allocBlockOnNode_lock(uint32_t node);
 
 /* De-Allocation ----------------------------------------------------------- */
 
@@ -294,7 +312,7 @@ void freeChain(bdescr *p);
 void freeGroup_lock(bdescr *p);
 void freeChain_lock(bdescr *p);
 
-bdescr * splitBlockGroup (bdescr *bd, nat blocks);
+bdescr * splitBlockGroup (bdescr *bd, uint32_t blocks);
 
 /* Round a value to megablocks --------------------------------------------- */
 
@@ -330,4 +348,3 @@ round_up_to_mblocks(StgWord words)
 }
 
 #endif /* !CMINUSMINUS */
-#endif /* RTS_STORAGE_BLOCK_H */

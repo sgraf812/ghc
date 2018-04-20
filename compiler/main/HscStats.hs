@@ -3,19 +3,24 @@
 --
 -- (c) The GRASP/AQUA Project, Glasgow University, 1993-1998
 --
+
+{-# LANGUAGE FlexibleContexts #-}
+
 module HscStats ( ppSourceStats ) where
+
+import GhcPrelude
 
 import Bag
 import HsSyn
 import Outputable
-import RdrName
 import SrcLoc
 import Util
 
 import Data.Char
+import Data.Foldable (foldl')
 
 -- | Source Statistics
-ppSourceStats :: Bool -> Located (HsModule RdrName) -> SDoc
+ppSourceStats :: Bool -> Located (HsModule GhcPs) -> SDoc
 ppSourceStats short (L _ (HsModule _ exports imports ldecls _ _))
   = (if short then hcat else vcat)
         (map pp_val
@@ -45,7 +50,7 @@ ppSourceStats short (L _ (HsModule _ exports imports ldecls _ _))
              ("InstType         ", inst_type_ds),
              ("InstData         ", inst_data_ds),
              ("TypeSigs         ", bind_tys),
-             ("GenericSigs      ", generic_sigs),
+             ("ClassOpSigs      ", generic_sigs),
              ("ValBinds         ", val_bind_ds),
              ("FunBinds         ", fn_bind_ds),
              ("PatSynBinds      ", patsyn_ds),
@@ -58,19 +63,19 @@ ppSourceStats short (L _ (HsModule _ exports imports ldecls _ _))
     decls = map unLoc ldecls
 
     pp_val (_, 0) = empty
-    pp_val (str, n) 
+    pp_val (str, n)
       | not short   = hcat [text str, int n]
       | otherwise   = hcat [text (trim str), equals, int n, semi]
-    
+
     trim ls    = takeWhile (not.isSpace) (dropWhile isSpace ls)
 
-    (fixity_sigs, bind_tys, bind_specs, bind_inlines, generic_sigs) 
+    (fixity_sigs, bind_tys, bind_specs, bind_inlines, generic_sigs)
         = count_sigs [d | SigD d <- decls]
                 -- NB: this omits fixity decls on local bindings and
                 -- in class decls. ToDo
 
     tycl_decls = [d | TyClD d <- decls]
-    (class_ds, type_ds, data_ds, newt_ds, type_fam_ds) = 
+    (class_ds, type_ds, data_ds, newt_ds, type_fam_ds) =
       countTyClDecls tycl_decls
 
     inst_decls = [d | InstD d <- decls]
@@ -78,7 +83,7 @@ ppSourceStats short (L _ (HsModule _ exports imports ldecls _ _))
     default_ds = count (\ x -> case x of { DefD{} -> True; _ -> False}) decls
     val_decls  = [d | ValD d <- decls]
 
-    real_exports = case exports of { Nothing -> []; Just es -> es }
+    real_exports = case exports of { Nothing -> []; Just (L _ es) -> es }
     n_exports    = length real_exports
     export_ms    = count (\ e -> case unLoc e of { IEModuleContents{} -> True;_ -> False})
                          real_exports
@@ -97,7 +102,7 @@ ppSourceStats short (L _ (HsModule _ exports imports ldecls _ _))
     (inst_method_ds, method_specs, method_inlines, inst_type_ds, inst_data_ds)
         = sum5 (map inst_info inst_decls)
 
-    count_bind (PatBind { pat_lhs = L _ (VarPat _) }) = (1,0,0)
+    count_bind (PatBind { pat_lhs = L _ (VarPat{}) }) = (1,0,0)
     count_bind (PatBind {})                           = (0,1,0)
     count_bind (FunBind {})                           = (0,1,0)
     count_bind (PatSynBind {})                        = (0,0,1)
@@ -105,12 +110,12 @@ ppSourceStats short (L _ (HsModule _ exports imports ldecls _ _))
 
     count_sigs sigs = sum5 (map sig_info sigs)
 
-    sig_info (FixSig _)       = (1,0,0,0,0)
-    sig_info (TypeSig _ _)    = (0,1,0,0,0)
-    sig_info (SpecSig _ _ _)  = (0,0,1,0,0)
-    sig_info (InlineSig _ _)  = (0,0,0,1,0)
-    sig_info (GenericSig _ _) = (0,0,0,0,1)
-    sig_info _                = (0,0,0,0,0)
+    sig_info (FixSig {})     = (1,0,0,0,0)
+    sig_info (TypeSig {})    = (0,1,0,0,0)
+    sig_info (SpecSig {})    = (0,0,1,0,0)
+    sig_info (InlineSig {})  = (0,0,0,1,0)
+    sig_info (ClassOpSig {}) = (0,0,0,0,1)
+    sig_info _               = (0,0,0,0,0)
 
     import_info (L _ (ImportDecl { ideclSafe = safe, ideclQualified = qual
                                  , ideclAs = as, ideclHiding = spec }))
@@ -124,9 +129,11 @@ ppSourceStats short (L _ (HsModule _ exports imports ldecls _ _))
     spec_info (Just (False, _)) = (0,0,0,0,0,1,0)
     spec_info (Just (True, _))  = (0,0,0,0,0,0,1)
 
-    data_info (DataDecl { tcdDataDefn = HsDataDefn {dd_cons = cs, dd_derivs = derivs}})
-        = (length cs, case derivs of Nothing -> 0
-                                     Just ds -> length ds)
+    data_info (DataDecl { tcdDataDefn = HsDataDefn { dd_cons = cs
+                                                   , dd_derivs = L _ derivs}})
+        = ( length cs
+          , foldl' (\s dc -> length (deriv_clause_tys $ unLoc dc) + s)
+                   0 derivs )
     data_info _ = (0,0)
 
     class_info decl@(ClassDecl {})

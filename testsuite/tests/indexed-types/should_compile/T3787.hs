@@ -24,7 +24,7 @@ module T3787 where
 
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Monad (liftM, liftM2, when)
+import Control.Monad (liftM, liftM2, when, ap)
 import Control.Monad.Identity
 import Control.Monad.Trans (MonadTrans(..))
 
@@ -77,8 +77,15 @@ data TrampolineState s m r =
    -- | Computation is suspended, its remainder is embedded in the functor /s/.
  | Suspend! (s (Trampoline s m r))
 
+instance (Functor s, Monad m) => Functor (Trampoline s m) where
+   fmap = liftM
+
+instance (Functor s, Monad m) => Applicative (Trampoline s m) where
+   pure x = Trampoline (pure (Done x))
+   (<*>) = ap
+
 instance (Functor s, Monad m) => Monad (Trampoline s m) where
-   return x = Trampoline (return (Done x))
+   return = pure
    t >>= f = Trampoline (bounce t >>= apply f)
       where apply f (Done x) = bounce (f x)
             apply f (Suspend s) = return (Suspend (fmap (>>= f) s))
@@ -357,7 +364,7 @@ data Sink (m :: * -> *) a x =
    {
    -- | Function 'put' tries to put a value into the given `Sink`. The intervening 'Trampoline' computations suspend up
    -- to the 'pipe' invocation that has created the argument sink. The result of 'put' indicates whether the operation
-   -- succeded.
+   -- succeeded.
    put :: forall d. (AncestorFunctor a d) => x -> Trampoline d m Bool,
    -- | Function 'canPut' checks if the argument `Sink` accepts values, i.e., whether a 'put' operation would succeed on
    -- the sink.

@@ -19,6 +19,14 @@ rts_dist_HC = $(GHC_STAGE1)
 rts_INSTALL_INFO = rts
 rts_VERSION = 1.0
 
+# Minimum supported Windows version.
+# These numbers can be found at:
+#  https://msdn.microsoft.com/en-us/library/windows/desktop/aa383745(v=vs.85).aspx
+# If we're compiling on windows, enforce that we only support Vista SP1+
+# Adding this here means it doesn't have to be done in individual .c files
+# and also centralizes the versioning.
+rts_WINVER = 0x06000100
+
 # merge GhcLibWays and GhcRTSWays but strip out duplicates
 rts_WAYS = $(GhcLibWays) $(filter-out $(GhcLibWays),$(GhcRTSWays))
 rts_dist_WAYS = $(rts_WAYS)
@@ -29,9 +37,9 @@ $(eval $(call all-target,rts,$(ALL_RTS_LIBS)))
 # -----------------------------------------------------------------------------
 # Defining the sources
 
-ALL_DIRS = hooks sm eventlog
+ALL_DIRS = hooks sm eventlog linker
 
-ifeq "$(HostOS_CPP)" "mingw32"
+ifeq "$(TargetOS_CPP)" "mingw32"
 ALL_DIRS += win32
 else
 ALL_DIRS += posix
@@ -45,6 +53,13 @@ ifneq "$(PORTING_HOST)" "YES"
 ifneq "$(findstring $(TargetArch_CPP), i386 powerpc powerpc64)" ""
 rts_S_SRCS += rts/AdjustorAsm.S
 endif
+# this matches substrings of powerpc64le, including "powerpc" and "powerpc64"
+ifneq "$(findstring $(TargetArch_CPP), powerpc64le)" ""
+# unregisterised builds use the mini interpreter
+ifneq "$(GhcUnregisterised)" "YES"
+rts_S_SRCS += rts/StgCRunAsm.S
+endif
+endif
 endif
 
 ifeq "$(GhcUnregisterised)" "YES"
@@ -56,10 +71,6 @@ rts_AUTO_APPLY_CMM = rts/dist/build/AutoApply.cmm
 $(rts_AUTO_APPLY_CMM): $$(genapply_INPLACE)
 	"$(genapply_INPLACE)" >$@
 
-rts/dist/build/sm/Evac_thr.c : rts/sm/Evac.c | $$(dir $$@)/.
-	cp $< $@
-rts/dist/build/sm/Scav_thr.c : rts/sm/Scav.c | $$(dir $$@)/.
-	cp $< $@
 
 rts_H_FILES := $(wildcard rts/*.h rts/*/*.h)
 
@@ -84,7 +95,7 @@ rts/dist/libs.depend : $$(ghc-pkg_INPLACE) | $$(dir $$@)/.
 # 	These are made from rts/win32/libHS*.def which contain lists of
 # 	all the symbols in those libraries used by the RTS.
 #
-ifeq "$(HostOS_CPP)" "mingw32" 
+ifeq "$(TargetOS_CPP)" "mingw32"
 
 ALL_RTS_DEF_LIBNAMES 	= base ghc-prim
 ALL_RTS_DEF_LIBS	= \
@@ -108,7 +119,7 @@ endif
 
 ifneq "$(BINDIST)" "YES"
 ifneq "$(UseSystemLibFFI)" "YES"
-ifeq "$(HostOS_CPP)" "mingw32" 
+ifeq "$(TargetOS_CPP)" "mingw32"
 rts/dist/build/$(LIBFFI_DLL): libffi/build/inst/bin/$(LIBFFI_DLL)
 	cp $< $@
 else
@@ -120,6 +131,13 @@ ifeq "$(TargetOS_CPP)" "darwin"
 	install_name_tool -id @rpath/lib$(LIBFFI_NAME)$(soext) rts/dist/build/lib$(LIBFFI_NAME)$(soext)
 endif
 endif
+endif
+endif
+
+
+ifeq "$(USE_DTRACE)" "YES"
+ifneq "$(findstring $(TargetOS_CPP), linux solaris2 freebsd)" ""
+NEED_DTRACE_PROBES_OBJ = YES
 endif
 endif
 
@@ -139,22 +157,19 @@ rts_dist_$1_CC_OPTS += -fno-omit-frame-pointer -g -O0
 endif
 
 ifneq "$$(findstring dyn, $1)" ""
-ifeq "$$(HostOS_CPP)" "mingw32" 
+ifeq "$$(TargetOS_CPP)" "mingw32"
 rts_dist_$1_CC_OPTS += -DCOMPILING_WINDOWS_DLL
 endif
 rts_dist_$1_CC_OPTS += -DDYNAMIC
 endif
 
-ifneq "$$(findstring thr, $1)" ""
-rts_$1_EXTRA_C_SRCS  =  rts/dist/build/sm/Evac_thr.c rts/dist/build/sm/Scav_thr.c
-endif
 
-$(call distdir-way-opts,rts,dist,$1)
+$(call distdir-way-opts,rts,dist,$1,1) # 1 because the rts is built with stage1
 $(call c-suffix-rules,rts,dist,$1,YES)
 $(call cmm-suffix-rules,rts,dist,$1)
 
-rts_$1_LIB_NAME = libHSrts$$($1_libsuf)
-rts_$1_LIB = rts/dist/build/$$(rts_$1_LIB_NAME)
+rts_$1_LIB_FILE = libHSrts$$($1_libsuf)
+rts_$1_LIB = rts/dist/build/$$(rts_$1_LIB_FILE)
 
 rts_$1_C_OBJS   = $$(patsubst rts/%.c,rts/dist/build/%.$$($1_osuf),$$(rts_C_SRCS)) $$(patsubst %.c,%.$$($1_osuf),$$(rts_$1_EXTRA_C_SRCS))
 rts_$1_S_OBJS   = $$(patsubst rts/%.S,rts/dist/build/%.$$($1_osuf),$$(rts_S_SRCS))
@@ -163,19 +178,26 @@ rts_$1_CMM_OBJS = $$(patsubst rts/%.cmm,rts/dist/build/%.$$($1_osuf),$$(rts_CMM_
 rts_$1_OBJS = $$(rts_$1_C_OBJS) $$(rts_$1_S_OBJS) $$(rts_$1_CMM_OBJS)
 
 ifeq "$(USE_DTRACE)" "YES"
-ifeq "$(TargetOS_CPP)" "solaris2"
+ifeq "$(NEED_DTRACE_PROBES_OBJ)" "YES"
 # On Darwin we don't need to generate binary containing probes defined
 # in DTrace script, but DTrace on Solaris expects generation of binary
 # from the DTrace probes definitions
 rts_$1_DTRACE_OBJS = rts/dist/build/RtsProbes.$$($1_osuf)
 
-rts/dist/build/RtsProbes.$$($1_osuf) : $$(rts_$1_OBJS)
+$$(rts_$1_DTRACE_OBJS) : $$(rts_$1_OBJS)
 	$(DTRACE) -G -C $$(addprefix -I,$$(GHC_INCLUDE_DIRS)) -DDTRACE -s rts/RtsProbes.d -o \
 		$$@ $$(rts_$1_OBJS)
 endif
 endif
 
 rts_dist_$1_CC_OPTS += -DRtsWay=\"rts_$1\"
+
+# If we're compiling on windows, enforce that we only support XP+
+# Adding this here means it doesn't have to be done in individual .c files
+# and also centralizes the versioning.
+ifeq "$$(TargetOS_CPP)" "mingw32"
+rts_dist_$1_CC_OPTS += -DWINVER=$(rts_WINVER)
+endif
 
 ifneq "$$(UseSystemLibFFI)" "YES"
 rts_dist_FFI_SO = rts/dist/build/lib$$(LIBFFI_NAME)$$(soext)
@@ -185,14 +207,28 @@ endif
 
 # Making a shared library for the RTS.
 ifneq "$$(findstring dyn, $1)" ""
-ifeq "$$(HostOS_CPP)" "mingw32" 
+ifeq "$$(TargetOS_CPP)" "mingw32"
 $$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(ALL_RTS_DEF_LIBS) rts/dist/libs.depend rts/dist/build/$$(LIBFFI_DLL)
 	"$$(RM)" $$(RM_OPTS) $$@
-	"$$(rts_dist_HC)" -this-package-key rts -shared -dynamic -dynload deploy \
-	  -no-auto-link-packages -Lrts/dist/build -l$$(LIBFFI_NAME) \
-         `cat rts/dist/libs.depend` $$(rts_$1_OBJS) $$(ALL_RTS_DEF_LIBS) \
-         $$(rts_dist_$1_GHC_LD_OPTS) \
-         -o $$@
+	# Call out to the shell script to decide how to build the dll.
+	# Making a shared library for the RTS.
+	# $$1  = dir
+	# $$2  = distdir
+	# $$3  = way
+	# $$4  = extra flags
+	# $$5  = extra libraries to link
+	# $$6  = object files to link
+	# $$7  = output filename
+	# $$8  = link command
+	# $$9  = create delay load import lib
+	# $$10 = SxS Name
+	# $$11 = SxS Version
+	$$(gen-dll_INPLACE) link "rts/dist/build" "rts/dist/build" "" "" "$$(ALL_RTS_DEF_LIBS)" "$$(rts_$1_OBJS)" "$$@" "$$(rts_dist_HC) -this-unit-id rts -no-hs-main -shared -dynamic -dynload deploy \
+         -no-auto-link-packages -Lrts/dist/build -l$$(LIBFFI_NAME) \
+         `cat rts/dist/libs.depend | tr '\n' ' '` \
+         $$(rts_dist_$1_GHC_LD_OPTS)" "NO" \
+         "$(rts_INSTALL_INFO)-$(subst dyn,,$(subst _dyn,,$(subst v,,$1)))" "$(ProjectVersion)"
+
 else
 ifneq "$$(UseSystemLibFFI)" "YES"
 LIBFFI_LIBS = -Lrts/dist/build -l$$(LIBFFI_NAME)
@@ -209,15 +245,38 @@ LIBFFI_LIBS =
 endif
 $$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS) rts/dist/libs.depend $$(rts_dist_FFI_SO)
 	"$$(RM)" $$(RM_OPTS) $$@
-	"$$(rts_dist_HC)" -this-package-key rts -shared -dynamic -dynload deploy \
+	"$$(rts_dist_HC)" -this-unit-id rts -shared -dynamic -dynload deploy \
 	  -no-auto-link-packages $$(LIBFFI_LIBS) `cat rts/dist/libs.depend` $$(rts_$1_OBJS) \
           $$(rts_dist_$1_GHC_LD_OPTS) \
 	  $$(rts_$1_DTRACE_OBJS) -o $$@
 endif
 else
-$$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS)
+
+ifeq "$(USE_DTRACE)" "YES"
+ifeq "$(NEED_DTRACE_PROBES_OBJ)" "YES"
+rts_$1_LINKED_OBJS = rts/dist/build/RTS.$$($1_osuf)
+
+$$(rts_$1_LINKED_OBJS) : $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS)
 	"$$(RM)" $$(RM_OPTS) $$@
-	echo $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS) | "$$(XARGS)" $$(XARGS_OPTS) "$$(AR_STAGE1)" \
+
+	# When linking an archive the linker will only include the object files that
+	# are actually needed during linking. It therefore does not include the dtrace
+	# specific code for initializing the probes. By creating a single object that
+	# also includes the probe object code we force the linker to include the
+	# probes when linking the static runtime.
+	$(LD) -r -o $$(rts_$1_LINKED_OBJS) $$(rts_$1_DTRACE_OBJS) $$(rts_$1_OBJS)
+else
+rts_$1_LINKED_OBJS = $$(rts_$1_OBJS)
+endif
+else
+rts_$1_LINKED_OBJS = $$(rts_$1_OBJS)
+endif
+
+
+$$(rts_$1_LIB) : $$(rts_$1_LINKED_OBJS)
+	"$$(RM)" $$(RM_OPTS) $$@
+
+	echo $$(rts_$1_LINKED_OBJS) | "$$(XARGS)" $$(XARGS_OPTS) "$$(AR_STAGE1)" \
 		$$(AR_OPTS_STAGE1) $$(EXTRA_AR_ARGS_STAGE1) $$@
 
 ifneq "$$(UseSystemLibFFI)" "YES"
@@ -242,11 +301,7 @@ $(eval $(call distdir-opts,rts,dist,1))
 
 # We like plenty of warnings.
 WARNING_OPTS += -Wall
-ifeq "$(GccLT34)" "YES"
-WARNING_OPTS += -W
-else
 WARNING_OPTS += -Wextra
-endif
 WARNING_OPTS += -Wstrict-prototypes 
 WARNING_OPTS += -Wmissing-prototypes 
 WARNING_OPTS += -Wmissing-declarations
@@ -255,7 +310,10 @@ WARNING_OPTS += -Waggregate-return
 WARNING_OPTS += -Wpointer-arith
 WARNING_OPTS += -Wmissing-noreturn
 WARNING_OPTS += -Wnested-externs
-WARNING_OPTS += -Wredundant-decls 
+WARNING_OPTS += -Wredundant-decls
+ifeq "$(GccLT46)" "NO"
+WARNING_OPTS += -Wundef
+endif
 
 # These ones are hard to avoid:
 #WARNING_OPTS += -Wconversion
@@ -274,7 +332,7 @@ WARNING_OPTS += -Wredundant-decls
 
 STANDARD_OPTS += $(addprefix -I,$(GHC_INCLUDE_DIRS)) -Irts -Irts/dist/build
 # COMPILING_RTS is only used when building Win32 DLL support.
-STANDARD_OPTS += -DCOMPILING_RTS
+STANDARD_OPTS += -DCOMPILING_RTS -DFS_NAMESPACE=rts
 
 # HC_OPTS is included in both .c and .cmm compilations, whereas CC_OPTS is
 # only included in .c compilations.  HC_OPTS included the WAY_* opts, which
@@ -283,7 +341,7 @@ STANDARD_OPTS += -DCOMPILING_RTS
 rts_CC_OPTS += $(WARNING_OPTS)
 rts_CC_OPTS += $(STANDARD_OPTS)
 
-rts_HC_OPTS += $(STANDARD_OPTS) -this-package-key rts
+rts_HC_OPTS += $(STANDARD_OPTS) -this-unit-id rts
 
 ifneq "$(GhcWithSMP)" "YES"
 rts_CC_OPTS += -DNOSMP
@@ -302,7 +360,7 @@ rts_HC_OPTS += -dcmm-lint
 # StgClosure, StgMVar, etc.), and without -fno-strict-aliasing gcc is
 # allowed to assume that these pointers do not alias.  eg. without
 # this flag we get problems in sm/Evac.c:copy() with gcc 3.4.3, the
-# upd_evacee() assigments get moved before the object copy.
+# upd_evacuee() assignments get moved before the object copy.
 rts_CC_OPTS += -fno-strict-aliasing
 
 rts_CC_OPTS += -fno-common
@@ -311,15 +369,13 @@ ifeq "$(BeConservative)" "YES"
 rts_CC_OPTS += -DBE_CONSERVATIVE
 endif
 
+# Set Windows version
+ifeq "$$(TargetOS_CPP)" "mingw32"
+rts_CC_OPTS += -DWINVER=$(rts_WINVER)
+endif
+
 #-----------------------------------------------------------------------------
 # Flags for compiling specific files
-
-# If RtsMain.c is built with optimisation then the SEH exception stuff on
-# Windows gets confused.
-# This has to be in HC rather than CC opts, as otherwise there's a
-# -optc-O2 that comes after it.
-rts/RtsMain_HC_OPTS += -optc-O0
-
 rts/RtsMessages_CC_OPTS += -DProjectVersion=\"$(ProjectVersion)\"
 rts/RtsUtils_CC_OPTS += -DProjectVersion=\"$(ProjectVersion)\"
 rts/Trace_CC_OPTS += -DProjectVersion=\"$(ProjectVersion)\"
@@ -341,6 +397,8 @@ rts/RtsUtils_CC_OPTS += -DTargetVendor=\"$(TargetVendor_CPP)\"
 #
 rts/RtsUtils_CC_OPTS += -DGhcUnregisterised=\"$(GhcUnregisterised)\"
 rts/RtsUtils_CC_OPTS += -DGhcEnableTablesNextToCode=\"$(GhcEnableTablesNextToCode)\"
+#
+rts/xxhash_CC_OPTS += -O3 -ffast-math -ftree-vectorize
 
 # Compile various performance-critical pieces *without* -fPIC -dynamic
 # even when building a shared library.  If we don't do this, then the
@@ -401,15 +459,22 @@ endif
 endif
 
 # add CFLAGS for libffi
-# ffi.h triggers prototype warnings, so disable them here:
 ifeq "$(UseSystemLibFFI)" "YES"
 LIBFFI_CFLAGS = $(addprefix -I,$(FFIIncludeDir))
 else
 LIBFFI_CFLAGS =
 endif
+# ffi.h triggers prototype warnings, so disable them here:
 rts/Interpreter_CC_OPTS += -Wno-strict-prototypes $(LIBFFI_CFLAGS)
 rts/Adjustor_CC_OPTS    += -Wno-strict-prototypes $(LIBFFI_CFLAGS)
 rts/sm/Storage_CC_OPTS  += -Wno-strict-prototypes $(LIBFFI_CFLAGS)
+# ffi.h triggers undefined macro warnings on PowerPC, disable those:
+# this matches substrings of powerpc64le, including "powerpc" and "powerpc64"
+ifneq "$(findstring $(TargetArch_CPP), powerpc64le)" ""
+rts/Interpreter_CC_OPTS += -Wno-undef
+rts/Adjustor_CC_OPTS    += -Wno-undef
+rts/sm/Storage_CC_OPTS  += -Wno-undef
+endif
 
 # inlining warnings happen in Compact
 rts/sm/Compact_CC_OPTS += -Wno-inline
@@ -422,7 +487,7 @@ rts/RetainerSet_CC_OPTS += -Wno-format
 # On Windows:
 rts/win32/ConsoleHandler_CC_OPTS += -w
 rts/win32/ThrIOManager_CC_OPTS += -w
-# The above warning supression flags are a temporary kludge.
+# The above warning suppression flags are a temporary kludge.
 # While working on this module you are encouraged to remove it and fix
 # any warnings in the module. See
 #     http://ghc.haskell.org/trac/ghc/wiki/WorkingConventions#Warnings
@@ -435,39 +500,8 @@ endif
 
 # -O3 helps unroll some loops (especially in copy() with a constant argument).
 rts/sm/Evac_CC_OPTS += -funroll-loops
-rts/dist/build/sm/Evac_thr_HC_OPTS += -optc-funroll-loops
+rts/sm/Evac_thr_HC_OPTS += -optc-funroll-loops
 
-# These files are just copies of sm/Evac.c and sm/Scav.c respectively,
-# but compiled with -DPARALLEL_GC.
-rts/dist/build/sm/Evac_thr_CC_OPTS += -DPARALLEL_GC -Irts/sm
-rts/dist/build/sm/Scav_thr_CC_OPTS += -DPARALLEL_GC -Irts/sm
-
-#-----------------------------------------------------------------------------
-# Add PAPI library if needed
-
-ifeq "$(GhcRtsWithPapi)" "YES"
-
-rts_CC_OPTS		+= -DUSE_PAPI
-
-rts_PACKAGE_CPP_OPTS	+= -DUSE_PAPI
-rts_PACKAGE_CPP_OPTS    += -DPAPI_INCLUDE_DIR=$(PapiIncludeDir)
-rts_PACKAGE_CPP_OPTS    += -DPAPI_LIB_DIR=$(PapiLibDir)
-
-ifneq "$(PapiIncludeDir)" ""
-rts_HC_OPTS     += -I$(PapiIncludeDir)
-rts_CC_OPTS     += -I$(PapiIncludeDir)
-rts_HSC2HS_OPTS += -I$(PapiIncludeDir)
-endif
-ifneq "$(PapiLibDirs)" ""
-rts_LD_OPTS     += -L$(PapiLibDirs)
-endif
-
-else # GhcRtsWithPapi==YES
-
-rts_PACKAGE_CPP_OPTS += -DPAPI_INCLUDE_DIR=""
-rts_PACKAGE_CPP_OPTS += -DPAPI_LIB_DIR=""
-
-endif
 
 #-----------------------------------------------------------------------------
 # Use system provided libffi
@@ -536,7 +570,7 @@ ifeq "$(TargetOS_CPP)" "darwin"
 # Darwin has a flag to tell dtrace which cpp to use.
 # Unfortunately, this isn't supported on Solaris (See Solaris Dynamic Tracing
 # Guide, Chapter 16, for the configuration variables available on Solaris)
-DTRACE_FLAGS = -x cpppath=$(WhatGccIsCalled)
+DTRACE_FLAGS = -x cpppath=$(CC)
 endif
 
 DTRACEPROBES_SRC = rts/RtsProbes.d
@@ -575,8 +609,8 @@ endif
 
 .PHONY: install_libffi_headers
 install_libffi_headers :
-	$(call INSTALL_DIR,"$(DESTDIR)$(ghcheaderdir)")
-	$(call INSTALL_HEADER,$(INSTALL_OPTS),$(libffi_HEADERS),"$(DESTDIR)$(ghcheaderdir)/")
+	$(INSTALL_DIR) "$(DESTDIR)$(ghcheaderdir)"
+	$(INSTALL_HEADER) $(INSTALL_OPTS) $(libffi_HEADERS) "$(DESTDIR)$(ghcheaderdir)/"
 
 # -----------------------------------------------------------------------------
 # cleaning

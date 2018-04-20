@@ -7,12 +7,16 @@ module RegAlloc.Graph.Spill (
         SpillStats(..),
         accSpillSL
 ) where
+import GhcPrelude
+
 import RegAlloc.Liveness
 import Instruction
 import Reg
 import Cmm hiding (RegSet)
 import BlockId
+import Hoopl.Collections
 
+import MonadUtils
 import State
 import Unique
 import UniqFM
@@ -23,10 +27,8 @@ import Platform
 
 import Data.List
 import Data.Maybe
-import Data.Map                 (Map)
-import Data.Set                 (Set)
-import qualified Data.Map       as Map
-import qualified Data.Set       as Set
+import Data.IntSet              (IntSet)
+import qualified Data.IntSet    as IntSet
 
 
 -- | Spill all these virtual regs to stack slots.
@@ -34,7 +36,7 @@ import qualified Data.Set       as Set
 --   TODO: See if we can split some of the live ranges instead of just globally
 --         spilling the virtual reg. This might make the spill cleaner's job easier.
 --
---   TODO: On CISCy x86 and x86_64 we don't nessesarally have to add a mov instruction
+--   TODO: On CISCy x86 and x86_64 we don't necessarily have to add a mov instruction
 --         when making spills. If an instr is using a spilled virtual we may be able to
 --         address the spill slot directly.
 --
@@ -45,7 +47,7 @@ regSpill
         -> UniqSet Int                  -- ^ available stack slots
         -> UniqSet VirtualReg           -- ^ the regs to spill
         -> UniqSM
-            ([LiveCmmDecl statics instr] 
+            ([LiveCmmDecl statics instr]
                  -- code with SPILL and RELOAD meta instructions added.
             , UniqSet Int               -- left over slots
             , SpillStats )              -- stats about what happened during spilling
@@ -61,12 +63,15 @@ regSpill platform code slotsFree regs
         | otherwise
         = do
                 -- Allocate a slot for each of the spilled regs.
-                let slots       = take (sizeUniqSet regs) $ uniqSetToList slotsFree
+                let slots       = take (sizeUniqSet regs) $ nonDetEltsUniqSet slotsFree
                 let regSlotMap  = listToUFM
-                                $ zip (uniqSetToList regs) slots
+                                $ zip (nonDetEltsUniqSet regs) slots
+                    -- This is non-deterministic but we do not
+                    -- currently support deterministic code-generation.
+                    -- See Note [Unique Determinism and code generation]
 
                 -- Grab the unique supply from the monad.
-                us      <- getUs
+                us      <- getUniqueSupplyM
 
                 -- Run the spiller on all the blocks.
                 let (code', state')     =
@@ -82,9 +87,9 @@ regSpill platform code slotsFree regs
 regSpill_top
         :: Instruction instr
         => Platform
-        -> RegMap Int                   
+        -> RegMap Int
                 -- ^ map of vregs to slots they're being spilled to.
-        -> LiveCmmDecl statics instr    
+        -> LiveCmmDecl statics instr
                 -- ^ the top level thing.
         -> SpillM (LiveCmmDecl statics instr)
 
@@ -106,10 +111,10 @@ regSpill_top platform regSlotMap cmm
                 -- number to the liveSlotsOnEntry set. The spill cleaner needs
                 -- this information to erase unneeded spill and reload instructions
                 -- after we've done a successful allocation.
-                let liveSlotsOnEntry' :: Map BlockId (Set Int)
+                let liveSlotsOnEntry' :: BlockMap IntSet
                     liveSlotsOnEntry'
-                        = mapFoldWithKey patchLiveSlot 
-                                         liveSlotsOnEntry liveVRegsOnEntry
+                        = mapFoldlWithKey patchLiveSlot
+                                          liveSlotsOnEntry liveVRegsOnEntry
 
                 let info'
                         = LiveInfo static firstId
@@ -125,24 +130,24 @@ regSpill_top platform regSlotMap cmm
         -- if registers in this block are being spilled to stack slots,
         -- then record the fact that these slots are now live in those blocks
         -- in the given slotmap.
-        patchLiveSlot 
-                :: BlockId -> RegSet 
-                -> Map BlockId (Set Int) -> Map BlockId (Set Int)
+        patchLiveSlot
+                :: BlockMap IntSet -> BlockId -> RegSet -> BlockMap IntSet
 
-        patchLiveSlot blockId regsLive slotMap
-         = let  
+        patchLiveSlot slotMap blockId regsLive
+         = let
                 -- Slots that are already recorded as being live.
-                curSlotsLive    = fromMaybe Set.empty
-                                $ Map.lookup blockId slotMap
+                curSlotsLive    = fromMaybe IntSet.empty
+                                $ mapLookup blockId slotMap
 
-                moreSlotsLive   = Set.fromList
+                moreSlotsLive   = IntSet.fromList
                                 $ catMaybes
                                 $ map (lookupUFM regSlotMap)
-                                $ uniqSetToList regsLive
+                                $ nonDetEltsUniqSet regsLive
+                    -- See Note [Unique Determinism and code generation]
 
                 slotMap'
-                 = Map.insert blockId (Set.union curSlotsLive moreSlotsLive) 
-                              slotMap
+                 = mapInsert blockId (IntSet.union curSlotsLive moreSlotsLive)
+                             slotMap
 
            in   slotMap'
 
@@ -294,10 +299,10 @@ patchInstr reg instr
         -- If it's not then something has gone horribly wrong.
         let nReg
              = case reg of
-                RegVirtual vr   
+                RegVirtual vr
                  -> RegVirtual (renameVirtualReg nUnique vr)
 
-                RegReal{}       
+                RegReal{}
                  -> panic "RegAlloc.Graph.Spill.patchIntr: not patching real reg"
 
         let instr'      = patchReg1 reg nReg instr
@@ -371,6 +376,5 @@ makeSpillStats s
 
 instance Outputable SpillStats where
  ppr stats
-        = (vcat $ map (\(r, s, l) -> ppr r <+> int s <+> int l)
-                        $ eltsUFM (spillStoreLoad stats))
-
+        = pprUFM (spillStoreLoad stats)
+                 (vcat . map (\(r, s, l) -> ppr r <+> int s <+> int l))

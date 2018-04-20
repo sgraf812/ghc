@@ -11,8 +11,7 @@
  *
  * -------------------------------------------------------------------------- */
 
-#ifndef RTS_IOMANAGER_H
-#define RTS_IOMANAGER_H
+#pragma once
 
 #if defined(mingw32_HOST_OS)
 
@@ -26,7 +25,7 @@ void     sendIOManagerEvent (HsWord32 event);
 
 #else
 
-void     setIOManagerControlFd   (nat cap_no, int fd);
+void     setIOManagerControlFd   (uint32_t cap_no, int fd);
 void     setTimerManagerControlFd(int fd);
 void     setIOManagerWakeupFd   (int fd);
 
@@ -42,5 +41,3 @@ void ioManagerWakeup (void);
 void ioManagerDie (void);
 void ioManagerStart (void);
 #endif
-
-#endif /* RTS_IOMANAGER_H */

@@ -1,7 +1,6 @@
 # Despite the name "package", this file contains the master list of
 # the *repositories* that make up GHC. It is parsed by
 # * boot
-# * sync-all
 # * rules/foreachLibrary.mk
 #
 # Some of this information is duplicated elsewhere in the build system:
@@ -30,17 +29,8 @@
 #     GitHub and GHC developers are granted push-rights for are denoted by
 #     being specified with the `ssh://` scheme. Thus, `https://`
 #     repo urls denote read-only access.
-#
-#   * The 'tag' determines when "sync-all get" will get the
-#     repo. If the tag is "-" then it will always get it, but if there
-#     is a tag then a corresponding flag must be given to "sync-all", e.g.
-#     if you want to get the packages with an "extralibs"
-#     tag then you need to use "sync-all --extra get".
-#     Support for new tags must be manually added to the "sync-all" script.
-#
-#     'tag' is also used to determine which packages the build system
-#     deems to have the EXTRA_PACKAGE property: tags 'dph' and 'extra'
-#     both give this property
+#   * 'tag', in combination with the variables BUILD_DPH and BUILD_EXTRA_PKGS,
+#     determines which packages are build by default.
 #
 # Lines that start with a '#' are comments.
 #
@@ -49,35 +39,34 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ghc-tarballs                 windows     ghc-tarballs.git                -
 libffi-tarballs              -           -                               -
-utils/hsc2hs                 -           -                               -
+utils/hsc2hs                 -           -                               ssh://git@github.com/haskell/hsc2hs.git
 utils/haddock                -           -                               ssh://git@github.com/haskell/haddock.git
 libraries/array              -           -                               -
 libraries/binary             -           -                               https://github.com/kolmodin/binary.git
 libraries/bytestring         -           -                               https://github.com/haskell/bytestring.git
 libraries/Cabal              -           -                               https://github.com/haskell/cabal.git
+libraries/ghc-compact        -           -                               -
 libraries/containers         -           -                               https://github.com/haskell/containers.git
-libraries/deepseq            -           -                               -
-libraries/directory          -           -                               -
-libraries/filepath           -           -                               -
+libraries/deepseq            -           -                               ssh://git@github.com/haskell/deepseq.git
+libraries/directory          -           -                               ssh://git@github.com/haskell/directory.git
+libraries/filepath           -           -                               ssh://git@github.com/haskell/filepath.git
 libraries/haskeline          -           -                               https://github.com/judah/haskeline.git
-libraries/haskell98          -           -                               -
-libraries/haskell2010        -           -                               -
-libraries/hoopl              -           -                               -
 libraries/hpc                -           -                               -
-libraries/old-locale         -           -                               -
-libraries/old-time           -           -                               -
+libraries/mtl                -           -                               https://github.com/haskell/mtl.git
+libraries/parsec             -           -                               https://github.com/haskell/parsec.git
 libraries/pretty             -           -                               https://github.com/haskell/pretty.git
-libraries/process            -           -                               -
+libraries/process            -           -                               ssh://git@github.com/haskell/process.git
 libraries/terminfo           -           -                               https://github.com/judah/terminfo.git
+libraries/text               -           -                               https://github.com/haskell/text.git
 libraries/time               -           -                               https://github.com/haskell/time.git
-libraries/transformers       -           -                               http://git.haskell.org/darcs-mirrors/transformers.git
+libraries/transformers       -           -                               https://git.haskell.org/darcs-mirrors/transformers.git
 libraries/unix               -           -                               ssh://git@github.com/haskell/unix.git
 libraries/Win32              -           -                               https://github.com/haskell/win32.git
 libraries/xhtml              -           -                               https://github.com/haskell/xhtml.git
 nofib                        nofib       -                               -
-libraries/parallel           extra       -                               -
-libraries/stm                extra       -                               -
-libraries/random             dph         -                               https://github.com/haskell/random.git
+libraries/parallel           extra       -                               ssh://git@github.com/haskell/parallel.git
+libraries/stm                -           -                               ssh://git@github.com/haskell/stm.git
+libraries/random             extra       -                               https://github.com/haskell/random.git
 libraries/primitive          dph         -                               https://github.com/haskell/primitive.git
 libraries/vector             dph         -                               https://github.com/haskell/vector.git
 libraries/dph                dph         -                               -

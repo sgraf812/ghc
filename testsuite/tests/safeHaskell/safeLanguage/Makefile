@@ -10,7 +10,7 @@ cleanSafeRecomp01:
 
 # Just a single file
 safeRecomp01:
-	'$(MAKE)' cleanSafeRecomp01
+	$(MAKE) -s --no-print-directory cleanSafeRecomp01
 	
 	'$(TEST_HC)' -c SafeRecomp01.hs
 	'$(TEST_HC)' --show-iface SafeRecomp01.hi | grep -E '^trusted:'
@@ -31,7 +31,7 @@ safeRecomp01:
 	# at moment we revert to 'no flags' so we recompile if previously
 	# flags were specified. An alternate design would be to assume the
 	# safe haskell flags from the old compile still apply but we
-	# go with the previous design as that's the least suprise to a user.
+	# go with the previous design as that's the least surprise to a user.
 	# See [SafeRecomp02] though.
 	'$(TEST_HC)' -c SafeRecomp01.hs
 	'$(TEST_HC)' --show-iface SafeRecomp01.hi | grep -E '^trusted:'
@@ -39,9 +39,9 @@ safeRecomp01:
 cleanSafeRecomp02:
 	rm -rf SafeRecomp02 SafeRecomp02.o SafeRecomp02.hi SafeRecomp02_A.o SafeRecomp02_A.hi
 
-# mutli module program
+# multi module program
 safeRecomp02:
-	'$(MAKE)' cleanSafeRecomp02
+	$(MAKE) -s --no-print-directory cleanSafeRecomp02
 	
 	'$(TEST_HC)' -c SafeRecomp02_A.hs
 	'$(TEST_HC)' --make SafeRecomp02.hs

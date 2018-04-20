@@ -7,6 +7,8 @@ module Vectorise.Utils.Closure
   )
 where
 
+import GhcPrelude
+
 import Vectorise.Builtins
 import Vectorise.Vect
 import Vectorise.Monad
@@ -22,7 +24,7 @@ import TyCon
 import DataCon
 import MkId
 import TysWiredIn
-import BasicTypes( TupleSort(..) )
+import BasicTypes( Boxity(..) )
 import FastString
 
 
@@ -100,7 +102,7 @@ buildClosure :: [TyVar]         -- ^Type variables passed during closure constru
              -> [VVar]          -- ^Variables in the environment.
              -> Type            -- ^Type of the closure argument.
              -> Type            -- ^Type of the result.
-             -> VM VExpr 
+             -> VM VExpr
              -> VM VExpr
 buildClosure tvs vars vvars arg_ty res_ty mk_body
   = do { (env_ty, env, bind) <- buildEnv vvars
@@ -122,19 +124,19 @@ buildClosure tvs vars vvars arg_ty res_ty mk_body
 -- Build the environment for a single closure.
 --
 buildEnv :: [VVar] -> VM (Type, VExpr, VExpr -> VExpr -> VExpr)
-buildEnv [] 
+buildEnv []
  = do
       ty    <- voidType
       void  <- builtin voidVar
       pvoid <- builtin pvoidVar
       return (ty, vVar (void, pvoid), \_ body -> body)
-buildEnv [v] 
+buildEnv [v]
  = return (vVarType v, vVar v,
            \env body -> vLet (vNonRec v env) body)
 buildEnv vs
  = do (lenv_tc, lenv_tyargs) <- pdataReprTyCon ty
 
-      let venv_con   = tupleCon BoxedTuple (length vs) 
+      let venv_con   = tupleDataCon Boxed (length vs)
           [lenv_con] = tyConDataCons lenv_tc
 
           venv       = mkCoreTup (map Var vvs)

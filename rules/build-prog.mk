@@ -11,11 +11,7 @@
 # -----------------------------------------------------------------------------
 
 
-# Build a program.  Invoke like this:
-#
-# utils/genapply_MODULES = Main
-# utils/genapply_HC_OPTS = -package Cabal
-# utils/genapply_dist_PROGNAME = genapply
+# Build a program.
 #
 # $(eval $(call build-prog,utils/genapply,dist-install,1))
 
@@ -26,7 +22,6 @@ $(call profStart, build-prog($1,$2,$3))
 # $2 = distdir
 # $3 = GHC stage to use (0 == bootstrapping compiler)
 
-ifneq "$$(CLEANING)" "YES"
 ifeq "$$($1_$2_PROGNAME)" ""
 $$(error $1_$2_PROGNAME is not set)
 endif
@@ -34,7 +29,6 @@ ifneq "$$($1_$2_PROG)" ""
 $$(error $1_$2_PROG is set)
 endif
 $1_$2_PROG = $$($1_$2_PROGNAME)$$(exeext$3)
-endif
 
 ifeq "$$(findstring $3,0 1 2)" ""
 $$(error $1/$2: stage argument to build-prog should be 0, 1, or 2)
@@ -49,6 +43,9 @@ $$(eval $$(call build-prog-helper,$1,$2,$3))
 endif
 $(call profEnd, build-prog($1,$2,$3))
 endef
+
+
+
 
 
 define build-prog-vars
@@ -85,31 +82,42 @@ endif
 $1_$2_depfile_base = $1/$2/build/.depend
 
 ifeq "$$($1_$2_INSTALL_INPLACE)" "NO"
-ifeq "$(findstring clean,$(MAKECMDGOALS))" ""
+ifneq "$$(CLEANING)" "YES"
 $1_$2_INPLACE = $$(error $1_$2 should not be installed inplace, but INPLACE var evaluated)
 else
 $1_$2_INPLACE =
 endif
 else
-ifeq "$(findstring clean,$(MAKECMDGOALS))" ""
 ifneq "$$($$($1_$2_PROGNAME)_INPLACE)" ""
 $$(error $$($1_$2_PROGNAME)_INPLACE defined twice)
 endif
-endif
+#
+# Where do we install the wrapper and the binary?
+#   $$($1_$2_PROGNAME)_INPLACE  The thing we run (script or binary)
+#   $1_$2_INPLACE               The binary
+#
 ifeq "$$($1_$2_TOPDIR)" "YES"
-$$($1_$2_PROGNAME)_INPLACE = $$(INPLACE_TOPDIR)/$$($1_$2_PROG)
+$$($1_$2_PROGNAME)_INPLACE = $$(INPLACE_LIB)/bin/$$($1_$2_PROG)
+ifeq "$$($1_$2_WANT_INPLACE_WRAPPER)" "YES"
+$1_$2_INPLACE = $$(INPLACE_LIB)/bin/$$($1_$2_PROG).bin
+else
+$1_$2_INPLACE = $$(INPLACE_LIB)/bin/$$($1_$2_PROG)
+endif
 else
 $$($1_$2_PROGNAME)_INPLACE = $$(INPLACE_BIN)/$$($1_$2_PROG)
-endif
-# Where do we install the inplace version?
 ifeq "$$($1_$2_WANT_INPLACE_WRAPPER)" "YES"
 $1_$2_INPLACE = $$(INPLACE_LIB)/bin/$$($1_$2_PROG)
 else
 $1_$2_INPLACE = $$($$($1_$2_PROGNAME)_INPLACE)
 endif
 endif
+endif
 
 endef
+
+
+
+
 
 define build-prog-helper
 # $1 = dir
@@ -185,16 +193,14 @@ $1_$2_$$($1_$2_PROGRAM_WAY)_GHC_LD_OPTS += -no-auto-link-packages -no-hs-main
 endif
 
 ifneq "$$(BINDIST)" "YES"
+
 # The quadrupled $'s here are because the _<way>_LIB variables aren't
 # necessarily set when this part of the makefile is read
 $1/$2/build/tmp/$$($1_$2_PROG) $1/$2/build/tmp/$$($1_$2_PROG).dll : \
-    $$(foreach dep,$$($1_$2_DEPS),\
-        $$(if $$(filter ghc%,$$(dep)),\
-            $(if $(filter 0,$3),$$(compiler_stage1_PROGRAM_DEP_LIB),\
-            $(if $(filter 1,$3),$$(compiler_stage2_PROGRAM_DEP_LIB),\
-            $(if $(filter 2,$3),$$(compiler_stage2_PROGRAM_DEP_LIB),\
-            $$(error Bad build stage)))),\
-        $$$$($$(dep)_dist-$(if $(filter 0,$3),boot,install)_PROGRAM_DEP_LIB)))
+    $$(foreach dep,$$($1_$2_TRANSITIVE_DEP_COMPONENT_IDS),\
+        $$$$($$(dep)_dist-$(if $(filter 0,$3),boot,install)_PROGRAM_DEP_LIB))
+# Workaround: We use TRANSITIVE_DEP_COMPONENT_IDS here as a workaround for
+# Trac #12078.
 
 $1_$2_PROG_NEEDS_C_WRAPPER = NO
 $1_$2_PROG_INPLACE = $$($1_$2_PROG)
@@ -240,7 +246,7 @@ $1/$2/build/tmp/$$($1_$2_PROG)-wrapper.c: driver/utils/dynwrapper.c | $$$$(dir $
 	echo '#include <Windows.h>' >> $$@
 	echo '#include "Rts.h"' >> $$@
 	echo 'LPTSTR path_dirs[] = {' >> $$@
-	$$(foreach p,$$($1_$2_TRANSITIVE_DEP_KEYS),$$(call make-command,echo '    TEXT("/../lib/$$p")$$(comma)' >> $$@))
+	$$(foreach p,$$($1_$2_TRANSITIVE_DEP_COMPONENT_IDS),$$(call make-command,echo '    TEXT("/../lib/$$p")$$(comma)' >> $$@))
 	echo '    TEXT("/../lib/"),' >> $$@
 	echo '    NULL};' >> $$@
 	echo 'LPTSTR progDll = TEXT("../lib/$$($1_$2_PROG).dll");' >> $$@
@@ -256,7 +262,7 @@ $1/$2/build/tmp/$$($1_$2_PROG) : $1/$2/build/tmp/$$($1_$2_PROG)-wrapper.c $1/$2/
 
 $1/$2/build/tmp/$$($1_$2_PROG).dll : $$($1_$2_$$($1_$2_PROGRAM_WAY)_HS_OBJS) $$($1_$2_$$($1_$2_PROGRAM_WAY)_C_OBJS) $$($1_$2_$$($1_$2_PROGRAM_WAY)_S_OBJS) $$($1_$2_OTHER_OBJS) | $$$$(dir $$$$@)/.
 	$$(call build-dll,$1,$2,$$($1_$2_PROGRAM_WAY),,$$($1_$2_$$($1_$2_PROGRAM_WAY)_HS_OBJS) $$($1_$2_$$($1_$2_PROGRAM_WAY)_C_OBJS) $$($1_$2_$$($1_$2_PROGRAM_WAY)_S_OBJS) $$($1_$2_OTHER_OBJS),$$@)
-else
+else # $1_$2_PROG_NEEDS_C_WRAPPER=NO
 ifeq "$$($1_$2_LINK_WITH_GCC)" "NO"
 $1/$2/build/tmp/$$($1_$2_PROG) : $$($1_$2_$$($1_$2_PROGRAM_WAY)_HS_OBJS) $$($1_$2_$$($1_$2_PROGRAM_WAY)_C_OBJS) $$($1_$2_$$($1_$2_PROGRAM_WAY)_S_OBJS) $$($1_$2_OTHER_OBJS) | $$$$(dir $$$$@)/.
 	$$(call cmd,$1_$2_HC) -o $$@ $$($1_$2_$$($1_$2_PROGRAM_WAY)_ALL_HC_OPTS) $$($1_$2_$$($1_$2_PROGRAM_WAY)_GHC_LD_OPTS) $$($1_$2_$$($1_$2_PROGRAM_WAY)_HS_OBJS) $$($1_$2_$$($1_$2_PROGRAM_WAY)_C_OBJS) $$($1_$2_$$($1_$2_PROGRAM_WAY)_S_OBJS) $$($1_$2_OTHER_OBJS) $$(addprefix -l,$$($1_$2_EXTRA_LIBRARIES))
@@ -265,7 +271,7 @@ else
 $1/$2/build/tmp/$$($1_$2_PROG) : $$($1_$2_$$($1_$2_PROGRAM_WAY)_HS_OBJS) $$($1_$2_$$($1_$2_PROGRAM_WAY)_C_OBJS) $$($1_$2_$$($1_$2_PROGRAM_WAY)_S_OBJS) $$($1_$2_OTHER_OBJS) | $$$$(dir $$$$@)/.
 	$$(call cmd,$1_$2_CC) -o $$@ $$($1_$2_$$($1_$2_PROGRAM_WAY)_ALL_CC_OPTS) $$($1_$2_$$($1_$2_PROGRAM_WAY)_ALL_LD_OPTS) $$($1_$2_$$($1_$2_PROGRAM_WAY)_HS_OBJS) $$($1_$2_$$($1_$2_PROGRAM_WAY)_C_OBJS) $$($1_$2_$$($1_$2_PROGRAM_WAY)_S_OBJS) $$($1_$2_OTHER_OBJS) $$($1_$2_$$($1_$2_PROGRAM_WAY)_EXTRA_CC_OPTS) $$(addprefix -l,$$($1_$2_EXTRA_LIBRARIES))
 endif
-endif
+endif # $1_$2_PROG_NEEDS_C_WRAPPER
 
 # Note [lib-depends] if this program is built with stage1 or greater, we
 # need to depend on the libraries too.  NB. since $(ALL_STAGE1_LIBS) and
@@ -274,23 +280,20 @@ endif
 ifneq "$$(CLEANING)" "YES"
 ifneq "$3" "0"
 ifneq "$$($1_$2_HS_SRCS)" ""
-ifeq "$$(strip $$(ALL_STAGE1_LIBS))" ""
-$$(error ordering failure in $1 ($2): ALL_STAGE1_LIBS is empty)
+ifeq "$$(strip $$(ALL_STAGE1_$$($1_$2_PROGRAM_WAY)_LIBS))" ""
+$$(error ordering failure in $1 ($2): ALL_STAGE1_$$($1_$2_PROGRAM_WAY)_LIBS is empty)
 endif
-$1/$2/build/tmp/$$($1_$2_PROG) : $$(ALL_STAGE1_LIBS) $$(ALL_RTS_LIBS) $$(OTHER_LIBS)
+$1/$2/build/tmp/$$($1_$2_PROG) : $$(ALL_STAGE1_$$($1_$2_PROGRAM_WAY)_LIBS) $$(ALL_RTS_LIBS)
 endif
 endif
 endif
 
-# INPLACE_BIN might be empty if we're distcleaning
-ifeq "$(findstring clean,$(MAKECMDGOALS))" ""
 ifeq "$$($1_$2_INSTALL_INPLACE)" "YES"
 $$($1_$2_INPLACE) : $1/$2/build/tmp/$$($1_$2_PROG_INPLACE) | $$$$(dir $$$$@)/.
 	$$(INSTALL) -m 755 $$< $$@
 endif
-endif
 
-endif
+endif # BINDIST
 
 ifneq "$$($1_$2_INSTALL_INPLACE)" "NO"
 $(call all-target,$1_$2,$$($1_$2_INPLACE))
@@ -304,7 +307,7 @@ endif
 ifeq "$$($1_$2_WANT_INSTALLED_WRAPPER)" "YES"
 INSTALL_LIBEXECS += $1/$2/build/tmp/$$($1_$2_PROG)
 else ifeq "$$($1_$2_TOPDIR)" "YES"
-INSTALL_TOPDIRS  += $1/$2/build/tmp/$$($1_$2_PROG)
+INSTALL_LIBEXECS += $1/$2/build/tmp/$$($1_$2_PROG)
 else
 INSTALL_BINS     += $1/$2/build/tmp/$$($1_$2_PROG)
 endif

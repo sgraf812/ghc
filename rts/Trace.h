@@ -6,8 +6,7 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef TRACE_H
-#define TRACE_H
+#pragma once
 
 #include "rts/EventLogFormat.h"
 #include "Capability.h"
@@ -28,7 +27,7 @@ void initTracing (void);
 void endTracing  (void);
 void freeTracing (void);
 void resetTracing (void);
-void tracingAddCapapilities (nat from, nat to);
+void tracingAddCapapilities (uint32_t from, uint32_t to);
 
 #endif /* TRACING */
 
@@ -45,23 +44,24 @@ enum CapsetType { CapsetTypeCustom = CAPSET_TYPE_CUSTOM,
 // Message classes
 // -----------------------------------------------------------------------------
 
-// debugging flags, set with +RTS -D<something>
-extern int DEBUG_sched;
-extern int DEBUG_interp;
-extern int DEBUG_weak;
-extern int DEBUG_gccafs;
-extern int DEBUG_gc;
-extern int DEBUG_block_alloc;
-extern int DEBUG_sanity;
-extern int DEBUG_stable;
-extern int DEBUG_stm;
-extern int DEBUG_prof;
-extern int DEBUG_gran;
-extern int DEBUG_par;
-extern int DEBUG_linker;
-extern int DEBUG_squeeze;
-extern int DEBUG_hpc;
-extern int DEBUG_sparks;
+// shorthand for RtsFlags.DebugFlags.<blah>, useful with debugTrace()
+#define DEBUG_sched       RtsFlags.DebugFlags.scheduler
+#define DEBUG_interp      RtsFlags.DebugFlags.interp
+#define DEBUG_weak        RtsFlags.DebugFlags.weak
+#define DEBUG_gccafs      RtsFlags.DebugFlags.gccafs
+#define DEBUG_gc          RtsFlags.DebugFlags.gc
+#define DEBUG_block_alloc RtsFlags.DebugFlags.alloc
+#define DEBUG_sanity      RtsFlags.DebugFlags.sanity
+#define DEBUG_stable      RtsFlags.DebugFlags.stable
+#define DEBUG_stm         RtsFlags.DebugFlags.stm
+#define DEBUG_prof        RtsFlags.DebugFlags.prof
+#define DEBUG_gran        RtsFlags.DebugFlags.gran
+#define DEBUG_par         RtsFlags.DebugFlags.par
+#define DEBUG_linker      RtsFlags.DebugFlags.linker
+#define DEBUG_squeeze     RtsFlags.DebugFlags.squeeze
+#define DEBUG_hpc         RtsFlags.DebugFlags.hpc
+#define DEBUG_sparks      RtsFlags.DebugFlags.sparks
+#define DEBUG_compact     RtsFlags.DebugFlags.compact
 
 // events
 extern int TRACE_sched;
@@ -69,6 +69,7 @@ extern int TRACE_gc;
 extern int TRACE_spark_sampled;
 extern int TRACE_spark_full;
 /* extern int TRACE_user; */  // only used in Trace.c
+extern int TRACE_cap;
 
 // -----------------------------------------------------------------------------
 // Posting events
@@ -77,17 +78,17 @@ extern int TRACE_spark_full;
 // the not-taken case to be as efficient as possible, a simple
 // test-and-jump, and with inline functions gcc seemed to move some of
 // the instructions from the branch up before the test.
-// 
+//
 // -----------------------------------------------------------------------------
 
-#ifdef DEBUG
+#if defined(DEBUG)
 void traceBegin (const char *str, ...);
 void traceEnd (void);
 #endif
 
-#ifdef TRACING
+#if defined(TRACING)
 
-/* 
+/*
  * Record a scheduler event
  */
 #define traceSchedEvent(cap, tag, tso, other)   \
@@ -100,10 +101,10 @@ void traceEnd (void);
         traceSchedEvent_(cap, tag, tso, info1, info2); \
     }
 
-void traceSchedEvent_ (Capability *cap, EventTypeNum tag, 
+void traceSchedEvent_ (Capability *cap, EventTypeNum tag,
                        StgTSO *tso, StgWord info1, StgWord info2);
 
-/* 
+/*
  * Record a GC event
  */
 #define traceGcEvent(cap, tag)    \
@@ -113,7 +114,7 @@ void traceSchedEvent_ (Capability *cap, EventTypeNum tag,
 
 void traceGcEvent_ (Capability *cap, EventTypeNum tag);
 
-/* 
+/*
  * Record a GC event at the explicitly given timestamp
  */
 #define traceGcEventAtT(cap, ts, tag)   \
@@ -123,7 +124,7 @@ void traceGcEvent_ (Capability *cap, EventTypeNum tag);
 
 void traceGcEventAtT_ (Capability *cap, StgWord64 ts, EventTypeNum tag);
 
-/* 
+/*
  * Record a heap event
  */
 #define traceHeapEvent(cap, tag, heap_capset, info1) \
@@ -136,7 +137,7 @@ void traceHeapEvent_ (Capability   *cap,
                       W_          info1);
 
 void traceEventHeapInfo_ (CapsetID    heap_capset,
-                          nat         gens,
+                          uint32_t  gens,
                           W_        maxHeapSize,
                           W_        allocAreaSize,
                           W_        mblockSize,
@@ -144,15 +145,16 @@ void traceEventHeapInfo_ (CapsetID    heap_capset,
 
 void traceEventGcStats_  (Capability *cap,
                           CapsetID    heap_capset,
-                          nat         gen,
+                          uint32_t  gen,
                           W_        copied,
                           W_        slop,
                           W_        fragmentation,
-                          nat         par_n_threads,
+                          uint32_t  par_n_threads,
                           W_        par_max_copied,
-                          W_        par_tot_copied);
+                          W_        par_tot_copied,
+                          W_        par_balanced_copied);
 
-/* 
+/*
  * Record a spark event
  */
 #define traceSparkEvent(cap, tag)         \
@@ -171,7 +173,7 @@ void traceSparkEvent_ (Capability *cap, EventTypeNum tag, StgWord info1);
 // ##__VA_ARGS syntax is a gcc extension, which allows the variable
 // argument list to be empty (see gcc docs for details).
 
-/* 
+/*
  * Emit a trace message on a particular Capability
  */
 #define traceCap(class, cap, msg, ...)          \
@@ -181,7 +183,7 @@ void traceSparkEvent_ (Capability *cap, EventTypeNum tag, StgWord info1);
 
 void traceCap_(Capability *cap, char *msg, ...);
 
-/* 
+/*
  * Emit a trace message
  */
 #define trace(class, msg, ...)                  \
@@ -191,13 +193,13 @@ void traceCap_(Capability *cap, char *msg, ...);
 
 void trace_(char *msg, ...);
 
-/* 
+/*
  * A message or event emitted by the program
  * Used by Debug.Trace.{traceEvent, traceEventIO}
  */
 void traceUserMsg(Capability *cap, char *msg);
 
-/* 
+/*
  * A marker event emitted by the program
  * Used by Debug.Trace.{traceMarker, traceMarkerIO}
  */
@@ -211,10 +213,10 @@ void traceThreadLabel_(Capability *cap,
                        StgTSO     *tso,
                        char       *label);
 
-/* 
+/*
  * Emit a debug message (only when DEBUG is defined)
  */
-#ifdef DEBUG
+#if defined(DEBUG)
 #define debugTrace(class, msg, ...)             \
     if (RTS_UNLIKELY(class)) {                  \
         trace_(msg, ##__VA_ARGS__);             \
@@ -223,7 +225,7 @@ void traceThreadLabel_(Capability *cap,
 #define debugTrace(class, str, ...) /* nothing */
 #endif
 
-#ifdef DEBUG
+#if defined(DEBUG)
 #define debugTraceCap(class, cap, msg, ...)      \
     if (RTS_UNLIKELY(class)) {                  \
         traceCap_(cap, msg, ##__VA_ARGS__);     \
@@ -232,7 +234,7 @@ void traceThreadLabel_(Capability *cap,
 #define debugTraceCap(class, cap, str, ...) /* nothing */
 #endif
 
-/* 
+/*
  * Emit a message/event describing the state of a thread
  */
 #define traceThreadStatus(class, tso)           \
@@ -242,23 +244,25 @@ void traceThreadLabel_(Capability *cap,
 
 void traceThreadStatus_ (StgTSO *tso);
 
-void traceEventStartup_ (int n_caps);
-
 /*
  * Events for describing capabilities and capability sets in the eventlog
- *
- * Note: unlike other events, these are not conditional on TRACE_sched or
- * similar because capabilities and capability sets are important
- * context for other events. Since other events depend on these events
- * then for simplicity we always emit them, rather than working out if
- * they're necessary . They should be very low volume.
  */
-void traceCapEvent (Capability   *cap,
+#define traceCapEvent(cap, tag)                 \
+    if (RTS_UNLIKELY(TRACE_cap)) {              \
+        traceCapEvent_(cap, tag);               \
+    }
+
+void traceCapEvent_ (Capability   *cap,
                     EventTypeNum  tag);
 
-void traceCapsetEvent (EventTypeNum tag,
-                       CapsetID     capset,
-                       StgWord      info);
+#define traceCapsetEvent(cap, capset, info)     \
+    if (RTS_UNLIKELY(TRACE_cap)) {              \
+        traceCapsetEvent_(cap, capset, info);   \
+    }
+
+void traceCapsetEvent_ (EventTypeNum tag,
+                        CapsetID     capset,
+                        StgWord      info);
 
 void traceWallClockTime_(void);
 
@@ -277,6 +281,20 @@ void traceTaskMigrate_ (Task       *task,
 
 void traceTaskDelete_ (Task       *task);
 
+void traceHeapProfBegin(StgWord8 profile_id);
+void traceHeapProfSampleBegin(StgInt era);
+void traceHeapProfSampleString(StgWord8 profile_id,
+                               const char *label, StgWord residency);
+#if defined(PROFILING)
+void traceHeapProfCostCentre(StgWord32 ccID,
+                             const char *label,
+                             const char *module,
+                             const char *srcloc,
+                             StgBool is_caf);
+void traceHeapProfSampleCostCentre(StgWord8 profile_id,
+                                   CostCentreStack *stack, StgWord residency);
+#endif /* PROFILING */
+
 #else /* !TRACING */
 
 #define traceSchedEvent(cap, tag, tso, other) /* nothing */
@@ -285,7 +303,8 @@ void traceTaskDelete_ (Task       *task);
 #define traceGcEventAtT(cap, ts, tag) /* nothing */
 #define traceEventGcStats_(cap, heap_capset, gen, \
                            copied, slop, fragmentation, \
-                           par_n_threads, par_max_copied, par_tot_copied) /* nothing */
+                           par_n_threads, par_max_copied, \
+                           par_tot_copied, par_balanced_copied) /* nothing */
 #define traceHeapEvent(cap, tag, heap_capset, info1) /* nothing */
 #define traceEventHeapInfo_(heap_capset, gens, \
                             maxHeapSize, allocAreaSize, \
@@ -298,7 +317,6 @@ void traceTaskDelete_ (Task       *task);
 #define debugTraceCap(class, cap, str, ...) /* nothing */
 #define traceThreadStatus(class, tso) /* nothing */
 #define traceThreadLabel_(cap, tso, label) /* nothing */
-INLINE_HEADER void traceEventStartup_ (int n_caps STG_UNUSED) {};
 #define traceCapEvent(cap, tag) /* nothing */
 #define traceCapsetEvent(tag, capset, info) /* nothing */
 #define traceWallClockTime_() /* nothing */
@@ -307,6 +325,11 @@ INLINE_HEADER void traceEventStartup_ (int n_caps STG_UNUSED) {};
 #define traceTaskCreate_(taskID, cap) /* nothing */
 #define traceTaskMigrate_(taskID, cap, new_cap) /* nothing */
 #define traceTaskDelete_(taskID) /* nothing */
+#define traceHeapProfBegin(profile_id) /* nothing */
+#define traceHeapProfCostCentre(ccID, label, module, srcloc, is_caf) /* nothing */
+#define traceHeapProfSampleBegin(era) /* nothing */
+#define traceHeapProfSampleCostCentre(profile_id, stack, residency) /* nothing */
+#define traceHeapProfSampleString(profile_id, label, residency) /* nothing */
 
 #endif /* TRACING */
 
@@ -350,9 +373,6 @@ void dtraceUserMarkerWrapper(Capability *cap, char *msg);
     HASKELLEVENT_CREATE_SPARK_THREAD(cap, spark_tid)
 #define dtraceThreadLabel(cap, tso, label)              \
     HASKELLEVENT_THREAD_LABEL(cap, tso, label)
-INLINE_HEADER void dtraceStartup (int num_caps) {
-    HASKELLEVENT_STARTUP(num_caps);
-}
 #define dtraceCapCreate(cap)                            \
     HASKELLEVENT_CAP_CREATE(cap)
 #define dtraceCapDelete(cap)                            \
@@ -377,11 +397,13 @@ INLINE_HEADER void dtraceStartup (int num_caps) {
                            copies, slop, fragmentation, \
                            par_n_threads,               \
                            par_max_copied,              \
-                           par_tot_copied)              \
+                           par_tot_copied,              \
+                           par_balanced_copied)         \
     HASKELLEVENT_GC_STATS(heap_capset, gens,            \
                            copies, slop, fragmentation, \
                            par_n_threads,               \
                            par_max_copied,              \
+                           par_balanced_copied,         \
                            par_tot_copied)
 #define dtraceHeapInfo(heap_capset, gens,               \
                        maxHeapSize, allocAreaSize,      \
@@ -442,7 +464,6 @@ INLINE_HEADER void dtraceStartup (int num_caps) {
 #define dtraceRequestParGc(cap)                         /* nothing */
 #define dtraceCreateSparkThread(cap, spark_tid)         /* nothing */
 #define dtraceThreadLabel(cap, tso, label)              /* nothing */
-INLINE_HEADER void dtraceStartup (int num_caps STG_UNUSED) {};
 #define dtraceUserMsg(cap, msg)                         /* nothing */
 #define dtraceUserMarker(cap, msg)                      /* nothing */
 #define dtraceGcIdle(cap)                               /* nothing */
@@ -453,7 +474,8 @@ INLINE_HEADER void dtraceStartup (int num_caps STG_UNUSED) {};
                            copies, slop, fragmentation, \
                            par_n_threads,               \
                            par_max_copied,              \
-                           par_tot_copied)              /* nothing */
+                           par_tot_copied,              \
+                           par_balanced_copied)         /* nothing */
 #define dtraceHeapInfo(heap_capset, gens,               \
                        maxHeapSize, allocAreaSize,      \
                        mblockSize, blockSize)           /* nothing */
@@ -492,30 +514,30 @@ INLINE_HEADER void dtraceStartup (int num_caps STG_UNUSED) {};
 //
 // Dtrace - dtrace probes are unconditionally added as probe activation is
 //   handled by the dtrace component of the kernel, and inactive probes are
-//   very cheap — usually, one no-op.  Consequently, dtrace can be used with
+//   very cheap - usually, one no-op.  Consequently, dtrace can be used with
 //   all flavours of the RTS.  In addition, we still support logging events to
 //   a file, even in the presence of dtrace.  This is, eg, useful when tracing
 //   on a server, but browsing trace information with ThreadScope on a local
 //   client.
-// 
+//
 // -----------------------------------------------------------------------------
 
-INLINE_HEADER void traceEventCreateThread(Capability *cap STG_UNUSED, 
+INLINE_HEADER void traceEventCreateThread(Capability *cap STG_UNUSED,
                                           StgTSO     *tso STG_UNUSED)
 {
     traceSchedEvent(cap, EVENT_CREATE_THREAD, tso, tso->stackobj->stack_size);
     dtraceCreateThread((EventCapNo)cap->no, (EventThreadID)tso->id);
 }
 
-INLINE_HEADER void traceEventRunThread(Capability *cap STG_UNUSED, 
+INLINE_HEADER void traceEventRunThread(Capability *cap STG_UNUSED,
                                        StgTSO     *tso STG_UNUSED)
 {
     traceSchedEvent(cap, EVENT_RUN_THREAD, tso, tso->what_next);
     dtraceRunThread((EventCapNo)cap->no, (EventThreadID)tso->id);
 }
 
-INLINE_HEADER void traceEventStopThread(Capability          *cap    STG_UNUSED, 
-                                        StgTSO              *tso    STG_UNUSED, 
+INLINE_HEADER void traceEventStopThread(Capability          *cap    STG_UNUSED,
+                                        StgTSO              *tso    STG_UNUSED,
                                         StgThreadReturnCode  status STG_UNUSED,
                                         StgWord32           info    STG_UNUSED)
 {
@@ -524,20 +546,9 @@ INLINE_HEADER void traceEventStopThread(Capability          *cap    STG_UNUSED,
                      (EventThreadStatus)status, (EventThreadID)info);
 }
 
-// needs to be EXTERN_INLINE as it is used in another EXTERN_INLINE function
-EXTERN_INLINE void traceEventThreadRunnable(Capability *cap STG_UNUSED, 
-                                            StgTSO     *tso STG_UNUSED);
-
-EXTERN_INLINE void traceEventThreadRunnable(Capability *cap STG_UNUSED, 
-                                            StgTSO     *tso STG_UNUSED)
-{
-    traceSchedEvent(cap, EVENT_THREAD_RUNNABLE, tso, 0);
-    dtraceThreadRunnable((EventCapNo)cap->no, (EventThreadID)tso->id);
-}
-
-INLINE_HEADER void traceEventMigrateThread(Capability *cap     STG_UNUSED, 
+INLINE_HEADER void traceEventMigrateThread(Capability *cap     STG_UNUSED,
                                            StgTSO     *tso     STG_UNUSED,
-                                           nat         new_cap STG_UNUSED)
+                                           uint32_t    new_cap STG_UNUSED)
 {
     traceSchedEvent(cap, EVENT_MIGRATE_THREAD, tso, new_cap);
     dtraceMigrateThread((EventCapNo)cap->no, (EventThreadID)tso->id,
@@ -568,9 +579,9 @@ INLINE_HEADER void traceCapDisable(Capability *cap STG_UNUSED)
     dtraceCapDisable((EventCapNo)cap->no);
 }
 
-INLINE_HEADER void traceEventThreadWakeup(Capability *cap       STG_UNUSED, 
+INLINE_HEADER void traceEventThreadWakeup(Capability *cap       STG_UNUSED,
                                           StgTSO     *tso       STG_UNUSED,
-                                          nat         other_cap STG_UNUSED)
+                                          uint32_t    other_cap STG_UNUSED)
 {
     traceSchedEvent(cap, EVENT_THREAD_WAKEUP, tso, other_cap);
     dtraceThreadWakeup((EventCapNo)cap->no, (EventThreadID)tso->id,
@@ -651,26 +662,29 @@ INLINE_HEADER void traceEventGcGlobalSync(Capability *cap STG_UNUSED)
 
 INLINE_HEADER void traceEventGcStats(Capability *cap            STG_UNUSED,
                                      CapsetID    heap_capset    STG_UNUSED,
-                                     nat         gen            STG_UNUSED,
+                                     uint32_t    gen            STG_UNUSED,
                                      W_        copied         STG_UNUSED,
                                      W_        slop           STG_UNUSED,
                                      W_        fragmentation  STG_UNUSED,
-                                     nat         par_n_threads  STG_UNUSED,
+                                     uint32_t  par_n_threads  STG_UNUSED,
                                      W_        par_max_copied STG_UNUSED,
-                                     W_        par_tot_copied STG_UNUSED)
+                                     W_        par_tot_copied STG_UNUSED,
+                                     W_        par_balanced_copied STG_UNUSED)
 {
     if (RTS_UNLIKELY(TRACE_gc)) {
         traceEventGcStats_(cap, heap_capset, gen,
                            copied, slop, fragmentation,
-                           par_n_threads, par_max_copied, par_tot_copied);
+                           par_n_threads, par_max_copied,
+                           par_tot_copied, par_balanced_copied);
     }
     dtraceEventGcStats(heap_capset, gen,
                        copied, slop, fragmentation,
-                       par_n_threads, par_max_copied, par_tot_copied);
+                       par_n_threads, par_max_copied,
+                       par_tot_copied, par_balanced_copied);
 }
 
 INLINE_HEADER void traceEventHeapInfo(CapsetID    heap_capset   STG_UNUSED,
-                                      nat         gens          STG_UNUSED,
+                                      uint32_t  gens          STG_UNUSED,
                                       W_        maxHeapSize   STG_UNUSED,
                                       W_        allocAreaSize STG_UNUSED,
                                       W_        mblockSize    STG_UNUSED,
@@ -710,23 +724,6 @@ INLINE_HEADER void traceEventHeapLive(Capability *cap         STG_UNUSED,
     dtraceEventHeapLive(heap_capset, heap_live);
 }
 
-/* TODO: at some point we should remove this event, it's covered by
- * the cap create/delete events.
- */
-INLINE_HEADER void traceEventStartup(void)
-{
-    int n_caps;
-#ifdef THREADED_RTS
-    // XXX n_capabilities hasn't been initialised yet
-    n_caps = RtsFlags.ParFlags.nNodes;
-#else
-    n_caps = 1;
-#endif
-
-    traceEventStartup_(n_caps);
-    dtraceStartup(n_caps);
-}
-
 INLINE_HEADER void traceCapsetCreate(CapsetID   capset      STG_UNUSED,
                                      CapsetType capset_type STG_UNUSED)
 {
@@ -741,14 +738,14 @@ INLINE_HEADER void traceCapsetDelete(CapsetID capset STG_UNUSED)
 }
 
 INLINE_HEADER void traceCapsetAssignCap(CapsetID capset STG_UNUSED,
-                                        nat      capno  STG_UNUSED)
+                                        uint32_t capno  STG_UNUSED)
 {
     traceCapsetEvent(EVENT_CAPSET_ASSIGN_CAP, capset, capno);
     dtraceCapsetAssignCap(capset, capno);
 }
 
 INLINE_HEADER void traceCapsetRemoveCap(CapsetID capset STG_UNUSED,
-                                        nat      capno  STG_UNUSED)
+                                        uint32_t capno  STG_UNUSED)
 {
     traceCapsetEvent(EVENT_CAPSET_REMOVE_CAP, capset, capno);
     dtraceCapsetRemoveCap(capset, capno);
@@ -767,7 +764,7 @@ INLINE_HEADER void traceOSProcessInfo(void)
      * is available to DTrace directly */
 }
 
-INLINE_HEADER void traceEventCreateSparkThread(Capability  *cap      STG_UNUSED, 
+INLINE_HEADER void traceEventCreateSparkThread(Capability  *cap      STG_UNUSED,
                                                StgThreadID spark_tid STG_UNUSED)
 {
     traceSparkEvent2(cap, EVENT_CREATE_SPARK_THREAD, spark_tid);
@@ -776,7 +773,7 @@ INLINE_HEADER void traceEventCreateSparkThread(Capability  *cap      STG_UNUSED,
 
 INLINE_HEADER void traceSparkCounters(Capability *cap STG_UNUSED)
 {
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     if (RTS_UNLIKELY(TRACE_spark_sampled)) {
         traceSparkCounters_(cap, cap->spark_stats, sparkPoolSize(cap->sparks));
     }
@@ -816,7 +813,7 @@ INLINE_HEADER void traceEventSparkRun(Capability *cap STG_UNUSED)
 }
 
 INLINE_HEADER void traceEventSparkSteal(Capability *cap STG_UNUSED,
-                                        nat         victim_cap STG_UNUSED)
+                                        uint32_t    victim_cap STG_UNUSED)
 {
     traceSparkEvent2(cap, EVENT_SPARK_STEAL, victim_cap);
     dtraceSparkSteal((EventCapNo)cap->no, (EventCapNo)victim_cap);
@@ -878,13 +875,3 @@ INLINE_HEADER void traceTaskDelete(Task *task STG_UNUSED)
 }
 
 #include "EndPrivate.h"
-
-#endif /* TRACE_H */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

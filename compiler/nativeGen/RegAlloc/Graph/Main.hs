@@ -4,6 +4,8 @@
 module RegAlloc.Graph.Main (
         regAlloc
 ) where
+import GhcPrelude
+
 import qualified GraphColor as Color
 import RegAlloc.Liveness
 import RegAlloc.Graph.Spill
@@ -16,13 +18,14 @@ import TargetReg
 import RegClass
 import Reg
 
-import UniqSupply
-import UniqSet
-import UniqFM
 import Bag
+import DynFlags
 import Outputable
 import Platform
-import DynFlags
+import UniqFM
+import UniqSet
+import UniqSupply
+import Util (seqList)
 
 import Data.List
 import Data.Maybe
@@ -30,7 +33,7 @@ import Control.Monad
 
 
 -- | The maximum number of build\/spill cycles we'll allow.
---  
+--
 --   It should only take 3 or 4 cycles for the allocator to converge.
 --   If it takes any longer than this it's probably in an infinite loop,
 --   so it's better just to bail out and report a bug.
@@ -71,11 +74,11 @@ regAlloc dflags regsFree slotsFree code
 -- | Perform solver iterations for the graph coloring allocator.
 --
 --   We extract a register confict graph from the provided cmm code,
---   and try to colour it. If that works then we use the solution rewrite 
+--   and try to colour it. If that works then we use the solution rewrite
 --   the code with real hregs. If coloring doesn't work we add spill code
 --   and try to colour it again. After `maxSpinCount` iterations we give up.
 --
-regAlloc_spin 
+regAlloc_spin
         :: (Instruction instr,
             Outputable instr,
             Outputable statics)
@@ -110,8 +113,11 @@ regAlloc_spin dflags spinCount triv regsFree slotsFree debug_codeGraphs code
            (  text "It looks like the register allocator is stuck in an infinite loop."
            $$ text "max cycles  = " <> int maxSpinCount
            $$ text "regsFree    = " <> (hcat $ punctuate space $ map ppr
-                                             $ uniqSetToList $ unionManyUniqSets 
-                                             $ eltsUFM regsFree)
+                                             $ nonDetEltsUniqSet $ unionManyUniqSets
+                                             $ nonDetEltsUFM regsFree)
+              -- This is non-deterministic but we do not
+              -- currently support deterministic code-generation.
+              -- See Note [Unique Determinism and code generation]
            $$ text "slotsFree   = " <> ppr (sizeUniqSet slotsFree))
 
         -- Build the register conflict graph from the cmm code.
@@ -126,7 +132,7 @@ regAlloc_spin dflags spinCount triv regsFree slotsFree debug_codeGraphs code
         seqGraph graph `seq` return ()
 
         -- Build a map of the cost of spilling each instruction.
-        -- This is a lazy binding, so the map will only be computed if we 
+        -- This is a lazy binding, so the map will only be computed if we
         -- actually have to spill to the stack.
         let spillCosts  = foldl' plusSpillCostInfo zeroSpillCostInfo
                         $ map (slurpSpillCostInfo platform) code
@@ -135,7 +141,7 @@ regAlloc_spin dflags spinCount triv regsFree slotsFree debug_codeGraphs code
         let spill       = chooseSpill spillCosts
 
         -- Record startup state in our log.
-        let stat1       
+        let stat1
              = if spinCount == 0
                  then   Just $ RegAllocStatsStart
                         { raLiveCmm     = code
@@ -179,7 +185,7 @@ regAlloc_spin dflags spinCount triv regsFree slotsFree debug_codeGraphs code
                                 else graph_colored
 
                 -- Rewrite the code to use real hregs, using the colored graph.
-                let code_patched        
+                let code_patched
                         = map (patchRegsFromGraph platform graph_colored_lint)
                               code_coalesced
 
@@ -197,7 +203,7 @@ regAlloc_spin dflags spinCount triv regsFree slotsFree debug_codeGraphs code
                         = map (stripLive dflags) code_spillclean
 
                 -- Record what happened in this stage for debugging
-                let stat                
+                let stat
                      =  RegAllocStatsColored
                         { raCode                = code
                         , raGraph               = graph
@@ -207,18 +213,18 @@ regAlloc_spin dflags spinCount triv regsFree slotsFree debug_codeGraphs code
                         , raPatched             = code_patched
                         , raSpillClean          = code_spillclean
                         , raFinal               = code_final
-                        , raSRMs                = foldl' addSRM (0, 0, 0) 
+                        , raSRMs                = foldl' addSRM (0, 0, 0)
                                                 $ map countSRMs code_spillclean }
 
                 -- Bundle up all the register allocator statistics.
-                --   .. but make sure to drop them on the floor if they're not 
+                --   .. but make sure to drop them on the floor if they're not
                 --      needed, otherwise we'll get a space leak.
                 let statList =
                         if dump then [stat] ++ maybeToList stat1 ++ debug_codeGraphs
                                 else []
 
                 -- Ensure all the statistics are evaluated, to avoid space leaks.
-                seqList statList `seq` return ()
+                seqList statList (return ())
 
                 return  ( code_final
                         , statList
@@ -243,7 +249,7 @@ regAlloc_spin dflags spinCount triv regsFree slotsFree debug_codeGraphs code
                 -- NOTE: we have to reverse the SCCs here to get them back into
                 --       the reverse-dependency order required by computeLiveness.
                 --       If they're not in the correct order that function will panic.
-                code_relive     <- mapM (regLiveness platform . reverseBlocksInTops) 
+                code_relive     <- mapM (regLiveness platform . reverseBlocksInTops)
                                         code_spilled
 
                 -- Record what happened in this stage for debugging.
@@ -257,7 +263,7 @@ regAlloc_spin dflags spinCount triv regsFree slotsFree debug_codeGraphs code
                         , raSpilled     = code_spilled }
 
                 -- Bundle up all the register allocator statistics.
-                --   .. but make sure to drop them on the floor if they're not 
+                --   .. but make sure to drop them on the floor if they're not
                 --      needed, otherwise we'll get a space leak.
                 let statList =
                         if dump
@@ -265,7 +271,7 @@ regAlloc_spin dflags spinCount triv regsFree slotsFree debug_codeGraphs code
                                 else []
 
                 -- Ensure all the statistics are evaluated, to avoid space leaks.
-                seqList statList `seq` return ()
+                seqList statList (return ())
 
                 regAlloc_spin dflags (spinCount + 1) triv regsFree slotsFree'
                         statList
@@ -289,7 +295,7 @@ buildGraph code
 
         -- Add the reg-reg conflicts to the graph.
         let conflictBag         = unionManyBags conflictList
-        let graph_conflict      
+        let graph_conflict
                 = foldrBag graphAddConflictSet Color.initGraph conflictBag
 
         -- Add the coalescences edges to the graph.
@@ -312,15 +318,16 @@ graphAddConflictSet
 
 graphAddConflictSet set graph
  = let  virtuals        = mkUniqSet
-                        [ vr | RegVirtual vr <- uniqSetToList set ]
+                        [ vr | RegVirtual vr <- nonDetEltsUniqSet set ]
 
         graph1  = Color.addConflicts virtuals classOfVirtualReg graph
 
         graph2  = foldr (\(r1, r2) -> Color.addExclusion r1 classOfVirtualReg r2)
                         graph1
                         [ (vr, rr)
-                                | RegVirtual vr <- uniqSetToList set
-                                , RegReal    rr <- uniqSetToList set]
+                                | RegVirtual vr <- nonDetEltsUniqSet set
+                                , RegReal    rr <- nonDetEltsUniqSet set]
+                          -- See Note [Unique Determinism and code generation]
 
    in   graph2
 
@@ -355,8 +362,8 @@ graphAddCoalesce (r1, r2) graph
         , RegReal _             <- r2
         = graph
 
-graphAddCoalesce _ _
-        = panic "graphAddCoalesce: bogus"
+        | otherwise
+        = panic "graphAddCoalesce"
 
 
 -- | Patch registers in code using the reg -> reg mapping in this graph.
@@ -384,7 +391,7 @@ patchRegsFromGraph platform graph code
                 -- no node in the graph for this virtual, bad news.
                 | otherwise
                 = pprPanic "patchRegsFromGraph: register mapping failed."
-                        (  text "There is no node in the graph for register " 
+                        (  text "There is no node in the graph for register "
                                 <> ppr reg
                         $$ ppr code
                         $$ Color.dotGraph
@@ -400,7 +407,8 @@ patchRegsFromGraph platform graph code
 --  We need to deepSeq the whole graph before trying to colour it to avoid
 --  space leaks.
 seqGraph :: Color.Graph VirtualReg RegClass RealReg -> ()
-seqGraph graph          = seqNodes (eltsUFM (Color.graphMap graph))
+seqGraph graph          = seqNodes (nonDetEltsUFM (Color.graphMap graph))
+   -- See Note [Unique Determinism and code generation]
 
 seqNodes :: [Color.Node VirtualReg RegClass RealReg] -> ()
 seqNodes ns
@@ -413,10 +421,11 @@ seqNode node
         =     seqVirtualReg     (Color.nodeId node)
         `seq` seqRegClass       (Color.nodeClass node)
         `seq` seqMaybeRealReg   (Color.nodeColor node)
-        `seq` (seqVirtualRegList (uniqSetToList (Color.nodeConflicts node)))
-        `seq` (seqRealRegList    (uniqSetToList (Color.nodeExclusions node)))
+        `seq` (seqVirtualRegList (nonDetEltsUniqSet (Color.nodeConflicts node)))
+        `seq` (seqRealRegList    (nonDetEltsUniqSet (Color.nodeExclusions node)))
         `seq` (seqRealRegList (Color.nodePreference node))
-        `seq` (seqVirtualRegList (uniqSetToList (Color.nodeCoalesce node)))
+        `seq` (seqVirtualRegList (nonDetEltsUniqSet (Color.nodeCoalesce node)))
+              -- It's OK to use nonDetEltsUniqSet for seq
 
 seqVirtualReg :: VirtualReg -> ()
 seqVirtualReg reg = reg `seq` ()
@@ -444,11 +453,3 @@ seqRealRegList rs
  = case rs of
         []              -> ()
         (r : rs)        -> seqRealReg r `seq` seqRealRegList rs
-
-seqList :: [a] -> ()
-seqList ls
- = case ls of
-        []              -> ()
-        (r : rs)        -> r `seq` seqList rs
-
-

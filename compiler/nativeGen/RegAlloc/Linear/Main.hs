@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, ScopedTypeVariables #-}
+{-# LANGUAGE BangPatterns, CPP, ScopedTypeVariables #-}
 
 -----------------------------------------------------------------------------
 --
@@ -102,6 +102,8 @@ module RegAlloc.Linear.Main (
 #include "HsVersions.h"
 
 
+import GhcPrelude
+
 import RegAlloc.Linear.State
 import RegAlloc.Linear.Base
 import RegAlloc.Linear.StackMap
@@ -118,6 +120,7 @@ import Instruction
 import Reg
 
 import BlockId
+import Hoopl.Collections
 import Cmm hiding (RegSet)
 
 import Digraph
@@ -208,10 +211,11 @@ linearRegAlloc dflags entry_ids block_live sccs
       ArchX86        -> go $ (frInitFreeRegs platform :: X86.FreeRegs)
       ArchX86_64     -> go $ (frInitFreeRegs platform :: X86_64.FreeRegs)
       ArchSPARC      -> go $ (frInitFreeRegs platform :: SPARC.FreeRegs)
+      ArchSPARC64    -> panic "linearRegAlloc ArchSPARC64"
       ArchPPC        -> go $ (frInitFreeRegs platform :: PPC.FreeRegs)
       ArchARM _ _ _  -> panic "linearRegAlloc ArchARM"
       ArchARM64      -> panic "linearRegAlloc ArchARM64"
-      ArchPPC_64     -> panic "linearRegAlloc ArchPPC_64"
+      ArchPPC_64 _   -> go $ (frInitFreeRegs platform :: PPC.FreeRegs)
       ArchAlpha      -> panic "linearRegAlloc ArchAlpha"
       ArchMipseb     -> panic "linearRegAlloc ArchMipseb"
       ArchMipsel     -> panic "linearRegAlloc ArchMipsel"
@@ -231,9 +235,9 @@ linearRegAlloc'
         -> UniqSM ([NatBasicBlock instr], RegAllocStats, Int)
 
 linearRegAlloc' dflags initFreeRegs entry_ids block_live sccs
- = do   us      <- getUs
+ = do   us      <- getUniqueSupplyM
         let (_, stack, stats, blocks) =
-                runR dflags emptyBlockMap initFreeRegs emptyRegMap (emptyStackMap dflags) us
+                runR dflags mapEmpty initFreeRegs emptyRegMap (emptyStackMap dflags) us
                     $ linearRA_SCCs entry_ids block_live [] sccs
         return  (blocks, stats, getStackUse stack)
 
@@ -349,7 +353,9 @@ initBlock id block_live
                           Nothing ->
                             setFreeRegsR    (frInitFreeRegs platform)
                           Just live ->
-                            setFreeRegsR $ foldr (frAllocateReg platform) (frInitFreeRegs platform) [ r | RegReal r <- uniqSetToList live ]
+                            setFreeRegsR $ foldl' (flip $ frAllocateReg platform) (frInitFreeRegs platform)
+                                                  [ r | RegReal r <- nonDetEltsUniqSet live ]
+                            -- See Note [Unique Determinism and code generation]
                         setAssigR       emptyRegMap
 
                 -- load info about register assignments leading into this block.
@@ -401,9 +407,9 @@ raInsn _     new_instrs _ (LiveInstr ii Nothing)
         = do    setDeltaR n
                 return (new_instrs, [])
 
-raInsn _     new_instrs _ (LiveInstr ii Nothing)
+raInsn _     new_instrs _ (LiveInstr ii@(Instr i) Nothing)
         | isMetaInstr ii
-        = return (new_instrs, [])
+        = return (i : new_instrs, [])
 
 
 raInsn block_live new_instrs id (LiveInstr (Instr instr) (Just live))
@@ -442,8 +448,9 @@ raInsn block_live new_instrs id (LiveInstr (Instr instr) (Just live))
            return (new_instrs, [])
 
         _ -> genRaInsn block_live new_instrs id instr
-                        (uniqSetToList $ liveDieRead live)
-                        (uniqSetToList $ liveDieWrite live)
+                        (nonDetEltsUniqSet $ liveDieRead live)
+                        (nonDetEltsUniqSet $ liveDieWrite live)
+                        -- See Note [Unique Determinism and code generation]
 
 raInsn _ _ _ instr
         = pprPanic "raInsn" (text "no match for:" <> ppr instr)
@@ -491,7 +498,7 @@ genRaInsn block_live new_instrs block_id instr r_dying w_dying = do
     -- debugging
 {-    freeregs <- getFreeRegsR
     assig    <- getAssigR
-    pprDebugAndThen (defaultDynFlags Settings{ sTargetPlatform=platform }) trace "genRaInsn"
+    pprDebugAndThen (defaultDynFlags Settings{ sTargetPlatform=platform } undefined) trace "genRaInsn"
         (ppr instr
                 $$ text "r_dying      = " <+> ppr r_dying
                 $$ text "w_dying      = " <+> ppr w_dying
@@ -578,10 +585,9 @@ releaseRegs regs = do
   let platform = targetPlatform dflags
   assig <- getAssigR
   free <- getFreeRegsR
-  let loop _     free _ | free `seq` False = undefined
-      loop assig free [] = do setAssigR assig; setFreeRegsR free; return ()
-      loop assig free (RegReal rr : rs) = loop assig (frReleaseReg platform rr free) rs
-      loop assig free (r:rs) =
+  let loop assig !free [] = do setAssigR assig; setFreeRegsR free; return ()
+      loop assig !free (RegReal rr : rs) = loop assig (frReleaseReg platform rr free) rs
+      loop assig !free (r:rs) =
          case lookupUFM assig r of
          Just (InBoth real _) -> loop (delFromUFM assig r)
                                       (frReleaseReg platform real free) rs
@@ -606,7 +612,7 @@ releaseRegs regs = do
 --
 
 saveClobberedTemps
-        :: (Outputable instr, Instruction instr, FR freeRegs)
+        :: (Instruction instr, FR freeRegs)
         => [RealReg]            -- real registers clobbered by this instruction
         -> [Reg]                -- registers which are no longer live after this insn
         -> RegM freeRegs [instr]         -- return: instructions to spill any temps that will
@@ -620,7 +626,10 @@ saveClobberedTemps clobbered dying
         assig   <- getAssigR
         let to_spill
                 = [ (temp,reg)
-                        | (temp, InReg reg) <- ufmToList assig
+                        | (temp, InReg reg) <- nonDetUFMToList assig
+                        -- This is non-deterministic but we do not
+                        -- currently support deterministic code-generation.
+                        -- See Note [Unique Determinism and code generation]
                         , any (realRegsAlias reg) clobbered
                         , temp `notElem` map getUnique dying  ]
 
@@ -657,12 +666,12 @@ saveClobberedTemps clobbered dying
               -- (2) no free registers: spill the value
               [] -> do
                   (spill, slot)   <- spillR (RegReal reg) temp
-     
+
                   -- record why this reg was spilled for profiling
                   recordSpill (SpillClobber temp)
-     
+
                   let new_assign  = addToUFM assig temp (InBoth reg slot)
-     
+
                   clobber new_assign (spill : instrs) rest
 
 
@@ -679,10 +688,13 @@ clobberRegs clobbered
         let platform = targetPlatform dflags
 
         freeregs        <- getFreeRegsR
-        setFreeRegsR $! foldr (frAllocateReg platform) freeregs clobbered
+        setFreeRegsR $! foldl' (flip $ frAllocateReg platform) freeregs clobbered
 
         assig           <- getAssigR
-        setAssigR $! clobber assig (ufmToList assig)
+        setAssigR $! clobber assig (nonDetUFMToList assig)
+          -- This is non-deterministic but we do not
+          -- currently support deterministic code-generation.
+          -- See Note [Unique Determinism and code generation]
 
    where
         -- if the temp was InReg and clobbered, then we will have
@@ -797,22 +809,30 @@ allocRegsAndSpill_spill reading keep spills alloc r rs assig spill_loc
 
           -- case (3): we need to push something out to free up a register
          [] ->
-           do   let keep' = map getUnique keep
+           do   let inRegOrBoth (InReg _) = True
+                    inRegOrBoth (InBoth _ _) = True
+                    inRegOrBoth _ = False
+                let candidates' =
+                      flip delListFromUFM keep $
+                      filterUFM inRegOrBoth $
+                      assig
+                      -- This is non-deterministic but we do not
+                      -- currently support deterministic code-generation.
+                      -- See Note [Unique Determinism and code generation]
+                let candidates = nonDetUFMToList candidates'
 
                 -- the vregs we could kick out that are already in a slot
                 let candidates_inBoth
                         = [ (temp, reg, mem)
-                                | (temp, InBoth reg mem) <- ufmToList assig
-                                , temp `notElem` keep'
-                                , targetClassOfRealReg platform reg == classOfVirtualReg r ]
+                          | (temp, InBoth reg mem) <- candidates
+                          , targetClassOfRealReg platform reg == classOfVirtualReg r ]
 
                 -- the vregs we could kick out that are only in a reg
                 --      this would require writing the reg to a new slot before using it.
                 let candidates_inReg
                         = [ (temp, reg)
-                                | (temp, InReg reg)     <- ufmToList assig
-                                , temp `notElem` keep'
-                                , targetClassOfRealReg platform reg == classOfVirtualReg r ]
+                          | (temp, InReg reg) <- candidates
+                          , targetClassOfRealReg platform reg == classOfVirtualReg r ]
 
                 let result
 
@@ -857,7 +877,7 @@ allocRegsAndSpill_spill reading keep spills alloc r rs assig spill_loc
                         = pprPanic ("RegAllocLinear.allocRegsAndSpill: no spill candidates\n")
                         $ vcat
                                 [ text "allocating vreg:  " <> text (show r)
-                                , text "assignment:       " <> text (show $ ufmToList assig)
+                                , text "assignment:       " <> ppr assig
                                 , text "freeRegs:         " <> text (show freeRegs)
                                 , text "initFreeRegs:     " <> text (show (frInitFreeRegs platform `asTypeOf` freeRegs)) ]
 
@@ -873,7 +893,7 @@ newLocation _ my_reg = InReg my_reg
 
 -- | Load up a spilled temporary if we need to (read from memory).
 loadTemp
-        :: (Outputable instr, Instruction instr)
+        :: (Instruction instr)
         => VirtualReg   -- the temp being loaded
         -> SpillLoc     -- the current location of this temp
         -> RealReg      -- the hreg to load the temp into

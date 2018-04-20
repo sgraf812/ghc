@@ -30,7 +30,6 @@ import GHC.Show
 import Foreign
 import Foreign.C
 import System.IO
-import Control.Monad (when)
 
 import GHC.Fingerprint.Type
 
@@ -57,7 +56,6 @@ fingerprintData buf len = do
       c_MD5Final pdigest pctxt
       peek (castPtr pdigest :: Ptr Fingerprint)
 
--- This is duplicated in compiler/utils/Fingerprint.hsc
 fingerprintString :: String -> Fingerprint
 fingerprintString str = unsafeDupablePerformIO $
   withArrayLen word8s $ \len p ->
@@ -73,7 +71,7 @@ fingerprintString str = unsafeDupablePerformIO $
 -- | Computes the hash of a given file.
 -- This function loops over the handle, running in constant memory.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 getFileHash :: FilePath -> IO Fingerprint
 getFileHash path = withBinaryFile path ReadMode $ \h -> do
   allocaBytes SIZEOF_STRUCT_MD5CONTEXT $ \pctxt -> do
@@ -96,7 +94,7 @@ getFileHash path = withBinaryFile path ReadMode $ \h -> do
       let loop = do
             count <- hGetBuf h arrPtr _BUFSIZE
             eof <- hIsEOF h
-            when (count /= _BUFSIZE && not eof) $ error $
+            when (count /= _BUFSIZE && not eof) $ errorWithoutStackTrace $
               "GHC.Fingerprint.getFileHash: only read " ++ show count ++ " bytes"
 
             f arrPtr count

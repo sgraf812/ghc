@@ -22,8 +22,12 @@ test('conc072', only_ways(['threaded2']), compile_and_run, [''])
 test('conc073', normal, compile_and_run, [''])
 
 # vector code must get inlined to become non-allocating
-test('T367', [reqlib('vector'), omit_ways(['ghci']), timeout_multiplier(0.001)], compile_and_run, ['-O2 -fno-omit-yields'])
-test('T367_letnoescape', [timeout_multiplier(0.02)], compile_and_run, ['-fno-omit-yields'])
+test('T367',
+     [reqlib('vector'), omit_ways(['ghci']), run_timeout_multiplier(0.001)],
+     compile_and_run, ['-O2 -fno-omit-yields'])
+test('T367_letnoescape',
+     [run_timeout_multiplier(0.02), expect_broken_for(7297,['optllvm'])],
+     compile_and_run, ['-fno-omit-yields'])
 
 test('T1980', normal, compile_and_run, [''])
 test('T2910', normal, compile_and_run, [''])
@@ -31,7 +35,9 @@ test('T2910a', normal, compile_and_run, [''])
 test('T3279', normal, compile_and_run, [''])
 
 # This test takes a long time with the default context switch interval
-test('T3429', extra_run_opts('+RTS -C0.001 -RTS'), compile_and_run, [''])
+test('T3429', [ extra_run_opts('+RTS -C0.001 -RTS'),
+                extra_ways(['debug_numa']) ],
+     compile_and_run, [''])
 
 # without -O, goes into an infinite loop
 # GHCi does not detect the infinite loop.  We should really fix this.
@@ -52,8 +58,7 @@ test('numsparks001', only_ways(['threaded1']), compile_and_run, [''])
 
 test('T4262', [ skip, # skip for now, it doesn't give reliable results
                 only_ways(['threaded1']),
-                unless(opsys('linux'),skip),
-                when(compiler_lt('ghc', '7.1'), expect_fail) ],
+                unless(opsys('linux'),skip) ],
               compile_and_run, [''])
 
 test('T4813', normal, compile_and_run, [''])
@@ -70,7 +75,8 @@ test('T5558',
      compile_and_run, [''])
 
 test('T5421', normal, compile_and_run, [''])
-test('T5611', normal, compile_and_run, [''])
+# See #12751, the test fails non-deterministically so we skip it.
+test('T5611', when ( opsys('darwin'), skip) , compile_and_run, [''])
 test('T5238', normal, compile_and_run, [''])
 test('T5866', exit_code(1), compile_and_run, [''])
 
@@ -88,14 +94,28 @@ test('threadstatus-9333', [omit_ways(['threaded2'])], compile_and_run, [''])
 
 test('T9379', normal, compile_and_run, [''])
 
+test('allocLimit1', exit_code(1), compile_and_run, [''])
+test('allocLimit2', normal, compile_and_run, [''])
+
+# The non-threaded RTS on Windows doesn't handle throwing exceptions at I/O
+# operations very well, and ends up duplicating the I/O, giving wrong results.
+test('allocLimit3', [ when(opsys('mingw32'), only_ways(threaded_ways)),
+                      exit_code(1) ], compile_and_run, [''])
+
+test('allocLimit4', [ extra_run_opts('+RTS -xq300k -RTS'),
+                      # ghci consumes part of set limit at startup
+                      omit_ways(['ghci']) ],
+                    compile_and_run, [''])
+
+test('performGC', [ only_ways(['threaded1','threaded2']), req_smp,
+                    reqlib('random'),
+                    extra_run_opts('400 +RTS -qg -RTS') ],
+                    compile_and_run, [''])
+
 # -----------------------------------------------------------------------------
 # These tests we only do for a full run
 
-def f( name, opts ):
-  if config.fast:
-     opts.skip = 1
-
-setTestOpts(f)
+setTestOpts(when(fast(), skip))
 
 test('conc001', normal, compile_and_run, [''])
 test('conc002', normal, compile_and_run, [''])
@@ -103,37 +123,31 @@ test('conc002', normal, compile_and_run, [''])
 # Omit GHCi way - it blows up to 0.5G.  Something to do with the threaded RTS?
 test('conc004', omit_ways(['ghci']), compile_and_run, [''])
 
-test('conc007', [only_compiler_types(['ghc']),
-                 extra_run_opts('+RTS -H128M -RTS')],
-		compile_and_run, [''])
-test('conc008', only_compiler_types(['ghc']), compile_and_run, [''])
-test('conc009', [only_compiler_types(['ghc']), exit_code(1)],
-		compile_and_run, [''])
-test('conc010', only_compiler_types(['ghc']), compile_and_run, [''])
+test('conc007', extra_run_opts('+RTS -H128M -RTS'), compile_and_run, [''])
+test('conc008', normal, compile_and_run, [''])
+test('conc009', exit_code(1), compile_and_run, [''])
+test('conc010', normal, compile_and_run, [''])
 
 # conc012(ghci) needs a smaller stack, or it takes forever
-test('conc012', [only_compiler_types(['ghc']),
-                 extra_run_opts('+RTS -K8m -RTS')],
+test('conc012',
+     extra_run_opts('+RTS -K8m -RTS'),
+     compile_and_run, [''])
+
+test('conc013', normal, compile_and_run, [''])
+test('conc014', normal, compile_and_run, [''])
+test('conc015', normal, compile_and_run, [''])
+test('conc015a', normal, compile_and_run, [''])
+test('conc016', omit_ways(['threaded2']), # see comment in conc016.hs
                 compile_and_run, [''])
-
-test('conc013', only_compiler_types(['ghc']), compile_and_run, [''])
-
-test('conc014', only_compiler_types(['ghc']), compile_and_run, [''])
-test('conc015', only_compiler_types(['ghc']), compile_and_run, [''])
-test('conc015a', only_compiler_types(['ghc']), compile_and_run, [''])
-test('conc016', [ omit_ways(['threaded2']), # see comment in conc016.hs
-                  only_compiler_types(['ghc']) ], compile_and_run, [''])
-test('conc017', only_compiler_types(['ghc']), compile_and_run, [''])
-test('conc017a', only_compiler_types(['ghc']), compile_and_run, [''])
-test('conc018', only_compiler_types(['ghc']), compile_and_run, [''])
-test('conc019', [only_compiler_types(['ghc']),
-                 extra_run_opts('+RTS -K16m -RTS')],
-		compile_and_run, [''])
-test('conc020', only_compiler_types(['ghc']), compile_and_run, [''])
+test('conc017', normal, compile_and_run, [''])
+test('conc017a', normal, compile_and_run, [''])
+test('conc018', normal, compile_and_run, [''])
+test('conc019', extra_run_opts('+RTS -K16m -RTS'), compile_and_run, [''])
+test('conc020', normal, compile_and_run, [''])
 test('conc021', [ omit_ways(['ghci']), exit_code(1) ], compile_and_run, [''])
-test('conc022', only_compiler_types(['ghc']), compile_and_run, [''])
+test('conc022', normal, compile_and_run, [''])
 
-# On Windows, the non-threaded RTS creates a real OS thread for each 
+# On Windows, the non-threaded RTS creates a real OS thread for each
 # threadDelay.  conc023 creates 5000 concurrent threadDelays, and the
 # resulting creation of OS threads seems to cause the system to run
 # out of memory sometimes (I'm not sure exactly how/why this happens,
@@ -144,31 +158,29 @@ else:
    conc023_ways = normal
 
 test('conc023', [when(fast(), skip),
-                 only_compiler_types(['ghc']),
-                 reqlib('random'),
+                 reqlib('random'), multi_cpu_race,
                  conc023_ways], compile_and_run, [''])
 
-test('conc024', only_compiler_types(['ghc']), compile_and_run, [''])
+test('conc024', normal, compile_and_run, [''])
 test('conc025', normal, compile_and_run, [''])
-test('conc026', only_compiler_types(['ghc']), compile_and_run, [''])
+test('conc026', normal, compile_and_run, [''])
 test('conc028', normal, compile_and_run, [''])
 test('conc029', normal, compile_and_run, [''])
-test('conc030',
-     [only_compiler_types(['ghc']), extra_run_opts('+RTS -K4M -RTS')],
-		compile_and_run, [''])
+test('conc030', extra_run_opts('+RTS -K4M -RTS'), compile_and_run, [''])
 
 test('conc031', exit_code(1), compile_and_run, [''])
 
-test('conc032', only_compiler_types(['ghc']), compile_and_run, [''])
+test('conc032', normal, compile_and_run, [''])
 test('conc033', normal, compile_and_run, [''])
 
 # Omit for GHCi, because it just sits there waiting for you to press ^C
-test('conc034', [only_compiler_types(['ghc']),
-                 omit_ways(['ghci']), 
+test('conc034', [
+                 normal,
+                 omit_ways(['ghci']),
                  extra_run_opts('+RTS -C0 -RTS')],
 		compile_and_run, [''])
 
-test('conc035', only_compiler_types(['ghc']), compile_and_run, [''])
+test('conc035', normal, compile_and_run, [''])
 
 # conc036: now skipped entirely.  This test attempts to check that
 # unsafe foreign calls block other threads, but doing that reliably is
@@ -191,38 +203,33 @@ test('foreignInterruptible', [when(fast(), skip),
                               # I don't think we support interrupting Sleep()
                               # on Windows.  --SDM
                               only_threaded_ways,
-                              only_compiler_types(['ghc'])],
+                              ],
       compile_and_run, [''])
 
 test('conc037', only_ways(['threaded1','threaded2']), compile_and_run, [''])
 test('conc038', only_ways(['threaded1','threaded2']), compile_and_run, [''])
 
 # Omit for GHCi, uses foreign export
-# Omit for the threaded ways, because in this case the main thread is allowed to 
+# Omit for the threaded ways, because in this case the main thread is allowed to
 # complete, which causes the child thread to be interrupted.
-test('conc039', omit_ways(['ghci','threaded1','threaded2','profthreaded']), compile_and_run, [''])
+test('conc039', omit_ways(['ghci'] + threaded_ways), compile_and_run, [''])
 
 # Omit for GHCi, uses foreign export
-test('conc040',
-     [only_compiler_types(['ghc']), exit_code(1), omit_ways(['ghci'])],
-		compile_and_run, [''])
+test('conc040', [exit_code(1), omit_ways(['ghci'])], compile_and_run, [''])
 
 # STM-related tests.
-test('conc041', only_compiler_types(['ghc']), compile_and_run, [''])
-test('conc042', only_compiler_types(['ghc']), compile_and_run, [''])
-test('conc043', only_compiler_types(['ghc']), compile_and_run, [''])
-test('conc044', only_compiler_types(['ghc']), compile_and_run, [''])
-test('conc045', only_compiler_types(['ghc']), compile_and_run, [''])
+test('conc041', normal, compile_and_run, [''])
+test('conc042', normal, compile_and_run, [''])
+test('conc043', normal, compile_and_run, [''])
+test('conc044', normal, compile_and_run, [''])
+test('conc045', normal, compile_and_run, [''])
 
-test('conc058', only_compiler_types(['ghc']), compile_and_run, [''])
+test('conc058', normal, compile_and_run, [''])
 
 test('conc059',
-     [only_compiler_types(['ghc']),
-      only_ways(['threaded1','threaded2']),
-      pre_cmd('$MAKE -s --no-print-directory conc059_setup'),
-      extra_clean(['conc059_c.o'])],
-     compile_and_run,
-     ['conc059_c.c -no-hs-main'])
+     [only_ways(['threaded1', 'threaded2']),
+      pre_cmd('$MAKE -s --no-print-directory conc059_setup')],
+     compile_and_run, ['conc059_c.c -no-hs-main'])
 
 # This test sometimes just exits successfully
 # when run the threaded2 way. The problem hasn't been diagnosed yet
@@ -230,25 +237,52 @@ test('conc064',
      exit_code(1),
      compile_and_run, [''])
 
-test('conc065', ignore_output, compile_and_run, [''])
-test('conc066', ignore_output, compile_and_run, [''])
-test('conc067', ignore_output, compile_and_run, [''])
+test('conc065', ignore_stdout, compile_and_run, [''])
+test('conc066', ignore_stdout, compile_and_run, [''])
+test('conc067', ignore_stdout, compile_and_run, [''])
 
 # omit threaded2, the behaviour of this test is non-deterministic with more
 # than one CPU.
 test('conc068', [ omit_ways('threaded2'), exit_code(1) ], compile_and_run, [''])
 
-if (ghc_with_smp == 0):
-   skip_if_not_smp = skip
-else:
-   skip_if_not_smp = normal
-
 test('setnumcapabilities001',
      [ only_ways(['threaded1','threaded2']),
-       extra_run_opts('4 12 2000'),
-       reqlib('parallel'),
-       skip_if_not_smp ],
+       extra_run_opts('8 12 2000'),
+       req_smp ],
      compile_and_run, [''])
 
 # omit ghci, which can't handle unboxed tuples:
 test('compareAndSwap', [omit_ways(['ghci','hpc']), reqlib('primitive')], compile_and_run, [''])
+
+test('hs_try_putmvar001',
+     [
+     when(opsys('mingw32'),skip), # uses pthread APIs in the C code
+     only_ways(['threaded1','threaded2']),
+      extra_clean(['hs_try_putmvar001_c.o'])],
+     compile_and_run,
+     ['hs_try_putmvar001_c.c'])
+
+# A benchmark for hs_try_putmvar() vs. foreign export
+# This one should work for both threaded and non-threaded RTS
+test('hs_try_putmvar002',
+     [pre_cmd('$MAKE -s --no-print-directory hs_try_putmvar002_setup'),
+      omit_ways(['ghci']),
+      extra_run_opts('1 8 10000')],
+     compile_and_run, ['hs_try_putmvar002_c.c'])
+
+# Another benchmark for hs_try_putmvar() vs. foreign export
+test('hs_try_putmvar003',
+     [
+     when(opsys('mingw32'),skip), # uses pthread APIs in the C code
+     pre_cmd('$MAKE -s --no-print-directory hs_try_putmvar003_setup'),
+     only_ways(['threaded1','threaded2']),
+     extra_clean(['hs_try_putmvar003_c.o']),
+     extra_run_opts('1 16 32 100')
+     ],
+     compile_and_run,
+     ['hs_try_putmvar003_c.c'])
+
+# Check forkIO exception determinism under optimization
+test('T13330', normal, compile_and_run, ['-O'])
+test('T13916', [reqlib('vector'), reqlib('stm'), reqlib('async')],
+     compile_and_run, ['-O2'])

@@ -5,12 +5,15 @@ Thumbs.db
 .DS_Store
 
 *~
+*#
 #*#
 *.bak
 *.BAK
 *.orig
 *.prof
 *.rej
+*.patch
+*.stackdump
 
 *.hi
 *.hi-boot
@@ -27,6 +30,8 @@ Thumbs.db
 *.depend*
 *.dyn_o
 *.dyn_hi
+__pycache__
+*.SYMDEF*
 
 log
 tags
@@ -35,6 +40,15 @@ autom4te.cache
 config.log
 config.status
 configure
+
+# Temporarily generated configure files
+confdefs.h
+
+# Hadrian files
+stage0
+stage1
+stage2
+_build
 
 # -----------------------------------------------------------------------------
 # Ignore any overlapped darcs repos and back up files
@@ -67,31 +81,40 @@ _darcs/
 /ghc/stage1/
 /ghc/stage2/
 /ghc/stage3/
+/iserv/stage2*/
+/iserv/dist/
 
 # -----------------------------------------------------------------------------
 # specific generated files
 
 /bindist-list
+/bindist-list.uniq
 /bindistprep/
 /bindisttest/HelloWorld
 /bindisttest/
+/bootstrapping/
 /ch01.html
 /ch02.html
+/compiler/dist/
 /compiler/ghc.cabal
 /compiler/ghc.cabal.old
 /distrib/configure.ac
 /distrib/ghc.iss
+/docs/man
 /docs/index.html
-/docs/man/flags.xml
-/docs/man/flags.xsl
-/docs/man/ghc.1
-/docs/users_guide/ug-book.xml
-/docs/users_guide/ug-ent.xml
-/docs/users_guide/users_guide.xml
+/docs/users_guide/users_guide
+/docs/users_guide/ghc.1
+/docs/users_guide/flags.pyc
+/docs/users_guide/ghc_config.py
+/docs/users_guide/ghc_config.pyc
 /docs/users_guide/users_guide.pdf
-/docs/users_guide/users_guide.ps
-/docs/users_guide/users_guide/
-/docs/users_guide/what_glasgow_exts_does.gen.xml
+/docs/users_guide/build-html
+/docs/users_guide/build-pdf
+/docs/users_guide/build-man
+/docs/users_guide/.doctrees-*
+/docs/users_guide/.doctrees/
+/docs/users_guide/ghc_packages.pyc
+/docs/users_guide/utils.pyc
 /driver/ghci/ghc-pkg-inplace
 /driver/ghci/ghci-inplace
 /driver/ghci/ghci.res
@@ -102,6 +125,7 @@ _darcs/
 /ghc/ghc-bin.cabal
 /includes/ghcautoconf.h
 /includes/ghcplatform.h
+/includes/ghcversion.h
 /index.html
 /inplace/
 /libffi/build/
@@ -111,12 +135,19 @@ _darcs/
 /libffi/stamp*
 /libffi/package.conf.install
 /libffi/package.conf.install.raw
-/libraries/bin-package-db/GNUmakefile
-/libraries/bin-package-db/ghc.mk
 /libraries/bootstrapping.conf
 /libraries/prologue.txt
 /libraries/doc-index*.html
 /libraries/frames.html
+/libraries/ghc-boot/GNUmakefile
+/libraries/ghc-boot/ghc-boot.cabal
+/libraries/ghc-boot/ghc.mk
+/libraries/ghc-boot-th/GNUmakefile
+/libraries/ghc-boot-th/ghc-boot-th.cabal
+/libraries/ghc-boot-th/ghc.mk
+/libraries/ghci/GNUmakefile
+/libraries/ghci/ghci.cabal
+/libraries/ghci/ghc.mk
 /libraries/haddock-util.js
 /libraries/hslogo-16.png
 /libraries/index-frames.html
@@ -126,6 +157,7 @@ _darcs/
 /libraries/plus.gif
 /libraries/synopsis.png
 /libraries/stamp/
+/linter.log
 /mk/are-validating.mk
 /mk/build.mk
 /mk/config.h
@@ -136,17 +168,38 @@ _darcs/
 /mk/project.mk
 /mk/project.mk.old
 /mk/validate.mk
+/rts/rts.cabal
 /rts/package.conf.inplace
 /rts/package.conf.inplace.raw
 /rts/package.conf.install
 /rts/package.conf.install.raw
 /stage3.package.conf
-/testsuite_summary.txt
-/testlog
+/testsuite_summary*.txt
+/testsuite*.xml
+/testlog*
+/utils/mkUserGuidePart/mkUserGuidePart.cabal
 /utils/runghc/runghc.cabal
+/utils/gen-dll/gen-dll.cabal
+utils/lndir/fs.*
+utils/unlit/fs.*
+rts/fs.*
+libraries/base/include/fs.h
+libraries/base/cbits/fs.c
 
 /extra-gcc-opts
 /sdistprep
 
 .tm_properties
 VERSION
+GIT_COMMIT_ID
+
+# -------------------------------------------------------------------------------------
+# when using a docker image, one can mount the source code directory as the home folder
+# -------------------------------------------------------------------------------------
+.arcrc
+.ghc
+.bash_history
+.gitconfig
+
+# Should be equal to testdir_suffix from testsuite/driver/testlib.py.
+*.run

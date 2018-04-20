@@ -134,15 +134,15 @@ data Operation cpu resultSize where
 
 type CDM cpu a = IO a
 
-($=) :: CPU cpu => Var cpu size -> Operation cpu size -> CDM cpu ()
+($=) :: Var cpu size -> Operation cpu size -> CDM cpu ()
 var $= op = undefined
 
-tempVar :: CPU cpu => CDM cpu (Var cpu size)
+tempVar :: CDM cpu (Var cpu size)
 tempVar = do
         cnt <- liftM fst undefined
         return $ Temp cnt
 
-op :: CPU cpu => Operation cpu size -> CDM cpu (Var cpu size)
+op :: Operation cpu size -> CDM cpu (Var cpu size)
 op operation = do
         v <- tempVar
         v $= operation
@@ -168,6 +168,19 @@ instance CPU DummyCPU where
 
 -------------------------------------------------------------------------------
 -- Long compiling program.
+
+{-  cnst has very simple code, and should be fast to typecheck
+    But if you insist on normalising (Immediate DummyCPU) you get
+
+      Immediate DummyCPU =  Const (ImmSize DummyCPU)
+                         -> Const SIZE12
+                         =  Const (DPlus SIX SIX)
+                         ...etc...
+
+similarly for (RegVar DummyCPU).
+
+So you get a lot of work and big coercions, for no gain.
+-}
 
 cnst :: Integer -> Either (Immediate DummyCPU) (RegVar DummyCPU)
 cnst x = Left (Const x)

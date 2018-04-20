@@ -1,4 +1,4 @@
-{-# OPTIONS_GHC -w #-}
+{-# OPTIONS_GHC -w -fno-warn-redundant-constraints #-}
 {-# LANGUAGE MultiParamTypeClasses, FunctionalDependencies,
              FlexibleContexts, FlexibleInstances,
              OverlappingInstances, UndecidableInstances,
@@ -8,7 +8,7 @@
 
 module Q where
 
-import Control.Monad (foldM)
+import Control.Monad (foldM, liftM, ap)
 
 data NameId = NameId
 data Named name a = Named
@@ -63,7 +63,7 @@ instance ToAbstract LetDef [ALetBinding] where
                                undefined
         where letToAbstract = do
                   localToAbstract lhsArgs $ \args ->
-                          foldM lambda undefined undefined
+                          foldM lambda undefined (undefined :: [a])
               lambda _ _ = do x <- freshNoName undefined
                               return undefined
               lambda _ _ = typeError $ NotAValidLetBinding d
@@ -78,6 +78,13 @@ instance Monad m => MonadState TCState (TCMT m) where
 
 instance Monad m => MonadTCM (TCMT m) where
     liftTCM = undefined
+
+instance Functor (TCMT m) where
+  fmap = liftM
+
+instance Applicative (TCMT m) where
+  pure  = return
+  (<*>) = ap
 
 instance Monad (TCMT m) where
     return = undefined

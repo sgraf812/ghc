@@ -1,4 +1,3 @@
-{-# OPTIONS -cpp #-}
 ------------------------------------------------------------------
 -- A primop-table mangling program                              --
 ------------------------------------------------------------------
@@ -67,7 +66,7 @@ desugarVectorSpec i              = case vecOptions i of
             | drop len s == suf = Just (take len s)
             | otherwise         = Nothing
           where
-            len = length s - length suf                            
+            len = length s - length suf
 
         lowerHead s = toLower (head s) : tail s
 
@@ -122,37 +121,37 @@ main = getArgs >>= \args ->
                 -> seq (sanityTop p_o_specs) (
                    case head args of
 
-                      "--data-decl" 
+                      "--data-decl"
                          -> putStr (gen_data_decl p_o_specs)
 
-                      "--has-side-effects" 
-                         -> putStr (gen_switch_from_attribs 
-                                       "has_side_effects" 
+                      "--has-side-effects"
+                         -> putStr (gen_switch_from_attribs
+                                       "has_side_effects"
                                        "primOpHasSideEffects" p_o_specs)
 
-                      "--out-of-line" 
-                         -> putStr (gen_switch_from_attribs 
-                                       "out_of_line" 
+                      "--out-of-line"
+                         -> putStr (gen_switch_from_attribs
+                                       "out_of_line"
                                        "primOpOutOfLine" p_o_specs)
 
-                      "--commutable" 
-                         -> putStr (gen_switch_from_attribs 
-                                       "commutable" 
+                      "--commutable"
+                         -> putStr (gen_switch_from_attribs
+                                       "commutable"
                                        "commutableOp" p_o_specs)
 
                       "--code-size"
-                         -> putStr (gen_switch_from_attribs 
+                         -> putStr (gen_switch_from_attribs
                                        "code_size"
                                        "primOpCodeSize" p_o_specs)
 
                       "--can-fail"
                          -> putStr (gen_switch_from_attribs
-                                       "can_fail" 
+                                       "can_fail"
                                        "primOpCanFail" p_o_specs)
 
-                      "--strictness" 
-                         -> putStr (gen_switch_from_attribs 
-                                       "strictness" 
+                      "--strictness"
+                         -> putStr (gen_switch_from_attribs
+                                       "strictness"
                                        "primOpStrictness" p_o_specs)
 
                       "--fixity"
@@ -160,31 +159,31 @@ main = getArgs >>= \args ->
                                        "fixity"
                                        "primOpFixity" p_o_specs)
 
-                      "--primop-primop-info" 
+                      "--primop-primop-info"
                          -> putStr (gen_primop_info p_o_specs)
 
-                      "--primop-tag" 
+                      "--primop-tag"
                          -> putStr (gen_primop_tag p_o_specs)
 
-                      "--primop-list" 
+                      "--primop-list"
                          -> putStr (gen_primop_list p_o_specs)
 
-                      "--primop-vector-uniques" 
+                      "--primop-vector-uniques"
                          -> putStr (gen_primop_vector_uniques p_o_specs)
 
-                      "--primop-vector-tys" 
+                      "--primop-vector-tys"
                          -> putStr (gen_primop_vector_tys p_o_specs)
 
-                      "--primop-vector-tys-exports" 
+                      "--primop-vector-tys-exports"
                          -> putStr (gen_primop_vector_tys_exports p_o_specs)
 
-                      "--primop-vector-tycons" 
+                      "--primop-vector-tycons"
                          -> putStr (gen_primop_vector_tycons p_o_specs)
 
-                      "--make-haskell-wrappers" 
+                      "--make-haskell-wrappers"
                          -> putStr (gen_wrappers p_o_specs)
-                        
-                      "--make-haskell-source" 
+
+                      "--make-haskell-source"
                          -> putStr (gen_hs_source p_o_specs)
 
                       "--make-latex-doc"
@@ -194,7 +193,7 @@ main = getArgs >>= \args ->
                    )
 
 known_args :: [String]
-known_args 
+known_args
    = [ "--data-decl",
        "--has-side-effects",
        "--out-of-line",
@@ -227,7 +226,7 @@ gen_hs_source (Info defaults entries) =
     ++ "consumed by haddock.\n"
     ++ "-}\n"
     ++ "\n"
-        ++ "-----------------------------------------------------------------------------\n"
+        ++ (replicate 77 '-' ++ "\n") -- For 80-col cleanliness
         ++ "-- |\n"
         ++ "-- Module      :  GHC.Prim\n"
         ++ "-- \n"
@@ -238,18 +237,44 @@ gen_hs_source (Info defaults entries) =
         ++ "-- GHC\'s primitive types and operations.\n"
         ++ "-- Use GHC.Exts from the base package instead of importing this\n"
         ++ "-- module directly.\n"
-        ++ "--\n" 
-        ++ "-----------------------------------------------------------------------------\n"
-        ++ "{-# LANGUAGE MagicHash, MultiParamTypeClasses, NoImplicitPrelude, UnboxedTuples #-}\n"
+        ++ "--\n"
+        ++ (replicate 77 '-' ++ "\n") -- For 80-col cleanliness
+        ++ "{-# LANGUAGE Unsafe #-}\n"
+        ++ "{-# LANGUAGE MagicHash #-}\n"
+        ++ "{-# LANGUAGE MultiParamTypeClasses #-}\n"
+        ++ "{-# LANGUAGE NoImplicitPrelude #-}\n"
+        ++ "{-# LANGUAGE UnboxedTuples #-}\n"
+
+        ++ "{-# OPTIONS_GHC -fno-warn-redundant-constraints #-}\n"
+                -- We generate a binding for coerce, like
+                --   coerce :: Coercible a b => a -> b
+                --   coerce = let x = x in x
+                -- and we don't want a complaint that the constraint is redundant
+                -- Remember, this silly file is only for Haddock's consumption
+
         ++ "module GHC.Prim (\n"
-        ++ unlines (map (("\t" ++) . hdr) entries')
+        ++ unlines (map (("        " ++) . hdr) entries')
         ++ ") where\n"
     ++ "\n"
     ++ "{-\n"
         ++ unlines (map opt defaults)
     ++ "-}\n"
     ++ "import GHC.Types (Coercible)\n"
-        ++ unlines (concatMap ent entries') ++ "\n\n\n"
+
+    ++ "default ()"  -- If we don't say this then the default type include Integer
+                     -- so that runs off and loads modules that are not part of
+                     -- pacakge ghc-prim at all.  And that in turn somehow ends up
+                     -- with Declaration for $fEqMaybe:
+                     --       attempting to use module ‘GHC.Classes’
+                     --       (libraries/ghc-prim/./GHC/Classes.hs) which is not loaded
+                     -- coming from LoadIface.homeModError
+                     -- I'm not sure precisely why; but I *am* sure that we don't need
+                     -- any type-class defaulting; and it's clearly wrong to need
+                     -- the base package when haddocking ghc-prim
+
+       -- Now the main payload
+    ++ unlines (concatMap ent entries') ++ "\n\n\n"
+
      where entries' = concatMap desugarVectorSpec entries
 
            opt (OptionFalse n)    = n ++ " = False"
@@ -279,20 +304,13 @@ gen_hs_source (Info defaults entries) =
                         ++ (unlines $ map ("-- " ++ ) $ lines $ unlatex $ escape $ "|" ++ desc s) ++ "\n"
 
            spec o = comm : decls
-             where decls = case o of
+             where decls = case o of  -- See Note [Placeholder declarations]
                         PrimOpSpec { name = n, ty = t, opts = options } ->
-                            [ pprFixity fixity n | OptionFixity (Just fixity) <- options ]
-                            ++
-                            [ wrapOp n ++ " :: " ++ pprTy t,
-                              wrapOp n ++ " = let x = x in x" ]
+                            prim_fixity n options ++ prim_decl n t
                         PrimVecOpSpec { name = n, ty = t, opts = options } ->
-                            [ pprFixity fixity n | OptionFixity (Just fixity) <- options ]
-                            ++
-                            [ wrapOp n ++ " :: " ++ pprTy t,
-                              wrapOp n ++ " = let x = x in x" ]
+                            prim_fixity n options ++ prim_decl n t
                         PseudoOpSpec { name = n, ty = t } ->
-                            [ wrapOp n ++ " :: " ++ pprTy t,
-                              wrapOp n ++ " = let x = x in x" ]
+                            prim_decl n t
                         PrimTypeSpec { ty = t }   ->
                             [ "data " ++ pprTy t ]
                         PrimVecTypeSpec { ty = t }   ->
@@ -303,10 +321,21 @@ gen_hs_source (Info defaults entries) =
                         [] -> ""
                         d -> "\n" ++ (unlines $ map ("-- " ++ ) $ lines $ unlatex $ escape $ "|" ++ d)
 
+           prim_fixity n options = [ pprFixity fixity n | OptionFixity (Just fixity) <- options ]
+
+           prim_decl n t = [ wrapOp n ++ " :: " ++ pprTy t,
+                             wrapOp n ++ " = " ++ wrapOpRhs n ]
+
            wrapOp nm | isAlpha (head nm) = nm
                      | otherwise         = "(" ++ nm ++ ")"
+
            wrapTy nm | isAlpha (head nm) = nm
                      | otherwise         = "(" ++ nm ++ ")"
+
+           wrapOpRhs "tagToEnum#" = "let x = x in x"
+           wrapOpRhs nm           = wrapOp nm
+              -- Special case for tagToEnum#: see Note [Placeholder declarations]
+
            unlatex s = case s of
                 '\\':'t':'e':'x':'t':'t':'t':'{':cs -> markup "@" "@" cs
                 '{':'\\':'t':'t':cs -> markup "@" "@" cs
@@ -321,7 +350,29 @@ gen_hs_source (Info defaults entries) =
            escape = concatMap (\c -> if c `elem` special then '\\':c:[] else c:[])
                 where special = "/'`\"@<"
 
-           pprFixity (Fixity i d) n = pprFixityDir d ++ " " ++ show i ++ " " ++ n
+           pprFixity (Fixity _ i d) n
+             = pprFixityDir d ++ " " ++ show i ++ " " ++ n
+
+{- Note [Placeholder declarations]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We are generating fake declarations for things in GHC.Prim, just to
+keep GHC's renamer and typechecker happy enough for what Haddock
+needs.  Our main plan is to say
+        foo :: <type>
+        foo = foo
+We have to silence GHC's complaints about unboxed-top-level declarations
+with an ad-hoc fix in TcBinds: see Note [Compiling GHC.Prim] in TcBinds.
+
+That works for all the primitive functions except tagToEnum#.
+If we generate the binding
+        tagToEnum# = tagToEnum#
+GHC will complain about "tagToEnum# must appear applied to one argument".
+We could hack GHC to silence this complaint when compiling GHC.Prim,
+but it seems easier to generate
+        tagToEnum# = let x = x in x
+We don't do this for *all* bindings because for ones with an unboxed
+RHS we would get other complaints (e.g.can't unify "*" with "#").
+-}
 
 pprTy :: Ty -> String
 pprTy = pty
@@ -337,135 +388,15 @@ pprTy = pty
 
           paty (TyVar tv)    = tv
           paty t             = "(" ++ pty t ++ ")"
---
--- Generates the type environment that the stand-alone External Core tools use.
-gen_ext_core_source :: [Entry] -> String
-gen_ext_core_source entries =
-      "-----------------------------------------------------------------------\n"
-   ++ "-- This module is automatically generated by the GHC utility\n"
-   ++ "-- \"genprimopcode\". Do not edit!\n"
-   ++ "-----------------------------------------------------------------------\n"
-   ++ "module Language.Core.PrimEnv(primTcs, primVals, intLitTypes, ratLitTypes,"
-   ++ "\n charLitTypes, stringLitTypes) where\nimport Language.Core.Core"
-   ++ "\nimport Language.Core.Encoding\n\n"
-   ++ "primTcs :: [(Tcon, Kind)]\n"
-   ++ "primTcs = [\n"
-   ++ printList tcEnt entries 
-   ++ "   ]\n"
-   ++ "primVals :: [(Var, Ty)]\n"
-   ++ "primVals = [\n"
-   ++ printList valEnt entries
-   ++ "]\n"
-   ++ "intLitTypes :: [Ty]\n"
-   ++ "intLitTypes = [\n"
-   ++ printList tyEnt (intLitTys entries)
-   ++ "]\n"
-   ++ "ratLitTypes :: [Ty]\n"
-   ++ "ratLitTypes = [\n"
-   ++ printList tyEnt (ratLitTys entries)
-   ++ "]\n"
-   ++ "charLitTypes :: [Ty]\n"
-   ++ "charLitTypes = [\n"
-   ++ printList tyEnt (charLitTys entries)
-   ++ "]\n"
-   ++ "stringLitTypes :: [Ty]\n"
-   ++ "stringLitTypes = [\n"
-   ++ printList tyEnt (stringLitTys entries)
-   ++ "]\n\n"
-
-  where printList f = concat . intersperse ",\n" . filter (not . null) . map f   
-        tcEnt  (PrimTypeSpec {ty=t}) = 
-           case t of
-            TyApp tc args -> parens (show tc) (tcKind tc args)
-            _             -> error ("tcEnt: type in PrimTypeSpec is not a type"
-                              ++ " constructor: " ++ show t)  
-        tcEnt  _                = ""
-        -- hack alert!
-        -- The primops.txt.pp format doesn't have enough information in it to 
-        -- print out some of the information that ext-core needs (like kinds,
-        -- and later on in this code, module names) so we special-case. An
-        -- alternative would be to refer to things indirectly and hard-wire
-        -- certain things (e.g., the kind of the Any constructor, here) into
-        -- ext-core's Prims module again.
-        tcKind (TyCon "Any") _               = "Klifted"
-        tcKind tc [] | last (show tc) == '#' = "Kunlifted"
-        tcKind _  [] | otherwise             = "Klifted"
-        -- assumes that all type arguments are lifted (are they?)
-        tcKind tc (_v:as)                    = "(Karrow Klifted " ++ tcKind tc as
-                                               ++ ")"
-        valEnt (PseudoOpSpec {name=n, ty=t}) = valEntry n t
-        valEnt (PrimOpSpec {name=n, ty=t})   = valEntry n t
-        valEnt _                             = ""
-        valEntry name' ty' = parens name' (mkForallTy (freeTvars ty') (pty ty'))
-            where pty (TyF t1 t2) = mkFunTy (pty t1) (pty t2)
-                  pty (TyC t1 t2) = mkFunTy (pty t1) (pty t2)
-                  pty (TyApp tc ts) = mkTconApp (mkTcon tc) (map pty ts)  
-                  pty (TyUTup ts)   = mkUtupleTy (map pty ts)
-                  pty (TyVar tv)    = paren $ "Tvar \"" ++ tv ++ "\""
-
-                  mkFunTy s1 s2 = "Tapp " ++ (paren ("Tapp (Tcon tcArrow)" 
-                                               ++ " " ++ paren s1))
-                                          ++ " " ++ paren s2
-                  mkTconApp tc args = foldl tapp tc args
-                  mkTcon tc = paren $ "Tcon " ++ paren (qualify True (show tc))
-                  mkUtupleTy args = foldl tapp (tcUTuple (length args)) args   
-                  mkForallTy [] t = t
-                  mkForallTy vs t = foldr 
-                     (\ v s -> "Tforall " ++ 
-                               (paren (quote v ++ ", " ++ vKind v)) ++ " "
-                               ++ paren s) t vs
-
-                  -- hack alert!
-                  vKind "o" = "Kopen"
-                  vKind _   = "Klifted"
-
-                  freeTvars (TyF t1 t2)   = freeTvars t1 `union` freeTvars t2
-                  freeTvars (TyC t1 t2)   = freeTvars t1 `union` freeTvars t2
-                  freeTvars (TyApp _ tys) = freeTvarss tys
-                  freeTvars (TyVar v)     = [v]
-                  freeTvars (TyUTup tys)  = freeTvarss tys
-                  freeTvarss = nub . concatMap freeTvars
-
-                  tapp s nextArg = paren $ "Tapp " ++ s ++ " " ++ paren nextArg
-                  tcUTuple n = paren $ "Tcon " ++ paren (qualify False $ "Z" 
-                                                          ++ show n ++ "H")
-
-        tyEnt (PrimTypeSpec {ty=(TyApp tc _args)}) = "   " ++ paren ("Tcon " ++
-                                                       (paren (qualify True (show tc))))
-        tyEnt _ = ""
-
-        -- more hacks. might be better to do this on the ext-core side,
-        -- as per earlier comment
-        qualify _ tc | tc == "Bool" = "Just boolMname" ++ ", " 
-                                                ++ ze True tc
-        qualify _ tc | tc == "()"  = "Just baseMname" ++ ", "
-                                                ++ ze True tc
-        qualify enc tc = "Just primMname" ++ ", " ++ (ze enc tc)
-        ze enc tc      = (if enc then "zEncodeString " else "")
-                                      ++ "\"" ++ tc ++ "\""
-
-        intLitTys = prefixes ["Int", "Word", "Addr", "Char"]
-        ratLitTys = prefixes ["Float", "Double"]
-        charLitTys = prefixes ["Char"]
-        stringLitTys = prefixes ["Addr"]
-        prefixes ps = filter (\ t ->
-                        case t of
-                          (PrimTypeSpec {ty=(TyApp tc _args)}) ->
-                            any (\ p -> p `isPrefixOf` show tc) ps
-                          _ -> False)
-
-        parens n ty' = "      (zEncodeString \"" ++ n ++ "\", " ++ ty' ++ ")"
-        paren s = "(" ++ s ++ ")"
-        quote s = "\"" ++ s ++ "\""
 
 gen_latex_doc :: Info -> String
 gen_latex_doc (Info defaults entries)
-   = "\\primopdefaults{" 
+   = "\\primopdefaults{"
          ++ mk_options defaults
          ++ "}\n"
      ++ (concat (map mk_entry entries))
      where mk_entry (PrimOpSpec {cons=constr,name=n,ty=t,cat=c,desc=d,opts=o}) =
-                 "\\primopdesc{" 
+                 "\\primopdesc{"
                  ++ latex_encode constr ++ "}{"
                  ++ latex_encode n ++ "}{"
                  ++ latex_encode (zencode n) ++ "}{"
@@ -478,7 +409,7 @@ gen_latex_doc (Info defaults entries)
            mk_entry (PrimVecOpSpec {}) =
                  ""
            mk_entry (Section {title=ti,desc=d}) =
-                 "\\primopsection{" 
+                 "\\primopsection{"
                  ++ latex_encode ti ++ "}{"
                  ++ d ++ "}\n"
            mk_entry (PrimTypeSpec {ty=t,desc=d,opts=o}) =
@@ -507,7 +438,7 @@ gen_latex_doc (Info defaults entries)
                    pbty t = paty t
                    paty (TyVar tv) = tv
                    paty t = "(" ++ pty t ++ ")"
-           
+
            mk_core_ty typ = foralls ++ (pty typ)
              where pty (TyF t1 t2) = pbty t1 ++ " -> " ++ pty t2
                    pty (TyC t1 t2) = pbty t1 ++ " => " ++ pty t2
@@ -522,7 +453,7 @@ gen_latex_doc (Info defaults entries)
                    utuplenm n = "(#" ++ (replicate (n-1) ',') ++ "#)"
                    foralls = if tvars == [] then "" else "%forall " ++ (tbinds tvars)
                    tvars = tvars_of typ
-                   tbinds [] = ". " 
+                   tbinds [] = ". "
                    tbinds ("o":tbs) = "(o::?) " ++ (tbinds tbs)
                    tbinds (tv:tbs) = tv ++ " " ++ (tbinds tbs)
            tvars_of (TyF t1 t2) = tvars_of t1 `union` tvars_of t2
@@ -530,7 +461,7 @@ gen_latex_doc (Info defaults entries)
            tvars_of (TyApp _ ts) = foldl union [] (map tvars_of ts)
            tvars_of (TyUTup ts) = foldr union [] (map tvars_of ts)
            tvars_of (TyVar tv) = [tv]
-           
+
            mk_options o =
              "\\primoptions{"
               ++ mk_has_side_effects o ++ "}{"
@@ -557,15 +488,15 @@ gen_latex_doc (Info defaults entries)
                Just (OptionFixity _) -> error "Fixity value for boolean option"
                Just (OptionVector _) -> error "vector template for boolean option"
                Nothing -> ""
-           
-           mk_strictness o = 
+
+           mk_strictness o =
              case lookup_attrib "strictness" o of
                Just (OptionString _ s) -> s  -- for now
                Just _ -> error "Wrong value for strictness"
-               Nothing -> "" 
+               Nothing -> ""
 
            mk_fixity o = case lookup_attrib "fixity" o of
-             Just (OptionFixity (Just (Fixity i d)))
+             Just (OptionFixity (Just (Fixity _ i d)))
                -> pprFixityDir d ++ " " ++ show i
              _ -> ""
 
@@ -583,19 +514,19 @@ gen_latex_doc (Info defaults entries)
                                                 (n, ')' : _) -> Just ('Z' : shows (n+1) "T")
                                                 _            -> Nothing
                maybe_tuple _                 = Nothing
-               
+
                count_commas :: Int -> String -> (Int, String)
                count_commas n (',' : cs) = count_commas (n+1) cs
                count_commas n cs          = (n,cs)
-               
+
                unencodedChar :: Char -> Bool    -- True for chars that don't need encoding
                unencodedChar 'Z' = False
                unencodedChar 'z' = False
                unencodedChar c   = isAlphaNum c
-               
+
                encode_ch :: Char -> String
                encode_ch c | unencodedChar c = [c]      -- Common case first
-               
+
                -- Constructors
                encode_ch '('  = "ZL"    -- Needed for things like (,), and (->)
                encode_ch ')'  = "ZR"    -- For symmetry with (
@@ -603,7 +534,7 @@ gen_latex_doc (Info defaults entries)
                encode_ch ']'  = "ZN"
                encode_ch ':'  = "ZC"
                encode_ch 'Z'  = "ZZ"
-               
+
                -- Variables
                encode_ch 'z'  = "zz"
                encode_ch '&'  = "za"
@@ -625,7 +556,7 @@ gen_latex_doc (Info defaults entries)
                encode_ch '_'  = "zu"
                encode_ch '%'  = "zv"
                encode_ch c    = 'z' : shows (ord c) "U"
-                       
+
            latex_encode [] = []
            latex_encode (c:cs) | c `elem` "#$%&_^{}" = "\\" ++ c:(latex_encode cs)
            latex_encode ('~':cs) = "\\verb!~!" ++ (latex_encode cs)
@@ -637,8 +568,8 @@ gen_wrappers (Info _ entries)
    = "{-# LANGUAGE MagicHash, NoImplicitPrelude, UnboxedTuples #-}\n"
         -- Dependencies on Prelude must be explicit in libraries/base, but we
         -- don't need the Prelude here so we add NoImplicitPrelude.
-     ++ "module GHC.PrimopWrappers where\n" 
-     ++ "import qualified GHC.Prim\n" 
+     ++ "module GHC.PrimopWrappers where\n"
+     ++ "import qualified GHC.Prim\n"
      ++ "import GHC.Tuple ()\n"
      ++ "import GHC.Prim (" ++ types ++ ")\n"
      ++ unlines (concatMap f specs)
@@ -660,13 +591,11 @@ gen_wrappers (Info _ entries)
                 | otherwise = "(" ++ nm ++ ")"
 
         dodgy spec
-           = name spec `elem` 
-             [-- C code generator can't handle these
-              "seq#", 
-              "tagToEnum#",
-              -- not interested in parallel support
-              "par#", "parGlobal#", "parLocal#", "parAt#", 
-              "parAtAbs#", "parAtRel#", "parAtForNow#" 
+           = name spec `elem`
+             [-- tagToEnum# is really magical, and can't have
+              -- a wrapper since its implementation depends on
+              -- the type of its result
+              "tagToEnum#"
              ]
 
         is_llvm_only :: Entry -> Bool
@@ -681,7 +610,7 @@ gen_primop_list (Info _ entries)
         [      "   [" ++ cons first       ]
         ++
         map (\p -> "   , " ++ cons p) rest
-        ++ 
+        ++
         [     "   ]"     ]
      ) where (first:rest) = concatMap desugarVectorSpec (filter is_primop entries)
 
@@ -735,7 +664,7 @@ gen_primop_vector_tys_exports (Info _ entries)
 
     mkVecTypes :: Entry -> String
     mkVecTypes i =
-        "\t" ++ ty_id ++ ", " ++ tycon_id ++ ","
+        "        " ++ ty_id ++ ", " ++ tycon_id ++ ","
       where
         ty_id    = prefix i ++ "PrimTy"
         tycon_id = prefix i ++ "PrimTyCon"
@@ -759,8 +688,8 @@ gen_primop_tag (Info _ entries)
               tagOf_type : zipWith f primop_entries [1 :: Int ..])
      where
         primop_entries = concatMap desugarVectorSpec $ filter is_primop entries
-        tagOf_type = "tagOf_PrimOp :: PrimOp -> FastInt"
-        f i n = "tagOf_PrimOp " ++ cons i ++ " = _ILIT(" ++ show n ++ ")"
+        tagOf_type = "primOpTag :: PrimOp -> Int"
+        f i n = "primOpTag " ++ cons i ++ " = " ++ show n
         max_def_type = "maxPrimOpTag :: Int"
         max_def      = "maxPrimOpTag = " ++ show (length primop_entries)
 
@@ -770,7 +699,7 @@ gen_data_decl (Info _ entries) =
      ++ unlines (map ("   | "++) (tail conss))
   where
     conss = map genCons (filter is_primop entries)
-            
+
     genCons :: Entry -> String
     genCons entry =
         case vecOptions entry of
@@ -799,7 +728,7 @@ gen_switch_from_attribs attrib_name fn_name (Info defaults entries)
      in
          case defv of
             Nothing -> error ("gen_switch_from: " ++ attrib_name)
-            Just xx 
+            Just xx
                -> unlines alternatives
                   ++ fn_name ++ " _ = " ++ getAltRhs xx ++ "\n"
 
@@ -821,9 +750,9 @@ mkPOI_LHS_text i
 mkPOI_RHS_text :: Entry -> String
 mkPOI_RHS_text i
    = case cat i of
-        Compare 
+        Compare
            -> case ty i of
-                 TyF t1 (TyF _ _) 
+                 TyF t1 (TyF _ _)
                     -> "mkCompare " ++ sl_name i ++ ppType t1
                  _ -> error "Type error in comparison op"
         Monadic
@@ -840,7 +769,7 @@ mkPOI_RHS_text i
            -> let (argTys, resTy) = flatTys (ty i)
                   tvs = nub (tvsIn (ty i))
               in
-                  "mkGenPrimOp " ++ sl_name i ++ " " 
+                  "mkGenPrimOp " ++ sl_name i ++ " "
                       ++ listify (map ppTyVar tvs) ++ " "
                       ++ listify (map ppType argTys) ++ " "
                       ++ "(" ++ ppType resTy ++ ")"
@@ -853,7 +782,7 @@ ppTyVar "a" = "alphaTyVar"
 ppTyVar "b" = "betaTyVar"
 ppTyVar "c" = "gammaTyVar"
 ppTyVar "s" = "deltaTyVar"
-ppTyVar "o" = "openAlphaTyVar"
+ppTyVar "o" = "runtimeRep1TyVar, openAlphaTyVar"
 ppTyVar _   = error "Unknown type var"
 
 ppType :: Ty -> String
@@ -875,6 +804,7 @@ ppType (TyApp (TyCon "RealWorld")   []) = "realWorldTy"
 ppType (TyApp (TyCon "ThreadId#")   []) = "threadIdPrimTy"
 ppType (TyApp (TyCon "ForeignObj#") []) = "foreignObjPrimTy"
 ppType (TyApp (TyCon "BCO#")        []) = "bcoPrimTy"
+ppType (TyApp (TyCon "Compact#")    []) = "compactPrimTy"
 ppType (TyApp (TyCon "()")          []) = "unitTy"      -- unitTy is TysWiredIn's name for ()
 
 ppType (TyVar "a")                      = "alphaTy"
@@ -884,14 +814,14 @@ ppType (TyVar "s")                      = "deltaTy"
 ppType (TyVar "o")                      = "openAlphaTy"
 
 ppType (TyApp (TyCon "State#") [x])             = "mkStatePrimTy " ++ ppType x
-ppType (TyApp (TyCon "MutVar#") [x,y])          = "mkMutVarPrimTy " ++ ppType x 
+ppType (TyApp (TyCon "MutVar#") [x,y])          = "mkMutVarPrimTy " ++ ppType x
                                                    ++ " " ++ ppType y
 ppType (TyApp (TyCon "MutableArray#") [x,y])    = "mkMutableArrayPrimTy " ++ ppType x
                                                    ++ " " ++ ppType y
 ppType (TyApp (TyCon "MutableArrayArray#") [x]) = "mkMutableArrayArrayPrimTy " ++ ppType x
 ppType (TyApp (TyCon "SmallMutableArray#") [x,y]) = "mkSmallMutableArrayPrimTy " ++ ppType x
                                                     ++ " " ++ ppType y
-ppType (TyApp (TyCon "MutableByteArray#") [x])  = "mkMutableByteArrayPrimTy " 
+ppType (TyApp (TyCon "MutableByteArray#") [x])  = "mkMutableByteArrayPrimTy "
                                                    ++ ppType x
 ppType (TyApp (TyCon "Array#") [x])             = "mkArrayPrimTy " ++ ppType x
 ppType (TyApp (TyCon "ArrayArray#") [])         = "mkArrayArrayPrimTy"
@@ -902,14 +832,14 @@ ppType (TyApp (TyCon "Weak#")       [x]) = "mkWeakPrimTy " ++ ppType x
 ppType (TyApp (TyCon "StablePtr#")  [x]) = "mkStablePtrPrimTy " ++ ppType x
 ppType (TyApp (TyCon "StableName#") [x]) = "mkStableNamePrimTy " ++ ppType x
 
-ppType (TyApp (TyCon "MVar#") [x,y])     = "mkMVarPrimTy " ++ ppType x 
+ppType (TyApp (TyCon "MVar#") [x,y])     = "mkMVarPrimTy " ++ ppType x
                                            ++ " " ++ ppType y
-ppType (TyApp (TyCon "TVar#") [x,y])     = "mkTVarPrimTy " ++ ppType x 
+ppType (TyApp (TyCon "TVar#") [x,y])     = "mkTVarPrimTy " ++ ppType x
                                            ++ " " ++ ppType y
 
 ppType (TyApp (VecTyCon _ pptc) [])      = pptc
 
-ppType (TyUTup ts) = "(mkTupleTy UnboxedTuple " 
+ppType (TyUTup ts) = "(mkTupleTy Unboxed "
                      ++ listify (map ppType ts) ++ ")"
 
 ppType (TyF s d) = "(mkFunTy (" ++ ppType s ++ ") (" ++ ppType d ++ "))"

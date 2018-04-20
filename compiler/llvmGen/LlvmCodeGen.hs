@@ -7,6 +7,8 @@ module LlvmCodeGen ( llvmCodeGen, llvmFixupAsm ) where
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import Llvm
 import LlvmCodeGen.Base
 import LlvmCodeGen.CodeGen
@@ -15,9 +17,12 @@ import LlvmCodeGen.Ppr
 import LlvmCodeGen.Regs
 import LlvmMangler
 
+import BlockId
 import CgUtils ( fixStgRegisters )
 import Cmm
-import Hoopl
+import CmmUtils
+import Hoopl.Block
+import Hoopl.Collections
 import PprCmm
 
 import BufWrite
@@ -30,7 +35,6 @@ import SysTools ( figureLlvmVersion )
 import qualified Stream
 
 import Control.Monad ( when )
-import Data.IORef ( writeIORef )
 import Data.Maybe ( fromMaybe, catMaybes )
 import System.IO
 
@@ -41,27 +45,25 @@ llvmCodeGen :: DynFlags -> Handle -> UniqSupply
                -> Stream.Stream IO RawCmmGroup ()
                -> IO ()
 llvmCodeGen dflags h us cmm_stream
-  = do bufh <- newBufHandle h
+  = withTiming (pure dflags) (text "LLVM CodeGen") (const ()) $ do
+       bufh <- newBufHandle h
 
        -- Pass header
        showPass dflags "LLVM CodeGen"
 
        -- get llvm version, cache for later use
-       ver <- (fromMaybe defaultLlvmVersion) `fmap` figureLlvmVersion dflags
-       writeIORef (llvmVersion dflags) ver
+       ver <- (fromMaybe supportedLlvmVersion) `fmap` figureLlvmVersion dflags
 
        -- warn if unsupported
        debugTraceMsg dflags 2
             (text "Using LLVM version:" <+> text (show ver))
        let doWarn = wopt Opt_WarnUnsupportedLlvmVersion dflags
-       when (ver < minSupportLlvmVersion && doWarn) $
-           errorMsg dflags (text "You are using an old version of LLVM that"
-                            <> text " isn't supported anymore!"
+       when (ver /= supportedLlvmVersion && doWarn) $
+           putMsg dflags (text "You are using an unsupported version of LLVM!"
+                            $+$ text ("Currently only " ++
+                                      llvmVersionStr supportedLlvmVersion ++
+                                      " is supported.")
                             $+$ text "We will try though...")
-       when (ver > maxSupportLlvmVersion && doWarn) $
-           putMsg dflags (text "You are using a new version of LLVM that"
-                          <> text " hasn't been tested yet!"
-                          $+$ text "We will try though...")
 
        -- run code generation
        runLlvm dflags ver bufh us $
@@ -72,7 +74,7 @@ llvmCodeGen dflags h us cmm_stream
 llvmCodeGen' :: Stream.Stream LlvmM RawCmmGroup () -> LlvmM ()
 llvmCodeGen' cmm_stream
   = do  -- Preamble
-        renderLlvm pprLlvmHeader
+        renderLlvm header
         ghcInternalFunctions
         cmmMetaLlvmPrelude
 
@@ -81,10 +83,19 @@ llvmCodeGen' cmm_stream
         _ <- Stream.collect llvmStream
 
         -- Declare aliases for forward references
-        renderLlvm . pprLlvmData =<< generateAliases
+        renderLlvm . pprLlvmData =<< generateExternDecls
 
         -- Postamble
         cmmUsedLlvmGens
+  where
+    header :: SDoc
+    header = sdocWithDynFlags $ \dflags ->
+      let target = LLVM_TARGET
+          layout = case lookup target (llvmTargets dflags) of
+            Just (LlvmTarget dl _ _) -> dl
+            Nothing -> error $ "Failed to lookup the datalayout for " ++ target ++ "; available targets: " ++ show (map fst $ llvmTargets dflags)
+      in     text ("target datalayout = \"" ++ layout ++ "\"")
+         $+$ text ("target triple = \"" ++ target ++ "\"")
 
 llvmGroupLlvmGens :: RawCmmGroup -> LlvmM ()
 llvmGroupLlvmGens cmm = do
@@ -120,8 +131,38 @@ cmmDataLlvmGens statics
                         = funInsert l ty
            regGlobal _  = return ()
        mapM_ regGlobal (concat gss)
+       gss' <- mapM aliasify $ concat gss
 
-       renderLlvm $ pprLlvmData (concat gss, concat tss)
+       renderLlvm $ pprLlvmData (concat gss', concat tss)
+
+-- | LLVM can't handle entry blocks which loop back to themselves (could be
+-- seen as an LLVM bug) so we rearrange the code to keep the original entry
+-- label which branches to a newly generated second label that branches back
+-- to itself. See: Trac #11649
+fixBottom :: RawCmmDecl -> LlvmM RawCmmDecl
+fixBottom cp@(CmmProc hdr entry_lbl live g) =
+    maybe (pure cp) fix_block $ mapLookup (g_entry g) blk_map
+  where
+    blk_map = toBlockMap g
+
+    fix_block :: CmmBlock -> LlvmM RawCmmDecl
+    fix_block blk
+        | (CmmEntry e_lbl tickscp, middle, CmmBranch b_lbl) <- blockSplit blk
+        , isEmptyBlock middle
+        , e_lbl == b_lbl = do
+            new_lbl <- mkBlockId <$> getUniqueM
+
+            let fst_blk =
+                    BlockCC (CmmEntry e_lbl tickscp) BNil (CmmBranch new_lbl)
+                snd_blk =
+                    BlockCC (CmmEntry new_lbl tickscp) BNil (CmmBranch new_lbl)
+
+            pure . CmmProc hdr entry_lbl live . ofBlockMap (g_entry g)
+                $ mapFromList [(e_lbl, fst_blk), (new_lbl, snd_blk)]
+
+    fix_block _ = pure cp
+
+fixBottom rcd = pure rcd
 
 -- | Complete LLVM code generation phase for a single top-level chunk of Cmm.
 cmmLlvmGen ::RawCmmDecl -> LlvmM ()
@@ -129,7 +170,8 @@ cmmLlvmGen cmm@CmmProc{} = do
 
     -- rewrite assignments to global regs
     dflags <- getDynFlag id
-    let fixed_cmm = {-# SCC "llvm_fix_regs" #-}
+    fixed_cmm <- fixBottom $
+                    {-# SCC "llvm_fix_regs" #-}
                     fixStgRegisters dflags cmm
 
     dumpIfSetLlvm Opt_D_dump_opt_cmm "Optimised Cmm" (pprCmmGroup [fixed_cmm])
@@ -137,13 +179,8 @@ cmmLlvmGen cmm@CmmProc{} = do
     -- generate llvm code from cmm
     llvmBC <- withClearVars $ genLlvmProc fixed_cmm
 
-    -- allocate IDs for info table and code, so the mangler can later
-    -- make sure they end up next to each other.
-    itableSection <- freshSectionId
-    _codeSection <- freshSectionId
-
     -- pretty print
-    (docs, ivars) <- fmap unzip $ mapM (pprLlvmCmmDecl itableSection) llvmBC
+    (docs, ivars) <- fmap unzip $ mapM pprLlvmCmmDecl llvmBC
 
     -- Output, note down used variables
     renderLlvm (vcat docs)
@@ -163,12 +200,13 @@ cmmMetaLlvmPrelude = do
     setUniqMeta uniq tbaaId
     parentId <- maybe (return Nothing) getUniqMeta parent
     -- Build definition
-    return $ MetaUnamed tbaaId $ MetaStruct
-        [ MetaStr name
-        , case parentId of
-          Just p  -> MetaNode p
-          Nothing -> MetaVar $ LMLitVar $ LMNullLit i8Ptr
-        ]
+    return $ MetaUnnamed tbaaId $ MetaStruct $
+          case parentId of
+              Just p  -> [ MetaStr name, MetaNode p ]
+              -- As of LLVM 4.0, a node without parents should be rendered as
+              -- just a name on its own. Previously `null` was accepted as the
+              -- name.
+              Nothing -> [ MetaStr name ]
   renderLlvm $ ppLlvmMetas metas
 
 -- -----------------------------------------------------------------------------

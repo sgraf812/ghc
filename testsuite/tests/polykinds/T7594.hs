@@ -1,14 +1,16 @@
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE UndecidableInstances  #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE UndecidableSuperClasses #-}
 {-# LANGUAGE KindSignatures        #-}
 {-# LANGUAGE TypeOperators         #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE GADTs           #-}
 {-# LANGUAGE Rank2Types      #-}
+
 module T7594 where
 
-import GHC.Prim (Constraint)
+import GHC.Exts (Constraint)
 
 class    (c1 t, c2 t) => (:&:) (c1 :: * -> Constraint) (c2 :: * -> Constraint) (t :: *)
 instance (c1 t, c2 t) => (:&:) c1 c2 t
@@ -33,5 +35,3 @@ q2 = error "urk"
 bar2 = app print q2
 -- This one fail, because the given constraint is
 --   (c :&: Real) a, which might have equality superclasses
-
-

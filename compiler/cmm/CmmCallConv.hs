@@ -1,5 +1,3 @@
-{-# LANGUAGE CPP #-}
-
 module CmmCallConv (
   ParamLocation(..),
   assignArgumentsPos,
@@ -7,7 +5,7 @@ module CmmCallConv (
   realArgRegsCover
 ) where
 
-#include "HsVersions.h"
+import GhcPrelude
 
 import CmmExpr
 import SMRep
@@ -106,7 +104,7 @@ passFloatArgsInXmm dflags = case platformArch (targetPlatform dflags) of
 
 -- On X86_64, we always pass 128-bit-wide vectors in registers. On 32-bit X86
 -- and for all larger vector sizes on X86_64, LLVM's GHC calling convention
--- doesn't currently passing vectors in registers. The patch to update the GHC
+-- does not currently pass vectors in registers. The patch to update the GHC
 -- calling convention to support passing SIMD vectors in registers is small and
 -- well-contained, so it may make it into LLVM 3.4. The hidden
 -- -fllvm-pass-vectors-in-regs flag will generate LLVM code that attempts to
@@ -129,9 +127,10 @@ assignStack dflags offset arg_ty args = assign_stk offset [] (reverse args)
       assign_stk offset assts (r:rs)
         = assign_stk off' ((r, StackParam off') : assts) rs
         where w    = typeWidth (arg_ty r)
-              size = (((widthInBytes w - 1) `div` word_size) + 1) * word_size
               off' = offset + size
-              word_size = wORD_SIZE dflags
+              -- Stack arguments always take a whole number of words, we never
+              -- pack them unlike constructor fields.
+              size = roundUpToWords dflags (widthInBytes w)
 
 -----------------------------------------------------------------------------
 -- Local information about the registers available

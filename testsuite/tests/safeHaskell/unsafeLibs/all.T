@@ -19,18 +19,10 @@ test('Dep10', normal, compile_fail, [''])
 
 # check unsafe modules are marked unsafe
 test('BadImport01', normal, compile_fail, [''])
-test('BadImport02',
-     extra_clean(['BadImport02_A.o', 'BadImport02_A.hi']),
-     multimod_compile_and_run,
-     ['BadImport02', ''])
-test('BadImport03',
-     extra_clean(['BadImport03_A.o', 'BadImport03_A.hi']),
-     multimod_compile_fail,
-     ['BadImport03', ''])
-test('BadImport05', normal, compile_fail, [''])
 test('BadImport06', normal, compile_fail, [''])
 test('BadImport07', normal, compile_fail, [''])
 test('BadImport08', normal, compile_fail, [''])
+test('BadImport09', normal, compile_fail, [''])
 
 # check safe modules are marked safe
 test('GoodImport01', normal, compile, [''])

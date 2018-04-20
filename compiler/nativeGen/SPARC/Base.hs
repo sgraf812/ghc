@@ -18,6 +18,8 @@ module SPARC.Base (
 
 where
 
+import GhcPrelude
+
 import DynFlags
 import Panic
 
@@ -66,7 +68,7 @@ is32BitInteger i
 
 
 -- | Sadness.
-largeOffsetError :: (Integral a, Show a) => a -> b
+largeOffsetError :: (Show a) => a -> b
 largeOffsetError i
   = panic ("ERROR: SPARC native-code generator cannot handle large offset ("
                 ++ show i ++ ");\nprobably because of large constant data structures;" ++

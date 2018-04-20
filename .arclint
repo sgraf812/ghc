@@ -7,7 +7,8 @@
       "type": "generated"
     },
     "merge-conflict": {
-      "type": "merge-conflict"
+      "type": "merge-conflict",
+      "exclude": "(\\.rst$)"
     },
     "nolint": {
       "type": "nolint"
@@ -16,33 +17,71 @@
       "type": "text",
       "include": ["(\\.(l?hs(-boot)?|x|y\\.pp)(\\.in)?$)"],
       "severity": {
-        "5": "disabled"
+        "5": "disabled",
+        "2": "warning"
       }
     },
     "c": {
       "type": "text",
-      "include": ["(\\.(c|h)(\\.in)?$)"]
+      "include": ["(\\.(c|h)(\\.in)?$)"],
+      "severity": {
+        "2": "warning"
+      }
     },
     "text-xml": {
       "type": "text",
       "include": "(\\.xml$)",
       "severity": {
         "5": "disabled",
-        "3": "disabled"
+        "3": "disabled",
+        "2": "warning"
       }
     },
     "shell": {
       "type": "text",
       "include": [ "(\\.sh$)" ],
-      "text.max-line-length": 200
+      "text.max-line-length": 200,
+      "severity": {
+        "2": "warning"
+      }
     },
     "makefiles": {
       "type": "text",
       "include": [ "(Makefile$)", "(\\.mk$)" ],
-      "text.max-line-length": 200,
+      "text.max-line-length": 400,
       "severity": {
         "2": "disabled"
       }
+    },
+    "cabal": {
+      "type": "text",
+      "include": ["(\\.cabal(\\.in)?$)"],
+      "severity": {
+        "5": "disabled",
+        "2": "warning"
+      }
+    },
+    "other-text": {
+      "type": "text",
+      "include": ["(.travis.yml?)", "(.md$)", "(.txt$)"],
+      "severity": {
+        "5": "disabled",
+        "2": "warning"
+      }
+    },
+    "check-binaries": {
+      "type": "external-json",
+      "external-json.script": "python3 .arc-linters/check-binaries.py"
+    },
+    "check-makefiles": {
+      "type": "external-json",
+      "include": ["(Makefile$)"],
+      "external-json.script": "python3 .arc-linters/check-makefiles.py"
+    },
+    "bad-assert-clang-cpp": {
+      "type": "external-json",
+      "include": ["(\\.(l?hs|x|y\\.pp)(\\.in)?$)", "(\\.(c|h)$)"],
+      "external-json.script": "python3 .arc-linters/check-cpp.py"
     }
   },
 

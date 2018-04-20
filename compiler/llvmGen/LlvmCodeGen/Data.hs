@@ -4,10 +4,12 @@
 --
 
 module LlvmCodeGen.Data (
-        genLlvmData
+        genLlvmData, genData
     ) where
 
 #include "HsVersions.h"
+
+import GhcPrelude
 
 import Llvm
 import LlvmCodeGen.Base
@@ -15,9 +17,11 @@ import LlvmCodeGen.Base
 import BlockId
 import CLabel
 import Cmm
+import DynFlags
+import Platform
 
 import FastString
-import qualified Outputable
+import Outputable
 
 -- ----------------------------------------------------------------------------
 -- * Constants
@@ -36,29 +40,59 @@ genLlvmData :: (Section, CmmStatics) -> LlvmM LlvmData
 genLlvmData (sec, Statics lbl xs) = do
     label <- strCLabel_llvm lbl
     static <- mapM genData xs
+    lmsec <- llvmSection sec
     let types   = map getStatType static
 
         strucTy = LMStruct types
-        alias   = LMAlias ((label `appendFS` structStr), strucTy)
+        tyAlias = LMAlias ((label `appendFS` structStr), strucTy)
 
-        struct         = Just $ LMStaticStruc static alias
+        struct         = Just $ LMStaticStruc static tyAlias
         link           = if (externallyVisibleCLabel lbl)
                             then ExternallyVisible else Internal
+        align          = case sec of
+                            Section CString _ -> Just 1
+                            _                 -> Nothing
         const          = if isSecConstant sec then Constant else Global
-        glob           = LMGlobalVar label alias link Nothing Nothing const
+        varDef         = LMGlobalVar label tyAlias link lmsec align const
+        globDef        = LMGlobal varDef struct
 
-    return ([LMGlobal glob struct], [alias])
+    return ([globDef], [tyAlias])
 
--- | Should a data in this section be considered constant
-isSecConstant :: Section -> Bool
-isSecConstant Text                    = True
-isSecConstant ReadOnlyData            = True
-isSecConstant RelocatableReadOnlyData = True
-isSecConstant ReadOnlyData16          = True
-isSecConstant Data                    = False
-isSecConstant UninitialisedData       = False
-isSecConstant (OtherSection _)        = False
+-- | Format the section type part of a Cmm Section
+llvmSectionType :: Platform -> SectionType -> FastString
+llvmSectionType p t = case t of
+    Text                    -> fsLit ".text"
+    ReadOnlyData            -> case platformOS p of
+                                 OSMinGW32 -> fsLit ".rdata"
+                                 _         -> fsLit ".rodata"
+    RelocatableReadOnlyData -> case platformOS p of
+                                 OSMinGW32 -> fsLit ".rdata$rel.ro"
+                                 _         -> fsLit ".data.rel.ro"
+    ReadOnlyData16          -> case platformOS p of
+                                 OSMinGW32 -> fsLit ".rdata$cst16"
+                                 _         -> fsLit ".rodata.cst16"
+    Data                    -> fsLit ".data"
+    UninitialisedData       -> fsLit ".bss"
+    CString                 -> case platformOS p of
+                                 OSMinGW32 -> fsLit ".rdata$str"
+                                 _         -> fsLit ".rodata.str"
+    (OtherSection _)        -> panic "llvmSectionType: unknown section type"
 
+-- | Format a Cmm Section into a LLVM section name
+llvmSection :: Section -> LlvmM LMSection
+llvmSection (Section t suffix) = do
+  dflags <- getDynFlags
+  let splitSect = gopt Opt_SplitSections dflags
+      platform  = targetPlatform dflags
+  if not splitSect
+  then return Nothing
+  else do
+    lmsuffix <- strCLabel_llvm suffix
+    let result sep = Just (concatFS [llvmSectionType platform t
+                                    , fsLit sep, lmsuffix])
+    case platformOS platform of
+      OSMinGW32 -> return (result "$")
+      _         -> return (result ".")
 
 -- ----------------------------------------------------------------------------
 -- * Generate static data
@@ -126,12 +160,3 @@ genStaticLit (CmmBlock b) = genStaticLit $ CmmLabel $ infoTblLbl b
 
 genStaticLit (CmmHighStackMark)
     = panic "genStaticLit: CmmHighStackMark unsupported!"
-
--- -----------------------------------------------------------------------------
--- * Misc
---
-
--- | Error Function
-panic :: String -> a
-panic s = Outputable.panic $ "LlvmCodeGen.Data." ++ s
-

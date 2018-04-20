@@ -48,6 +48,8 @@ where
 #include "nativeGen/NCG.h"
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import CodeGen.Platform
 import Reg
 import RegClass
@@ -57,65 +59,64 @@ import CLabel           ( CLabel )
 import DynFlags
 import Outputable
 import Platform
-import FastTypes
-import FastBool
 
+import qualified Data.Array as A
 
 -- | regSqueeze_class reg
---      Calculuate the maximum number of register colors that could be
+--      Calculate the maximum number of register colors that could be
 --      denied to a node of this class due to having this reg
 --      as a neighbour.
 --
 {-# INLINE virtualRegSqueeze #-}
-virtualRegSqueeze :: RegClass -> VirtualReg -> FastInt
+virtualRegSqueeze :: RegClass -> VirtualReg -> Int
 
 virtualRegSqueeze cls vr
  = case cls of
         RcInteger
          -> case vr of
-                VirtualRegI{}           -> _ILIT(1)
-                VirtualRegHi{}          -> _ILIT(1)
-                _other                  -> _ILIT(0)
+                VirtualRegI{}           -> 1
+                VirtualRegHi{}          -> 1
+                _other                  -> 0
 
         RcDouble
          -> case vr of
-                VirtualRegD{}           -> _ILIT(1)
-                VirtualRegF{}           -> _ILIT(0)
-                _other                  -> _ILIT(0)
+                VirtualRegD{}           -> 1
+                VirtualRegF{}           -> 0
+                _other                  -> 0
 
         RcDoubleSSE
          -> case vr of
-                VirtualRegSSE{}         -> _ILIT(1)
-                _other                  -> _ILIT(0)
+                VirtualRegSSE{}         -> 1
+                _other                  -> 0
 
-        _other -> _ILIT(0)
+        _other -> 0
 
 {-# INLINE realRegSqueeze #-}
-realRegSqueeze :: RegClass -> RealReg -> FastInt
+realRegSqueeze :: RegClass -> RealReg -> Int
 realRegSqueeze cls rr
  = case cls of
         RcInteger
          -> case rr of
                 RealRegSingle regNo
-                        | regNo < firstfake -> _ILIT(1)
-                        | otherwise     -> _ILIT(0)
+                        | regNo < firstfake -> 1
+                        | otherwise     -> 0
 
-                RealRegPair{}           -> _ILIT(0)
+                RealRegPair{}           -> 0
 
         RcDouble
          -> case rr of
                 RealRegSingle regNo
-                        | regNo >= firstfake && regNo <= lastfake -> _ILIT(1)
-                        | otherwise     -> _ILIT(0)
+                        | regNo >= firstfake && regNo <= lastfake -> 1
+                        | otherwise     -> 0
 
-                RealRegPair{}           -> _ILIT(0)
+                RealRegPair{}           -> 0
 
         RcDoubleSSE
          -> case rr of
-                RealRegSingle regNo | regNo >= firstxmm -> _ILIT(1)
-                _otherwise                        -> _ILIT(0)
+                RealRegSingle regNo | regNo >= firstxmm -> 1
+                _otherwise                        -> 0
 
-        _other -> _ILIT(0)
+        _other -> 0
 
 -- -----------------------------------------------------------------------------
 -- Immediates
@@ -237,7 +238,6 @@ xmmregnos platform = [firstxmm  .. lastxmm platform]
 floatregnos :: Platform -> [RegNo]
 floatregnos platform = fakeregnos ++ xmmregnos platform
 
-
 -- argRegs is the set of regs which are read for an n-argument call to C.
 -- For archs which pass all args on the stack (x86), is empty.
 -- Sparc passes up to the first 6 args in regs.
@@ -270,13 +270,13 @@ showReg platform n
         | n >= firstxmm  = "%xmm" ++ show (n-firstxmm)
         | n >= firstfake = "%fake" ++ show (n-firstfake)
         | n >= 8         = "%r" ++ show n
-        | otherwise      = regNames platform !! n
+        | otherwise      = regNames platform A.! n
 
-regNames :: Platform -> [String]
+regNames :: Platform -> A.Array Int String
 regNames platform
     = if target32Bit platform
-      then ["%eax", "%ebx", "%ecx", "%edx", "%esi", "%edi", "%ebp", "%esp"]
-      else ["%rax", "%rbx", "%rcx", "%rdx", "%rsi", "%rdi", "%rbp", "%rsp"]
+      then A.listArray (0,8) ["%eax", "%ebx", "%ecx", "%edx", "%esi", "%edi", "%ebp", "%esp"]
+      else A.listArray (0,8) ["%rax", "%rbx", "%rcx", "%rdx", "%rsi", "%rdi", "%rbp", "%rsp"]
 
 
 
@@ -407,7 +407,10 @@ callClobberedRegs platform
  | target32Bit platform = [eax,ecx,edx] ++ map regSingle (floatregnos platform)
  | platformOS platform == OSMinGW32
    = [rax,rcx,rdx,r8,r9,r10,r11]
-   ++ map regSingle (floatregnos platform)
+   -- Only xmm0-5 are caller-saves registers on 64bit windows.
+   -- ( https://docs.microsoft.com/en-us/cpp/build/register-usage )
+   -- For details check the Win64 ABI.
+   ++ map regSingle fakeregnos ++ map xmm [0  .. 5]
  | otherwise
     -- all xmm regs are caller-saves
     -- caller-saves registers
@@ -447,6 +450,6 @@ instrClobberedRegs platform
 -- register allocator to attempt to map VRegs to.
 allocatableRegs :: Platform -> [RealReg]
 allocatableRegs platform
-   = let isFree i = isFastTrue (freeReg platform i)
+   = let isFree i = freeReg platform i
      in  map RealRegSingle $ filter isFree (allMachRegNos platform)
 

@@ -42,10 +42,6 @@ LIBFFI_NAME = ffi
 endif
 LIBFFI_DLL = lib$(LIBFFI_NAME).dll
 
-ifeq "$(OSTYPE)" "cygwin"
-LIBFFI_PATH_MANGLE = PATH=$$(cygpath "$(TOP)")/libffi:$$PATH; export PATH;
-endif
-
 ifneq "$(BINDIST)" "YES"
 $(libffi_STAMP_CONFIGURE): $(TOUCH_DEP)
 	$(call removeFiles,$(libffi_STAMP_STATIC_CONFIGURE))
@@ -58,6 +54,10 @@ $(libffi_STAMP_CONFIGURE): $(TOUCH_DEP)
 	cat libffi-tarballs/libffi*.tar.gz | $(GZIP_CMD) -d | { cd libffi && $(TAR_CMD) -xf - ; }
 	mv libffi/libffi-* libffi/build
 
+# update config.guess/config.sub
+	$(CP) "$(TOP)/config.guess" libffi/build/config.guess
+	$(CP) "$(TOP)/config.sub"   libffi/build/config.sub
+
 # We have to fake a non-working ln for configure, so that the fallback
 # option (cp -p) gets used instead.  Otherwise the libffi build system
 # will use cygwin symbolic links which cannot be read by mingw gcc.
@@ -69,10 +69,17 @@ $(libffi_STAMP_CONFIGURE): $(TOUCH_DEP)
 	mv libffi/build/Makefile.in libffi/build/Makefile.in.orig
 	sed "s/-MD/-MMD/" < libffi/build/Makefile.in.orig > libffi/build/Makefile.in
 
-	# Their cmd invocation only works on msys. On cygwin it starts
-	# a cmd interactive shell. The replacement works in both environments.
-	mv libffi/build/ltmain.sh libffi/build/ltmain.sh.orig
-	sed 's#cmd //c echo "\$$1"#cmd /c "echo $$1"#' < libffi/build/ltmain.sh.orig > libffi/build/ltmain.sh
+	# We attempt to specify the installation directory below with --libdir,
+	# but libffi installs into 'toolexeclibdir' instead, which may differ
+	# on systems where gcc has multilib support. Force libffi to use libdir.
+	# (https://sourceware.org/ml/libffi-discuss/2014/msg00016.html)
+	mv libffi/build/Makefile.in libffi/build/Makefile.in.orig
+	sed 's:@toolexeclibdir@:$$(libdir):g' < libffi/build/Makefile.in.orig > libffi/build/Makefile.in
+
+	# install-sh is used when /usr/bin/install is missing; ensure its
+	# path in libffi's Makefile is correct. See GHC #11109.
+	mv libffi/build/Makefile.in libffi/build/Makefile.in.orig
+	sed 's|@INSTALL@|$$(subst ../install-sh,$(TOP)/install-sh,@INSTALL@)|g' < libffi/build/Makefile.in.orig > libffi/build/Makefile.in
 
 # * Because -Werror may be in SRC_CC_OPTS/SRC_LD_OPTS, we need to turn
 #   warnings off or the compilation of libffi might fail due to warnings;
@@ -80,18 +87,19 @@ $(libffi_STAMP_CONFIGURE): $(TOUCH_DEP)
 # * We specify --libdir, as we need to know the path to libffi.a, but on
 #   some platforms it defaults to .../lib64/ rather than .../lib/.
 	cd libffi && \
-	    $(LIBFFI_PATH_MANGLE) \
 	    cd build && \
 	    CC=$(CC_STAGE1) \
+	    CXX=$(CC_STAGE1) \
 	    LD=$(LD) \
 	    AR=$(AR_STAGE1) \
 	    NM=$(NM) \
 	    RANLIB=$(REAL_RANLIB_CMD) \
         CFLAGS="$(SRC_CC_OPTS) $(CONF_CC_OPTS_STAGE1) -w" \
-        LDFLAGS="$(SRC_LD_OPTS) $(CONF_GCC_LINKER_OPTS_STAGE1) -w" \
+        LDFLAGS="$(SRC_LD_OPTS) -w" \
         "$(SHELL)" ./configure \
 	          --prefix=$(TOP)/libffi/build/inst \
 	          --libdir=$(TOP)/libffi/build/inst/lib \
+	          --disable-docs \
 	          --enable-static=yes \
 	          --enable-shared=$(libffi_EnableShared) \
 	          --host=$(TargetPlatformFull)
@@ -104,7 +112,8 @@ $(libffi_STAMP_CONFIGURE): $(TOUCH_DEP)
 	"$(TOUCH_CMD)" $@
 
 $(libffi_STAMP_BUILD): $(libffi_STAMP_CONFIGURE) $(TOUCH_DEP)
-	$(MAKE) -C libffi/build MAKEFLAGS=
+	# Use 'sync' as a temporary solution for #11960 (parallelisation bug).
+	sync; $(MAKE) -C libffi/build MAKEFLAGS=
 	"$(TOUCH_CMD)" $@
 
 $(libffi_STAMP_INSTALL): $(libffi_STAMP_BUILD) $(TOUCH_DEP)
@@ -115,7 +124,7 @@ $(libffi_STATIC_LIB): $(libffi_STAMP_INSTALL)
 	@test -f $@ || { echo "$< exists, but $@ does not."; echo "Suggest removing $<."; exit 1; }
 
 $(libffi_HEADERS): $(libffi_STAMP_INSTALL) | $$(dir $$@)/.
-	cp -f libffi/build/inst/lib/libffi-*/include/$(notdir $@) $@
+	cp -f libffi/build/inst/include/$(notdir $@) $@
 
 $(eval $(call clean-target,libffi,, \
     libffi/build $(wildcard libffi/stamp.ffi.*) libffi/dist-install))

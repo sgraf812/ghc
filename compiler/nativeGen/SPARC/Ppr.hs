@@ -13,10 +13,9 @@
 module SPARC.Ppr (
         pprNatCmmDecl,
         pprBasicBlock,
-        pprSectionHeader,
         pprData,
         pprInstr,
-        pprSize,
+        pprFormat,
         pprImm,
         pprDataItem
 )
@@ -26,6 +25,8 @@ where
 #include "HsVersions.h"
 #include "nativeGen/NCG.h"
 
+import GhcPrelude
+
 import SPARC.Regs
 import SPARC.Instr
 import SPARC.Cond
@@ -34,15 +35,17 @@ import SPARC.AddrMode
 import SPARC.Base
 import Instruction
 import Reg
-import Size
+import Format
 import PprBase
 
 import Cmm hiding (topInfoTable)
 import PprCmm()
-import CLabel
 import BlockId
+import CLabel
+import Hoopl.Label
+import Hoopl.Collections
 
-import Unique           ( Uniquable(..), pprUnique )
+import Unique           ( pprUniqueAlways )
 import Outputable
 import Platform
 import FastString
@@ -53,7 +56,7 @@ import Data.Word
 
 pprNatCmmDecl :: NatCmmDecl CmmStatics Instr -> SDoc
 pprNatCmmDecl (CmmData section dats) =
-  pprSectionHeader section $$ pprDatas dats
+  pprSectionAlign section $$ pprDatas dats
 
 pprNatCmmDecl proc@(CmmProc top_info lbl _ (ListGraph blocks)) =
   case topInfoTable proc of
@@ -62,44 +65,42 @@ pprNatCmmDecl proc@(CmmProc top_info lbl _ (ListGraph blocks)) =
          []     -> -- special case for split markers:
            pprLabel lbl
          blocks -> -- special case for code without info table:
-           pprSectionHeader Text $$
+           pprSectionAlign (Section Text lbl) $$
            pprLabel lbl $$ -- blocks guaranteed not null, so label needed
            vcat (map (pprBasicBlock top_info) blocks)
 
     Just (Statics info_lbl _) ->
       sdocWithPlatform $ \platform ->
       (if platformHasSubsectionsViaSymbols platform
-          then pprSectionHeader Text $$
+          then pprSectionAlign dspSection $$
                ppr (mkDeadStripPreventer info_lbl) <> char ':'
           else empty) $$
       vcat (map (pprBasicBlock top_info) blocks) $$
-         -- above: Even the first block gets a label, because with branch-chain
-         -- elimination, it might be the target of a goto.
-            (if platformHasSubsectionsViaSymbols platform
-             then
-             -- If we are using the .subsections_via_symbols directive
-             -- (available on recent versions of Darwin),
-             -- we have to make sure that there is some kind of reference
-             -- from the entry code to a label on the _top_ of of the info table,
-             -- so that the linker will not think it is unreferenced and dead-strip
-             -- it. That's why the label is called a DeadStripPreventer (_dsp).
-                      text "\t.long "
-                  <+> ppr info_lbl
-                  <+> char '-'
-                  <+> ppr (mkDeadStripPreventer info_lbl)
-             else empty)
+      -- above: Even the first block gets a label, because with branch-chain
+      -- elimination, it might be the target of a goto.
+      (if platformHasSubsectionsViaSymbols platform
+       then
+       -- See Note [Subsections Via Symbols] in X86/Ppr.hs
+                text "\t.long "
+            <+> ppr info_lbl
+            <+> char '-'
+            <+> ppr (mkDeadStripPreventer info_lbl)
+       else empty)
 
+dspSection :: Section
+dspSection = Section Text $
+    panic "subsections-via-symbols doesn't combine with split-sections"
 
-pprBasicBlock :: BlockEnv CmmStatics -> NatBasicBlock Instr -> SDoc
+pprBasicBlock :: LabelMap CmmStatics -> NatBasicBlock Instr -> SDoc
 pprBasicBlock info_env (BasicBlock blockid instrs)
   = maybe_infotable $$
-    pprLabel (mkAsmTempLabel (getUnique blockid)) $$
+    pprLabel (blockLbl blockid) $$
     vcat (map pprInstr instrs)
   where
     maybe_infotable = case mapLookup blockid info_env of
        Nothing   -> empty
        Just (Statics info_lbl info) ->
-           pprSectionHeader Text $$
+           pprAlignForSection Text $$
            vcat (map pprData info) $$
            pprLabel info_lbl
 
@@ -109,19 +110,19 @@ pprDatas (Statics lbl dats) = vcat (pprLabel lbl : map pprData dats)
 
 pprData :: CmmStatic -> SDoc
 pprData (CmmString str)          = pprASCII str
-pprData (CmmUninitialised bytes) = ptext (sLit ".skip ") <> int bytes
+pprData (CmmUninitialised bytes) = text ".skip " <> int bytes
 pprData (CmmStaticLit lit)       = pprDataItem lit
 
 pprGloblDecl :: CLabel -> SDoc
 pprGloblDecl lbl
   | not (externallyVisibleCLabel lbl) = empty
-  | otherwise = ptext (sLit ".global ") <> ppr lbl
+  | otherwise = text ".global " <> ppr lbl
 
 pprTypeAndSizeDecl :: CLabel -> SDoc
 pprTypeAndSizeDecl lbl
     = sdocWithPlatform $ \platform ->
       if platformOS platform == OSLinux && externallyVisibleCLabel lbl
-      then ptext (sLit ".type ") <> ppr lbl <> ptext (sLit ", @object")
+      then text ".type " <> ppr lbl <> ptext (sLit ", @object")
       else empty
 
 pprLabel :: CLabel -> SDoc
@@ -135,7 +136,7 @@ pprASCII str
   = vcat (map do1 str) $$ do1 0
     where
        do1 :: Word8 -> SDoc
-       do1 w = ptext (sLit "\t.byte\t") <> int (fromIntegral w)
+       do1 w = text "\t.byte\t" <> int (fromIntegral w)
 
 
 -- -----------------------------------------------------------------------------
@@ -151,11 +152,11 @@ pprReg reg
  = case reg of
         RegVirtual vr
          -> case vr of
-                VirtualRegI   u -> text "%vI_"  <> pprUnique u
-                VirtualRegHi  u -> text "%vHi_" <> pprUnique u
-                VirtualRegF   u -> text "%vF_"  <> pprUnique u
-                VirtualRegD   u -> text "%vD_"  <> pprUnique u
-                VirtualRegSSE u -> text "%vSSE_" <> pprUnique u
+                VirtualRegI   u -> text "%vI_"   <> pprUniqueAlways u
+                VirtualRegHi  u -> text "%vHi_"  <> pprUniqueAlways u
+                VirtualRegF   u -> text "%vF_"   <> pprUniqueAlways u
+                VirtualRegD   u -> text "%vD_"   <> pprUniqueAlways u
+                VirtualRegSSE u -> text "%vSSE_" <> pprUniqueAlways u
 
         RegReal rr
          -> case rr of
@@ -164,7 +165,7 @@ pprReg reg
 
                 RealRegPair r1 r2
                  -> text "(" <> pprReg_ofRegNo r1
-                 <> text "|" <> pprReg_ofRegNo r2
+                 <> vbar     <> pprReg_ofRegNo r2
                  <> text ")"
 
 
@@ -213,9 +214,9 @@ pprReg_ofRegNo i
         _  -> sLit "very naughty sparc register" })
 
 
--- | Pretty print a size for an instruction suffix.
-pprSize :: Size -> SDoc
-pprSize x
+-- | Pretty print a format for an instruction suffix.
+pprFormat :: Format -> SDoc
+pprFormat x
  = ptext
     (case x of
         II8     -> sLit "ub"
@@ -224,13 +225,13 @@ pprSize x
         II64    -> sLit "d"
         FF32    -> sLit ""
         FF64    -> sLit "d"
-        _       -> panic "SPARC.Ppr.pprSize: no match")
+        _       -> panic "SPARC.Ppr.pprFormat: no match")
 
 
--- | Pretty print a size for an instruction suffix.
+-- | Pretty print a format for an instruction suffix.
 --      eg LD is 32bit on sparc, but LDD is 64 bit.
-pprStSize :: Size -> SDoc
-pprStSize x
+pprStFormat :: Format -> SDoc
+pprStFormat x
  = ptext
     (case x of
         II8   -> sLit "b"
@@ -239,7 +240,7 @@ pprStSize x
         II64  -> sLit "x"
         FF32  -> sLit ""
         FF64  -> sLit "d"
-        _       -> panic "SPARC.Ppr.pprSize: no match")
+        _       -> panic "SPARC.Ppr.pprFormat: no match")
 
 
 -- | Pretty print a condition code.
@@ -317,47 +318,57 @@ pprImm imm
 
         -- these should have been converted to bytes and placed
         --      in the data section.
-        ImmFloat _      -> ptext (sLit "naughty float immediate")
-        ImmDouble _     -> ptext (sLit "naughty double immediate")
+        ImmFloat _      -> text "naughty float immediate"
+        ImmDouble _     -> text "naughty double immediate"
 
 
 -- | Pretty print a section \/ segment header.
 --      On SPARC all the data sections must be at least 8 byte aligned
 --      incase we store doubles in them.
 --
-pprSectionHeader :: Section -> SDoc
-pprSectionHeader seg
- = case seg of
-        Text                    -> ptext (sLit ".text\n\t.align 4")
-        Data                    -> ptext (sLit ".data\n\t.align 8")
-        ReadOnlyData            -> ptext (sLit ".text\n\t.align 8")
-        RelocatableReadOnlyData -> ptext (sLit ".text\n\t.align 8")
-        UninitialisedData       -> ptext (sLit ".bss\n\t.align 8")
-        ReadOnlyData16          -> ptext (sLit ".data\n\t.align 16")
-        OtherSection _          -> panic "PprMach.pprSectionHeader: unknown section"
+pprSectionAlign :: Section -> SDoc
+pprSectionAlign sec@(Section seg _) =
+  sdocWithPlatform $ \platform ->
+    pprSectionHeader platform sec $$
+    pprAlignForSection seg
 
+-- | Print appropriate alignment for the given section type.
+pprAlignForSection :: SectionType -> SDoc
+pprAlignForSection seg =
+    ptext (case seg of
+      Text              -> sLit ".align 4"
+      Data              -> sLit ".align 8"
+      ReadOnlyData      -> sLit ".align 8"
+      RelocatableReadOnlyData
+                        -> sLit ".align 8"
+      UninitialisedData -> sLit ".align 8"
+      ReadOnlyData16    -> sLit ".align 16"
+      -- TODO: This is copied from the ReadOnlyData case, but it can likely be
+      -- made more efficient.
+      CString           -> sLit ".align 8"
+      OtherSection _    -> panic "PprMach.pprSectionHeader: unknown section")
 
 -- | Pretty print a data item.
 pprDataItem :: CmmLit -> SDoc
 pprDataItem lit
   = sdocWithDynFlags $ \dflags ->
-    vcat (ppr_item (cmmTypeSize $ cmmLitType dflags lit) lit)
+    vcat (ppr_item (cmmTypeFormat $ cmmLitType dflags lit) lit)
     where
         imm = litToImm lit
 
-        ppr_item II8   _        = [ptext (sLit "\t.byte\t") <> pprImm imm]
-        ppr_item II32  _        = [ptext (sLit "\t.long\t") <> pprImm imm]
+        ppr_item II8   _        = [text "\t.byte\t" <> pprImm imm]
+        ppr_item II32  _        = [text "\t.long\t" <> pprImm imm]
 
         ppr_item FF32  (CmmFloat r _)
          = let bs = floatToBytes (fromRational r)
-           in  map (\b -> ptext (sLit "\t.byte\t") <> pprImm (ImmInt b)) bs
+           in  map (\b -> text "\t.byte\t" <> pprImm (ImmInt b)) bs
 
         ppr_item FF64 (CmmFloat r _)
          = let bs = doubleToBytes (fromRational r)
-           in  map (\b -> ptext (sLit "\t.byte\t") <> pprImm (ImmInt b)) bs
+           in  map (\b -> text "\t.byte\t" <> pprImm (ImmInt b)) bs
 
-        ppr_item II16  _        = [ptext (sLit "\t.short\t") <> pprImm imm]
-        ppr_item II64  _        = [ptext (sLit "\t.quad\t") <> pprImm imm]
+        ppr_item II16  _        = [text "\t.short\t" <> pprImm imm]
+        ppr_item II64  _        = [text "\t.quad\t" <> pprImm imm]
         ppr_item _ _            = panic "SPARC.Ppr.pprDataItem: no match"
 
 
@@ -383,10 +394,10 @@ pprInstr (LD FF64 _ reg)
         | RegReal (RealRegSingle{})     <- reg
         = panic "SPARC.Ppr: not emitting potentially misaligned LD FF64 instr"
 
-pprInstr (LD size addr reg)
+pprInstr (LD format addr reg)
         = hcat [
-               ptext (sLit "\tld"),
-               pprSize size,
+               text "\tld",
+               pprFormat format,
                char '\t',
                lbrack,
                pprAddr addr,
@@ -394,18 +405,18 @@ pprInstr (LD size addr reg)
                pprReg reg
             ]
 
--- 64 bit FP storees are expanded into individual instructions in CodeGen.Expand
+-- 64 bit FP stores are expanded into individual instructions in CodeGen.Expand
 pprInstr (ST FF64 reg _)
         | RegReal (RealRegSingle{}) <- reg
         = panic "SPARC.Ppr: not emitting potentially misaligned ST FF64 instr"
 
 -- no distinction is made between signed and unsigned bytes on stores for the
 -- Sparc opcodes (at least I cannot see any, and gas is nagging me --SOF),
--- so we call a special-purpose pprSize for ST..
-pprInstr (ST size reg addr)
+-- so we call a special-purpose pprFormat for ST..
+pprInstr (ST format reg addr)
         = hcat [
-               ptext (sLit "\tst"),
-               pprStSize size,
+               text "\tst",
+               pprStFormat format,
                char '\t',
                pprReg reg,
                pp_comma_lbracket,
@@ -416,7 +427,7 @@ pprInstr (ST size reg addr)
 
 pprInstr (ADD x cc reg1 ri reg2)
         | not x && not cc && riZero ri
-        = hcat [ ptext (sLit "\tmov\t"), pprReg reg1, comma, pprReg reg2 ]
+        = hcat [ text "\tmov\t", pprReg reg1, comma, pprReg reg2 ]
 
         | otherwise
         = pprRegRIReg (if x then sLit "addx" else sLit "add") cc reg1 ri reg2
@@ -424,10 +435,10 @@ pprInstr (ADD x cc reg1 ri reg2)
 
 pprInstr (SUB x cc reg1 ri reg2)
         | not x && cc && reg2 == g0
-        = hcat [ ptext (sLit "\tcmp\t"), pprReg reg1, comma, pprRI ri ]
+        = hcat [ text "\tcmp\t", pprReg reg1, comma, pprRI ri ]
 
         | not x && not cc && riZero ri
-        = hcat [ ptext (sLit "\tmov\t"), pprReg reg1, comma, pprReg reg2 ]
+        = hcat [ text "\tmov\t", pprReg reg1, comma, pprReg reg2 ]
 
         | otherwise
         = pprRegRIReg (if x then sLit "subx" else sLit "sub") cc reg1 ri reg2
@@ -438,7 +449,7 @@ pprInstr (ANDN b reg1 ri reg2) = pprRegRIReg (sLit "andn") b reg1 ri reg2
 
 pprInstr (OR b reg1 ri reg2)
         | not b && reg1 == g0
-        = let doit = hcat [ ptext (sLit "\tmov\t"), pprRI ri, comma, pprReg reg2 ]
+        = let doit = hcat [ text "\tmov\t", pprRI ri, comma, pprReg reg2 ]
           in  case ri of
                    RIReg rrr | rrr == reg2 -> empty
                    _                       -> doit
@@ -455,14 +466,14 @@ pprInstr (SLL reg1 ri reg2)    = pprRegRIReg (sLit "sll") False reg1 ri reg2
 pprInstr (SRL reg1 ri reg2)    = pprRegRIReg (sLit "srl") False reg1 ri reg2
 pprInstr (SRA reg1 ri reg2)    = pprRegRIReg (sLit "sra") False reg1 ri reg2
 
-pprInstr (RDY rd)              = ptext (sLit "\trd\t%y,") <> pprReg rd
+pprInstr (RDY rd)              = text "\trd\t%y," <> pprReg rd
 pprInstr (WRY reg1 reg2)
-        = ptext (sLit "\twr\t")
+        = text "\twr\t"
                 <> pprReg reg1
                 <> char ','
                 <> pprReg reg2
                 <> char ','
-                <> ptext (sLit "%y")
+                <> text "%y"
 
 pprInstr (SMUL b reg1 ri reg2) = pprRegRIReg (sLit "smul")  b reg1 ri reg2
 pprInstr (UMUL b reg1 ri reg2) = pprRegRIReg (sLit "umul")  b reg1 ri reg2
@@ -471,53 +482,54 @@ pprInstr (UDIV b reg1 ri reg2) = pprRegRIReg (sLit "udiv")  b reg1 ri reg2
 
 pprInstr (SETHI imm reg)
   = hcat [
-        ptext (sLit "\tsethi\t"),
+        text "\tsethi\t",
         pprImm imm,
         comma,
         pprReg reg
     ]
 
 pprInstr NOP
-        = ptext (sLit "\tnop")
+        = text "\tnop"
 
-pprInstr (FABS size reg1 reg2)
-        = pprSizeRegReg (sLit "fabs") size reg1 reg2
+pprInstr (FABS format reg1 reg2)
+        = pprFormatRegReg (sLit "fabs") format reg1 reg2
 
-pprInstr (FADD size reg1 reg2 reg3)
-        = pprSizeRegRegReg (sLit "fadd") size reg1 reg2 reg3
+pprInstr (FADD format reg1 reg2 reg3)
+        = pprFormatRegRegReg (sLit "fadd") format reg1 reg2 reg3
 
-pprInstr (FCMP e size reg1 reg2)
-        = pprSizeRegReg (if e then sLit "fcmpe" else sLit "fcmp") size reg1 reg2
+pprInstr (FCMP e format reg1 reg2)
+        = pprFormatRegReg (if e then sLit "fcmpe" else sLit "fcmp")
+                          format reg1 reg2
 
-pprInstr (FDIV size reg1 reg2 reg3)
-        = pprSizeRegRegReg (sLit "fdiv") size reg1 reg2 reg3
+pprInstr (FDIV format reg1 reg2 reg3)
+        = pprFormatRegRegReg (sLit "fdiv") format reg1 reg2 reg3
 
-pprInstr (FMOV size reg1 reg2)
-        = pprSizeRegReg (sLit "fmov") size reg1 reg2
+pprInstr (FMOV format reg1 reg2)
+        = pprFormatRegReg (sLit "fmov") format reg1 reg2
 
-pprInstr (FMUL size reg1 reg2 reg3)
-        = pprSizeRegRegReg (sLit "fmul") size reg1 reg2 reg3
+pprInstr (FMUL format reg1 reg2 reg3)
+        = pprFormatRegRegReg (sLit "fmul") format reg1 reg2 reg3
 
-pprInstr (FNEG size reg1 reg2)
-        = pprSizeRegReg (sLit "fneg") size reg1 reg2
+pprInstr (FNEG format reg1 reg2)
+        = pprFormatRegReg (sLit "fneg") format reg1 reg2
 
-pprInstr (FSQRT size reg1 reg2)
-        = pprSizeRegReg (sLit "fsqrt") size reg1 reg2
+pprInstr (FSQRT format reg1 reg2)
+        = pprFormatRegReg (sLit "fsqrt") format reg1 reg2
 
-pprInstr (FSUB size reg1 reg2 reg3)
-        = pprSizeRegRegReg (sLit "fsub") size reg1 reg2 reg3
+pprInstr (FSUB format reg1 reg2 reg3)
+        = pprFormatRegRegReg (sLit "fsub") format reg1 reg2 reg3
 
-pprInstr (FxTOy size1 size2 reg1 reg2)
+pprInstr (FxTOy format1 format2 reg1 reg2)
   = hcat [
-        ptext (sLit "\tf"),
+        text "\tf",
         ptext
-        (case size1 of
+        (case format1 of
             II32  -> sLit "ito"
             FF32  -> sLit "sto"
             FF64  -> sLit "dto"
             _     -> panic "SPARC.Ppr.pprInstr.FxToY: no match"),
         ptext
-        (case size2 of
+        (case format2 of
             II32  -> sLit "i\t"
             II64  -> sLit "x\t"
             FF32  -> sLit "s\t"
@@ -529,28 +541,28 @@ pprInstr (FxTOy size1 size2 reg1 reg2)
 
 pprInstr (BI cond b blockid)
   = hcat [
-        ptext (sLit "\tb"), pprCond cond,
+        text "\tb", pprCond cond,
         if b then pp_comma_a else empty,
         char '\t',
-        ppr (mkAsmTempLabel (getUnique blockid))
+        ppr (blockLbl blockid)
     ]
 
 pprInstr (BF cond b blockid)
   = hcat [
-        ptext (sLit "\tfb"), pprCond cond,
+        text "\tfb", pprCond cond,
         if b then pp_comma_a else empty,
         char '\t',
-        ppr (mkAsmTempLabel (getUnique blockid))
+        ppr (blockLbl blockid)
     ]
 
-pprInstr (JMP addr) = ptext (sLit "\tjmp\t") <> pprAddr addr
+pprInstr (JMP addr) = text "\tjmp\t" <> pprAddr addr
 pprInstr (JMP_TBL op _ _)  = pprInstr (JMP op)
 
 pprInstr (CALL (Left imm) n _)
-  = hcat [ ptext (sLit "\tcall\t"), pprImm imm, comma, int n ]
+  = hcat [ text "\tcall\t", pprImm imm, comma, int n ]
 
 pprInstr (CALL (Right reg) n _)
-  = hcat [ ptext (sLit "\tcall\t"), pprReg reg, comma, int n ]
+  = hcat [ text "\tcall\t", pprReg reg, comma, int n ]
 
 
 -- | Pretty print a RI
@@ -560,15 +572,15 @@ pprRI (RIImm r) = pprImm r
 
 
 -- | Pretty print a two reg instruction.
-pprSizeRegReg :: LitString -> Size -> Reg -> Reg -> SDoc
-pprSizeRegReg name size reg1 reg2
+pprFormatRegReg :: LitString -> Format -> Reg -> Reg -> SDoc
+pprFormatRegReg name format reg1 reg2
   = hcat [
         char '\t',
         ptext name,
-        (case size of
-            FF32 -> ptext (sLit "s\t")
-            FF64 -> ptext (sLit "d\t")
-            _    -> panic "SPARC.Ppr.pprSizeRegReg: no match"),
+        (case format of
+            FF32 -> text "s\t"
+            FF64 -> text "d\t"
+            _    -> panic "SPARC.Ppr.pprFormatRegReg: no match"),
 
         pprReg reg1,
         comma,
@@ -577,15 +589,15 @@ pprSizeRegReg name size reg1 reg2
 
 
 -- | Pretty print a three reg instruction.
-pprSizeRegRegReg :: LitString -> Size -> Reg -> Reg -> Reg -> SDoc
-pprSizeRegRegReg name size reg1 reg2 reg3
+pprFormatRegRegReg :: LitString -> Format -> Reg -> Reg -> Reg -> SDoc
+pprFormatRegRegReg name format reg1 reg2 reg3
   = hcat [
         char '\t',
         ptext name,
-        (case size of
-            FF32  -> ptext (sLit "s\t")
-            FF64  -> ptext (sLit "d\t")
-            _    -> panic "SPARC.Ppr.pprSizeRegReg: no match"),
+        (case format of
+            FF32  -> text "s\t"
+            FF64  -> text "d\t"
+            _    -> panic "SPARC.Ppr.pprFormatRegReg: no match"),
         pprReg reg1,
         comma,
         pprReg reg2,
@@ -600,7 +612,7 @@ pprRegRIReg name b reg1 ri reg2
   = hcat [
         char '\t',
         ptext name,
-        if b then ptext (sLit "cc\t") else char '\t',
+        if b then text "cc\t" else char '\t',
         pprReg reg1,
         comma,
         pprRI ri,
@@ -614,7 +626,7 @@ pprRIReg name b ri reg1
   = hcat [
         char '\t',
         ptext name,
-        if b then ptext (sLit "cc\t") else char '\t',
+        if b then text "cc\t" else char '\t',
         pprRI ri,
         comma,
         pprReg reg1
@@ -623,7 +635,7 @@ pprRIReg name b ri reg1
 
 {-
 pp_ld_lbracket :: SDoc
-pp_ld_lbracket    = ptext (sLit "\tld\t[")
+pp_ld_lbracket    = text "\tld\t["
 -}
 
 pp_rbracket_comma :: SDoc

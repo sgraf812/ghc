@@ -59,12 +59,12 @@
 #include "StgRun.h"
 #include "Capability.h"
 
-#ifdef DEBUG
+#if defined(DEBUG)
 #include "RtsUtils.h"
 #include "Printer.h"
 #endif
 
-#ifdef USE_MINIINTERPRETER
+#if defined(USE_MINIINTERPRETER)
 
 /* -----------------------------------------------------------------------------
    any architecture (using miniinterpreter)
@@ -90,7 +90,7 @@ StgFunPtr StgReturn(void)
 
 #else /* !USE_MINIINTERPRETER */
 
-#ifdef LEADING_UNDERSCORE
+#if defined(LEADING_UNDERSCORE)
 #define STG_RUN "_StgRun"
 #define STG_RETURN "_StgReturn"
 #else
@@ -99,11 +99,17 @@ StgFunPtr StgReturn(void)
 #endif
 
 #if defined(mingw32_HOST_OS)
-// On windows the stack has to be allocated 4k at a time, otherwise
-// we get a segfault.  The C compiler knows how to do this (it calls
-// _alloca()), so we make sure that we can allocate as much stack as
-// we need:
-StgWord8 *win32AllocStack(void)
+/*
+ * Note [Windows Stack allocations]
+ *
+ * On windows the stack has to be allocated 4k at a time, otherwise
+ * we get a segfault.  The C compiler knows how to do this (it calls
+ * _alloca()), so we make sure that we can allocate as much stack as
+ * we need.  However since we are doing a local stack allocation and the value
+ * isn't valid outside the frame, compilers are free to optimize this allocation
+ * and the corresponding stack check away. So to prevent that we request that
+ * this function never be optimized (See #14669).  */
+STG_NO_OPTIMIZE StgWord8 *win32AllocStack(void)
 {
     StgWord8 stack[RESERVED_C_STACK_BYTES + 16 + 12];
     return stack;
@@ -114,7 +120,7 @@ StgWord8 *win32AllocStack(void)
    x86 architecture
    -------------------------------------------------------------------------- */
 
-#ifdef i386_HOST_ARCH
+#if defined(i386_HOST_ARCH)
 
 #if defined(darwin_HOST_OS) || defined(ios_HOST_OS)
 #define STG_GLOBAL ".globl "
@@ -141,7 +147,7 @@ StgWord8 *win32AllocStack(void)
  * we only jump to other STG procedures, so we maintain the 16n - word_size
  * alignment for these jumps.
  *
- * This gives us binary compatability with LLVM and GCC as well as dealing
+ * This gives us binary compatibility with LLVM and GCC as well as dealing
  * with the FFI. Previously we just maintianed a 16n byte alignment for
  * procedure entry and calls, which led to bugs (see #4211 and #5250).
  *
@@ -159,6 +165,8 @@ StgWord8 *win32AllocStack(void)
  * stack isn't aligned, and calling exitWith from Haskell invokes
  * shutdownHaskellAndExit using a C call.
  *
+ * If you edit the sequence below be sure to update the unwinding information
+ * for stg_stop_thread in StgStartup.cmm.
  */
 
 static void GNUC3_ATTRIBUTE(used)
@@ -228,7 +236,7 @@ StgRunIsImplementedInAssembler(void)
     );
 }
 
-#endif
+#endif // defined(i386_HOST_ARCH)
 
 /* ----------------------------------------------------------------------------
    x86-64 is almost the same as plain x86.
@@ -239,11 +247,11 @@ StgRunIsImplementedInAssembler(void)
    enough space.  Oh well, it's not much harder this way.
    ------------------------------------------------------------------------- */
 
-#ifdef x86_64_HOST_ARCH
+#if defined(x86_64_HOST_ARCH)
 
 #define STG_GLOBAL ".globl "
 
-#ifdef darwin_HOST_OS
+#if defined(darwin_HOST_OS) || defined(ios_HOST_OS)
 #define STG_HIDDEN ".private_extern "
 #else
 #define STG_HIDDEN ".hidden "
@@ -271,9 +279,23 @@ StgRunIsImplementedInAssembler(void)
         "movq %%r14,32(%%rax)\n\t"
         "movq %%r15,40(%%rax)\n\t"
 #if defined(mingw32_HOST_OS)
+        /*
+         * Additional callee saved registers on Win64. This must match
+         * callClobberedRegisters in compiler/nativeGen/X86/Regs.hs as
+         * both represent the Win64 calling convention.
+         */
         "movq %%rdi,48(%%rax)\n\t"
         "movq %%rsi,56(%%rax)\n\t"
-        "movq %%xmm6,64(%%rax)\n\t"
+        "movq %%xmm6,  64(%%rax)\n\t"
+        "movq %%xmm7,  72(%%rax)\n\t"
+        "movq %%xmm8,  80(%%rax)\n\t"
+        "movq %%xmm9,  88(%%rax)\n\t"
+        "movq %%xmm10, 96(%%rax)\n\t"
+        "movq %%xmm11,104(%%rax)\n\t"
+        "movq %%xmm12,112(%%rax)\n\t"
+        "movq %%xmm13,120(%%rax)\n\t"
+        "movq %%xmm14,128(%%rax)\n\t"
+        "movq %%xmm15,136(%%rax)\n\t"
 #endif
         /*
          * Set BaseReg
@@ -302,28 +324,32 @@ StgRunIsImplementedInAssembler(void)
          * restore callee-saves registers.  (Don't stomp on %%rax!)
          */
         "addq %0, %%rsp\n\t"
-        "movq %%rsp, %%rdx\n\t"
-        "addq %1, %%rsp\n\t"
-        "movq 0(%%rdx),%%rbx\n\t"       /* restore the registers saved above */
-        "movq 8(%%rdx),%%rbp\n\t"
-        "movq 16(%%rdx),%%r12\n\t"
-        "movq 24(%%rdx),%%r13\n\t"
-        "movq 32(%%rdx),%%r14\n\t"
-        "movq 40(%%rdx),%%r15\n\t"
+        "movq 0(%%rsp),%%rbx\n\t"       /* restore the registers saved above */
+        "movq 8(%%rsp),%%rbp\n\t"
+        "movq 16(%%rsp),%%r12\n\t"
+        "movq 24(%%rsp),%%r13\n\t"
+        "movq 32(%%rsp),%%r14\n\t"
+        "movq 40(%%rsp),%%r15\n\t"
 #if defined(mingw32_HOST_OS)
-        "movq 48(%%rdx),%%rdi\n\t"
-        "movq 56(%%rdx),%%rsi\n\t"
-        "movq 64(%%rdx),%%xmm6\n\t"
+        "movq  48(%%rsp),%%rdi\n\t"
+        "movq  56(%%rsp),%%rsi\n\t"
+        "movq  64(%%rsp),%%xmm6\n\t"
+        "movq  72(%%rax),%%xmm7\n\t"
+        "movq  80(%%rax),%%xmm8\n\t"
+        "movq  88(%%rax),%%xmm9\n\t"
+        "movq  96(%%rax),%%xmm10\n\t"
+        "movq 104(%%rax),%%xmm11\n\t"
+        "movq 112(%%rax),%%xmm12\n\t"
+        "movq 120(%%rax),%%xmm13\n\t"
+        "movq 128(%%rax),%%xmm14\n\t"
+        "movq 136(%%rax),%%xmm15\n\t"
 #endif
+        "addq %1, %%rsp\n\t"
         "retq"
 
         :
         : "i"(RESERVED_C_STACK_BYTES),
-#if defined(mingw32_HOST_OS)
-          "i"(80 /*stack frame size; 8 too large to make the alignment right*/)
-#else
-          "i"(48 /*stack frame size*/)
-#endif
+          "i"(STG_RUN_STACK_FRAME_SIZE /* stack frame size */)
         );
         /*
          * See Note [Stack Alignment on X86]
@@ -363,7 +389,7 @@ StgRunIsImplementedInAssembler(void)
    Updated info (GHC 4.08.2): not saving %i7 any more (see below).
    -------------------------------------------------------------------------- */
 
-#ifdef sparc_HOST_ARCH
+#if defined(sparc_HOST_ARCH)
 
 StgRegTable *
 StgRun(StgFunPtr f, StgRegTable *basereg) {
@@ -412,17 +438,21 @@ StgRun(StgFunPtr f, StgRegTable *basereg) {
    Everything is in assembler, so we don't have to deal with GCC...
    -------------------------------------------------------------------------- */
 
-#ifdef powerpc_HOST_ARCH
+#if defined(powerpc_HOST_ARCH)
 
 #define STG_GLOBAL ".globl "
 
-#ifdef darwin_HOST_OS
+#if defined(darwin_HOST_OS)
 #define STG_HIDDEN ".private_extern "
 #else
 #define STG_HIDDEN ".hidden "
 #endif
 
-#ifdef darwin_HOST_OS
+#if defined(aix_HOST_OS)
+
+// implementation is in StgCRunAsm.S
+
+#elif defined(darwin_HOST_OS)
 void StgRunIsImplementedInAssembler(void)
 {
 #if HAVE_SUBSECTIONS_VIA_SYMBOLS
@@ -537,9 +567,9 @@ StgRunIsImplementedInAssembler(void)
    Everything is in assembler, so we don't have to deal with GCC...
    -------------------------------------------------------------------------- */
 
-#ifdef powerpc64_HOST_ARCH
+#if defined(powerpc64_HOST_ARCH)
 
-#ifdef linux_HOST_OS
+#if defined(linux_HOST_OS)
 static void GNUC3_ATTRIBUTE(used)
 StgRunIsImplementedInAssembler(void)
 {
@@ -662,16 +692,24 @@ StgRunIsImplementedInAssembler(void)
 }
 
 #else // linux_HOST_OS
-#error Only linux support for power64 right now.
+#error Only Linux support for power64 right now.
 #endif
 
+#endif
+
+#if defined(powerpc64le_HOST_ARCH)
+/* -----------------------------------------------------------------------------
+   PowerPC 64 little endian architecture
+
+   Really everything is in assembler, so we don't have to deal with GCC...
+   -------------------------------------------------------------------------- */
 #endif
 
 /* -----------------------------------------------------------------------------
    ARM architecture
    -------------------------------------------------------------------------- */
 
-#ifdef arm_HOST_ARCH
+#if defined(arm_HOST_ARCH)
 
 #if defined(__thumb__)
 #define THUMB_FUNC ".thumb\n\t.thumb_func\n\t"
@@ -692,7 +730,7 @@ StgRun(StgFunPtr f, StgRegTable *basereg) {
 #endif
         /*
          * allocate some space for Stg machine's temporary storage.
-         * Note: RESERVER_C_STACK_BYTES has to be a round number here or
+         * Note: RESERVED_C_STACK_BYTES has to be a round number here or
          * the assembler can't assemble it.
          */
         "sub sp, sp, %3\n\t"
@@ -748,30 +786,38 @@ StgRun(StgFunPtr f, StgRegTable *basereg) {
 }
 #endif
 
-#ifdef aarch64_HOST_ARCH
+#if defined(aarch64_HOST_ARCH)
 
 StgRegTable *
 StgRun(StgFunPtr f, StgRegTable *basereg) {
     StgRegTable * r;
     __asm__ volatile (
         /*
-         * save callee-saves registers on behalf of the STG code.
+         * Save callee-saves registers on behalf of the STG code.
+         * Floating point registers only need the bottom 64 bits preserved.
+         * We need to use the names x16, x17, x29 and x30 instead of ip0
+         * ip1, fp and lp because one of either clang or gcc doesn't understand
+         * the later names.
          */
+        "stp x29,  x30,  [sp, #-16]!\n\t"
+        "mov x29, sp\n\t"
+        "stp x16, x17, [sp, #-16]!\n\t"
         "stp x19, x20, [sp, #-16]!\n\t"
         "stp x21, x22, [sp, #-16]!\n\t"
         "stp x23, x24, [sp, #-16]!\n\t"
         "stp x25, x26, [sp, #-16]!\n\t"
-        "stp x27, x28, [sp, #-16]!\n\t" 
-        "stp ip0, ip1, [sp, #-16]!\n\t"
-        "str lr, [sp, #-8]!\n\t"
+        "stp x27, x28, [sp, #-16]!\n\t"
+        "stp d8,  d9,  [sp, #-16]!\n\t"
+        "stp d10, d11, [sp, #-16]!\n\t"
+        "stp d12, d13, [sp, #-16]!\n\t"
+        "stp d14, d15, [sp, #-16]!\n\t"
 
         /*
          * allocate some space for Stg machine's temporary storage.
-         * Note: RESERVER_C_STACK_BYTES has to be a round number here or
+         * Note: RESERVED_C_STACK_BYTES has to be a round number here or
          * the assembler can't assemble it.
          */
-        "str lr, [sp, %3]"
-        /* "sub sp, sp, %3\n\t" */
+        "sub sp, sp, %3\n\t"
         /*
          * Set BaseReg
          */
@@ -779,16 +825,17 @@ StgRun(StgFunPtr f, StgRegTable *basereg) {
         /*
          * Jump to function argument.
          */
-        "bx %1\n\t"
+        "br %1\n\t"
 
         ".globl " STG_RETURN "\n\t"
+#if !defined(ios_HOST_OS)
         ".type " STG_RETURN ", %%function\n"
+#endif
         STG_RETURN ":\n\t"
         /*
          * Free the space we allocated
          */
-        "ldr lr, [sp], %3\n\t"
-        /* "add sp, sp, %3\n\t" */
+        "add sp, sp, %3\n\t"
         /*
          * Return the new register table, taking it from Stg's R1 (ARM64's R22).
          */
@@ -796,18 +843,23 @@ StgRun(StgFunPtr f, StgRegTable *basereg) {
         /*
          * restore callee-saves registers.
          */
-        "ldr lr, [sp], #8\n\t"
-        "ldp ip0, ip1, [sp], #16\n\t"
+
+        "ldp d14, d15, [sp], #16\n\t"
+        "ldp d12, d13, [sp], #16\n\t"
+        "ldp d10, d11, [sp], #16\n\t"
+        "ldp d8,  d9,  [sp], #16\n\t"
         "ldp x27, x28, [sp], #16\n\t"
         "ldp x25, x26, [sp], #16\n\t"
         "ldp x23, x24, [sp], #16\n\t"
         "ldp x21, x22, [sp], #16\n\t"
         "ldp x19, x20, [sp], #16\n\t"
+        "ldp x16, x17, [sp], #16\n\t"
+        "ldp x29,  x30,  [sp], #16\n\t"
 
       : "=r" (r)
       : "r" (f), "r" (basereg), "i" (RESERVED_C_STACK_BYTES)
         : "%x19", "%x20", "%x21", "%x22", "%x23", "%x24", "%x25", "%x26", "%x27", "%x28",
-          "%ip0", "%ip1", "%lr"
+          "%x16", "%x17", "%x30"
     );
     return r;
 }
@@ -815,11 +867,3 @@ StgRun(StgFunPtr f, StgRegTable *basereg) {
 #endif
 
 #endif /* !USE_MINIINTERPRETER */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

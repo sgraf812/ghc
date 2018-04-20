@@ -28,6 +28,8 @@
 module RegAlloc.Graph.SpillClean (
         cleanSpills
 ) where
+import GhcPrelude
+
 import RegAlloc.Liveness
 import Instruction
 import Reg
@@ -40,17 +42,16 @@ import Unique
 import State
 import Outputable
 import Platform
+import Hoopl.Collections
 
 import Data.List
 import Data.Maybe
-import Data.Map                 (Map)
-import Data.Set                 (Set)
-import qualified Data.Map       as Map
-import qualified Data.Set       as Set
+import Data.IntSet              (IntSet)
+import qualified Data.IntSet    as IntSet
 
 
 -- | The identification number of a spill slot.
---   A value is stored in a spill slot when we don't have a free 
+--   A value is stored in a spill slot when we don't have a free
 --   register to hold it.
 type Slot = Int
 
@@ -58,8 +59,8 @@ type Slot = Int
 -- | Clean out unneeded spill\/reloads from this top level thing.
 cleanSpills
         :: Instruction instr
-        => Platform 
-        -> LiveCmmDecl statics instr 
+        => Platform
+        -> LiveCmmDecl statics instr
         -> LiveCmmDecl statics instr
 
 cleanSpills platform cmm
@@ -84,7 +85,7 @@ cleanSpin platform spinCount code
 
         code_forward    <- mapBlockTopM (cleanBlockForward platform) code
         code_backward   <- cleanTopBackward code_forward
-        
+
         -- During the cleaning of each block we collected information about
         -- what regs were valid across each jump. Based on this, work out
         -- whether it will be safe to erase reloads after join points for
@@ -158,7 +159,7 @@ cleanForward platform blockId assoc acc (li1 : li2 : instrs)
         = do
                 modify $ \s -> s { sCleanedReloadsAcc = sCleanedReloadsAcc s + 1 }
                 cleanForward platform blockId assoc acc
-                 $ li1 : LiveInstr (mkRegRegMoveInstr platform reg1 reg2) Nothing 
+                 $ li1 : LiveInstr (mkRegRegMoveInstr platform reg1 reg2) Nothing
                        : instrs
 
 cleanForward platform blockId assoc acc (li@(LiveInstr i1 _) : instrs)
@@ -245,7 +246,7 @@ cleanReload platform blockId assoc li@(LiveInstr (RELOAD slot reg) _)
         | otherwise
         = do    -- Update the association.
                 let assoc'
-                        = addAssoc (SReg reg)  (SSlot slot)     
+                        = addAssoc (SReg reg)  (SSlot slot)
                                 -- doing the reload makes reg and slot the same value
                         $ delAssoc (SReg reg)
                                 -- reg value changes on reload
@@ -290,7 +291,7 @@ cleanReload _ _ _ _
 --       we should really be updating the noReloads set as we cross jumps also.
 --
 -- TODO: generate noReloads from liveSlotsOnEntry
--- 
+--
 cleanTopBackward
         :: Instruction instr
         => LiveCmmDecl statics instr
@@ -300,17 +301,17 @@ cleanTopBackward cmm
  = case cmm of
         CmmData{}
          -> return cmm
-        
+
         CmmProc info label live sccs
          | LiveInfo _ _ _ liveSlotsOnEntry <- info
          -> do  sccs'   <- mapM (mapSCCM (cleanBlockBackward liveSlotsOnEntry)) sccs
-                return  $ CmmProc info label live sccs' 
+                return  $ CmmProc info label live sccs'
 
 
-cleanBlockBackward 
+cleanBlockBackward
         :: Instruction instr
-        => Map BlockId (Set Int)
-        -> LiveBasicBlock instr 
+        => BlockMap IntSet
+        -> LiveBasicBlock instr
         -> CleanM (LiveBasicBlock instr)
 
 cleanBlockBackward liveSlotsOnEntry (BasicBlock blockId instrs)
@@ -321,7 +322,7 @@ cleanBlockBackward liveSlotsOnEntry (BasicBlock blockId instrs)
 
 cleanBackward
         :: Instruction instr
-        => Map BlockId (Set Int)    -- ^ Slots live on entry to each block
+        => BlockMap IntSet          -- ^ Slots live on entry to each block
         -> UniqSet Int              -- ^ Slots that have been spilled, but not reloaded from
         -> [LiveInstr instr]        -- ^ acc
         -> [LiveInstr instr]        -- ^ Instrs to clean (in forwards order)
@@ -332,9 +333,9 @@ cleanBackward liveSlotsOnEntry noReloads acc lis
         cleanBackward' liveSlotsOnEntry reloadedBy noReloads acc lis
 
 
-cleanBackward' 
+cleanBackward'
         :: Instruction instr
-        => Map BlockId (Set Int)
+        => BlockMap IntSet
         -> UniqFM [BlockId]
         -> UniqSet Int
         -> [LiveInstr instr]
@@ -379,17 +380,17 @@ cleanBackward' liveSlotsOnEntry reloadedBy noReloads acc (li : instrs)
         --       liveness map doesn't get updated.
         | LiveInstr instr _     <- li
         , targets               <- jumpDestsOfInstr instr
-        = do    
+        = do
                 let slotsReloadedByTargets
-                        = Set.unions
+                        = IntSet.unions
                         $ catMaybes
-                        $ map (flip Map.lookup liveSlotsOnEntry) 
+                        $ map (flip mapLookup liveSlotsOnEntry)
                         $ targets
-                
+
                 let noReloads'
-                        = foldl' delOneFromUniqSet noReloads 
-                        $ Set.toList slotsReloadedByTargets
-                
+                        = foldl' delOneFromUniqSet noReloads
+                        $ IntSet.toList slotsReloadedByTargets
+
                 cleanBackward liveSlotsOnEntry noReloads' (li : acc) instrs
 
         -- some other instruction
@@ -414,7 +415,8 @@ intersects assocs       = foldl1' intersectAssoc assocs
 findRegOfSlot :: Assoc Store -> Int -> Maybe Reg
 findRegOfSlot assoc slot
         | close                 <- closeAssoc (SSlot slot) assoc
-        , Just (SReg reg)       <- find isStoreReg $ uniqSetToList close
+        , Just (SReg reg)       <- find isStoreReg $ nonDetEltsUniqSet close
+           -- See Note [Unique Determinism and code generation]
         = Just reg
 
         | otherwise
@@ -423,7 +425,7 @@ findRegOfSlot assoc slot
 
 -------------------------------------------------------------------------------
 -- | Cleaner monad.
-type CleanM 
+type CleanM
         = State CleanS
 
 -- | Cleaner state.
@@ -543,13 +545,14 @@ addAssoc a b m
 
 
 -- | Delete all associations to a node.
-delAssoc :: (Outputable a, Uniquable a)
+delAssoc :: (Uniquable a)
          => a -> Assoc a -> Assoc a
 
 delAssoc a m
         | Just aSet     <- lookupUFM  m a
         , m1            <- delFromUFM m a
-        = foldUniqSet (\x m -> delAssoc1 x a m) m1 aSet
+        = nonDetFoldUniqSet (\x m -> delAssoc1 x a m) m1 aSet
+          -- It's OK to use nonDetFoldUFM here because deletion is commutative
 
         | otherwise     = m
 
@@ -566,7 +569,7 @@ delAssoc1 a b m
 
 
 -- | Check if these two things are associated.
-elemAssoc :: (Outputable a, Uniquable a)
+elemAssoc :: (Uniquable a)
           => a -> a -> Assoc a -> Bool
 
 elemAssoc a b m
@@ -574,14 +577,15 @@ elemAssoc a b m
 
 
 -- | Find the refl. trans. closure of the association from this point.
-closeAssoc :: (Outputable a, Uniquable a)
+closeAssoc :: (Uniquable a)
         => a -> Assoc a -> UniqSet a
 
 closeAssoc a assoc
  =      closeAssoc' assoc emptyUniqSet (unitUniqSet a)
  where
         closeAssoc' assoc visited toVisit
-         = case uniqSetToList toVisit of
+         = case nonDetEltsUniqSet toVisit of
+             -- See Note [Unique Determinism and code generation]
 
                 -- nothing else to visit, we're done
                 []      -> visited
@@ -604,10 +608,7 @@ closeAssoc a assoc
                         (unionUniqSets   toVisit neighbors)
 
 -- | Intersect two associations.
-intersectAssoc
-        :: Uniquable a
-        => Assoc a -> Assoc a -> Assoc a
-
+intersectAssoc :: Assoc a -> Assoc a -> Assoc a
 intersectAssoc a b
         = intersectUFM_C (intersectUniqSets) a b
 

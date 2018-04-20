@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -fno-warn-redundant-constraints #-}
 {-# LANGUAGE UndecidableInstances,
              ExistentialQuantification, FlexibleInstances #-}
 
@@ -42,7 +43,7 @@ class (Eq f, Show f) => FORMULA f where
     argList  = error ""
     same _ _ = False
 
--- By now extensibility is accomplished by existentialy
+-- By now extensibility is accomplished by existentially
 -- quantified type variables.
 
 data Formula = forall f . ( FORMULA f
@@ -194,20 +195,20 @@ instance AddT Formula where
 instance AddT FInt where
     addT (FInt 0) y  = Just y
     addT (FInt x) y
-	 | isInt y   = Just (mkInt (x + intVal y))
-	 | otherwise = Nothing
+         | isInt y   = Just (mkInt (x + intVal y))
+         | otherwise = Nothing
 
 instance AddT FSum where
     addT (FSum xs) y
-	 | isSum y   = Just (mkSum (merge xs (argList y)))
-	 | otherwise = Just (mkSum (merge xs [y]))
+         | isSum y   = Just (mkSum (merge xs (argList y)))
+         | otherwise = Just (mkSum (merge xs [y]))
          where
          merge = (++)
 
 instance AddT FLog where
     addT (FLog x b) y
-	 | isLog y && b == logBase y = Just (mkLog (mkPro [x,logExp y]) b)
-	 | otherwise                 = Nothing
+         | isLog y && b == logBase y = Just (mkLog (mkPro [x,logExp y]) b)
+         | otherwise                 = Nothing
          where
          merge = (++)
 

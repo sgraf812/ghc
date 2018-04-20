@@ -11,8 +11,7 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef SM_MARKWEAK_H
-#define SM_MARKWEAK_H
+#pragma once
 
 #include "BeginPrivate.h"
 
@@ -22,17 +21,8 @@ extern StgTSO *exception_threads;
 
 void    collectFreshWeakPtrs   ( void );
 void    initWeakForGC          ( void );
-rtsBool traverseWeakPtrList    ( void );
+bool    traverseWeakPtrList    ( void );
 void    markWeakPtrList        ( void );
+void    scavengeLiveWeak       ( StgWeak * );
 
 #include "EndPrivate.h"
-
-#endif /* SM_MARKWEAK_H */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

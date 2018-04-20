@@ -11,16 +11,15 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef RTS_PROF_LDV_H
-#define RTS_PROF_LDV_H
+#pragma once
 
-#ifdef PROFILING
+#if defined(PROFILING)
 
 /* retrieves the LDV word from closure c */
 #define LDVW(c)                 (((StgClosure *)(c))->header.prof.hp.ldvw)
 
 /*
- * Stores the creation time for closure c. 
+ * Stores the creation time for closure c.
  * This macro is called at the very moment of closure creation.
  *
  * NOTE: this initializes LDVW(c) to zero, which ensures that there
@@ -29,7 +28,7 @@
  * to zero.
  */
 
-#ifdef CMINUSMINUS
+#if defined(CMINUSMINUS)
 
 #else
 
@@ -43,5 +42,3 @@
 #define LDV_RECORD_CREATE(c)   /* nothing */
 
 #endif /* PROFILING */
-
-#endif /* STGLDVPROF_H */

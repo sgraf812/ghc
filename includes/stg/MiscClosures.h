@@ -17,14 +17,13 @@
  *
  * --------------------------------------------------------------------------*/
 
-#ifndef STGMISCCLOSURES_H
-#define STGMISCCLOSURES_H
+#pragma once
 
 #if IN_STG_CODE
-#  define RTS_RET_INFO(i)   extern W_(i)[]
-#  define RTS_FUN_INFO(i)   extern W_(i)[]
-#  define RTS_THUNK_INFO(i) extern W_(i)[]
-#  define RTS_INFO(i)       extern W_(i)[]
+#  define RTS_RET_INFO(i)   extern const W_(i)[]
+#  define RTS_FUN_INFO(i)   extern const W_(i)[]
+#  define RTS_THUNK_INFO(i) extern const W_(i)[]
+#  define RTS_INFO(i)       extern const W_(i)[]
 #  define RTS_CLOSURE(i)    extern W_(i)[]
 #  define RTS_FUN_DECL(f)   extern DLL_IMPORT_RTS StgFunPtr f(void)
 #else
@@ -36,7 +35,7 @@
 #  define RTS_FUN_DECL(f)   extern DLL_IMPORT_RTS StgFunPtr f(void)
 #endif
 
-#ifdef TABLES_NEXT_TO_CODE
+#if defined(TABLES_NEXT_TO_CODE)
 #  define RTS_RET(f)      RTS_INFO(f##_info)
 #  define RTS_ENTRY(f)    RTS_INFO(f##_info)
 #  define RTS_FUN(f)      RTS_FUN_INFO(f##_info)
@@ -63,8 +62,15 @@ RTS_RET(stg_maskUninterruptiblezh_ret);
 RTS_RET(stg_maskAsyncExceptionszh_ret);
 RTS_RET(stg_stack_underflow_frame);
 RTS_RET(stg_restore_cccs);
+RTS_RET(stg_restore_cccs_eval);
 
-// RTS_FUN(stg_interp_constr_entry);
+// RTS_FUN(stg_interp_constr1_entry);
+// RTS_FUN(stg_interp_constr2_entry);
+// RTS_FUN(stg_interp_constr3_entry);
+// RTS_FUN(stg_interp_constr4_entry);
+// RTS_FUN(stg_interp_constr5_entry);
+// RTS_FUN(stg_interp_constr6_entry);
+// RTS_FUN(stg_interp_constr7_entry);
 //
 // This is referenced using the FFI in the compiler (ByteCodeItbls),
 // so we can't give it the correct type here because the prototypes
@@ -86,7 +92,6 @@ RTS_RET(stg_apply_interp);
 RTS_ENTRY(stg_IND);
 RTS_ENTRY(stg_IND_direct);
 RTS_ENTRY(stg_IND_STATIC);
-RTS_ENTRY(stg_IND_PERM);
 RTS_ENTRY(stg_BLACKHOLE);
 RTS_ENTRY(stg_CAF_BLACKHOLE);
 RTS_ENTRY(__stg_EAGER_BLACKHOLE);
@@ -106,6 +111,7 @@ RTS_ENTRY(stg_TVAR_CLEAN);
 RTS_ENTRY(stg_TVAR_DIRTY);
 RTS_ENTRY(stg_TSO);
 RTS_ENTRY(stg_STACK);
+RTS_ENTRY(stg_RUBBISH_ENTRY);
 RTS_ENTRY(stg_ARR_WORDS);
 RTS_ENTRY(stg_MUT_ARR_WORDS);
 RTS_ENTRY(stg_MUT_ARR_PTRS_CLEAN);
@@ -145,6 +151,8 @@ RTS_ENTRY(stg_END_STM_WATCH_QUEUE);
 RTS_ENTRY(stg_END_INVARIANT_CHECK_QUEUE);
 RTS_ENTRY(stg_END_STM_CHUNK_LIST);
 RTS_ENTRY(stg_NO_TREC);
+RTS_ENTRY(stg_COMPACT_NFDATA_CLEAN);
+RTS_ENTRY(stg_COMPACT_NFDATA_DIRTY);
 
 /* closures */
 
@@ -222,8 +230,8 @@ RTS_THUNK(stg_ap_5_upd);
 RTS_THUNK(stg_ap_6_upd);
 RTS_THUNK(stg_ap_7_upd);
 
-/* standard application routines (see also utils/genapply, 
- * and compiler/codeGen/CgStackery.lhs).
+/* standard application routines (see also utils/genapply,
+ * and compiler/codeGen/StgCmmArgRep.hs).
  */
 RTS_RET(stg_ap_v);
 RTS_RET(stg_ap_f);
@@ -263,11 +271,9 @@ RTS_FUN_DECL(stg_ap_ppppp_fast);
 RTS_FUN_DECL(stg_ap_pppppp_fast);
 RTS_FUN_DECL(stg_PAP_apply);
 
-/* standard GC & stack check entry points, all defined in HeapStackCheck.hc */
+/* standard GC & stack check entry points, all defined in HeapStackCheck.cmm */
 
 RTS_FUN_DECL(stg_gc_noregs);
-
-RTS_RET(stg_enter_checkbh);
 
 RTS_RET(stg_ret_v);
 RTS_RET(stg_ret_p);
@@ -310,7 +316,7 @@ RTS_RET(stg_block_takemvar);
 RTS_RET(stg_block_readmvar);
 RTS_FUN_DECL(stg_block_putmvar);
 RTS_RET(stg_block_putmvar);
-#ifdef mingw32_HOST_OS
+#if defined(mingw32_HOST_OS)
 RTS_FUN_DECL(stg_block_async);
 RTS_RET(stg_block_async);
 RTS_FUN_DECL(stg_block_async_void);
@@ -330,9 +336,6 @@ RTS_FUN_DECL(stg_returnToSchedNotPaused);
 RTS_FUN_DECL(stg_returnToSchedButFirst);
 RTS_FUN_DECL(stg_threadFinished);
 
-RTS_FUN_DECL(stg_init_finish);
-RTS_FUN_DECL(stg_init);
-
 RTS_FUN_DECL(StgReturn);
 
 /* -----------------------------------------------------------------------------
@@ -341,12 +344,15 @@ RTS_FUN_DECL(StgReturn);
 
 RTS_FUN_DECL(stg_decodeFloatzuIntzh);
 RTS_FUN_DECL(stg_decodeDoublezu2Intzh);
+RTS_FUN_DECL(stg_decodeDoublezuInt64zh);
 
 RTS_FUN_DECL(stg_unsafeThawArrayzh);
 RTS_FUN_DECL(stg_casArrayzh);
 RTS_FUN_DECL(stg_newByteArrayzh);
 RTS_FUN_DECL(stg_newPinnedByteArrayzh);
 RTS_FUN_DECL(stg_newAlignedPinnedByteArrayzh);
+RTS_FUN_DECL(stg_isByteArrayPinnedzh);
+RTS_FUN_DECL(stg_isMutableByteArrayPinnedzh);
 RTS_FUN_DECL(stg_shrinkMutableByteArrayzh);
 RTS_FUN_DECL(stg_resizzeMutableByteArrayzh);
 RTS_FUN_DECL(stg_casIntArrayzh);
@@ -387,7 +393,7 @@ RTS_FUN_DECL(stg_tryReadMVarzh);
 RTS_FUN_DECL(stg_waitReadzh);
 RTS_FUN_DECL(stg_waitWritezh);
 RTS_FUN_DECL(stg_delayzh);
-#ifdef mingw32_HOST_OS
+#if defined(mingw32_HOST_OS)
 RTS_FUN_DECL(stg_asyncReadzh);
 RTS_FUN_DECL(stg_asyncWritezh);
 RTS_FUN_DECL(stg_asyncDoProczh);
@@ -400,6 +406,20 @@ RTS_FUN_DECL(stg_raiseIOzh);
 RTS_FUN_DECL(stg_makeStableNamezh);
 RTS_FUN_DECL(stg_makeStablePtrzh);
 RTS_FUN_DECL(stg_deRefStablePtrzh);
+
+RTS_FUN_DECL(stg_compactAddzh);
+RTS_FUN_DECL(stg_compactAddWithSharingzh);
+RTS_FUN_DECL(stg_compactNewzh);
+RTS_FUN_DECL(stg_compactAppendzh);
+RTS_FUN_DECL(stg_compactResizzezh);
+RTS_FUN_DECL(stg_compactGetRootzh);
+RTS_FUN_DECL(stg_compactContainszh);
+RTS_FUN_DECL(stg_compactContainsAnyzh);
+RTS_FUN_DECL(stg_compactGetFirstBlockzh);
+RTS_FUN_DECL(stg_compactGetNextBlockzh);
+RTS_FUN_DECL(stg_compactAllocateBlockzh);
+RTS_FUN_DECL(stg_compactFixupPointerszh);
+RTS_FUN_DECL(stg_compactSizzezh);
 
 RTS_FUN_DECL(stg_forkzh);
 RTS_FUN_DECL(stg_forkOnzh);
@@ -422,6 +442,8 @@ RTS_FUN_DECL(stg_addCFinalizzerToWeakzh);
 RTS_FUN_DECL(stg_finalizzeWeakzh);
 RTS_FUN_DECL(stg_deRefWeakzh);
 
+RTS_FUN_DECL(stg_runRWzh);
+
 RTS_FUN_DECL(stg_newBCOzh);
 RTS_FUN_DECL(stg_mkApUpd0zh);
 
@@ -443,8 +465,12 @@ RTS_FUN_DECL(stg_numSparkszh);
 RTS_FUN_DECL(stg_noDuplicatezh);
 
 RTS_FUN_DECL(stg_traceCcszh);
+RTS_FUN_DECL(stg_clearCCSzh);
 RTS_FUN_DECL(stg_traceEventzh);
 RTS_FUN_DECL(stg_traceMarkerzh);
+RTS_FUN_DECL(stg_getThreadAllocationCounterzh);
+RTS_FUN_DECL(stg_setThreadAllocationCounterzh);
+
 
 /* Other misc stuff */
 // See wiki:Commentary/Compiler/Backends/PprC#Prototypes
@@ -459,14 +485,13 @@ extern StgWord rts_breakpoint_io_action[];
 // Schedule.c
 extern StgWord RTS_VAR(blocked_queue_hd), RTS_VAR(blocked_queue_tl);
 extern StgWord RTS_VAR(sleeping_queue);
-extern StgWord RTS_VAR(blackhole_queue);
 extern StgWord RTS_VAR(sched_mutex);
 
 // Apply.cmm
 // canned bitmap for each arg type
-extern StgWord stg_arg_bitmaps[];
-extern StgWord stg_ap_stack_entries[];
-extern StgWord stg_stack_save_entries[];
+extern const StgWord stg_arg_bitmaps[];
+extern const StgWord stg_ap_stack_entries[];
+extern const StgWord stg_stack_save_entries[];
 
 // Storage.c
 extern unsigned int RTS_VAR(g0);
@@ -485,15 +510,25 @@ extern unsigned int RTS_VAR(era);
 extern unsigned int RTS_VAR(entering_PAP);
 extern StgWord      RTS_VAR(CC_LIST);          /* registered CC list */
 extern StgWord      RTS_VAR(CCS_LIST);         /* registered CCS list */
+extern StgWord      CCS_OVERHEAD[];
 extern StgWord      CCS_SYSTEM[];
 extern unsigned int RTS_VAR(CC_ID);            /* global ids */
 extern unsigned int RTS_VAR(CCS_ID);
-RTS_FUN_DECL(enterFunCCS);
-RTS_FUN_DECL(pushCostCentre);
+
+// Calls to these rts functions are generated directly
+// by codegen (see compiler/codeGen/StgCmmProf.hs)
+// and don't require (don't emit) forward declarations.
+//
+// In unregisterised mode (when building via .hc files)
+// the calls are ordinary C calls. Functions must be in
+// scope and must match prototype assumed by
+//    'compiler/codeGen/StgCmmProf.hs'
+// as opposed to real prototype declared in
+//    'includes/rts/prof/CCS.h'
+void enterFunCCS (void *reg, void *ccsfn);
+void * pushCostCentre (void *ccs, void *cc);
 
 // Capability.c
 extern unsigned int n_capabilities;
 
 #endif
-
-#endif /* STGMISCCLOSURES_H */

@@ -11,12 +11,17 @@
 
 #include "eventlog/EventLog.h"
 
+#if USE_LIBDW
+#include <Libdw.h>
+#endif
+
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
 
-#ifdef HAVE_WINDOWS_H
+#if defined(HAVE_WINDOWS_H)
 #include <windows.h>
+#include <fcntl.h>
 #endif
 
 /* -----------------------------------------------------------------------------
@@ -51,7 +56,7 @@ vbarf(const char*s, va_list ap)
   stg_exit(EXIT_INTERNAL_ERROR); // just in case fatalInternalErrorFn() returns
 }
 
-void 
+void
 _assertFail(const char*filename, unsigned int linenum)
 {
     barf("ASSERTION FAILED: file %s, line %u\n", filename, linenum);
@@ -108,7 +113,7 @@ vdebugBelch(const char*s, va_list ap)
 
 #define BUFSIZE 512
 
-#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+#if defined (mingw32_HOST_OS)
 static int
 isGUIApp(void)
 {
@@ -133,7 +138,9 @@ isGUIApp(void)
 void GNU_ATTRIBUTE(__noreturn__)
 rtsFatalInternalErrorFn(const char *s, va_list ap)
 {
-#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+#if defined(mingw32_HOST_OS)
+  /* Ensure we're in text mode so newlines get encoded properly.  */
+  int mode = _setmode (_fileno(stderr), _O_TEXT);
   if (isGUIApp())
   {
      char title[BUFSIZE], message[BUFSIZE];
@@ -142,10 +149,10 @@ rtsFatalInternalErrorFn(const char *s, va_list ap)
      vsnprintf(message, BUFSIZE, s, ap);
 
      MessageBox(NULL /* hWnd */,
-	        message,
-	        title,
-	        MB_OK | MB_ICONERROR | MB_TASKMODAL
-	       );
+                message,
+                title,
+                MB_OK | MB_ICONERROR | MB_TASKMODAL
+               );
   }
   else
 #endif
@@ -157,13 +164,24 @@ rtsFatalInternalErrorFn(const char *s, va_list ap)
        fprintf(stderr, "internal error: ");
      }
      vfprintf(stderr, s, ap);
+#if USE_LIBDW
+     fprintf(stderr, "\n");
+     fprintf(stderr, "Stack trace:\n");
+     LibdwSession *session = libdwInit();
+     Backtrace *bt = libdwGetBacktrace(session);
+     libdwPrintBacktrace(session, stderr, bt);
+     libdwFree(session);
+#endif
      fprintf(stderr, "\n");
      fprintf(stderr, "    (GHC version %s for %s)\n", ProjectVersion, xstr(HostPlatform_TYPE));
      fprintf(stderr, "    Please report this as a GHC bug:  http://www.haskell.org/ghc/reportabug\n");
      fflush(stderr);
   }
+#if defined(mingw32_HOST_OS)
+  _setmode (_fileno(stderr), mode);
+#endif
 
-#ifdef TRACING
+#if defined(TRACING)
   if (RtsFlags.TraceFlags.tracing == TRACE_EVENTLOG) endEventLogging();
 #endif
 
@@ -174,15 +192,17 @@ rtsFatalInternalErrorFn(const char *s, va_list ap)
 void
 rtsErrorMsgFn(const char *s, va_list ap)
 {
-#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+#if defined(mingw32_HOST_OS)
+  /* Ensure we're in text mode so newlines get encoded properly.  */
+  int mode = _setmode (_fileno(stderr), _O_TEXT);
   if (isGUIApp())
   {
      char buf[BUFSIZE];
      int r;
 
-	 r = vsnprintf(buf, BUFSIZE, s, ap);
-	 if (r > 0 && r < BUFSIZE) {
-		MessageBox(NULL /* hWnd */,
+         r = vsnprintf(buf, BUFSIZE, s, ap);
+         if (r > 0 && r < BUFSIZE) {
+                MessageBox(NULL /* hWnd */,
               buf,
               prog_name,
               MB_OK | MB_ICONERROR | MB_TASKMODAL
@@ -199,6 +219,9 @@ rtsErrorMsgFn(const char *s, va_list ap)
      vfprintf(stderr, s, ap);
      fprintf(stderr, "\n");
   }
+#if defined(mingw32_HOST_OS)
+  _setmode (_fileno(stderr), mode);
+#endif
 }
 
 void
@@ -206,32 +229,34 @@ rtsSysErrorMsgFn(const char *s, va_list ap)
 {
     char *syserr;
 
-#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
-    FormatMessage( 
-	FORMAT_MESSAGE_ALLOCATE_BUFFER | 
-	FORMAT_MESSAGE_FROM_SYSTEM | 
-	FORMAT_MESSAGE_IGNORE_INSERTS,
-	NULL,
-	GetLastError(),
-	MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), // Default language
-	(LPTSTR) &syserr,
-	0,
-	NULL );
+#if defined(mingw32_HOST_OS)
+    /* Ensure we're in text mode so newlines get encoded properly.  */
+    int mode = _setmode (_fileno(stderr), _O_TEXT);
+    FormatMessage(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER |
+        FORMAT_MESSAGE_FROM_SYSTEM |
+        FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL,
+        GetLastError(),
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), // Default language
+        (LPTSTR) &syserr,
+        0,
+        NULL );
 
     if (isGUIApp())
     {
-	char buf[BUFSIZE];
-	int r;
-	
-	r = vsnprintf(buf, BUFSIZE, s, ap);
-	if (r > 0 && r < BUFSIZE) {
-	    r = vsnprintf(buf+r, BUFSIZE-r, ": %s", syserr);
-	    MessageBox(NULL /* hWnd */,
-		       buf,
-		       prog_name,
-		       MB_OK | MB_ICONERROR | MB_TASKMODAL
-		);
-	}
+        char buf[BUFSIZE];
+        int r;
+
+        r = vsnprintf(buf, BUFSIZE, s, ap);
+        if (r > 0 && r < BUFSIZE) {
+            r = vsnprintf(buf+r, BUFSIZE-r, ": %s", syserr);
+            MessageBox(NULL /* hWnd */,
+                       buf,
+                       prog_name,
+                       MB_OK | MB_ICONERROR | MB_TASKMODAL
+                );
+        }
     }
     else
 #else
@@ -239,39 +264,42 @@ rtsSysErrorMsgFn(const char *s, va_list ap)
     // ToDo: use strerror_r() if available
 #endif
     {
-	/* don't fflush(stdout); WORKAROUND bug in Linux glibc */
-	if (prog_argv != NULL && prog_name != NULL) {
-	    fprintf(stderr, "%s: ", prog_name);
-	}
-	vfprintf(stderr, s, ap);
-	if (syserr) {
-#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+        /* don't fflush(stdout); WORKAROUND bug in Linux glibc */
+        if (prog_argv != NULL && prog_name != NULL) {
+            fprintf(stderr, "%s: ", prog_name);
+        }
+        vfprintf(stderr, s, ap);
+        if (syserr) {
+#if defined(mingw32_HOST_OS)
             // Win32 error messages have a terminating \n
-	    fprintf(stderr, ": %s", syserr);
+            fprintf(stderr, ": %s", syserr);
 #else
-	    fprintf(stderr, ": %s\n", syserr);
+            fprintf(stderr, ": %s\n", syserr);
 #endif
-	} else {
-	    fprintf(stderr, "\n");
-	}
+        } else {
+            fprintf(stderr, "\n");
+        }
     }
 
-#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+#if defined(mingw32_HOST_OS)
     if (syserr) LocalFree(syserr);
+    _setmode (_fileno(stderr), mode);
 #endif
 }
 
 void
 rtsDebugMsgFn(const char *s, va_list ap)
 {
-#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+#if defined(mingw32_HOST_OS)
+  /* Ensure we're in text mode so newlines get encoded properly.  */
+  int mode = _setmode (_fileno(stderr), _O_TEXT);
   if (isGUIApp())
   {
      char buf[BUFSIZE];
-	 int r;
+         int r;
 
-	 r = vsnprintf(buf, BUFSIZE, s, ap);
-	 if (r > 0 && r < BUFSIZE) {
+         r = vsnprintf(buf, BUFSIZE, s, ap);
+         if (r > 0 && r < BUFSIZE) {
        OutputDebugString(buf);
      }
   }
@@ -282,12 +310,17 @@ rtsDebugMsgFn(const char *s, va_list ap)
      vfprintf(stderr, s, ap);
      fflush(stderr);
   }
+#if defined(mingw32_HOST_OS)
+  _setmode (_fileno(stderr), mode);
+#endif
 }
 
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:
+
+// Used in stg_badAlignment_entry defined in StgStartup.cmm.
+void rtsBadAlignmentBarf(void) GNUC3_ATTRIBUTE(__noreturn__);
+
+void
+rtsBadAlignmentBarf()
+{
+    barf("Encountered incorrectly aligned pointer. This can't be good.");
+}

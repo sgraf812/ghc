@@ -3,9 +3,9 @@
            , MagicHash
            , UnboxedTuples
            , ScopedTypeVariables
+           , RankNTypes
   #-}
-{-# OPTIONS_GHC -fno-warn-unused-imports #-}
-{-# OPTIONS_GHC -fno-warn-deprecations #-}
+{-# OPTIONS_GHC -Wno-deprecations #-}
 -- kludge for the Control.Concurrent.QSem, Control.Concurrent.QSemN
 -- and Control.Concurrent.SampleVar imports.
 
@@ -74,6 +74,7 @@ module Control.Concurrent (
         -- $boundthreads
         rtsSupportsBoundThreads,
         forkOS,
+        forkOSWithUnmask,
         isCurrentThreadBound,
         runInBoundThread,
         runInUnboundThread,
@@ -104,27 +105,25 @@ module Control.Concurrent (
 
     ) where
 
-import Prelude
-
 import Control.Exception.Base as Exception
 
-import GHC.Exception
 import GHC.Conc hiding (threadWaitRead, threadWaitWrite,
                         threadWaitReadSTM, threadWaitWriteSTM)
-import qualified GHC.Conc
-import GHC.IO           ( IO(..), unsafeInterleaveIO, unsafeUnmask )
+import GHC.IO           ( unsafeUnmask, catchException )
 import GHC.IORef        ( newIORef, readIORef, writeIORef )
 import GHC.Base
 
 import System.Posix.Types ( Fd )
 import Foreign.StablePtr
 import Foreign.C.Types
-import Control.Monad
 
-#ifdef mingw32_HOST_OS
+#if defined(mingw32_HOST_OS)
 import Foreign.C
 import System.IO
-import Data.Maybe (Maybe(..))
+import Data.Functor ( void )
+import Data.Int ( Int64 )
+#else
+import qualified GHC.Conc
 #endif
 
 import Control.Concurrent.MVar
@@ -184,7 +183,7 @@ attribute will block all other threads.
 
 -}
 
--- | fork a thread and call the supplied function when the thread is about
+-- | Fork a thread and call the supplied function when the thread is about
 -- to terminate, with an exception or a returned value.  The function is
 -- called with asynchronous exceptions masked.
 --
@@ -195,7 +194,7 @@ attribute will block all other threads.
 -- This function is useful for informing the parent when a child
 -- terminates, for example.
 --
--- /Since: 4.6.0.0/
+-- @since 4.6.0.0
 forkFinally :: IO a -> (Either SomeException a -> IO ()) -> IO ThreadId
 forkFinally action and_then =
   mask $ \restore ->
@@ -255,7 +254,7 @@ waiting for the results in the main thread.
 -- If @rtsSupportsBoundThreads@ is 'False', 'isCurrentThreadBound'
 -- will always return 'False' and both 'forkOS' and 'runInBoundThread' will
 -- fail.
-foreign import ccall rtsSupportsBoundThreads :: Bool
+foreign import ccall unsafe rtsSupportsBoundThreads :: Bool
 
 
 {- |
@@ -310,7 +309,7 @@ forkOS action0
                         MaskedInterruptible -> action0
                         MaskedUninterruptible -> uninterruptibleMask_ action0
 
-            action_plus = Exception.catch action1 childHandler
+            action_plus = catch action1 childHandler
 
         entry <- newStablePtr (myThreadId >>= putMVar mv >> action_plus)
         err <- forkOS_createThread entry
@@ -319,6 +318,11 @@ forkOS action0
         freeStablePtr entry
         return tid
     | otherwise = failNonThreaded
+
+-- | Like 'forkIOWithUnmask', but the child thread is a bound thread,
+-- as with 'forkOS'.
+forkOSWithUnmask :: ((forall a . IO a -> IO a) -> IO ()) -> IO ThreadId
+forkOSWithUnmask io = forkOS (io unsafeUnmask)
 
 -- | Returns 'True' if the calling thread is /bound/, that is, if it is
 -- safe to use foreign libraries that rely on thread-local state from the
@@ -378,7 +382,7 @@ runInUnboundThread action = do
       mv <- newEmptyMVar
       mask $ \restore -> do
         tid <- forkIO $ Exception.try (restore action) >>= putMVar mv
-        let wait = takeMVar mv `Exception.catch` \(e :: SomeException) ->
+        let wait = takeMVar mv `catchException` \(e :: SomeException) ->
                      Exception.throwTo tid e >> wait
         wait >>= unsafeResult
     else action
@@ -398,18 +402,18 @@ unsafeResult = either Exception.throwIO return
 -- 'GHC.Conc.closeFdWith'.
 threadWaitRead :: Fd -> IO ()
 threadWaitRead fd
-#ifdef mingw32_HOST_OS
+#if defined(mingw32_HOST_OS)
   -- we have no IO manager implementing threadWaitRead on Windows.
   -- fdReady does the right thing, but we have to call it in a
   -- separate thread, otherwise threadWaitRead won't be interruptible,
   -- and this only works with -threaded.
-  | threaded  = withThread (waitFd fd 0)
+  | threaded  = withThread (waitFd fd False)
   | otherwise = case fd of
                   0 -> do _ <- hWaitForInput stdin (-1)
                           return ()
                         -- hWaitForInput does work properly, but we can only
                         -- do this for stdin since we know its FD.
-                  _ -> error "threadWaitRead requires -threaded on Windows, or use System.IO.hWaitForInput"
+                  _ -> errorWithoutStackTrace "threadWaitRead requires -threaded on Windows, or use System.IO.hWaitForInput"
 #else
   = GHC.Conc.threadWaitRead fd
 #endif
@@ -423,9 +427,9 @@ threadWaitRead fd
 -- 'GHC.Conc.closeFdWith'.
 threadWaitWrite :: Fd -> IO ()
 threadWaitWrite fd
-#ifdef mingw32_HOST_OS
-  | threaded  = withThread (waitFd fd 1)
-  | otherwise = error "threadWaitWrite requires -threaded on Windows"
+#if defined(mingw32_HOST_OS)
+  | threaded  = withThread (waitFd fd True)
+  | otherwise = errorWithoutStackTrace "threadWaitWrite requires -threaded on Windows"
 #else
   = GHC.Conc.threadWaitWrite fd
 #endif
@@ -435,12 +439,12 @@ threadWaitWrite fd
 -- is an IO action that can be used to deregister interest
 -- in the file descriptor.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 threadWaitReadSTM :: Fd -> IO (STM (), IO ())
 threadWaitReadSTM fd
-#ifdef mingw32_HOST_OS
+#if defined(mingw32_HOST_OS)
   | threaded = do v <- newTVarIO Nothing
-                  mask_ $ void $ forkIO $ do result <- try (waitFd fd 0)
+                  mask_ $ void $ forkIO $ do result <- try (waitFd fd False)
                                              atomically (writeTVar v $ Just result)
                   let waitAction = do result <- readTVar v
                                       case result of
@@ -449,7 +453,7 @@ threadWaitReadSTM fd
                                         Just (Left e)   -> throwSTM (e :: IOException)
                   let killAction = return ()
                   return (waitAction, killAction)
-  | otherwise = error "threadWaitReadSTM requires -threaded on Windows"
+  | otherwise = errorWithoutStackTrace "threadWaitReadSTM requires -threaded on Windows"
 #else
   = GHC.Conc.threadWaitReadSTM fd
 #endif
@@ -459,12 +463,12 @@ threadWaitReadSTM fd
 -- is an IO action that can be used to deregister interest
 -- in the file descriptor.
 --
--- /Since: 4.7.0.0/
+-- @since 4.7.0.0
 threadWaitWriteSTM :: Fd -> IO (STM (), IO ())
 threadWaitWriteSTM fd
-#ifdef mingw32_HOST_OS
+#if defined(mingw32_HOST_OS)
   | threaded = do v <- newTVarIO Nothing
-                  mask_ $ void $ forkIO $ do result <- try (waitFd fd 1)
+                  mask_ $ void $ forkIO $ do result <- try (waitFd fd True)
                                              atomically (writeTVar v $ Just result)
                   let waitAction = do result <- readTVar v
                                       case result of
@@ -473,12 +477,12 @@ threadWaitWriteSTM fd
                                         Just (Left e)   -> throwSTM (e :: IOException)
                   let killAction = return ()
                   return (waitAction, killAction)
-  | otherwise = error "threadWaitWriteSTM requires -threaded on Windows"
+  | otherwise = errorWithoutStackTrace "threadWaitWriteSTM requires -threaded on Windows"
 #else
   = GHC.Conc.threadWaitWriteSTM fd
 #endif
 
-#ifdef mingw32_HOST_OS
+#if defined(mingw32_HOST_OS)
 foreign import ccall unsafe "rtsSupportsBoundThreads" threaded :: Bool
 
 withThread :: IO a -> IO a
@@ -490,16 +494,13 @@ withThread io = do
     Right a -> return a
     Left e  -> throwIO (e :: IOException)
 
-waitFd :: Fd -> CInt -> IO ()
+waitFd :: Fd -> Bool -> IO ()
 waitFd fd write = do
    throwErrnoIfMinus1_ "fdReady" $
-        fdReady (fromIntegral fd) write iNFINITE 0
-
-iNFINITE :: CInt
-iNFINITE = 0xFFFFFFFF -- urgh
+        fdReady (fromIntegral fd) (if write then 1 else 0) (-1) 0
 
 foreign import ccall safe "fdReady"
-  fdReady :: CInt -> CInt -> CInt -> CInt -> IO CInt
+  fdReady :: CInt -> CBool -> Int64 -> CBool -> IO CInt
 #endif
 
 -- ---------------------------------------------------------------------------

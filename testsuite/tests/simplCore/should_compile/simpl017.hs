@@ -1,12 +1,13 @@
 {-# OPTIONS -XImpredicativeTypes -fno-warn-deprecated-flags -XEmptyDataDecls -XGADTs -XLiberalTypeSynonyms -XFlexibleInstances -XScopedTypeVariables #-}
 
 -- See Trac #1627.  The point is that we should get nice
--- 		    compact code for Foo
+--                  compact code for Foo
 
 -- In GHC 7.0 this fails, and rightly so.
 
 module M(foo) where
 
+import Control.Monad
 import Control.Monad.ST
 import Data.Array.ST
 
@@ -25,6 +26,16 @@ runE :: E' v m a -> m a
 runE (E t) = t
 runE (V t _) = t
 
+instance Monad m => Functor (E' RValue m) where
+    {-# INLINE fmap #-}
+    fmap f x = liftM f x
+
+instance Monad m => Applicative (E' RValue m) where
+    {-# INLINE pure #-}
+    pure x = return x
+    {-# INLINE (<*>) #-}
+    (<*>) = ap
+
 instance (Monad m) => Monad (E' RValue m) where
     {-# INLINE return #-}
     return x = E $ return x
@@ -39,8 +50,8 @@ liftArray :: forall arr m a i . (Ix i, MArray arr a m) =>
 liftArray a = E (do
     let ix :: [E m i] -> m i
         ix [i] = runE i
-	{-# INLINE f #-}
-	f is = V (ix is >>= readArray a) (\ x -> ix is >>= \ i -> writeArray a i x)
+        {-# INLINE f #-}
+        f is = V (ix is >>= readArray a) (\ x -> ix is >>= \ i -> writeArray a i x)
     return f
   )
 
