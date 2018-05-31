@@ -294,7 +294,7 @@ setLevels dflags float_lams binds us
 
 lvlTopBind :: LevelEnv -> Bind Id -> LvlM (LevelledBind, LevelEnv)
 lvlTopBind env (NonRec bndr rhs)
-  = do { rhs' <- lvlExpr env (analyzeFVs (initFVEnv $ finalPass env) rhs)
+  = do { rhs' <- lvl_top env NonRecursive bndr rhs
        ; let  -- lambda lifting impedes specialization, so: if the old
               -- RHS has an unstable unfolding that will survive
               -- TidyPgm, "stablize it" so that it ends up in the .hi
@@ -318,8 +318,6 @@ lvlTopBind env (Rec pairs)
        ; rhss' <- mapM (\(b,r) -> lvl_top env' Recursive b r) pairs
        ; return (Rec (bndrs' `zip` rhss'), env') }
 
--- TODO SG 20 April 2018: I'm not sure I applied the diff in a semantically
--- meaningful way
 lvl_top :: LevelEnv -> RecFlag -> Id -> CoreExpr -> LvlM LevelledExpr
 lvl_top env is_rec bndr rhs
   = lvlRhs env is_rec
