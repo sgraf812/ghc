@@ -106,7 +106,7 @@ module HscTypes (
         -- * Information on imports and exports
         WhetherHasOrphans, IsBootInterface, Usage(..),
         Dependencies(..), noDependencies,
-        updNameCacheIO,
+        updNameCache,
         IfaceExport,
 
         -- * Warnings
@@ -861,6 +861,7 @@ data ModIface
                                               -- excluding optimisation flags
         mi_opt_hash   :: !Fingerprint,        -- ^ Hash of optimisation flags
         mi_hpc_hash   :: !Fingerprint,        -- ^ Hash of hpc flags
+        mi_plugin_hash :: !Fingerprint,       -- ^ Hash of plugins
 
         mi_orphan     :: !WhetherHasOrphans,  -- ^ Whether this module has orphans
         mi_finsts     :: !WhetherHasFamInst,
@@ -1023,6 +1024,7 @@ instance Binary ModIface where
                  mi_flag_hash = flag_hash,
                  mi_opt_hash  = opt_hash,
                  mi_hpc_hash  = hpc_hash,
+                 mi_plugin_hash = plugin_hash,
                  mi_orphan    = orphan,
                  mi_finsts    = hasFamInsts,
                  mi_deps      = deps,
@@ -1051,6 +1053,7 @@ instance Binary ModIface where
         put_ bh flag_hash
         put_ bh opt_hash
         put_ bh hpc_hash
+        put_ bh plugin_hash
         put_ bh orphan
         put_ bh hasFamInsts
         lazyPut bh deps
@@ -1081,6 +1084,7 @@ instance Binary ModIface where
         flag_hash   <- get bh
         opt_hash    <- get bh
         hpc_hash    <- get bh
+        plugin_hash <- get bh
         orphan      <- get bh
         hasFamInsts <- get bh
         deps        <- lazyGet bh
@@ -1110,6 +1114,7 @@ instance Binary ModIface where
                  mi_flag_hash   = flag_hash,
                  mi_opt_hash    = opt_hash,
                  mi_hpc_hash    = hpc_hash,
+                 mi_plugin_hash = plugin_hash,
                  mi_orphan      = orphan,
                  mi_finsts      = hasFamInsts,
                  mi_deps        = deps,
@@ -1149,6 +1154,7 @@ emptyModIface mod
                mi_flag_hash   = fingerprint0,
                mi_opt_hash    = fingerprint0,
                mi_hpc_hash    = fingerprint0,
+               mi_plugin_hash = fingerprint0,
                mi_orphan      = False,
                mi_finsts      = False,
                mi_hsc_src     = HsSrcFile,
@@ -1244,7 +1250,8 @@ data ImportedModsVal
         imv_span :: SrcSpan,             -- ^ the source span of the whole import
         imv_is_safe :: IsSafeImport,     -- ^ whether this is a safe import
         imv_is_hiding :: Bool,           -- ^ whether this is an "hiding" import
-        imv_all_exports :: GlobalRdrEnv, -- ^ all the things the module could provide
+        imv_all_exports :: !GlobalRdrEnv, -- ^ all the things the module could provide
+          -- NB. BangPattern here: otherwise this leaks. (#15111)
         imv_qualified :: Bool            -- ^ whether this is a qualified import
         }
 
@@ -2612,10 +2619,10 @@ interface file); so we give it 'noSrcLoc' then.  Later, when we find
 its binding site, we fix it up.
 -}
 
-updNameCacheIO :: HscEnv
-               -> (NameCache -> (NameCache, c))  -- The updating function
-               -> IO c
-updNameCacheIO hsc_env upd_fn
+updNameCache :: HscEnv
+             -> (NameCache -> (NameCache, c))  -- The updating function
+             -> IO c
+updNameCache hsc_env upd_fn
   = atomicModifyIORef' (hsc_NC hsc_env) upd_fn
 
 mkSOName :: Platform -> FilePath -> FilePath

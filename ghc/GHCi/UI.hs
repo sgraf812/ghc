@@ -134,6 +134,8 @@ import GHC.IO.Exception ( IOErrorType(InvalidArgument) )
 import GHC.IO.Handle ( hFlushAll )
 import GHC.TopHandler ( topHandler )
 
+import GHCi.Leak
+
 -----------------------------------------------------------------------------
 
 data GhciSettings = GhciSettings {
@@ -791,16 +793,14 @@ checkPromptStringForErrors (_:xs) = checkPromptStringForErrors xs
 checkPromptStringForErrors "" = Nothing
 
 generatePromptFunctionFromString :: String -> PromptFunction
-generatePromptFunctionFromString promptS = \_ _ -> do
-    (context, modules_names, line) <- getInfoForPrompt
-
-    let
+generatePromptFunctionFromString promptS modules_names line =
+        processString promptS
+  where
         processString :: String -> GHCi SDoc
         processString ('%':'s':xs) =
             liftM2 (<>) (return modules_list) (processString xs)
             where
-              modules_list = context <> modules_bit
-              modules_bit = hsep $ map text modules_names
+              modules_list = hsep $ map text modules_names
         processString ('%':'l':xs) =
             liftM2 (<>) (return $ ppr line) (processString xs)
         processString ('%':'d':xs) =
@@ -860,8 +860,6 @@ generatePromptFunctionFromString promptS = \_ _ -> do
             liftM (char x <>) (processString xs)
         processString "" =
             return empty
-
-    processString promptS
 
 mkPrompt :: GHCi String
 mkPrompt = do
@@ -1646,6 +1644,14 @@ loadModule' files = do
   -- require some re-working of the GHC interface, so we'll leave it
   -- as a ToDo for now.
 
+  hsc_env <- GHC.getSession
+
+  -- Grab references to the currently loaded modules so that we can
+  -- see if they leak.
+  leak_indicators <- if gopt Opt_GhciLeakCheck (hsc_dflags hsc_env)
+    then liftIO $ getLeakIndicators hsc_env
+    else return (panic "no leak indicators")
+
   -- unload first
   _ <- GHC.abandonAll
   lift discardActiveBreakPoints
@@ -1653,7 +1659,10 @@ loadModule' files = do
   _ <- GHC.load LoadAllTargets
 
   GHC.setTargets targets
-  doLoadAndCollectInfo False LoadAllTargets
+  success <- doLoadAndCollectInfo False LoadAllTargets
+  when (gopt Opt_GhciLeakCheck (hsc_dflags hsc_env)) $
+    liftIO $ checkLeakIndicators (hsc_dflags hsc_env) leak_indicators
+  return success
 
 -- | @:add@ command
 addModule :: [FilePath] -> InputT GHCi ()
@@ -2559,7 +2568,9 @@ showDynFlags show_all dflags = do
                 is_on = test f dflags
                 quiet = not show_all && test f default_dflags == is_on
 
-        default_dflags = defaultDynFlags (settings dflags) (llvmTargets dflags)
+        llvmConfig = (llvmTargets dflags, llvmPasses dflags)
+
+        default_dflags = defaultDynFlags (settings dflags) llvmConfig
 
         (ghciFlags,others)  = partition (\f -> flagSpecFlag f `elem` flgs)
                                         DynFlags.fFlags
@@ -2970,8 +2981,10 @@ showLanguages' show_all dflags =
                 is_on = test f dflags
                 quiet = not show_all && test f default_dflags == is_on
 
+   llvmConfig = (llvmTargets dflags, llvmPasses dflags)
+
    default_dflags =
-       defaultDynFlags (settings dflags) (llvmTargets dflags) `lang_set`
+       defaultDynFlags (settings dflags) llvmConfig `lang_set`
          case language dflags of
            Nothing -> Just Haskell2010
            other   -> other

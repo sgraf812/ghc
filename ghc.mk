@@ -420,7 +420,7 @@ else # CLEANING
 # programs such as GHC and ghc-pkg, that we do not assume the stage0
 # compiler already has installed (or up-to-date enough).
 
-PACKAGES_STAGE0 = binary text transformers mtl parsec Cabal/Cabal hpc ghc-boot-th ghc-boot template-haskell ghci
+PACKAGES_STAGE0 = binary text transformers mtl parsec Cabal/Cabal hpc ghc-boot-th ghc-boot template-haskell ghc-heap ghci
 ifeq "$(Windows_Host)" "NO"
 PACKAGES_STAGE0 += terminfo
 endif
@@ -459,6 +459,7 @@ PACKAGES_STAGE1 += ghc-boot-th
 PACKAGES_STAGE1 += ghc-boot
 PACKAGES_STAGE1 += template-haskell
 PACKAGES_STAGE1 += ghc-compact
+PACKAGES_STAGE1 += ghc-heap
 
 ifeq "$(HADDOCK_DOCS)" "YES"
 PACKAGES_STAGE1 += xhtml
@@ -1046,6 +1047,7 @@ $(eval $(call bindist-list,.,\
     configure config.sub config.guess install-sh \
     settings.in \
     llvm-targets \
+    llvm-passes \
     packages \
     Makefile \
     mk/config.mk.in \
@@ -1072,7 +1074,7 @@ $(eval $(call bindist-list,.,\
     $(wildcard compiler/stage2/doc) \
     $(wildcard libraries/*/dist-install/doc/) \
     $(wildcard libraries/*/*/dist-install/doc/) \
-    $(filter-out settings llvm-targets,$(INSTALL_LIBS)) \
+    $(filter-out settings llvm-targets llvm-passes,$(INSTALL_LIBS)) \
     $(RTS_INSTALL_LIBS) \
     $(filter-out %/project.mk mk/config.mk %/mk/install.mk,$(MAKEFILE_LIST)) \
     mk/project.mk \
@@ -1105,7 +1107,7 @@ BIN_DIST_MK = $(BIN_DIST_PREP_DIR)/bindist.mk
 unix-binary-dist-prep:
 	$(call removeTrees,bindistprep/)
 	"$(MKDIRHIER)" $(BIN_DIST_PREP_DIR)
-	set -e; for i in packages LICENSE compiler ghc iserv rts libraries utils docs libffi includes driver mk rules Makefile aclocal.m4 config.sub config.guess install-sh settings.in llvm-targets ghc.mk inplace distrib/configure.ac distrib/README distrib/INSTALL; do ln -s ../../$$i $(BIN_DIST_PREP_DIR)/; done
+	set -e; for i in packages LICENSE compiler ghc iserv rts libraries utils docs libffi includes driver mk rules Makefile aclocal.m4 config.sub config.guess install-sh settings.in llvm-targets llvm-passes ghc.mk inplace distrib/configure.ac distrib/README distrib/INSTALL; do ln -s ../../$$i $(BIN_DIST_PREP_DIR)/; done
 	echo "HADDOCK_DOCS       = $(HADDOCK_DOCS)"       >> $(BIN_DIST_MK)
 	echo "BUILD_SPHINX_HTML  = $(BUILD_SPHINX_HTML)"  >> $(BIN_DIST_MK)
 	echo "BUILD_SPHINX_PDF   = $(BUILD_SPHINX_PDF)"   >> $(BIN_DIST_MK)
@@ -1203,7 +1205,7 @@ SRC_DIST_GHC_DIRS = mk rules docs distrib bindisttest libffi includes \
 SRC_DIST_GHC_FILES += \
     configure.ac config.guess config.sub configure \
     aclocal.m4 README.md ANNOUNCE HACKING.md INSTALL.md LICENSE Makefile \
-    install-sh settings.in llvm-targets VERSION GIT_COMMIT_ID \
+    install-sh settings.in llvm-targets llvm-passes VERSION GIT_COMMIT_ID \
     boot packages ghc.mk MAKEHELP.md
 
 .PHONY: VERSION

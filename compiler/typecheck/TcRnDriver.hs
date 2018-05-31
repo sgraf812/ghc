@@ -8,6 +8,7 @@ https://ghc.haskell.org/trac/ghc/wiki/Commentary/Compiler/TypeChecker
 -}
 
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NondecreasingIndentation #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
@@ -132,6 +133,7 @@ import Data.Data ( Data )
 import HsDumpAst
 import qualified Data.Set as S
 
+import Control.DeepSeq
 import Control.Monad
 
 #include "HsVersions.h"
@@ -509,9 +511,10 @@ tc_rn_src_decls ds
             else do { (th_group, th_group_tail) <- findSplice th_ds
                     ; case th_group_tail of
                         { Nothing -> return () ;
-                        ; Just (SpliceDecl (L loc _) _, _)
+                        ; Just (SpliceDecl _ (L loc _) _, _)
                             -> setSrcSpan loc $
                                addErr (text "Declaration splices are not permitted inside top-level declarations added with addTopDecls")
+                        ; Just (XSpliceDecl _, _) -> panic "tc_rn_src_decls"
                         } ;
 
                     -- Rename TH-generated top-level declarations
@@ -538,7 +541,7 @@ tc_rn_src_decls ds
           { Nothing -> return (tcg_env, tcl_env)
 
             -- If there's a splice, we must carry on
-          ; Just (SpliceDecl (L loc splice) _, rest_ds) ->
+          ; Just (SpliceDecl _ (L loc splice) _, rest_ds) ->
             do { recordTopLevelSpliceLoc loc
 
                  -- Rename the splice expression, and get its supporting decls
@@ -549,6 +552,7 @@ tc_rn_src_decls ds
                ; setGblEnv (tcg_env `addTcgDUs` usesOnly splice_fvs) $
                  tc_rn_src_decls (spliced_decls ++ rest_ds)
                }
+          ; Just (XSpliceDecl _, _) -> panic "tc_rn_src_decls"
           }
       }
 
@@ -583,7 +587,8 @@ tcRnHsBootDecls hsc_src decls
 
                 -- Check for illegal declarations
         ; case group_tail of
-             Just (SpliceDecl d _, _) -> badBootDecl hsc_src "splice" d
+             Just (SpliceDecl _ d _, _) -> badBootDecl hsc_src "splice" d
+             Just (XSpliceDecl _, _) -> panic "tcRnHsBootDecls"
              Nothing                  -> return ()
         ; mapM_ (badBootDecl hsc_src "foreign") for_decls
         ; mapM_ (badBootDecl hsc_src "default") def_decls
@@ -1687,8 +1692,12 @@ check_main dflags tcg_env explicit_mod_hdr
               ; root_main_id = Id.mkExportedVanillaId root_main_name
                                                       (mkTyConApp ioTyCon [res_ty])
               ; co  = mkWpTyApps [res_ty]
-              ; rhs = mkHsDictLet ev_binds $
-                      nlHsApp (mkLHsWrap co (nlHsVar run_main_id)) main_expr
+              -- The ev_binds of the `main` function may contain deferred
+              -- type error when type of `main` is not `IO a`. The `ev_binds`
+              -- must be put inside `runMainIO` to ensure the deferred type
+              -- error can be emitted correctly. See Trac #13838.
+              ; rhs = nlHsApp (mkLHsWrap co (nlHsVar run_main_id)) $
+                        mkHsDictLet ev_binds main_expr
               ; main_bind = mkVarBind root_main_id rhs }
 
         ; return (tcg_env { tcg_main  = Just main_name,
@@ -1785,8 +1794,8 @@ runTcInteractive hsc_env thing_inside
                                  (loadSrcInterface (text "runTcInteractive") m
                                                    False mb_pkg)
 
-       ; orphs <- fmap concat . forM (ic_imports icxt) $ \i ->
-            case i of
+       ; !orphs <- fmap (force . concat) . forM (ic_imports icxt) $ \i ->
+            case i of                   -- force above: see #15111
                 IIModule n -> getOrphans n Nothing
                 IIDecl i ->
                   let mb_pkg = sl_fs <$> ideclPkgQual i in
@@ -1795,6 +1804,7 @@ runTcInteractive hsc_env thing_inside
        ; let imports = emptyImportAvails {
                             imp_orphs = orphs
                         }
+
        ; (gbl_env, lcl_env) <- getEnvs
        ; let gbl_env' = gbl_env {
                            tcg_rdr_env      = ic_rn_gbl_env icxt
@@ -1978,7 +1988,7 @@ runPlans (p:ps) = tryTcDiscardingErrs (runPlans ps) p
 tcUserStmt :: GhciLStmt GhcPs -> TcM (PlanResult, FixityEnv)
 
 -- An expression typed at the prompt is treated very specially
-tcUserStmt (L loc (BodyStmt expr _ _ _))
+tcUserStmt (L loc (BodyStmt _ expr _ _))
   = do  { (rn_expr, fvs) <- checkNoErrs (rnLExpr expr)
                -- Don't try to typecheck if the renamer fails!
         ; ghciStep <- getGhciStepIO
@@ -1995,36 +2005,38 @@ tcUserStmt (L loc (BodyStmt expr _ _ _))
                           -- (if we are at a breakpoint, say).  We must put those free vars
 
               -- [let it = expr]
-              let_stmt  = L loc $ LetStmt $ noLoc $ HsValBinds noExt
+              let_stmt  = L loc $ LetStmt noExt $ noLoc $ HsValBinds noExt
                            $ XValBindsLR
                                (NValBinds [(NonRecursive,unitBag the_bind)] [])
 
               -- [it <- e]
-              bind_stmt = L loc $ BindStmt
+              bind_stmt = L loc $ BindStmt noExt
                                        (L loc (VarPat noExt (L loc fresh_it)))
                                        (nlHsApp ghciStep rn_expr)
                                        (mkRnSyntaxExpr bindIOName)
                                        noSyntaxExpr
-                                       placeHolder
 
               -- [; print it]
-              print_it  = L loc $ BodyStmt (nlHsApp (nlHsVar interPrintName) (nlHsVar fresh_it))
+              print_it  = L loc $ BodyStmt noExt
+                                           (nlHsApp (nlHsVar interPrintName)
+                                           (nlHsVar fresh_it))
                                            (mkRnSyntaxExpr thenIOName)
-                                                  noSyntaxExpr placeHolderType
+                                                  noSyntaxExpr
 
               -- NewA
-              no_it_a = L loc $ BodyStmt (nlHsApps bindIOName
+              no_it_a = L loc $ BodyStmt noExt (nlHsApps bindIOName
                                        [rn_expr , nlHsVar interPrintName])
                                        (mkRnSyntaxExpr thenIOName)
-                                       noSyntaxExpr placeHolderType
+                                       noSyntaxExpr
 
-              no_it_b = L loc $ BodyStmt (rn_expr)
+              no_it_b = L loc $ BodyStmt noExt (rn_expr)
                                        (mkRnSyntaxExpr thenIOName)
-                                       noSyntaxExpr placeHolderType
+                                       noSyntaxExpr
 
-              no_it_c = L loc $ BodyStmt (nlHsApp (nlHsVar interPrintName) rn_expr)
-                                       (mkRnSyntaxExpr thenIOName)
-                                       noSyntaxExpr placeHolderType
+              no_it_c = L loc $ BodyStmt noExt
+                                      (nlHsApp (nlHsVar interPrintName) rn_expr)
+                                      (mkRnSyntaxExpr thenIOName)
+                                      noSyntaxExpr
 
               -- See Note [GHCi Plans]
 
@@ -2080,8 +2092,8 @@ tcUserStmt rdr_stmt@(L loc _)
 
        ; ghciStep <- getGhciStepIO
        ; let gi_stmt
-               | (L loc (BindStmt pat expr op1 op2 ty)) <- rn_stmt
-                           = L loc $ BindStmt pat (nlHsApp ghciStep expr) op1 op2 ty
+               | (L loc (BindStmt ty pat expr op1 op2)) <- rn_stmt
+                     = L loc $ BindStmt ty pat (nlHsApp ghciStep expr) op1 op2
                | otherwise = rn_stmt
 
        ; opt_pr_flag <- goptM Opt_PrintBindResult
@@ -2103,9 +2115,9 @@ tcUserStmt rdr_stmt@(L loc _)
            ; when (isUnitTy v_ty || not (isTauTy v_ty)) failM
            ; return stuff }
       where
-        print_v  = L loc $ BodyStmt (nlHsApp (nlHsVar printName) (nlHsVar v))
+        print_v  = L loc $ BodyStmt noExt (nlHsApp (nlHsVar printName)
+                                    (nlHsVar v))
                                     (mkRnSyntaxExpr thenIOName) noSyntaxExpr
-                                    placeHolderType
 
 {-
 Note [GHCi Plans]
@@ -2297,7 +2309,7 @@ tcRnType :: HscEnv
 tcRnType hsc_env normalise rdr_type
   = runTcInteractive hsc_env $
     setXOptM LangExt.PolyKinds $   -- See Note [Kind-generalise in tcRnType]
-    do { (HsWC { hswc_wcs = wcs, hswc_body = rn_type }, _fvs)
+    do { (HsWC { hswc_ext = wcs, hswc_body = rn_type }, _fvs)
                <- rnHsWcType GHCiCtx (mkHsWildCardBndrs rdr_type)
                   -- The type can have wild cards, but no implicit
                   -- generalisation; e.g.   :kind (T _)

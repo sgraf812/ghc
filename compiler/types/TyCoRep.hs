@@ -34,6 +34,7 @@ module TyCoRep (
         UnivCoProvenance(..),
         CoercionHole(..), coHoleCoVar, setCoHoleCoVar,
         CoercionN, CoercionR, CoercionP, KindCoercion,
+        MCoercion(..), MCoercionR,
 
         -- * Functions over types
         mkTyConTy, mkTyVarTy, mkTyVarTys,
@@ -62,7 +63,7 @@ module TyCoRep (
         pprTyVar, pprTyVars,
         pprThetaArrowTy, pprClassPred,
         pprKind, pprParendKind, pprTyLit,
-        TyPrec(..), maybeParen,
+        PprPrec(..), topPrec, sigPrec, opPrec, funPrec, appPrec, maybeParen,
         pprDataCons, ppSuggestExplicitKinds,
 
         pprCo, pprParendCo,
@@ -166,7 +167,8 @@ import CoAxiom
 import FV
 
 -- others
-import BasicTypes ( LeftOrRight(..), TyPrec(..), maybeParen, pickLR )
+import BasicTypes ( LeftOrRight(..), PprPrec(..), topPrec, sigPrec, opPrec
+                  , funPrec, appPrec, maybeParen, pickLR )
 import PrelNames
 import Outputable
 import DynFlags
@@ -904,10 +906,14 @@ data Coercion
   | SymCo Coercion             -- :: e -> e
   | TransCo Coercion Coercion  -- :: e -> e -> e
 
-  | NthCo  Int         Coercion     -- Zero-indexed; decomposes (T t0 ... tn)
-    -- :: _ -> e -> ?? (inverse of TyConAppCo, see Note [TyConAppCo roles])
+  | NthCo  Role Int Coercion     -- Zero-indexed; decomposes (T t0 ... tn)
+    -- :: "e" -> _ -> e0 -> e (inverse of TyConAppCo, see Note [TyConAppCo roles])
     -- Using NthCo on a ForAllCo gives an N coercion always
     -- See Note [NthCo and newtypes]
+    --
+    -- Invariant:  (NthCo r i co), it is always the case that r = role of (Nth i co)
+    -- That is: the role of the entire coercion is redundantly cached here.
+    -- See Note [NthCo Cached Roles]
 
   | LRCo   LeftOrRight CoercionN     -- Decomposes (t_left t_right)
     -- :: _ -> N -> N
@@ -936,6 +942,15 @@ type CoercionN = Coercion       -- always nominal
 type CoercionR = Coercion       -- always representational
 type CoercionP = Coercion       -- always phantom
 type KindCoercion = CoercionN   -- always nominal
+
+-- | A semantically more meaningful type to represent what may or may not be a
+-- useful 'Coercion'.
+data MCoercion
+  = MRefl
+    -- A trivial Reflexivity coercion
+  | MCo Coercion
+    -- Other coercions
+type MCoercionR = MCoercion
 
 {-
 Note [Refl invariant]
@@ -1217,7 +1232,7 @@ We can then build
 for any `a` and `b`. Because of the role annotation on N, if we use
 NthCo, we'll get out a representational coercion. That is:
 
-  NthCo 0 co :: forall a b. a ~R b
+  NthCo r 0 co :: forall a b. a ~R b
 
 Yikes! Clearly, this is terrible. The solution is simple: forbid
 NthCo to be used on newtypes if the internal coercion is representational.
@@ -1225,6 +1240,23 @@ NthCo to be used on newtypes if the internal coercion is representational.
 This is not just some corner case discovered by a segfault somewhere;
 it was discovered in the proof of soundness of roles and described
 in the "Safe Coercions" paper (ICFP '14).
+
+Note [NthCo Cached Roles]
+~~~~~~~~~~~~~~~~~~~~~~~~~
+Why do we cache the role of NthCo in the NthCo constructor?
+Because computing role(Nth i co) involves figuring out that
+
+  co :: T tys1 ~ T tys2
+
+using coercionKind, and finding (coercionRole co), and then looking
+at the tyConRoles of T. Avoiding bad asymptotic behaviour here means
+we have to compute the kind and role of a coercion simultaneously,
+which makes the code complicated and inefficient.
+
+This only happens for NthCo. Caching the role solves the problem, and
+allows coercionKind and coercionRole to be simple.
+
+See Trac #11735
 
 Note [InstCo roles]
 ~~~~~~~~~~~~~~~~~~~
@@ -1574,7 +1606,7 @@ tyCoFVsOfCo (UnivCo p _ t1 t2) fv_cand in_scope acc
                      `unionFV` tyCoFVsOfType t2) fv_cand in_scope acc
 tyCoFVsOfCo (SymCo co)          fv_cand in_scope acc = tyCoFVsOfCo co fv_cand in_scope acc
 tyCoFVsOfCo (TransCo co1 co2)   fv_cand in_scope acc = (tyCoFVsOfCo co1 `unionFV` tyCoFVsOfCo co2) fv_cand in_scope acc
-tyCoFVsOfCo (NthCo _ co)        fv_cand in_scope acc = tyCoFVsOfCo co fv_cand in_scope acc
+tyCoFVsOfCo (NthCo _ _ co)      fv_cand in_scope acc = tyCoFVsOfCo co fv_cand in_scope acc
 tyCoFVsOfCo (LRCo _ co)         fv_cand in_scope acc = tyCoFVsOfCo co fv_cand in_scope acc
 tyCoFVsOfCo (InstCo co arg)     fv_cand in_scope acc = (tyCoFVsOfCo co `unionFV` tyCoFVsOfCo arg) fv_cand in_scope acc
 tyCoFVsOfCo (CoherenceCo c1 c2) fv_cand in_scope acc = (tyCoFVsOfCo c1 `unionFV` tyCoFVsOfCo c2) fv_cand in_scope acc
@@ -1637,7 +1669,7 @@ coVarsOfCo (AxiomInstCo _ _ as) = coVarsOfCos as
 coVarsOfCo (UnivCo p _ t1 t2)   = coVarsOfProv p `unionVarSet` coVarsOfTypes [t1, t2]
 coVarsOfCo (SymCo co)           = coVarsOfCo co
 coVarsOfCo (TransCo co1 co2)    = coVarsOfCo co1 `unionVarSet` coVarsOfCo co2
-coVarsOfCo (NthCo _ co)         = coVarsOfCo co
+coVarsOfCo (NthCo _ _ co)       = coVarsOfCo co
 coVarsOfCo (LRCo _ co)          = coVarsOfCo co
 coVarsOfCo (InstCo co arg)      = coVarsOfCo co `unionVarSet` coVarsOfCo arg
 coVarsOfCo (CoherenceCo c1 c2)  = coVarsOfCos [c1, c2]
@@ -1744,7 +1776,7 @@ noFreeVarsOfCo (UnivCo p _ t1 t2)     = noFreeVarsOfProv p &&
                                         noFreeVarsOfType t2
 noFreeVarsOfCo (SymCo co)             = noFreeVarsOfCo co
 noFreeVarsOfCo (TransCo co1 co2)      = noFreeVarsOfCo co1 && noFreeVarsOfCo co2
-noFreeVarsOfCo (NthCo _ co)           = noFreeVarsOfCo co
+noFreeVarsOfCo (NthCo _ _ co)         = noFreeVarsOfCo co
 noFreeVarsOfCo (LRCo _ co)            = noFreeVarsOfCo co
 noFreeVarsOfCo (InstCo co1 co2)       = noFreeVarsOfCo co1 && noFreeVarsOfCo co2
 noFreeVarsOfCo (CoherenceCo co1 co2)  = noFreeVarsOfCo co1 && noFreeVarsOfCo co2
@@ -1786,7 +1818,7 @@ data TCvSubst
   = TCvSubst InScopeSet -- The in-scope type and kind variables
              TvSubstEnv -- Substitutes both type and kind variables
              CvSubstEnv -- Substitutes coercion variables
-        -- See Note [Apply Once]
+        -- See Note [Substitutions apply only once]
         -- and Note [Extending the TvSubstEnv]
         -- and Note [Substituting types and coercions]
         -- and Note [The substitution invariant]
@@ -1794,21 +1826,51 @@ data TCvSubst
 -- | A substitution of 'Type's for 'TyVar's
 --                 and 'Kind's for 'KindVar's
 type TvSubstEnv = TyVarEnv Type
-        -- A TvSubstEnv is used both inside a TCvSubst (with the apply-once
-        -- invariant discussed in Note [Apply Once]), and also independently
-        -- in the middle of matching, and unification (see Types.Unify)
-        -- So you have to look at the context to know if it's idempotent or
-        -- apply-once or whatever
+  -- NB: A TvSubstEnv is used
+  --   both inside a TCvSubst (with the apply-once invariant
+  --        discussed in Note [Substitutions apply only once],
+  --   and  also independently in the middle of matching,
+  --        and unification (see Types.Unify).
+  -- So you have to look at the context to know if it's idempotent or
+  -- apply-once or whatever
 
 -- | A substitution of 'Coercion's for 'CoVar's
 type CvSubstEnv = CoVarEnv Coercion
 
-{-
-Note [Apply Once]
-~~~~~~~~~~~~~~~~~
+{- Note [The substitution invariant]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When calling (substTy subst ty) it should be the case that
+the in-scope set in the substitution is a superset of both:
+
+  (SIa) The free vars of the range of the substitution
+  (SIb) The free vars of ty minus the domain of the substitution
+
+The same rules apply to other substitutions (notably CoreSubst.Subst)
+
+* Reason for (SIa). Consider
+      substTy [a :-> Maybe b] (forall b. b->a)
+  we must rename the forall b, to get
+      forall b2. b2 -> Maybe b
+  Making 'b' part of the in-scope set forces this renaming to
+  take place.
+
+* Reason for (SIb). Consider
+     substTy [a :-> Maybe b] (forall b. (a,b,x))
+  Then if we use the in-scope set {b}, satisfying (SIa), there is
+  a danger we will rename the forall'd variable to 'x' by mistake,
+  getting this:
+      forall x. (List b, x, x)
+  Breaking (SIb) caused the bug from #11371.
+
+Note: if the free vars of the range of the substitution are freshly created,
+then the problems of (SIa) can't happen, and so it would be sound to
+ignore (SIa).
+
+Note [Substitutions apply only once]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We use TCvSubsts to instantiate things, and we might instantiate
         forall a b. ty
-\with the types
+with the types
         [a, b], or [b, a].
 So the substitution might go [a->b, b->a].  A similar situation arises in Core
 when we find a beta redex like
@@ -1816,9 +1878,9 @@ when we find a beta redex like
 Then we also end up with a substitution that permutes type variables. Other
 variations happen to; for example [a -> (a, b)].
 
-        ****************************************************
-        *** So a TCvSubst must be applied precisely once ***
-        ****************************************************
+        ********************************************************
+        *** So a substitution must be applied precisely once ***
+        ********************************************************
 
 A TCvSubst is not idempotent, but, unlike the non-idempotent substitution
 we use during unifications, it must not be repeatedly applied.
@@ -1861,25 +1923,6 @@ Note that the TvSubstEnv should *never* map a CoVar (built with the Id
 constructor) and the CvSubstEnv should *never* map a TyVar. Furthermore,
 the range of the TvSubstEnv should *never* include a type headed with
 CoercionTy.
-
-Note [The substitution invariant]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-When calling (substTy subst ty) it should be the case that
-the in-scope set in the substitution is a superset of both:
-
-  * The free vars of the range of the substitution
-  * The free vars of ty minus the domain of the substitution
-
-If we want to substitute [a -> ty1, b -> ty2] I used to
-think it was enough to generate an in-scope set that includes
-fv(ty1,ty2).  But that's not enough; we really should also take the
-free vars of the type we are substituting into!  Example:
-     (forall b. (a,b,x)) [a -> List b]
-Then if we use the in-scope set {b}, there is a danger we will rename
-the forall'd variable to 'x' by mistake, getting this:
-     (forall x. (List b, x, x))
-
-Breaking this invariant caused the bug from #11371.
 -}
 
 emptyTvSubstEnv :: TvSubstEnv
@@ -2166,7 +2209,8 @@ ForAllCo tv (sym h) (sym g[tv |-> tv |> sym h])
 substTyWith :: HasCallStack => [TyVar] -> [Type] -> Type -> Type
 -- Works only if the domain of the substitution is a
 -- superset of the type being substituted into
-substTyWith tvs tys = ASSERT( tvs `equalLength` tys )
+substTyWith tvs tys = {-#SCC "substTyWith" #-}
+                      ASSERT( tvs `equalLength` tys )
                       substTy (zipTvSubst tvs tys)
 
 -- | Type substitution, see 'zipTvSubst'. Disables sanity checks.
@@ -2245,7 +2289,7 @@ isValidTCvSubst (TCvSubst in_scope tenv cenv) =
 checkValidSubst :: HasCallStack => TCvSubst -> [Type] -> [Coercion] -> a -> a
 checkValidSubst subst@(TCvSubst in_scope tenv cenv) tys cos a
 -- TODO (RAE): Change back to ASSERT
-  = WARN( not (isValidTCvSubst subst),
+  = WARN( not ({-#SCC "isValidTCvSubst" #-} isValidTCvSubst subst),
              text "in_scope" <+> ppr in_scope $$
              text "tenv" <+> ppr tenv $$
              text "tenvFVs"
@@ -2255,7 +2299,7 @@ checkValidSubst subst@(TCvSubst in_scope tenv cenv) tys cos a
                <+> ppr (tyCoVarsOfCosSet cenv) $$
              text "tys" <+> ppr tys $$
              text "cos" <+> ppr cos )
-    WARN( not tysCosFVsInScope,
+    WARN( not ({-#SCC "tysCosFVsInScope" #-} tysCosFVsInScope),
              text "in_scope" <+> ppr in_scope $$
              text "tenv" <+> ppr tenv $$
              text "cenv" <+> ppr cenv $$
@@ -2413,7 +2457,7 @@ subst_co subst co
                                 (go_ty t1)) $! (go_ty t2)
     go (SymCo co)            = mkSymCo $! (go co)
     go (TransCo co1 co2)     = (mkTransCo $! (go co1)) $! (go co2)
-    go (NthCo d co)          = mkNthCo d $! (go co)
+    go (NthCo r d co)        = mkNthCo r d $! (go co)
     go (LRCo lr co)          = mkLRCo lr $! (go co)
     go (InstCo co arg)       = (mkInstCo $! (go co)) $! go arg
     go (CoherenceCo co1 co2) = (mkCoherenceCo $! (go co1)) $! (go co2)
@@ -2592,10 +2636,10 @@ See Note [Precedence in types] in BasicTypes.
 ------------------
 
 pprType, pprParendType :: Type -> SDoc
-pprType       = pprPrecType TopPrec
-pprParendType = pprPrecType TyConPrec
+pprType       = pprPrecType topPrec
+pprParendType = pprPrecType appPrec
 
-pprPrecType :: TyPrec -> Type -> SDoc
+pprPrecType :: PprPrec -> Type -> SDoc
 pprPrecType prec ty
   = getPprStyle $ \sty ->
     if debugStyle sty           -- Use pprDebugType when in
@@ -2656,10 +2700,10 @@ pprClassPred clas tys = pprTypeApp (classTyCon clas) tys
 
 ------------
 pprTheta :: ThetaType -> SDoc
-pprTheta = pprIfaceContext TopPrec . map tidyToIfaceType
+pprTheta = pprIfaceContext topPrec . map tidyToIfaceType
 
 pprParendTheta :: ThetaType -> SDoc
-pprParendTheta = pprIfaceContext TyConPrec . map tidyToIfaceType
+pprParendTheta = pprIfaceContext appPrec . map tidyToIfaceType
 
 pprThetaArrowTy :: ThetaType -> SDoc
 pprThetaArrowTy = pprIfaceContextArr . map tidyToIfaceType
@@ -2719,9 +2763,9 @@ debugPprType :: Type -> SDoc
 -- be useful for debugging.  E.g. with -dppr-debug it prints the
 -- kind on type-variable /occurrences/ which the normal route
 -- fundamentally cannot do.
-debugPprType ty = debug_ppr_ty TopPrec ty
+debugPprType ty = debug_ppr_ty topPrec ty
 
-debug_ppr_ty :: TyPrec -> Type -> SDoc
+debug_ppr_ty :: PprPrec -> Type -> SDoc
 debug_ppr_ty _ (LitTy l)
   = ppr l
 
@@ -2729,21 +2773,21 @@ debug_ppr_ty _ (TyVarTy tv)
   = ppr tv  -- With -dppr-debug we get (tv :: kind)
 
 debug_ppr_ty prec (FunTy arg res)
-  = maybeParen prec FunPrec $
-    sep [debug_ppr_ty FunPrec arg, arrow <+> debug_ppr_ty prec res]
+  = maybeParen prec funPrec $
+    sep [debug_ppr_ty funPrec arg, arrow <+> debug_ppr_ty prec res]
 
 debug_ppr_ty prec (TyConApp tc tys)
   | null tys  = ppr tc
-  | otherwise = maybeParen prec TyConPrec $
-                hang (ppr tc) 2 (sep (map (debug_ppr_ty TyConPrec) tys))
+  | otherwise = maybeParen prec appPrec $
+                hang (ppr tc) 2 (sep (map (debug_ppr_ty appPrec) tys))
 
 debug_ppr_ty prec (AppTy t1 t2)
   = hang (debug_ppr_ty prec t1)
-       2 (debug_ppr_ty TyConPrec t2)
+       2 (debug_ppr_ty appPrec t2)
 
 debug_ppr_ty prec (CastTy ty co)
-  = maybeParen prec TopPrec $
-    hang (debug_ppr_ty TopPrec ty)
+  = maybeParen prec topPrec $
+    hang (debug_ppr_ty topPrec ty)
        2 (text "|>" <+> ppr co)
 
 debug_ppr_ty _ (CoercionTy co)
@@ -2751,7 +2795,7 @@ debug_ppr_ty _ (CoercionTy co)
 
 debug_ppr_ty prec ty@(ForAllTy {})
   | (tvs, body) <- split ty
-  = maybeParen prec FunPrec $
+  = maybeParen prec funPrec $
     hang (text "forall" <+> fsep (map ppr tvs) <> dot)
          -- The (map ppr tvs) will print kind-annotated
          -- tvs, because we are (usually) in debug-style
@@ -2819,7 +2863,7 @@ pprDataConWithArgs dc = sep [forAllDoc, thetaDoc, ppr dc <+> argsDoc]
 
 pprTypeApp :: TyCon -> [Type] -> SDoc
 pprTypeApp tc tys
-  = pprIfaceTypeApp TopPrec (toIfaceTyCon tc)
+  = pprIfaceTypeApp topPrec (toIfaceTyCon tc)
                             (toIfaceTcArgs tc tys)
     -- TODO: toIfaceTcArgs seems rather wasteful here
 
@@ -3013,7 +3057,7 @@ tidyCo env@(_, subst) co
                                 tidyType env t1) $! tidyType env t2
     go (SymCo co)            = SymCo $! go co
     go (TransCo co1 co2)     = (TransCo $! go co1) $! go co2
-    go (NthCo d co)          = NthCo d $! go co
+    go (NthCo r d co)        = NthCo r d $! go co
     go (LRCo lr co)          = LRCo lr $! go co
     go (InstCo co ty)        = (InstCo $! go co) $! go ty
     go (CoherenceCo co1 co2) = (CoherenceCo $! go co1) $! go co2
@@ -3072,7 +3116,7 @@ coercionSize (AxiomInstCo _ _ args) = 1 + sum (map coercionSize args)
 coercionSize (UnivCo p _ t1 t2)  = 1 + provSize p + typeSize t1 + typeSize t2
 coercionSize (SymCo co)          = 1 + coercionSize co
 coercionSize (TransCo co1 co2)   = 1 + coercionSize co1 + coercionSize co2
-coercionSize (NthCo _ co)        = 1 + coercionSize co
+coercionSize (NthCo _ _ co)      = 1 + coercionSize co
 coercionSize (LRCo  _ co)        = 1 + coercionSize co
 coercionSize (InstCo co arg)     = 1 + coercionSize co + coercionSize arg
 coercionSize (CoherenceCo c1 c2) = 1 + coercionSize c1 + coercionSize c2

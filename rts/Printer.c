@@ -412,6 +412,9 @@ printClosure( const StgClosure *obj )
                    (W_)((StgCompactNFData *)obj)->totalW * (W_)sizeof(W_));
         break;
 
+    case TREC_CHUNK:
+        debugBelch("TREC_CHUNK\n");
+        break;
 
     default:
             //barf("printClosure %d",get_itbl(obj)->type);
@@ -420,6 +423,21 @@ printClosure( const StgClosure *obj )
             barf("printClosure %d",get_itbl(obj)->type);
             return;
     }
+}
+
+void
+printMutableList(bdescr *bd)
+{
+    StgPtr p;
+
+    debugBelch("mutable list %p: ", bd);
+
+    for (; bd != NULL; bd = bd->link) {
+        for (p = bd->start; p < bd->free; p++) {
+            debugBelch("%p (%s), ", (void *)*p, info_type((StgClosure *)*p));
+        }
+    }
+    debugBelch("\n");
 }
 
 // If you know you have an UPDATE_FRAME, but want to know exactly which.
@@ -440,13 +458,6 @@ const char *info_update_frame(const StgClosure *closure)
         return "ERROR: Not an update frame!!!";
     }
 }
-
-/*
-void printGraph( StgClosure *obj )
-{
- printClosure(obj);
-}
-*/
 
 static void
 printSmallBitmap( StgPtr spBottom, StgPtr payload, StgWord bitmap,
@@ -542,6 +553,18 @@ printStackChunk( StgPtr sp, StgPtr spBottom )
                 debugBelch("stg_ap_ppppp_info\n" );
             } else if (c == (StgWord)&stg_ap_pppppp_info) {
                 debugBelch("stg_ap_pppppp_info\n" );
+            } else if (c == (StgWord)&stg_ret_v_info) {
+                debugBelch("stg_ret_v_info\n" );
+            } else if (c == (StgWord)&stg_ret_p_info) {
+                debugBelch("stg_ret_p_info\n" );
+            } else if (c == (StgWord)&stg_ret_n_info) {
+                debugBelch("stg_ret_n_info\n" );
+            } else if (c == (StgWord)&stg_ret_f_info) {
+                debugBelch("stg_ret_f_info\n" );
+            } else if (c == (StgWord)&stg_ret_d_info) {
+                debugBelch("stg_ret_d_info\n" );
+            } else if (c == (StgWord)&stg_ret_l_info) {
+                debugBelch("stg_ret_l_info\n" );
 #if defined(PROFILING)
             } else if (c == (StgWord)&stg_restore_cccs_info) {
                 debugBelch("stg_restore_cccs_info\n" );
@@ -612,10 +635,14 @@ printStackChunk( StgPtr sp, StgPtr spBottom )
     }
 }
 
+static void printStack( StgStack *stack )
+{
+    printStackChunk( stack->sp, stack->stack + stack->stack_size );
+}
+
 void printTSO( StgTSO *tso )
 {
-    printStackChunk( tso->stackobj->sp,
-                     tso->stackobj->stack+tso->stackobj->stack_size);
+    printStack( tso->stackobj );
 }
 
 /* --------------------------------------------------------------------------

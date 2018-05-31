@@ -64,6 +64,7 @@ Library
                    transformers == 0.5.*,
                    ghc-boot   == @ProjectVersionMunged@,
                    ghc-boot-th == @ProjectVersionMunged@,
+                   ghc-heap   == @ProjectVersionMunged@,
                    ghci == @ProjectVersionMunged@
 
     if os(windows)
@@ -290,6 +291,7 @@ Library
         CoreTidy
         CoreUnfold
         CoreUtils
+        CoreMap
         CoreSeq
         CoreStats
         MkCore
@@ -466,6 +468,7 @@ Library
         TcRnTypes
         TcRules
         TcSimplify
+        TcHoleErrors
         TcErrors
         TcTyClsDecls
         TcTyDecls
@@ -642,5 +645,4 @@ Library
             Debugger
             Linker
             RtClosureInspect
-            DebuggerUtils
             GHCi

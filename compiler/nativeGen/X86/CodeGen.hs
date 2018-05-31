@@ -2229,6 +2229,8 @@ genCCall _ is32Bit target dest_regs args = do
                           ADC format (OpImm (ImmInteger 0)) (OpReg reg_h)
                return code
         _ -> panic "genCCall: Wrong number of arguments/results for add2"
+    (PrimTarget (MO_AddWordC width), [res_r, res_c]) ->
+        addSubIntC platform ADD_CC (const Nothing) CARRY width res_r res_c args
     (PrimTarget (MO_SubWordC width), [res_r, res_c]) ->
         addSubIntC platform SUB_CC (const Nothing) CARRY width res_r res_c args
     (PrimTarget (MO_AddIntC width), [res_r, res_c]) ->
@@ -2788,6 +2790,7 @@ outOfLineCmmOp mop res args
               MO_Add2 {}       -> unsupported
               MO_AddIntC {}    -> unsupported
               MO_SubIntC {}    -> unsupported
+              MO_AddWordC {}   -> unsupported
               MO_SubWordC {}   -> unsupported
               MO_U_Mul2 {}     -> unsupported
               MO_WriteBarrier  -> unsupported
@@ -2854,11 +2857,16 @@ genSwitch dflags expr targets
                     JMP_TBL op ids (Section ReadOnlyData lbl) lbl
                  ]
         return code
-  where (offset, ids) = switchTargetsToTable targets
+  where
+    (offset, blockIds) = switchTargetsToTable targets
+    ids = map (fmap DestBlockId) blockIds
 
 generateJumpTableForInstr :: DynFlags -> Instr -> Maybe (NatCmmDecl (Alignment, CmmStatics) Instr)
 generateJumpTableForInstr dflags (JMP_TBL _ ids section lbl)
-    = Just (createJumpTable dflags ids section lbl)
+    = let getBlockId (DestBlockId id) = id
+          getBlockId _ = panic "Non-Label target in Jump Table"
+          blockIds = map (fmap getBlockId) ids
+      in Just (createJumpTable dflags blockIds section lbl)
 generateJumpTableForInstr _ _ = Nothing
 
 createJumpTable :: DynFlags -> [Maybe BlockId] -> Section -> CLabel
@@ -2866,10 +2874,11 @@ createJumpTable :: DynFlags -> [Maybe BlockId] -> Section -> CLabel
 createJumpTable dflags ids section lbl
     = let jumpTable
             | positionIndependent dflags =
-                  let jumpTableEntryRel Nothing
-                          = CmmStaticLit (CmmInt 0 (wordWidth dflags))
+                  let ww = wordWidth dflags
+                      jumpTableEntryRel Nothing
+                          = CmmStaticLit (CmmInt 0 ww)
                       jumpTableEntryRel (Just blockid)
-                          = CmmStaticLit (CmmLabelDiffOff blockLabel lbl 0)
+                          = CmmStaticLit (CmmLabelDiffOff blockLabel lbl 0 ww)
                           where blockLabel = blockLbl blockid
                   in map jumpTableEntryRel ids
             | otherwise = map (jumpTableEntry dflags) ids

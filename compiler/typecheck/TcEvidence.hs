@@ -16,7 +16,7 @@ module TcEvidence (
   lookupEvBind, evBindMapBinds, foldEvBindMap, filterEvBindMap,
   isEmptyEvBindMap,
   EvBind(..), emptyTcEvBinds, isEmptyTcEvBinds, mkGivenEvBind, mkWantedEvBind,
-  sccEvBinds, evBindVar,
+  sccEvBinds, evBindVar, isNoEvBindsVar,
 
   -- EvTerm (already a CoreExpr)
   EvTerm(..), EvExpr,
@@ -110,7 +110,7 @@ mkTcUnbranchedAxInstCo :: CoAxiom Unbranched -> [TcType]
                        -> [TcCoercion] -> TcCoercionR
 mkTcForAllCo           :: TyVar -> TcCoercionN -> TcCoercion -> TcCoercion
 mkTcForAllCos          :: [(TyVar, TcCoercionN)] -> TcCoercion -> TcCoercion
-mkTcNthCo              :: Int -> TcCoercion -> TcCoercion
+mkTcNthCo              :: Role -> Int -> TcCoercion -> TcCoercion
 mkTcLRCo               :: LeftOrRight -> TcCoercion -> TcCoercion
 mkTcSubCo              :: TcCoercionN -> TcCoercionR
 maybeTcSubCo           :: EqRel -> TcCoercion -> TcCoercion
@@ -401,10 +401,9 @@ data EvBindsVar
       -- See Note [Tracking redundant constraints] in TcSimplify
     }
 
-  | NoEvBindsVar {  -- used when we're solving only for equalities,
-                    -- which don't have bindings
+  | NoEvBindsVar {  -- See Note [No evidence bindings]
 
-        -- see above for comments
+      -- See above for comments on ebv_uniq, evb_tcvs
       ebv_uniq :: Unique,
       ebv_tcvs :: IORef CoVarSet
     }
@@ -414,6 +413,25 @@ instance Data.Data TcEvBinds where
   toConstr _   = abstractConstr "TcEvBinds"
   gunfold _ _  = error "gunfold"
   dataTypeOf _ = Data.mkNoRepType "TcEvBinds"
+
+{- Note [No evidence bindings]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Class constraints etc give rise to /term/ bindings for evidence, and
+we have nowhere to put term bindings in /types/.  So in some places we
+use NoEvBindsVar (see newNoTcEvBinds) to signal that no term-level
+evidence bindings are allowed.  Notebly ():
+
+  - Places in types where we are solving kind constraints (all of which
+    are equalities); see solveEqualities, solveLocalEqualities,
+    checkTvConstraints
+
+  - When unifying forall-types
+-}
+
+isNoEvBindsVar :: EvBindsVar -> Bool
+isNoEvBindsVar (NoEvBindsVar {}) = True
+isNoEvBindsVar (EvBindsVar {})   = False
 
 -----------------
 newtype EvBindMap
@@ -768,11 +786,6 @@ isEmptyTcEvBinds (TcEvBinds {}) = panic "isEmptyTcEvBinds"
 evTermCoercion :: EvTerm -> TcCoercion
 -- Applied only to EvTerms of type (s~t)
 -- See Note [Coercion evidence terms]
-evTermCoercion (EvExpr (Var v))       = mkCoVarCo v
-evTermCoercion (EvExpr (Coercion co)) = co
-evTermCoercion (EvExpr (Cast tm co))  = mkCoCast (evTermCoercion (EvExpr tm)) co
-evTermCoercion tm                     = pprPanic "evTermCoercion" (ppr tm)
-
 
 {-
 ************************************************************************
@@ -799,6 +812,11 @@ findNeededEvVars ev_binds seeds
      = evVarsOfTerm rhs `unionVarSet` needs
      | otherwise
      = needs
+
+evTermCoercion (EvExpr (Var v))       = mkCoVarCo v
+evTermCoercion (EvExpr (Coercion co)) = co
+evTermCoercion (EvExpr (Cast tm co))  = mkCoCast (evTermCoercion (EvExpr tm)) co
+evTermCoercion tm                     = pprPanic "evTermCoercion" (ppr tm)
 
 evVarsOfTerm :: EvTerm -> VarSet
 evVarsOfTerm (EvExpr e)         = exprSomeFreeVars isEvVar e

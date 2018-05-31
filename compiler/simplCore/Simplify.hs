@@ -128,8 +128,8 @@ simplTopBinds env0 binds0
                 -- anything into scope, then we don't get a complaint about that.
                 -- It's rather as if the top-level binders were imported.
                 -- See note [Glomming] in OccurAnal.
-        ; env1 <- simplRecBndrs env0 (bindersOfBinds binds0)
-        ; (floats, env2) <- simpl_binds env1 binds0
+        ; env1 <- {-#SCC "simplTopBinds-simplRecBndrs" #-} simplRecBndrs env0 (bindersOfBinds binds0)
+        ; (floats, env2) <- {-#SCC "simplTopBinds-simpl_binds" #-} simpl_binds env1 binds0
         ; freeTick SimplifierDone
         ; return (floats, env2) }
   where
@@ -197,17 +197,20 @@ simplRecOrTopPair :: SimplEnv
 
 simplRecOrTopPair env top_lvl is_rec mb_cont old_bndr new_bndr rhs
   | Just env' <- preInlineUnconditionally env top_lvl old_bndr rhs env
-  = trace_bind "pre-inline-uncond" $
+  = {-#SCC "simplRecOrTopPair-pre-inline-uncond" #-}
+    trace_bind "pre-inline-uncond" $
     do { tick (PreInlineUnconditionally old_bndr)
        ; return ( emptyFloats env, env' ) }
 
   | Just cont <- mb_cont
-  = ASSERT( isNotTopLevel top_lvl && isJoinId new_bndr )
+  = {-#SCC "simplRecOrTopPair-join" #-}
+    ASSERT( isNotTopLevel top_lvl && isJoinId new_bndr )
     trace_bind "join" $
     simplJoinBind env cont old_bndr new_bndr rhs env
 
   | otherwise
-  = trace_bind "normal" $
+  = {-#SCC "simplRecOrTopPair-normal" #-}
+    trace_bind "normal" $
     simplLazyBind env top_lvl is_rec old_bndr new_bndr rhs env
 
   where
@@ -254,12 +257,12 @@ simplLazyBind env top_lvl is_rec bndr bndr1 rhs rhs_se
                         -- should eta-reduce.
 
 
-        ; (body_env, tvs') <- simplBinders rhs_env tvs
+        ; (body_env, tvs') <- {-#SCC "simplBinders" #-} simplBinders rhs_env tvs
                 -- See Note [Floating and type abstraction] in SimplUtils
 
         -- Simplify the RHS
         ; let rhs_cont = mkRhsStop (substTy body_env (exprType body))
-        ; (body_floats0, body0) <- simplExprF body_env body rhs_cont
+        ; (body_floats0, body0) <- {-#SCC "simplExprF" #-} simplExprF body_env body rhs_cont
 
               -- Never float join-floats out of a non-join let-binding
               -- So wrap the body in the join-floats right now
@@ -268,21 +271,24 @@ simplLazyBind env top_lvl is_rec bndr bndr1 rhs rhs_se
 
         -- ANF-ise a constructor or PAP rhs
         -- We get at most one float per argument here
-        ; (let_floats, body2) <- prepareRhs (getMode env) top_lvl
+        ; (let_floats, body2) <- {-#SCC "prepareRhs" #-} prepareRhs (getMode env) top_lvl
                                             (getOccFS bndr1) (idInfo bndr1) body1
         ; let body_floats2 = body_floats1 `addLetFloats` let_floats
 
         ; (rhs_floats, rhs')
             <-  if not (doFloatFromRhs top_lvl is_rec False body_floats2 body2)
                 then                    -- No floating, revert to body1
+                     {-#SCC "simplLazyBind-no-floating" #-}
                      do { rhs' <- mkLam env tvs' (wrapFloats body_floats2 body1) rhs_cont
                         ; return (emptyFloats env, rhs') }
 
                 else if null tvs then   -- Simple floating
+                     {-#SCC "simplLazyBind-simple-floating" #-}
                      do { tick LetFloatFromLet
                         ; return (body_floats2, body2) }
 
                 else                    -- Do type-abstraction first
+                     {-#SCC "simplLazyBind-type-abstraction-first" #-}
                      do { tick LetFloatFromLet
                         ; (poly_binds, body3) <- abstractFloats (seDynFlags env) top_lvl
                                                                 tvs' body_floats2 body2
@@ -850,14 +856,14 @@ simplExprF1 _ (Type ty) _
     -- The (Type ty) case is handled separately by simplExpr
     -- and by the other callers of simplExprF
 
-simplExprF1 env (Var v)        cont = simplIdF env v cont
-simplExprF1 env (Lit lit)      cont = rebuild env (Lit lit) cont
-simplExprF1 env (Tick t expr)  cont = simplTick env t expr cont
-simplExprF1 env (Cast body co) cont = simplCast env body co cont
-simplExprF1 env (Coercion co)  cont = simplCoercionF env co cont
+simplExprF1 env (Var v)        cont = {-#SCC "simplIdF" #-} simplIdF env v cont
+simplExprF1 env (Lit lit)      cont = {-#SCC "rebuild" #-} rebuild env (Lit lit) cont
+simplExprF1 env (Tick t expr)  cont = {-#SCC "simplTick" #-} simplTick env t expr cont
+simplExprF1 env (Cast body co) cont = {-#SCC "simplCast" #-} simplCast env body co cont
+simplExprF1 env (Coercion co)  cont = {-#SCC "simplCoercionF" #-} simplCoercionF env co cont
 
 simplExprF1 env (App fun arg) cont
-  = case arg of
+  = {-#SCC "simplExprF1-App" #-} case arg of
       Type ty -> do { -- The argument type will (almost) certainly be used
                       -- in the output program, so just force it now.
                       -- See Note [Avoiding space leaks in OutType]
@@ -877,7 +883,8 @@ simplExprF1 env (App fun arg) cont
                             , sc_dup = NoDup, sc_cont = cont }
 
 simplExprF1 env expr@(Lam {}) cont
-  = simplLam env zapped_bndrs body cont
+  = {-#SCC "simplExprF1-Lam" #-}
+    simplLam env zapped_bndrs body cont
         -- The main issue here is under-saturated lambdas
         --   (\x1. \x2. e) arg1
         -- Here x1 might have "occurs-once" occ-info, because occ-info
@@ -899,28 +906,30 @@ simplExprF1 env expr@(Lam {}) cont
           | otherwise = zapLamIdInfo b
 
 simplExprF1 env (Case scrut bndr _ alts) cont
-  = simplExprF env scrut (Select { sc_dup = NoDup, sc_bndr = bndr
+  = {-#SCC "simplExprF1-Case" #-}
+    simplExprF env scrut (Select { sc_dup = NoDup, sc_bndr = bndr
                                  , sc_alts = alts
                                  , sc_env = env, sc_cont = cont })
 
 simplExprF1 env (Let (Rec pairs) body) cont
   | Just pairs' <- joinPointBindings_maybe pairs
-  = simplRecJoinPoint env pairs' body cont
+  = {-#SCC "simplRecJoinPoin" #-} simplRecJoinPoint env pairs' body cont
 
   | otherwise
-  = simplRecE env pairs body cont
+  = {-#SCC "simplRecE" #-} simplRecE env pairs body cont
 
 simplExprF1 env (Let (NonRec bndr rhs) body) cont
   | Type ty <- rhs    -- First deal with type lets (let a = Type ty in e)
-  = ASSERT( isTyVar bndr )
+  = {-#SCC "simplExprF1-NonRecLet-Type" #-}
+    ASSERT( isTyVar bndr )
     do { ty' <- simplType env ty
        ; simplExprF (extendTvSubst env bndr ty') body cont }
 
   | Just (bndr', rhs') <- joinPointBinding_maybe bndr rhs
-  = simplNonRecJoinPoint env bndr' rhs' body cont
+  = {-#SCC "simplNonRecJoinPoint" #-} simplNonRecJoinPoint env bndr' rhs' body cont
 
   | otherwise
-  = simplNonRecE env bndr (rhs, env) ([], body) cont
+  = {-#SCC "simplNonRecE" #-} simplNonRecE env bndr (rhs, env) ([], body) cont
 
 {- Note [Avoiding space leaks in OutType]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1200,37 +1209,73 @@ rebuild env expr cont
 ************************************************************************
 -}
 
+{- Note [Optimising reflexivity]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+It's important (for compiler performance) to get rid of reflexivity as soon
+as it appears.  See Trac #11735, #14737, and #15019.
+
+In particular, we want to behave well on
+
+ *  e |> co1 |> co2
+    where the two happen to cancel out entirely. That is quite common;
+    e.g. a newtype wrapping and unwrapping cancel.
+
+
+ * (f |> co) @t1 @t2 ... @tn x1 .. xm
+   Here we wil use pushCoTyArg and pushCoValArg successively, which
+   build up NthCo stacks.  Silly to do that if co is reflexive.
+
+However, we don't want to call isReflexiveCo too much, because it uses
+type equality which is expensive on big types (Trac #14737 comment:7).
+
+A good compromise (determined experimentally) seems to be to call
+isReflexiveCo
+ * when composing casts, and
+ * at the end
+
+In investigating this I saw missed opportunities for on-the-fly
+coercion shrinkage. See Trac #15090.
+-}
+
+
 simplCast :: SimplEnv -> InExpr -> Coercion -> SimplCont
           -> SimplM (SimplFloats, OutExpr)
 simplCast env body co0 cont0
-  = do  { co1   <- simplCoercion env co0
-        ; cont1 <- addCoerce co1 cont0
-        ; simplExprF env body cont1 }
+  = do  { co1   <- {-#SCC "simplCast-simplCoercion" #-} simplCoercion env co0
+        ; cont1 <- {-#SCC "simplCast-addCoerce" #-}
+                   if isReflCo co1
+                   then return cont0  -- See Note [Optimising reflexivity]
+                   else addCoerce co1 cont0
+        ; {-#SCC "simplCast-simplExprF" #-} simplExprF env body cont1 }
   where
-        -- If the first parameter is Nothing, then simplifying revealed a
+        -- If the first parameter is MRefl, then simplifying revealed a
         -- reflexive coercion. Omit.
-        addCoerce0 :: Maybe OutCoercion -> SimplCont -> SimplM SimplCont
-        addCoerce0 Nothing   cont = return cont
-        addCoerce0 (Just co) cont = addCoerce co cont
+        addCoerceM :: MOutCoercion -> SimplCont -> SimplM SimplCont
+        addCoerceM MRefl   cont = return cont
+        addCoerceM (MCo co) cont = addCoerce co cont
 
         addCoerce :: OutCoercion -> SimplCont -> SimplM SimplCont
-
-        addCoerce co1 (CastIt co2 cont)
-          = addCoerce (mkTransCo co1 co2) cont
+        addCoerce co1 (CastIt co2 cont)  -- See Note [Optimising reflexivity]
+          | isReflexiveCo co' = return cont
+          | otherwise         = addCoerce co' cont
+          where
+            co' = mkTransCo co1 co2
 
         addCoerce co cont@(ApplyToTy { sc_arg_ty = arg_ty, sc_cont = tail })
           | Just (arg_ty', m_co') <- pushCoTyArg co arg_ty
-          = do { tail' <- addCoerce0 m_co' tail
+          = {-#SCC "addCoerce-pushCoTyArg" #-}
+            do { tail' <- addCoerceM m_co' tail
                ; return (cont { sc_arg_ty = arg_ty', sc_cont = tail' }) }
 
         addCoerce co cont@(ApplyToVal { sc_arg = arg, sc_env = arg_se
-                                 , sc_dup = dup, sc_cont = tail })
+                                      , sc_dup = dup, sc_cont = tail })
           | Just (co1, m_co2) <- pushCoValArg co
           , Pair _ new_ty <- coercionKind co1
-          , not (isTypeLevPoly new_ty)  -- without this check, we get a lev-poly arg
+          , not (isTypeLevPoly new_ty)  -- Without this check, we get a lev-poly arg
                                         -- See Note [Levity polymorphism invariants] in CoreSyn
                                         -- test: typecheck/should_run/EtaExpandLevPoly
-          = do { tail' <- addCoerce0 m_co2 tail
+          = {-#SCC "addCoerce-pushCoValArg" #-}
+            do { tail' <- addCoerceM m_co2 tail
                ; if isReflCo co1
                  then return (cont { sc_cont = tail' })
                       -- Avoid simplifying if possible;
@@ -1248,13 +1293,10 @@ simplCast env body co0 cont0
                                     , sc_cont = tail' }) } }
 
         addCoerce co cont
-          | isReflexiveCo co = return cont
+          | isReflexiveCo co = return cont  -- Having this at the end makes a huge
+                                            -- difference in T12227, for some reason
+                                            -- See Note [Optimising reflexivity]
           | otherwise        = return (CastIt co cont)
-                 -- It's worth checking isReflexiveCo.
-                 -- For example, in the initial form of a worker
-                 -- we may find  (coerce T (coerce S (\x.e))) y
-                 -- and we'd like it to simplify to e[y/x] in one round
-                 -- of simplification
 
 simplArg :: SimplEnv -> DupFlag -> StaticEnv -> CoreExpr
          -> SimplM (DupFlag, StaticEnv, OutExpr)
@@ -1682,7 +1724,7 @@ simplIdF env var cont
 
 completeCall :: SimplEnv -> OutId -> SimplCont -> SimplM (SimplFloats, OutExpr)
 completeCall env var cont
-  | Just expr <- callSiteInline dflags var unfolding
+  | Just expr <- callSiteInline dflags var active_unf
                                 lone_variable arg_infos interesting_cont
   -- Inline the variable's RHS
   = do { checkedTick (UnfoldingDone var)
@@ -1692,7 +1734,7 @@ completeCall env var cont
   | otherwise
   -- Don't inline; instead rebuild the call
   = do { rule_base <- getSimplRules
-       ; let info = mkArgInfo var (getRules rule_base var)
+       ; let info = mkArgInfo env var (getRules rule_base var)
                               n_val_args call_cont
        ; rebuildCall env info cont }
 
@@ -1701,7 +1743,7 @@ completeCall env var cont
     (lone_variable, arg_infos, call_cont) = contArgs cont
     n_val_args       = length arg_infos
     interesting_cont = interestingCallContext env call_cont
-    unfolding        = activeUnfolding (getMode env) var
+    active_unf       = activeUnfolding (getMode env) var
 
     dump_inline unfolding cont
       | not (dopt Opt_D_dump_inlinings dflags) = return ()
@@ -3278,7 +3320,7 @@ simplLetUnfolding env top_lvl cont_mb id new_rhs rhs_ty unf
   | isStableUnfolding unf
   = simplStableUnfolding env top_lvl cont_mb id unf rhs_ty
   | isExitJoinId id
-  = return noUnfolding -- see Note [Do not inline exit join points] in Exitify
+  = return noUnfolding -- See Note [Do not inline exit join points] in Exitify
   | otherwise
   = mkLetUnfolding (seDynFlags env) top_lvl InlineRhs id new_rhs
 

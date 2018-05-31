@@ -265,6 +265,7 @@ primop   IntAddCOp   "addIntC#"    GenPrimOp   Int# -> Int# -> (# Int#, Int# #)
           nonzero if overflow occurred (the sum is either too large
           or too small to fit in an {\tt Int#}).}
    with code_size = 2
+        commutable = True
 
 primop   IntSubCOp   "subIntC#"    GenPrimOp   Int# -> Int# -> (# Int#, Int# #)
          {Subtract signed integers reporting overflow.
@@ -328,15 +329,25 @@ primtype Word#
 primop   WordAddOp   "plusWord#"   Dyadic   Word# -> Word# -> Word#
    with commutable = True
 
+primop   WordAddCOp   "addWordC#"   GenPrimOp   Word# -> Word# -> (# Word#, Int# #)
+         {Add unsigned integers reporting overflow.
+          The first element of the pair is the result.  The second element is
+          the carry flag, which is nonzero on overflow. See also {\tt plusWord2#}.}
+   with code_size = 2
+        commutable = True
+
 primop   WordSubCOp   "subWordC#"   GenPrimOp   Word# -> Word# -> (# Word#, Int# #)
          {Subtract unsigned integers reporting overflow.
           The first element of the pair is the result.  The second element is
           the carry flag, which is nonzero on overflow.}
+   with code_size = 2
 
--- Returns (# high, low #) (or equivalently, (# carry, low #))
-primop   WordAdd2Op  "plusWord2#"  GenPrimOp
-   Word# -> Word# -> (# Word#, Word# #)
-   with commutable = True
+primop   WordAdd2Op   "plusWord2#"   GenPrimOp   Word# -> Word# -> (# Word#, Word# #)
+         {Add unsigned integers, with the high part (carry) in the first
+          component of the returned pair and the low part in the second
+          component of the pair. See also {\tt addWordC#}.}
+   with code_size = 2
+        commutable = True
 
 primop   WordSubOp   "minusWord#"   Dyadic   Word# -> Word# -> Word#
 
@@ -818,8 +829,13 @@ primop  SizeofMutableArrayOp "sizeofMutableArray#" GenPrimOp
 
 primop  IndexArrayOp "indexArray#" GenPrimOp
    Array# a -> Int# -> (# a #)
-   {Read from specified index of immutable array. Result is packaged into
-    an unboxed singleton; the result itself is not yet evaluated.}
+   {Read from the specified index of an immutable array. The result is packaged
+    into an unboxed unary tuple; the result itself is not yet
+    evaluated. Pattern matching on the tuple forces the indexing of the
+    array to happen but does not evaluate the element itself. Evaluating
+    the thunk prevents additional thunks from building up on the
+    heap. Avoiding these thunks, in turn, reduces references to the
+    argument array, allowing it to be garbage collected more promptly.}
    with
    can_fail         = True
 
@@ -3013,12 +3029,11 @@ primop  NewBCOOp "newBCO#" GenPrimOp
    out_of_line      = True
 
 primop  UnpackClosureOp "unpackClosure#" GenPrimOp
-   a -> (# Addr#, Array# b, ByteArray# #)
-   { {\tt unpackClosure\# closure} copies non-pointers and pointers in the
+   a -> (# Addr#, ByteArray#, Array# b #)
+   { {\tt unpackClosure\# closure} copies the closure and pointers in the
      payload of the given closure into two new arrays, and returns a pointer to
-     the first word of the closure's info table, a pointer array for the
-     pointers in the payload, and a non-pointer array for the non-pointers in
-     the payload. }
+     the first word of the closure's info table, a non-pointer array for the raw
+     bytes of the closure, and a pointer array for the pointers in the payload. }
    with
    out_of_line = True
 

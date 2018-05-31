@@ -83,7 +83,7 @@ module TcRnTypes(
         tyCoVarsOfCtList, tyCoVarsOfCtsList,
 
         WantedConstraints(..), insolubleWC, emptyWC, isEmptyWC,
-        andWC, unionsWC, mkSimpleWC, mkImplicWC,
+        isSolvedWC, andWC, unionsWC, mkSimpleWC, mkImplicWC,
         addInsols, insolublesOnly, addSimples, addImplics,
         tyCoVarsOfWC, dropDerivedWC, dropDerivedSimples,
         tyCoVarsOfWCList, insolubleWantedCt, insolubleEqCt,
@@ -106,7 +106,6 @@ module TcRnTypes(
 
 
         SkolemInfo(..), pprSigSkolInfo, pprSkolInfo,
-        termEvidenceAllowed,
 
         CtEvidence(..), TcEvDest(..),
         mkKindLoc, toKindLoc, mkGivenLoc,
@@ -114,6 +113,7 @@ module TcRnTypes(
         ctEvRole,
 
         wrapType, wrapTypeWithImplication,
+        removeBindingShadowing,
 
         -- Constraint solver plugins
         TcPlugin(..), TcPluginResult(..), TcPluginSolver,
@@ -270,8 +270,9 @@ type TcM  = TcRn
 -- the lcl type).
 data Env gbl lcl
   = Env {
-        env_top  :: HscEnv,  -- Top-level stuff that never changes
+        env_top  :: !HscEnv, -- Top-level stuff that never changes
                              -- Includes all info about imported things
+                             -- BangPattern is to fix leak, see #15111
 
         env_us   :: {-# UNPACK #-} !(IORef UniqSupply),
                              -- Unique supply for local variables
@@ -526,10 +527,12 @@ data TcGblEnv
                 -- bound in this module when dealing with hi-boot recursions
                 -- Updated at intervals (e.g. after dealing with types and classes)
 
-        tcg_inst_env     :: InstEnv,
+        tcg_inst_env     :: !InstEnv,
           -- ^ Instance envt for all /home-package/ modules;
           -- Includes the dfuns in tcg_insts
-        tcg_fam_inst_env :: FamInstEnv, -- ^ Ditto for family instances
+          -- NB. BangPattern is to fix a leak, see #15111
+        tcg_fam_inst_env :: !FamInstEnv, -- ^ Ditto for family instances
+          -- NB. BangPattern is to fix a leak, see #15111
         tcg_ann_env      :: AnnEnv,     -- ^ And for annotations
 
                 -- Now a bunch of things about this module that are simply
@@ -679,8 +682,9 @@ data TcGblEnv
         tcg_patsyns   :: [PatSyn],            -- ...Pattern synonyms
 
         tcg_doc_hdr   :: Maybe LHsDocString, -- ^ Maybe Haddock header docs
-        tcg_hpc       :: AnyHpcUsage,        -- ^ @True@ if any part of the
+        tcg_hpc       :: !AnyHpcUsage,       -- ^ @True@ if any part of the
                                              --  prog uses hpc instrumentation.
+           -- NB. BangPattern is to fix a leak, see #15111
 
         tcg_self_boot :: SelfBootInfo,       -- ^ Whether this module has a
                                              -- corresponding hi-boot file
@@ -931,6 +935,23 @@ instance HasOccName TcBinder where
     occName (TcIdBndr id _)             = occName (idName id)
     occName (TcIdBndr_ExpType name _ _) = occName name
     occName (TcTvBndr name _)           = occName name
+
+-- fixes #12177
+-- Builds up a list of bindings whose OccName has not been seen before
+-- i.e., If    ys  = removeBindingShadowing xs
+-- then
+--  - ys is obtained from xs by deleting some elements
+--  - ys has no duplicate OccNames
+--  - The first duplicated OccName in xs is retained in ys
+-- Overloaded so that it can be used for both GlobalRdrElt in typed-hole
+-- substitutions and TcBinder when looking for relevant bindings.
+removeBindingShadowing :: HasOccName a => [a] -> [a]
+removeBindingShadowing bindings = reverse $ fst $ foldl
+    (\(bindingAcc, seenNames) binding ->
+    if occName binding `elemOccSet` seenNames -- if we've seen it
+        then (bindingAcc, seenNames)              -- skip it
+        else (binding:bindingAcc, extendOccSet seenNames (occName binding)))
+    ([], emptyOccSet) bindings
 
 ---------------------------
 -- Template Haskell stages and levels
@@ -1687,8 +1708,8 @@ data Ct
         --    *never* over-saturated (because if so
         --    we should have decomposed)
 
-      cc_fsk    :: TcTyVar  -- [Given]  always a FlatSkolTv
-                            -- [Wanted] always a FlatMetaTv
+      cc_fsk    :: TcTyVar  -- [G]  always a FlatSkolTv
+                            -- [W], [WD], or [D] always a FlatMetaTv
         -- See Note [The flattening story] in TcFlatten
     }
 
@@ -2300,6 +2321,14 @@ isEmptyWC :: WantedConstraints -> Bool
 isEmptyWC (WC { wc_simple = f, wc_impl = i })
   = isEmptyBag f && isEmptyBag i
 
+
+-- | Checks whether a the given wanted constraints are solved, i.e.
+-- that there are no simple constraints left and all the implications
+-- are solved.
+isSolvedWC :: WantedConstraints -> Bool
+isSolvedWC WC {wc_simple = wc_simple, wc_impl = wc_impl} =
+  isEmptyBag wc_simple && allBag (isSolvedStatus . ic_status) wc_impl
+
 andWC :: WantedConstraints -> WantedConstraints -> WantedConstraints
 andWC (WC { wc_simple = f1, wc_impl = i1 })
       (WC { wc_simple = f2, wc_impl = i2 })
@@ -2508,8 +2537,9 @@ instance Outputable Implication where
   ppr (Implic { ic_tclvl = tclvl, ic_skols = skols
               , ic_given = given, ic_no_eqs = no_eqs
               , ic_wanted = wanted, ic_status = status
-              , ic_binds = binds, ic_need_inner = need_in
-              , ic_need_outer = need_out, ic_info = info })
+              , ic_binds = binds
+--              , ic_need_inner = need_in, ic_need_outer = need_out
+              , ic_info = info })
    = hang (text "Implic" <+> lbrace)
         2 (sep [ text "TcLevel =" <+> ppr tclvl
                , text "Skolems =" <+> pprTyVars skols
@@ -2518,8 +2548,8 @@ instance Outputable Implication where
                , hang (text "Given =")  2 (pprEvVars given)
                , hang (text "Wanted =") 2 (ppr wanted)
                , text "Binds =" <+> ppr binds
-               , text "Needed inner =" <+> ppr need_in
-               , text "Needed outer =" <+> ppr need_out
+--               , text "Needed inner =" <+> ppr need_in
+--               , text "Needed outer =" <+> ppr need_out
                , pprSkolInfo info ] <+> rbrace)
 
 instance Outputable ImplicStatus where
@@ -3224,14 +3254,6 @@ data SkolemInfo
 instance Outputable SkolemInfo where
   ppr = pprSkolInfo
 
-termEvidenceAllowed :: SkolemInfo -> Bool
--- Whether an implication constraint with this SkolemInfo
--- is permitted to have term-level evidence.  There is
--- only one that is not, associated with unifiying
--- forall-types
-termEvidenceAllowed (UnifyForAllSkol {}) = False
-termEvidenceAllowed _                    = True
-
 pprSkolInfo :: SkolemInfo -> SDoc
 -- Complete the sentence "is a rigid type variable bound by..."
 pprSkolInfo (SigSkol cx ty _) = pprSigSkolInfo cx ty
@@ -3536,14 +3558,17 @@ matchesCtOrigin (MG { mg_alts = alts })
 
   | otherwise
   = Shouldn'tHappenOrigin "multi-way match"
+matchesCtOrigin (XMatchGroup{}) = panic "matchesCtOrigin"
 
 -- | Extract a suitable CtOrigin from guarded RHSs
 grhssCtOrigin :: GRHSs GhcRn (LHsExpr GhcRn) -> CtOrigin
 grhssCtOrigin (GRHSs { grhssGRHSs = lgrhss }) = lGRHSCtOrigin lgrhss
+grhssCtOrigin (XGRHSs _) = panic "grhssCtOrigin"
 
 -- | Extract a suitable CtOrigin from a list of guarded RHSs
 lGRHSCtOrigin :: [LGRHS GhcRn (LHsExpr GhcRn)] -> CtOrigin
-lGRHSCtOrigin [L _ (GRHS _ (L _ e))] = exprCtOrigin e
+lGRHSCtOrigin [L _ (GRHS _ _ (L _ e))] = exprCtOrigin e
+lGRHSCtOrigin [L _ (XGRHS _)] = panic "lGRHSCtOrigin"
 lGRHSCtOrigin _ = Shouldn'tHappenOrigin "multi-way GRHS"
 
 pprCtLoc :: CtLoc -> SDoc

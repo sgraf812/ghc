@@ -66,6 +66,7 @@ import OrdList
 import Data.List
 import Data.IORef
 import Control.Monad( when )
+import Plugins ( LoadedPlugin(..) )
 
 {-
 ************************************************************************
@@ -169,7 +170,10 @@ deSugar hsc_env
         ; endPassIO hsc_env print_unqual CoreDesugarOpt ds_binds ds_rules_for_imps
 
         ; let used_names = mkUsedNames tcg_env
-        ; deps <- mkDependencies tcg_env
+              pluginModules =
+                map lpModule (plugins (hsc_dflags hsc_env))
+        ; deps <- mkDependencies (thisInstalledUnitId (hsc_dflags hsc_env))
+                                 pluginModules tcg_env
 
         ; used_th <- readIORef tc_splice_used
         ; dep_files <- readIORef dependent_files
@@ -374,9 +378,9 @@ Reason
 -}
 
 dsRule :: LRuleDecl GhcTc -> DsM (Maybe CoreRule)
-dsRule (L loc (HsRule name rule_act vars lhs _tv_lhs rhs _fv_rhs))
+dsRule (L loc (HsRule _ name rule_act vars lhs rhs))
   = putSrcSpanDs loc $
-    do  { let bndrs' = [var | L _ (RuleBndr (L _ var)) <- vars]
+    do  { let bndrs' = [var | L _ (RuleBndr _ (L _ var)) <- vars]
 
         ; lhs' <- unsetGOptM Opt_EnableRewriteRules $
                   unsetWOptM Opt_WarnIdentities $
@@ -413,6 +417,7 @@ dsRule (L loc (HsRule name rule_act vars lhs _tv_lhs rhs _fv_rhs))
 
         ; return (Just rule)
         } } }
+dsRule (L _ (XRuleDecl _)) = panic "dsRule"
 
 
 warnRuleShadowing :: RuleName -> Activation -> Id -> [Id] -> DsM ()
@@ -553,26 +558,22 @@ subsequent transformations could fire.
 -}
 
 dsVect :: LVectDecl GhcTc -> DsM CoreVect
-dsVect (L loc (HsVect _ (L _ v) rhs))
+dsVect (L loc (HsVect _ _ (L _ v) rhs))
   = putSrcSpanDs loc $
     do { rhs' <- dsLExpr rhs
        ; return $ Vect v rhs'
        }
-dsVect (L _loc (HsNoVect _ (L _ v)))
+dsVect (L _loc (HsNoVect _ _ (L _ v)))
   = return $ NoVect v
-dsVect (L _loc (HsVectTypeOut isScalar tycon rhs_tycon))
+dsVect (L _loc (HsVectType (VectTypeTc tycon rhs_tycon) isScalar))
   = return $ VectType isScalar tycon' rhs_tycon
   where
     tycon' | Just ty <- coreView $ mkTyConTy tycon
            , (tycon', []) <- splitTyConApp ty      = tycon'
            | otherwise                             = tycon
-dsVect vd@(L _ (HsVectTypeIn _ _ _ _))
-  = pprPanic "Desugar.dsVect: unexpected 'HsVectTypeIn'" (ppr vd)
-dsVect (L _loc (HsVectClassOut cls))
+dsVect (L _loc (HsVectClass cls))
   = return $ VectClass (classTyCon cls)
-dsVect vc@(L _ (HsVectClassIn _ _))
-  = pprPanic "Desugar.dsVect: unexpected 'HsVectClassIn'" (ppr vc)
-dsVect (L _loc (HsVectInstOut inst))
+dsVect (L _loc (HsVectInst inst))
   = return $ VectInst (instanceDFunId inst)
-dsVect vi@(L _ (HsVectInstIn _))
-  = pprPanic "Desugar.dsVect: unexpected 'HsVectInstIn'" (ppr vi)
+dsVect vd@(L _ (XVectDecl {}))
+  = pprPanic "Desugar.dsVect: unexpected 'XVectDecl'" (ppr vd)

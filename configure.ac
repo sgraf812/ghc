@@ -842,7 +842,7 @@ AC_PATH_PROG(SPHINXBUILD,sphinx-build)
 AC_CACHE_CHECK([for version of sphinx-build], fp_cv_sphinx_version,
 changequote(, )dnl
 [if test -n "$SPHINXBUILD"; then
-  fp_cv_sphinx_version=`"$SPHINXBUILD" --version 2>&1 | sed 's/Sphinx\( (sphinx-build)\)\? v\?\([0-9]\.[0-9]\.[0-9]\)/\2/' | head -n1`;
+  fp_cv_sphinx_version=`"$SPHINXBUILD" --version 2>&1 | sed 's/.* v\?\([0-9]\.[0-9]\.[0-9]\)/\1/' | head -n1`;
 fi;
 changequote([, ])dnl
 ])
@@ -1258,6 +1258,12 @@ if test "$ac_cv_header_numa_h$ac_cv_header_numaif_h" = "yesyes" ; then
     AC_CHECK_LIB(numa, numa_available,HaveLibNuma=1)
 fi
 AC_DEFINE_UNQUOTED([HAVE_LIBNUMA], [$HaveLibNuma], [Define to 1 if you have libnuma])
+if test $HaveLibNuma = "YES" ; then
+  AC_SUBST([CabalHaveLibNuma],[True])
+else
+  AC_SUBST([CabalHaveLibNuma],[False])
+fi
+
 
 dnl ** Documentation
 dnl --------------------------------------------------------------
@@ -1317,7 +1323,7 @@ checkMake380() {
 checkMake380 make
 checkMake380 gmake
 
-AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk rts/rts.cabal compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal utils/gen-dll/gen-dll.cabal libraries/ghc-boot/ghc-boot.cabal libraries/ghc-boot-th/ghc-boot-th.cabal libraries/ghci/ghci.cabal settings docs/users_guide/ghc_config.py docs/index.html libraries/prologue.txt distrib/configure.ac])
+AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk rts/rts.cabal compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal utils/gen-dll/gen-dll.cabal libraries/ghc-boot/ghc-boot.cabal libraries/ghc-boot-th/ghc-boot-th.cabal libraries/ghci/ghci.cabal libraries/ghc-heap/ghc-heap.cabal settings docs/users_guide/ghc_config.py docs/index.html libraries/prologue.txt distrib/configure.ac])
 AC_OUTPUT
 [
 if test "$print_make_warning" = "true"; then

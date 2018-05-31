@@ -24,7 +24,7 @@ module DynFlags (
         WarningFlag(..), WarnReason(..),
         Language(..),
         PlatformConstants(..),
-        FatalMessager, LogAction, LogFinaliser, FlushOut(..), FlushErr(..),
+        FatalMessager, LogAction, FlushOut(..), FlushErr(..),
         ProfAuto(..),
         glasgowExtsFlags,
         warningGroups, warningHierarchies,
@@ -79,7 +79,7 @@ module DynFlags (
         unsafeFlags, unsafeFlagsForInfer,
 
         -- ** LLVM Targets
-        LlvmTarget(..), LlvmTargets,
+        LlvmTarget(..), LlvmTargets, LlvmPasses, LlvmConfig,
 
         -- ** System tool settings and locations
         Settings(..),
@@ -114,6 +114,7 @@ module DynFlags (
         setUnitId,
         interpretPackageEnv,
         canonicalizeHomeModule,
+        canonicalizeModuleIfHome,
 
         -- ** Parsing DynFlags
         parseDynamicFlagsCmdLine,
@@ -203,10 +204,10 @@ import Outputable
 import Foreign.C        ( CInt(..) )
 import System.IO.Unsafe ( unsafeDupablePerformIO )
 import {-# SOURCE #-} ErrUtils ( Severity(..), MsgDoc, mkLocMessageAnn
-                               , getCaretDiagnostic, dumpSDoc )
+                               , getCaretDiagnostic )
 import Json
 import SysTools.Terminal ( stderrSupportsAnsiColors )
-import SysTools.BaseDir ( expandTopDir )
+import SysTools.BaseDir ( expandToolDir, expandTopDir )
 
 import System.IO.Unsafe ( unsafePerformIO )
 import Data.IORef
@@ -551,6 +552,7 @@ data GeneralFlag
    | Opt_IgnoreDotGhci
    | Opt_GhciSandbox
    | Opt_GhciHistory
+   | Opt_GhciLeakCheck
    | Opt_LocalGhciHistory
    | Opt_NoIt
    | Opt_HelpfulErrors
@@ -582,10 +584,21 @@ data GeneralFlag
    | Opt_PprCaseAsLet
    | Opt_PprShowTicks
    | Opt_ShowHoleConstraints
-   | Opt_NoShowValidSubstitutions
-   | Opt_UnclutterValidSubstitutions
-   | Opt_NoSortValidSubstitutions
-   | Opt_AbstractRefSubstitutions
+    -- Options relating to the display of valid hole fits
+    -- when generating an error message for a typed hole
+    -- See Note [Valid hole fits include] in TcHoleErrors.hs
+   | Opt_ShowValidHoleFits
+   | Opt_SortValidHoleFits
+   | Opt_SortBySizeHoleFits
+   | Opt_SortBySubsumHoleFits
+   | Opt_AbstractRefHoleFits
+   | Opt_UnclutterValidHoleFits
+   | Opt_ShowTypeAppOfHoleFits
+   | Opt_ShowTypeAppVarsOfHoleFits
+   | Opt_ShowTypeOfHoleFits
+   | Opt_ShowProvOfHoleFits
+   | Opt_ShowMatchesOfHoleFits
+
    | Opt_ShowLoadedModules
    | Opt_HexWordLiterals -- See Note [Print Hexadecimal Literals]
 
@@ -846,6 +859,7 @@ data DynFlags = DynFlags {
   hscTarget             :: HscTarget,
   settings              :: Settings,
   llvmTargets           :: LlvmTargets,
+  llvmPasses            :: LlvmPasses,
   verbosity             :: Int,         -- ^ Verbosity level: see Note [Verbosity levels]
   optLevel              :: Int,         -- ^ Optimisation level
   debugLevel            :: Int,         -- ^ How much debug information to produce
@@ -865,14 +879,14 @@ data DynFlags = DynFlags {
 
   maxRelevantBinds      :: Maybe Int,   -- ^ Maximum number of bindings from the type envt
                                         --   to show in type error messages
-  maxValidSubstitutions :: Maybe Int,   -- ^ Maximum number of substitutions to
-                                        --   show in typed hole error messages
-  maxRefSubstitutions   :: Maybe Int,   -- ^ Maximum number of refinement
-                                        --   substitutions to show in typed hole
+  maxValidHoleFits      :: Maybe Int,   -- ^ Maximum number of hole fits to show
+                                        --   in typed hole error messages
+  maxRefHoleFits        :: Maybe Int,   -- ^ Maximum number of refinement hole
+                                        --   fits to show in typed hole error
+                                        --   messages
+  refLevelHoleFits      :: Maybe Int,   -- ^ Maximum level of refinement for
+                                        --   refinement hole fits in typed hole
                                         --   error messages
-  refLevelSubstitutions :: Maybe Int,   -- ^ Maximum level of refinement for
-                                        --   refinement substitutions in typed
-                                        --   typed hole error messages
   maxUncoveredPatterns  :: Int,         -- ^ Maximum number of unmatched patterns to show
                                         --   in non-exhaustiveness warnings
   simplTickFactor       :: Int,         -- ^ Multiplier for simplifier ticks
@@ -1060,9 +1074,7 @@ data DynFlags = DynFlags {
   ghciHistSize          :: Int,
 
   -- | MsgDoc output action: use "ErrUtils" instead of this if you can
-  initLogAction         :: IO (Maybe LogOutput),
   log_action            :: LogAction,
-  log_finaliser         :: LogFinaliser,
   flushOut              :: FlushOut,
   flushErr              :: FlushErr,
 
@@ -1170,12 +1182,15 @@ data LlvmTarget = LlvmTarget
   }
 
 type LlvmTargets = [(String, LlvmTarget)]
+type LlvmPasses = [(Int, String)]
+type LlvmConfig = (LlvmTargets, LlvmPasses)
 
 data Settings = Settings {
-  sTargetPlatform        :: Platform,    -- Filled in by SysTools
-  sGhcUsagePath          :: FilePath,    -- Filled in by SysTools
-  sGhciUsagePath         :: FilePath,    -- ditto
-  sTopDir                :: FilePath,
+  sTargetPlatform        :: Platform,       -- Filled in by SysTools
+  sGhcUsagePath          :: FilePath,       -- ditto
+  sGhciUsagePath         :: FilePath,       -- ditto
+  sToolDir               :: Maybe FilePath, -- ditto
+  sTopDir                :: FilePath,       -- ditto
   sTmpDir                :: String,      -- no trailing '/'
   sProgramName           :: String,
   sProjectVersion        :: String,
@@ -1235,6 +1250,8 @@ ghcUsagePath          :: DynFlags -> FilePath
 ghcUsagePath dflags = sGhcUsagePath (settings dflags)
 ghciUsagePath         :: DynFlags -> FilePath
 ghciUsagePath dflags = sGhciUsagePath (settings dflags)
+toolDir               :: DynFlags -> Maybe FilePath
+toolDir dflags = sToolDir (settings dflags)
 topDir                :: DynFlags -> FilePath
 topDir dflags = sTopDir (settings dflags)
 tmpDir                :: DynFlags -> String
@@ -1743,8 +1760,8 @@ initDynFlags dflags = do
 
 -- | The normal 'DynFlags'. Note that they are not suitable for use in this form
 -- and must be fully initialized by 'GHC.runGhc' first.
-defaultDynFlags :: Settings -> LlvmTargets -> DynFlags
-defaultDynFlags mySettings myLlvmTargets =
+defaultDynFlags :: Settings -> LlvmConfig -> DynFlags
+defaultDynFlags mySettings (myLlvmTargets, myLlvmPasses) =
 -- See Note [Updating flag description in the User's Guide]
      DynFlags {
         ghcMode                 = CompManager,
@@ -1759,9 +1776,9 @@ defaultDynFlags mySettings myLlvmTargets =
         ruleCheck               = Nothing,
         inlineCheck             = Nothing,
         maxRelevantBinds        = Just 6,
-        maxValidSubstitutions   = Just 6,
-        maxRefSubstitutions     = Just 6,
-        refLevelSubstitutions   = Nothing,
+        maxValidHoleFits   = Just 6,
+        maxRefHoleFits     = Just 6,
+        refLevelHoleFits   = Nothing,
         maxUncoveredPatterns    = 4,
         simplTickFactor         = 100,
         specConstrThreshold     = Just 2000,
@@ -1846,6 +1863,7 @@ defaultDynFlags mySettings myLlvmTargets =
         splitInfo               = Nothing,
         settings                = mySettings,
         llvmTargets             = myLlvmTargets,
+        llvmPasses              = myLlvmPasses,
 
         -- ghc -M values
         depMakefile       = "Makefile",
@@ -1900,10 +1918,7 @@ defaultDynFlags mySettings myLlvmTargets =
 
         -- Logging
 
-        initLogAction = defaultLogOutput,
-
         log_action = defaultLogAction,
-        log_finaliser = \ _ -> return (),
 
         flushOut = defaultFlushOut,
         flushErr = defaultFlushErr,
@@ -1964,9 +1979,10 @@ interpreterDynamic dflags
 -- Note [JSON Error Messages]
 --
 -- When the user requests the compiler output to be dumped as json
--- we modify the log_action to collect all the messages in an IORef
--- and then finally in GHC.withCleanupSession the log_finaliser is
--- called which prints out the messages together.
+-- we used to collect them all in an IORef and then print them at the end.
+-- This doesn't work very well with GHCi. (See #14078) So instead we now
+-- use the simpler method of just outputting a JSON document inplace to
+-- stdout.
 --
 -- Before the compiler calls log_action, it has already turned the `ErrMsg`
 -- into a formatted message. This means that we lose some possible
@@ -1976,14 +1992,6 @@ interpreterDynamic dflags
 
 type FatalMessager = String -> IO ()
 
-data LogOutput = LogOutput
-               { getLogAction :: LogAction
-               , getLogFinaliser :: LogFinaliser
-               }
-
-defaultLogOutput :: IO (Maybe LogOutput)
-defaultLogOutput = return $ Nothing
-
 type LogAction = DynFlags
               -> WarnReason
               -> Severity
@@ -1992,41 +2000,24 @@ type LogAction = DynFlags
               -> MsgDoc
               -> IO ()
 
-type LogFinaliser = DynFlags -> IO ()
-
 defaultFatalMessager :: FatalMessager
 defaultFatalMessager = hPutStrLn stderr
 
 
 -- See Note [JSON Error Messages]
-jsonLogOutput :: IO (Maybe LogOutput)
-jsonLogOutput = do
-  ref <- newIORef []
-  return . Just $ LogOutput (jsonLogAction ref) (jsonLogFinaliser ref)
-
-jsonLogAction :: IORef [SDoc] -> LogAction
-jsonLogAction iref dflags reason severity srcSpan style msg
+--
+jsonLogAction :: LogAction
+jsonLogAction dflags reason severity srcSpan _style msg
   = do
-      addMessage . withPprStyle (mkCodeStyle CStyle) . renderJSON $
-        JSObject [ ( "span", json srcSpan )
-                 , ( "doc" , JSString (showSDoc dflags msg) )
-                 , ( "severity", json severity )
-                 , ( "reason" ,   json reason )
-                ]
-      defaultLogAction dflags reason severity srcSpan style msg
-  where
-    addMessage m = modifyIORef iref (m:)
-
-
-jsonLogFinaliser :: IORef [SDoc] -> DynFlags -> IO ()
-jsonLogFinaliser iref dflags = do
-  msgs <- readIORef iref
-  let fmt_msgs = brackets $ pprWithCommas (blankLine $$) msgs
-  output fmt_msgs
-  where
-    -- dumpSDoc uses log_action to output the dump
-    dflags' = dflags { log_action = defaultLogAction }
-    output doc = dumpSDoc dflags' neverQualify Opt_D_dump_json "" doc
+    defaultLogActionHPutStrDoc dflags stdout (doc $$ text "")
+                               (mkCodeStyle CStyle)
+    where
+      doc = renderJSON $
+              JSObject [ ( "span", json srcSpan )
+                       , ( "doc" , JSString (showSDoc dflags msg) )
+                       , ( "severity", json severity )
+                       , ( "reason" ,   json reason )
+                       ]
 
 
 defaultLogAction :: LogAction
@@ -2424,7 +2415,7 @@ setDynOutputFile f d = d { dynOutputFile = f}
 setOutputHi   f d = d { outputHi   = f}
 
 setJsonLogAction :: DynFlags -> DynFlags
-setJsonLogAction d = d { initLogAction = jsonLogOutput }
+setJsonLogAction d = d { log_action = jsonLogAction }
 
 thisComponentId :: DynFlags -> ComponentId
 thisComponentId dflags =
@@ -2643,27 +2634,11 @@ parseDynamicFlagsFull activeFlags cmdline dflags0 args = do
     Just x -> liftIO (setHeapSize x)
     _      -> return ()
 
-  dflags7 <- liftIO $ setLogAction dflags5
-
-  liftIO $ setUnsafeGlobalDynFlags dflags7
+  liftIO $ setUnsafeGlobalDynFlags dflags5
 
   let warns' = map (Warn Cmd.NoReason) (consistency_warnings ++ sh_warns)
 
-  return (dflags7, leftover, warns' ++ warns)
-
-setLogAction :: DynFlags -> IO DynFlags
-setLogAction dflags = do
- mlogger <- initLogAction dflags
- return $
-    maybe
-         dflags
-         (\logger ->
-            dflags
-              { log_action    = getLogAction logger
-              , log_finaliser = getLogFinaliser logger
-              , initLogAction = return $ Nothing -- Don't initialise it twice
-              })
-         mlogger
+  return (dflags5, leftover, warns' ++ warns)
 
 -- | Write an error or warning to the 'LogOutput'.
 putLogMsg :: DynFlags -> WarnReason -> Severity -> SrcSpan -> PprStyle
@@ -3403,18 +3378,20 @@ dynamic_flags_deps = [
       (intSuffix (\n d -> d { maxRelevantBinds = Just n }))
   , make_ord_flag defFlag "fno-max-relevant-binds"
       (noArg (\d -> d { maxRelevantBinds = Nothing }))
-  , make_ord_flag defFlag "fmax-valid-substitutions"
-      (intSuffix (\n d -> d { maxValidSubstitutions = Just n }))
-  , make_ord_flag defFlag "fno-max-valid-substitutions"
-      (noArg (\d -> d { maxValidSubstitutions = Nothing }))
-  , make_ord_flag defFlag "fmax-refinement-substitutions"
-      (intSuffix (\n d -> d { maxRefSubstitutions = Just n }))
-  , make_ord_flag defFlag "fno-max-refinement-substitutions"
-      (noArg (\d -> d { maxRefSubstitutions = Nothing }))
-  , make_ord_flag defFlag "frefinement-level-substitutions"
-      (intSuffix (\n d -> d { refLevelSubstitutions = Just n }))
-  , make_ord_flag defFlag "fno-refinement-level-substitutions"
-      (noArg (\d -> d { refLevelSubstitutions = Nothing }))
+
+  , make_ord_flag defFlag "fmax-valid-hole-fits"
+      (intSuffix (\n d -> d { maxValidHoleFits = Just n }))
+  , make_ord_flag defFlag "fno-max-valid-hole-fits"
+      (noArg (\d -> d { maxValidHoleFits = Nothing }))
+  , make_ord_flag defFlag "fmax-refinement-hole-fits"
+      (intSuffix (\n d -> d { maxRefHoleFits = Just n }))
+  , make_ord_flag defFlag "fno-max-refinement-hole-fits"
+      (noArg (\d -> d { maxRefHoleFits = Nothing }))
+  , make_ord_flag defFlag "frefinement-level-hole-fits"
+      (intSuffix (\n d -> d { refLevelHoleFits = Just n }))
+  , make_ord_flag defFlag "fno-refinement-level-hole-fits"
+      (noArg (\d -> d { refLevelHoleFits = Nothing }))
+
   , make_ord_flag defFlag "fmax-uncovered-patterns"
       (intSuffix (\n d -> d { maxUncoveredPatterns = n }))
   , make_ord_flag defFlag "fsimplifier-phases"
@@ -3998,6 +3975,7 @@ fFlagsDeps = [
   flagSpec "fun-to-thunk"                     Opt_FunToThunk,
   flagSpec "gen-manifest"                     Opt_GenManifest,
   flagSpec "ghci-history"                     Opt_GhciHistory,
+  flagSpec "ghci-leak-check"                  Opt_GhciLeakCheck,
   flagGhciSpec "local-ghci-history"           Opt_LocalGhciHistory,
   flagGhciSpec "no-it"                        Opt_NoIt,
   flagSpec "ghci-sandbox"                     Opt_GhciSandbox,
@@ -4075,13 +4053,33 @@ fFlagsDeps = [
   flagSpec "alignment-sanitisation"           Opt_AlignmentSanitisation,
   flagSpec "show-warning-groups"              Opt_ShowWarnGroups,
   flagSpec "hide-source-paths"                Opt_HideSourcePaths,
-  flagSpec "show-hole-constraints"            Opt_ShowHoleConstraints,
-  flagSpec "no-show-valid-substitutions"      Opt_NoShowValidSubstitutions,
-  flagSpec "no-sort-valid-substitutions"      Opt_NoSortValidSubstitutions,
-  flagSpec "abstract-refinement-substitutions" Opt_AbstractRefSubstitutions,
-  flagSpec "unclutter-valid-substitutions"    Opt_UnclutterValidSubstitutions,
   flagSpec "show-loaded-modules"              Opt_ShowLoadedModules,
   flagSpec "whole-archive-hs-libs"            Opt_WholeArchiveHsLibs
+  ]
+  ++ fHoleFlags
+
+-- | These @-f\<blah\>@ flags have to do with the typed-hole error message or
+-- the valid hole fits in that message. See Note [Valid hole fits include ...]
+-- in the TcHoleErrors module. These flags can all be reversed with
+-- @-fno-\<blah\>@
+fHoleFlags :: [(Deprecation, FlagSpec GeneralFlag)]
+fHoleFlags = [
+  flagSpec "show-hole-constraints"            Opt_ShowHoleConstraints,
+  depFlagSpec' "show-valid-substitutions"     Opt_ShowValidHoleFits
+   (useInstead "-f" "show-valid-hole-fits"),
+  flagSpec "show-valid-hole-fits"             Opt_ShowValidHoleFits,
+  -- Sorting settings
+  flagSpec "sort-valid-hole-fits"             Opt_SortValidHoleFits,
+  flagSpec "sort-by-size-hole-fits"           Opt_SortBySizeHoleFits,
+  flagSpec "sort-by-subsumption-hole-fits"    Opt_SortBySubsumHoleFits,
+  flagSpec "abstract-refinement-hole-fits"    Opt_AbstractRefHoleFits,
+  -- Output format settings
+  flagSpec "show-hole-matches-of-hole-fits"   Opt_ShowMatchesOfHoleFits,
+  flagSpec "show-provenance-of-hole-fits"     Opt_ShowProvOfHoleFits,
+  flagSpec "show-type-of-hole-fits"           Opt_ShowTypeOfHoleFits,
+  flagSpec "show-type-app-of-hole-fits"       Opt_ShowTypeAppOfHoleFits,
+  flagSpec "show-type-app-vars-of-hole-fits"  Opt_ShowTypeAppVarsOfHoleFits,
+  flagSpec "unclutter-valid-hole-fits"        Opt_UnclutterValidHoleFits
   ]
 
 -- | These @-f\<blah\>@ flags can all be reversed with @-fno-\<blah\>@
@@ -4337,8 +4335,31 @@ defaultFlags settings
     ++ default_PIC platform
 
     ++ concatMap (wayGeneralFlags platform) (defaultWays settings)
+    ++ validHoleFitDefaults
 
     where platform = sTargetPlatform settings
+
+-- | These are the default settings for the display and sorting of valid hole
+--  fits in typed-hole error messages. See Note [Valid hole fits include ...]
+ -- in the TcHoleErrors module.
+validHoleFitDefaults :: [GeneralFlag]
+validHoleFitDefaults
+  =  [ Opt_ShowTypeAppOfHoleFits
+     , Opt_ShowTypeOfHoleFits
+     , Opt_ShowProvOfHoleFits
+     , Opt_ShowMatchesOfHoleFits
+     , Opt_ShowValidHoleFits
+     , Opt_SortValidHoleFits
+     , Opt_SortBySizeHoleFits
+     , Opt_ShowHoleConstraints ]
+
+
+validHoleFitsImpliedGFlags :: [(GeneralFlag, TurnOnFlag, GeneralFlag)]
+validHoleFitsImpliedGFlags
+  = [ (Opt_UnclutterValidHoleFits, turnOff, Opt_ShowTypeAppOfHoleFits)
+    , (Opt_UnclutterValidHoleFits, turnOff, Opt_ShowTypeAppVarsOfHoleFits)
+    , (Opt_ShowTypeAppVarsOfHoleFits, turnOff, Opt_ShowTypeAppOfHoleFits)
+    , (Opt_UnclutterValidHoleFits, turnOff, Opt_ShowProvOfHoleFits) ]
 
 default_PIC :: Platform -> [GeneralFlag]
 default_PIC platform =
@@ -4358,7 +4379,7 @@ impliedGFlags :: [(GeneralFlag, TurnOnFlag, GeneralFlag)]
 impliedGFlags = [(Opt_DeferTypeErrors, turnOn, Opt_DeferTypedHoles)
                 ,(Opt_DeferTypeErrors, turnOn, Opt_DeferOutOfScopeVariables)
                 ,(Opt_Strictness, turnOn, Opt_WorkerWrapper)
-                ]
+                ] ++ validHoleFitsImpliedGFlags
 
 -- General flags that are switched on/off when other general flags are switched
 -- off
@@ -4979,6 +5000,12 @@ canonicalizeHomeModule dflags mod_name =
         Nothing  -> mkModule (thisPackage dflags) mod_name
         Just mod -> mod
 
+canonicalizeModuleIfHome :: DynFlags -> Module -> Module
+canonicalizeModuleIfHome dflags mod
+    = if thisPackage dflags == moduleUnitId mod
+                      then canonicalizeHomeModule dflags (moduleName mod)
+                      else mod
+
 
 -- -----------------------------------------------------------------------------
 -- | Find the package environment (if one exists)
@@ -5012,12 +5039,14 @@ interpretPackageEnv :: DynFlags -> IO DynFlags
 interpretPackageEnv dflags = do
     mPkgEnv <- runMaybeT $ msum $ [
                    getCmdLineArg >>= \env -> msum [
-                       probeEnvFile env
+                       probeNullEnv env
+                     , probeEnvFile env
                      , probeEnvName env
                      , cmdLineError env
                      ]
                  , getEnvVar >>= \env -> msum [
-                       probeEnvFile env
+                       probeNullEnv env
+                     , probeEnvFile env
                      , probeEnvName env
                      , envError     env
                      ]
@@ -5030,8 +5059,14 @@ interpretPackageEnv dflags = do
       Nothing ->
         -- No environment found. Leave DynFlags unchanged.
         return dflags
+      Just "-" -> do
+        -- Explicitly disabled environment file. Leave DynFlags unchanged.
+        return dflags
       Just envfile -> do
         content <- readFile envfile
+        putLogMsg dflags NoReason SevInfo noSrcSpan
+             (defaultUserStyle dflags)
+             (text ("Loaded package environment from " ++ envfile))
         let setFlags :: DynP ()
             setFlags = do
               setGeneralFlag Opt_HideAllPackages
@@ -5055,6 +5090,10 @@ interpretPackageEnv dflags = do
     probeEnvFile path = do
       guard =<< liftMaybeT (doesFileExist path)
       return path
+
+    probeNullEnv :: FilePath -> MaybeT IO FilePath
+    probeNullEnv "-" = return "-"
+    probeNullEnv _   = mzero
 
     parseEnvFile :: FilePath -> String -> DynP ()
     parseEnvFile envfile = mapM_ parseEntry . lines
@@ -5377,7 +5416,8 @@ compilerInfo dflags
       -- Next come the settings, so anything else can be overridden
       -- in the settings file (as "lookup" uses the first match for the
       -- key)
-    : map (fmap $ expandTopDir $ topDir dflags) (rawSettings dflags)
+    : map (fmap $ expandDirectories (topDir dflags) (toolDir dflags))
+          (rawSettings dflags)
    ++ [("Project version",             projectVersion dflags),
        ("Project Git commit id",       cProjectGitCommitId),
        ("Booter version",              cBooterVersion),
@@ -5428,6 +5468,8 @@ compilerInfo dflags
     showBool True  = "YES"
     showBool False = "NO"
     isWindows = platformOS (targetPlatform dflags) == OSMinGW32
+    expandDirectories :: FilePath -> Maybe FilePath -> String -> String
+    expandDirectories topd mtoold = expandToolDir mtoold . expandTopDir topd
 
 -- Produced by deriveConstants
 #include "GHCConstantsHaskellWrappers.hs"
@@ -5567,10 +5609,11 @@ makeDynFlagsConsistent dflags
 -- initialized.
 defaultGlobalDynFlags :: DynFlags
 defaultGlobalDynFlags =
-    (defaultDynFlags settings llvmTargets) { verbosity = 2 }
+    (defaultDynFlags settings (llvmTargets, llvmPasses)) { verbosity = 2 }
   where
     settings = panic "v_unsafeGlobalDynFlags: settings not initialised"
     llvmTargets = panic "v_unsafeGlobalDynFlags: llvmTargets not initialised"
+    llvmPasses = panic "v_unsafeGlobalDynFlags: llvmPasses not initialised"
 
 #if STAGE < 2
 GLOBAL_VAR(v_unsafeGlobalDynFlags, defaultGlobalDynFlags, DynFlags)

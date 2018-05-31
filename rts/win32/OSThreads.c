@@ -578,9 +578,8 @@ void setThreadNode (uint32_t node)
 {
     if (osNumaAvailable())
     {
-        StgWord mask = 0;
-        mask |= 1 << node;
-        if (!SetThreadAffinityMask(GetCurrentThread(), mask))
+        uint64_t mask = 0;
+        if (!GetNumaNodeProcessorMask(node, &mask) && !SetThreadAffinityMask(GetCurrentThread(), mask))
         {
             sysErrorBelch(
                 "setThreadNode: Error setting affinity of thread to NUMA node `%u': %lu.",
