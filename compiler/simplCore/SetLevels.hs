@@ -1840,9 +1840,10 @@ maxIn max_me (LE { le_lvl_env = lvl_env, le_env = id_env }) in_var lvl
         | otherwise = lvl       -- Ignore some vars depending on max_me
 
 lookupVar :: LevelEnv -> Id -> LevelledExpr
-lookupVar le v = case lookupVarEnv (le_env le) v of
-                    Just (v',vs') -> mkVarApps (Var v') vs'
-                    _             -> Var v
+lookupVar le v =
+  ASSERT( isId v ) case lookupVarEnv (le_env le) v of
+    Just (v',vs') -> mkVarApps (Var v') vs'
+    _             -> Var v
 
 -- Level to which join points are allowed to float (boundary of current tail
 -- context). See Note [Join ceiling]
@@ -2004,8 +2005,7 @@ cloneLetVars is_rec
 add_id :: IdEnv (OutVar, [OutVar]) -> (Var, Var) -> IdEnv (OutVar, [OutVar])
 add_id id_env (v, v1)
   | isTyVar v = delVarEnv    id_env v
-  | otherwise = ASSERT(not (isCoVar v1))
-                extendVarEnv id_env v (v1,[])
+  | otherwise = extendVarEnv id_env v (v1,[])
 
 {-
 Note [Preserving Fast Entries] (wrt Note [Late Lambda Floating])
