@@ -53,7 +53,7 @@ import Name
 import VarSet
 import Rules
 import VarEnv
-import Var( EvVar )
+import Var( EvVar, varType )
 import Outputable
 import Module
 import SrcLoc
@@ -64,6 +64,7 @@ import BasicTypes
 import DynFlags
 import FastString
 import Util
+import UniqSet( nonDetEltsUniqSet )
 import MonadUtils
 import qualified GHC.LanguageExtensions as LangExt
 import Control.Monad
@@ -688,7 +689,7 @@ dsSpec mb_poly_rhs (L loc (SpecPrag poly_id spec_co spec_inl))
        { dflags <- getDynFlags
        ; this_mod <- getModule
        ; let fn_unf    = realIdUnfolding poly_id
-             spec_unf  = specUnfolding spec_bndrs core_app arity_decrease fn_unf
+             spec_unf  = specUnfolding dflags spec_bndrs core_app arity_decrease fn_unf
              spec_id   = mkLocalId spec_name spec_ty
                             `setInlinePragma` inl_prag
                             `setIdUnfolding`  spec_unf
@@ -848,7 +849,7 @@ decomposeRuleLhs orig_bndrs orig_lhs
   = Left bad_shape_msg
  where
    lhs1         = drop_dicts orig_lhs
-   lhs2         = simpleOptExpr lhs1  -- See Note [Simplify rule LHS]
+   lhs2         = simpleOptExpr unsafeGlobalDynFlags lhs1  -- See Note [Simplify rule LHS]
    (fun2,args2) = collectArgs lhs2
 
    lhs_fvs    = exprFreeVars lhs2
@@ -1144,14 +1145,38 @@ dsTcEvBinds (TcEvBinds {}) = panic "dsEvBinds"    -- Zonker has got rid of this
 dsTcEvBinds (EvBinds bs)   = dsEvBinds bs
 
 dsEvBinds :: Bag EvBind -> DsM [CoreBind]
-dsEvBinds bs = mapM ds_scc (sccEvBinds bs)
+dsEvBinds bs
+  = do { ds_bs <- mapBagM dsEvBind bs
+       ; return (mk_ev_binds ds_bs) }
+
+mk_ev_binds :: Bag (Id,CoreExpr) -> [CoreBind]
+-- We do SCC analysis of the evidence bindings, /after/ desugaring
+-- them. This is convenient: it means we can use the CoreSyn
+-- free-variable functions rather than having to do accurate free vars
+-- for EvTerm.
+mk_ev_binds ds_binds
+  = map ds_scc (stronglyConnCompFromEdgedVerticesUniq edges)
   where
-    ds_scc (AcyclicSCC (EvBind { eb_lhs = v, eb_rhs = r}))
-                          = liftM (NonRec v) (dsEvTerm r)
-    ds_scc (CyclicSCC bs) = liftM Rec (mapM dsEvBind bs)
+    edges :: [ Node EvVar (EvVar,CoreExpr) ]
+    edges = foldrBag ((:) . mk_node) [] ds_binds
+
+    mk_node :: (Id, CoreExpr) -> Node EvVar (EvVar,CoreExpr)
+    mk_node b@(var, rhs)
+      = DigraphNode { node_payload = b
+                    , node_key = var
+                    , node_dependencies = nonDetEltsUniqSet $
+                                          exprFreeVars rhs `unionVarSet`
+                                          coVarsOfType (varType var) }
+      -- It's OK to use nonDetEltsUniqSet here as stronglyConnCompFromEdgedVertices
+      -- is still deterministic even if the edges are in nondeterministic order
+      -- as explained in Note [Deterministic SCC] in Digraph.
+
+    ds_scc (AcyclicSCC (v,r)) = NonRec v r
+    ds_scc (CyclicSCC prs)    = Rec prs
 
 dsEvBind :: EvBind -> DsM (Id, CoreExpr)
 dsEvBind (EvBind { eb_lhs = v, eb_rhs = r}) = liftM ((,) v) (dsEvTerm r)
+
 
 {-**********************************************************************
 *                                                                      *
@@ -1162,6 +1187,13 @@ dsEvBind (EvBind { eb_lhs = v, eb_rhs = r}) = liftM ((,) v) (dsEvTerm r)
 dsEvTerm :: EvTerm -> DsM CoreExpr
 dsEvTerm (EvExpr e)          = return e
 dsEvTerm (EvTypeable ty ev)  = dsEvTypeable ty ev
+dsEvTerm (EvFun { et_tvs = tvs, et_given = given
+                , et_binds = ev_binds, et_body = wanted_id })
+  = do { ds_ev_binds <- dsTcEvBinds ev_binds
+       ; return $ (mkLams (tvs ++ given) $
+                   mkCoreLets ds_ev_binds $
+                   Var wanted_id) }
+
 
 {-**********************************************************************
 *                                                                      *

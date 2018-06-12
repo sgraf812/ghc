@@ -380,8 +380,8 @@ checkClosure( const StgClosure* p )
 
     case MUT_ARR_PTRS_CLEAN:
     case MUT_ARR_PTRS_DIRTY:
-    case MUT_ARR_PTRS_FROZEN:
-    case MUT_ARR_PTRS_FROZEN0:
+    case MUT_ARR_PTRS_FROZEN_CLEAN:
+    case MUT_ARR_PTRS_FROZEN_DIRTY:
         {
             StgMutArrPtrs* a = (StgMutArrPtrs *)p;
             uint32_t i;
@@ -389,6 +389,18 @@ checkClosure( const StgClosure* p )
                 ASSERT(LOOKS_LIKE_CLOSURE_PTR(a->payload[i]));
             }
             return mut_arr_ptrs_sizeW(a);
+        }
+
+    case SMALL_MUT_ARR_PTRS_CLEAN:
+    case SMALL_MUT_ARR_PTRS_DIRTY:
+    case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+    case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY:
+        {
+            StgSmallMutArrPtrs *a = (StgSmallMutArrPtrs *)p;
+            for (uint32_t i = 0; i < a->ptrs; i++) {
+                ASSERT(LOOKS_LIKE_CLOSURE_PTR(a->payload[i]));
+            }
+            return small_mut_arr_ptrs_sizeW(a);
         }
 
     case TSO:

@@ -121,7 +121,6 @@ repTopDs group@(HsGroup { hs_valds   = valds
                         , hs_warnds  = warnds
                         , hs_annds   = annds
                         , hs_ruleds  = ruleds
-                        , hs_vects   = vects
                         , hs_docs    = docs })
  = do { let { bndrs  = hsSigTvBinders valds
                        ++ hsGroupBinders group
@@ -151,7 +150,6 @@ repTopDs group@(HsGroup { hs_valds   = valds
                      ; ann_ds   <- mapM repAnnD annds
                      ; rule_ds  <- mapM repRuleD (concatMap (rds_rules . unLoc)
                                                             ruleds)
-                     ; _        <- mapM no_vect vects
                      ; _        <- mapM no_doc docs
 
                         -- more needed
@@ -178,8 +176,6 @@ repTopDs group@(HsGroup { hs_valds   = valds
       = notHandledL loc "WARNING and DEPRECATION pragmas" $
                     text "Pragma for declaration of" <+> ppr thing
     no_warn (L _ (XWarnDecl _)) = panic "repTopDs"
-    no_vect (L loc decl)
-      = notHandledL loc "Vectorisation pragmas" (ppr decl)
     no_doc (L loc _)
       = notHandledL loc "Haddock documentation" empty
 repTopDs (XHsGroup _) = panic "repTopDs"
@@ -1114,11 +1110,6 @@ repTy (HsListTy _ t)        = do
                                 t1   <- repLTy t
                                 tcon <- repListTyCon
                                 repTapp tcon t1
-repTy (HsPArrTy _ t)   = do
-                           t1   <- repLTy t
-                           tcon <- repTy (HsTyVar noExt NotPromoted
-                                                  (noLoc (tyConName parrTyCon)))
-                           repTapp tcon t1
 repTy (HsTupleTy _ HsUnboxedTuple tys) = do
                                 tys1 <- repLTys tys
                                 tcon <- repUnboxedTupleTyCon (length tys)
@@ -1291,7 +1282,6 @@ repE e@(HsDo _ ctxt (L _ sts))
   = notHandled "mdo, monad comprehension and [: :]" (ppr e)
 
 repE (ExplicitList _ _ es) = do { xs <- repLEs es; repListExp xs }
-repE e@(ExplicitPArr _ _) = notHandled "Parallel arrays" (ppr e)
 repE e@(ExplicitTuple _ es boxed)
   | not (all tupArgPresent es) = notHandled "Tuple sections" (ppr e)
   | isBoxed boxed = do { xs <- repLEs [e | L _ (Present _ e) <- es]; repTup xs }
@@ -1340,7 +1330,6 @@ repE (HsUnboundVar _ uv)   = do
                                sname <- repNameS occ
                                repUnboundVar sname
 
-repE e@(PArrSeq {})        = notHandled "Parallel arrays" (ppr e)
 repE e@(HsCoreAnn {})      = notHandled "Core annotations" (ppr e)
 repE e@(HsSCC {})          = notHandled "Cost centres" (ppr e)
 repE e@(HsTickPragma {})   = notHandled "Tick Pragma" (ppr e)
@@ -2142,19 +2131,34 @@ repInst :: Core (Maybe TH.Overlap) ->
 repInst (MkC o) (MkC cxt) (MkC ty) (MkC ds) = rep2 instanceWithOverlapDName
                                                               [o, cxt, ty, ds]
 
-repDerivStrategy :: Maybe (Located DerivStrategy)
-                 -> DsM (Core (Maybe TH.DerivStrategy))
+repDerivStrategy :: Maybe (LDerivStrategy GhcRn)
+                 -> DsM (Core (Maybe TH.DerivStrategyQ))
 repDerivStrategy mds =
   case mds of
     Nothing -> nothing
     Just (L _ ds) ->
       case ds of
-        StockStrategy    -> just =<< dataCon stockStrategyDataConName
-        AnyclassStrategy -> just =<< dataCon anyclassStrategyDataConName
-        NewtypeStrategy  -> just =<< dataCon newtypeStrategyDataConName
+        StockStrategy    -> just =<< repStockStrategy
+        AnyclassStrategy -> just =<< repAnyclassStrategy
+        NewtypeStrategy  -> just =<< repNewtypeStrategy
+        ViaStrategy ty   -> do ty' <- repLTy (hsSigType ty)
+                               via_strat <- repViaStrategy ty'
+                               just via_strat
   where
-  nothing = coreNothing derivStrategyTyConName
-  just    = coreJust    derivStrategyTyConName
+  nothing = coreNothing derivStrategyQTyConName
+  just    = coreJust    derivStrategyQTyConName
+
+repStockStrategy :: DsM (Core TH.DerivStrategyQ)
+repStockStrategy = rep2 stockStrategyName []
+
+repAnyclassStrategy :: DsM (Core TH.DerivStrategyQ)
+repAnyclassStrategy = rep2 anyclassStrategyName []
+
+repNewtypeStrategy :: DsM (Core TH.DerivStrategyQ)
+repNewtypeStrategy = rep2 newtypeStrategyName []
+
+repViaStrategy :: Core TH.TypeQ -> DsM (Core TH.DerivStrategyQ)
+repViaStrategy (MkC t) = rep2 viaStrategyName [t]
 
 repOverlap :: Maybe OverlapMode -> DsM (Core (Maybe TH.Overlap))
 repOverlap mb =
@@ -2178,7 +2182,7 @@ repClass :: Core TH.CxtQ -> Core TH.Name -> Core [TH.TyVarBndrQ]
 repClass (MkC cxt) (MkC cls) (MkC tvs) (MkC fds) (MkC ds)
   = rep2 classDName [cxt, cls, tvs, fds, ds]
 
-repDeriv :: Core (Maybe TH.DerivStrategy)
+repDeriv :: Core (Maybe TH.DerivStrategyQ)
          -> Core TH.CxtQ -> Core TH.TypeQ
          -> DsM (Core TH.DecQ)
 repDeriv (MkC ds) (MkC cxt) (MkC ty)

@@ -51,7 +51,7 @@ import NameEnv
 import Avail
 import Outputable
 import Bag
-import BasicTypes       ( DerivStrategy, RuleName, pprRuleName )
+import BasicTypes       ( RuleName, pprRuleName )
 import FastString
 import SrcLoc
 import DynFlags
@@ -68,7 +68,6 @@ import Control.Arrow ( first )
 import Data.List ( mapAccumL )
 import qualified Data.List.NonEmpty as NE
 import Data.List.NonEmpty ( NonEmpty(..) )
-import Data.Maybe ( isJust )
 import qualified Data.Set as Set ( difference, fromList, toList, null )
 
 {- | @rnSourceDecl@ "renames" declarations.
@@ -99,7 +98,6 @@ rnSrcDecls group@(HsGroup { hs_valds   = val_decls,
                             hs_fords   = foreign_decls,
                             hs_defds   = default_decls,
                             hs_ruleds  = rule_decls,
-                            hs_vects   = vect_decls,
                             hs_docs    = docs })
  = do {
    -- (A) Process the fixity declarations, creating a mapping from
@@ -187,12 +185,11 @@ rnSrcDecls group@(HsGroup { hs_valds   = val_decls,
    (rn_rule_decls,    src_fvs2) <- setXOptM LangExt.ScopedTypeVariables $
                                    rnList rnHsRuleDecls rule_decls ;
                            -- Inside RULES, scoped type variables are on
-   (rn_vect_decls,    src_fvs3) <- rnList rnHsVectDecl    vect_decls ;
-   (rn_foreign_decls, src_fvs4) <- rnList rnHsForeignDecl foreign_decls ;
-   (rn_ann_decls,     src_fvs5) <- rnList rnAnnDecl       ann_decls ;
-   (rn_default_decls, src_fvs6) <- rnList rnDefaultDecl   default_decls ;
-   (rn_deriv_decls,   src_fvs7) <- rnList rnSrcDerivDecl  deriv_decls ;
-   (rn_splice_decls,  src_fvs8) <- rnList rnSpliceDecl    splice_decls ;
+   (rn_foreign_decls, src_fvs3) <- rnList rnHsForeignDecl foreign_decls ;
+   (rn_ann_decls,     src_fvs4) <- rnList rnAnnDecl       ann_decls ;
+   (rn_default_decls, src_fvs5) <- rnList rnDefaultDecl   default_decls ;
+   (rn_deriv_decls,   src_fvs6) <- rnList rnSrcDerivDecl  deriv_decls ;
+   (rn_splice_decls,  src_fvs7) <- rnList rnSpliceDecl    splice_decls ;
       -- Haddock docs; no free vars
    rn_docs <- mapM (wrapLocM rnDocDecl) docs ;
 
@@ -210,13 +207,12 @@ rnSrcDecls group@(HsGroup { hs_valds   = val_decls,
                              hs_annds  = rn_ann_decls,
                              hs_defds  = rn_default_decls,
                              hs_ruleds = rn_rule_decls,
-                             hs_vects  = rn_vect_decls,
                              hs_docs   = rn_docs } ;
 
         tcf_bndrs = hsTyClForeignBinders rn_tycl_decls rn_foreign_decls ;
         other_def  = (Just (mkNameSet tcf_bndrs), emptyNameSet) ;
-        other_fvs  = plusFVs [src_fvs1, src_fvs2, src_fvs3, src_fvs4, src_fvs5,
-                              src_fvs6, src_fvs7, src_fvs8] ;
+        other_fvs  = plusFVs [src_fvs1, src_fvs2, src_fvs3, src_fvs4,
+                              src_fvs5, src_fvs6, src_fvs7] ;
                 -- It is tiresome to gather the binders from type and class decls
 
         src_dus = [other_def] `plusDU` bind_dus `plusDU` usesOnly other_fvs ;
@@ -959,14 +955,16 @@ Here 'k' is in scope in the kind signature, just like 'x'.
 -}
 
 rnSrcDerivDecl :: DerivDecl GhcPs -> RnM (DerivDecl GhcRn, FreeVars)
-rnSrcDerivDecl (DerivDecl _ ty deriv_strat overlap)
+rnSrcDerivDecl (DerivDecl _ ty mds overlap)
   = do { standalone_deriv_ok <- xoptM LangExt.StandaloneDeriving
-       ; deriv_strats_ok     <- xoptM LangExt.DerivingStrategies
        ; unless standalone_deriv_ok (addErr standaloneDerivErr)
-       ; failIfTc (isJust deriv_strat && not deriv_strats_ok) $
-           illegalDerivStrategyErr $ fmap unLoc deriv_strat
-       ; (ty', fvs) <- rnHsSigWcType DerivDeclCtx ty
-       ; return (DerivDecl noExt ty' deriv_strat overlap, fvs) }
+       ; (mds', ty', fvs)
+           <- rnLDerivStrategy DerivDeclCtx mds $ \strat_tvs ppr_via_ty ->
+              rnAndReportFloatingViaTvs strat_tvs loc ppr_via_ty "instance" $
+              rnHsSigWcType DerivDeclCtx ty
+       ; return (DerivDecl noExt ty' mds' overlap, fvs) }
+  where
+    loc = getLoc $ hsib_body $ hswc_body ty
 rnSrcDerivDecl (XDerivDecl _) = panic "rnSrcDerivDecl"
 
 standaloneDerivErr :: SDoc
@@ -1105,53 +1103,6 @@ badRuleLhsErr name lhs bad_e
     err = case bad_e of
             HsUnboundVar _ uv -> text "Not in scope:" <+> ppr uv
             _ -> text "Illegal expression:" <+> ppr bad_e
-
-{-
-*********************************************************
-*                                                      *
-\subsection{Vectorisation declarations}
-*                                                      *
-*********************************************************
--}
-
-rnHsVectDecl :: VectDecl GhcPs -> RnM (VectDecl GhcRn, FreeVars)
--- FIXME: For the moment, the right-hand side is restricted to be a variable as we cannot properly
---        typecheck a complex right-hand side without invoking 'vectType' from the vectoriser.
-rnHsVectDecl (HsVect _ s var rhs@(L _ (HsVar _ _)))
-  = do { var' <- lookupLocatedOccRn var
-       ; (rhs', fv_rhs) <- rnLExpr rhs
-       ; return (HsVect noExt s var' rhs', fv_rhs `addOneFV` unLoc var')
-       }
-rnHsVectDecl (HsVect _ _ _var _rhs)
-  = failWith $ vcat
-               [ text "IMPLEMENTATION RESTRICTION: right-hand side of a VECTORISE pragma"
-               , text "must be an identifier"
-               ]
-rnHsVectDecl (HsNoVect _ s var)
-  = do { var' <- lookupLocatedTopBndrRn var           -- only applies to local (not imported) names
-       ; return (HsNoVect noExt s var', unitFV (unLoc var'))
-       }
-rnHsVectDecl (HsVectType (VectTypePR s tycon Nothing) isScalar)
-  = do { tycon' <- lookupLocatedOccRn tycon
-       ; return ( HsVectType (VectTypePR s tycon' Nothing) isScalar
-                , unitFV (unLoc tycon'))
-       }
-rnHsVectDecl (HsVectType (VectTypePR s tycon (Just rhs_tycon)) isScalar)
-  = do { tycon'     <- lookupLocatedOccRn tycon
-       ; rhs_tycon' <- lookupLocatedOccRn rhs_tycon
-       ; return ( HsVectType (VectTypePR s tycon' (Just rhs_tycon')) isScalar
-                , mkFVs [unLoc tycon', unLoc rhs_tycon'])
-       }
-rnHsVectDecl (HsVectClass (VectClassPR s cls))
-  = do { cls' <- lookupLocatedOccRn cls
-       ; return (HsVectClass (VectClassPR s cls'), unitFV (unLoc cls'))
-       }
-rnHsVectDecl (HsVectInst instTy)
-  = do { (instTy', fvs) <- rnLHsInstType (text "a VECTORISE pragma") instTy
-       ; return (HsVectInst instTy', fvs)
-       }
-rnHsVectDecl (XVectDecl {})
-  = panic "RnSource.rnHsVectDecl: Unexpected 'XVectDecl'"
 
 {- **************************************************************
          *                                                      *
@@ -1682,35 +1633,148 @@ rnDataDefn doc (HsDataDefn { dd_ND = new_or_data, dd_cType = cType
       = do { deriv_strats_ok <- xoptM LangExt.DerivingStrategies
            ; failIfTc (lengthExceeds ds 1 && not deriv_strats_ok)
                multipleDerivClausesErr
-           ; (ds', fvs) <- mapFvRn (rnLHsDerivingClause deriv_strats_ok doc) ds
+           ; (ds', fvs) <- mapFvRn (rnLHsDerivingClause doc) ds
            ; return (L loc ds', fvs) }
 rnDataDefn _ (XHsDataDefn _) = panic "rnDataDefn"
 
-rnLHsDerivingClause :: Bool -> HsDocContext -> LHsDerivingClause GhcPs
+rnLHsDerivingClause :: HsDocContext -> LHsDerivingClause GhcPs
                     -> RnM (LHsDerivingClause GhcRn, FreeVars)
-rnLHsDerivingClause deriv_strats_ok doc
+rnLHsDerivingClause doc
                 (L loc (HsDerivingClause { deriv_clause_ext = noExt
                                          , deriv_clause_strategy = dcs
                                          , deriv_clause_tys = L loc' dct }))
-  = do { failIfTc (isJust dcs && not deriv_strats_ok) $
-           illegalDerivStrategyErr $ fmap unLoc dcs
-       ; (dct', fvs) <- mapFvRn (rnHsSigType doc) dct
-       ; return ( L loc (HsDerivingClause { deriv_clause_ext = noExt
-                                          , deriv_clause_strategy = dcs
-                                          , deriv_clause_tys = L loc' dct' })
-                , fvs ) }
-rnLHsDerivingClause _ _ (L _ (XHsDerivingClause _))
+  = do { (dcs', dct', fvs)
+           <- rnLDerivStrategy doc dcs $ \strat_tvs ppr_via_ty ->
+              mapFvRn (rn_deriv_ty strat_tvs ppr_via_ty) dct
+       ; pure ( L loc (HsDerivingClause { deriv_clause_ext = noExt
+                                        , deriv_clause_strategy = dcs'
+                                        , deriv_clause_tys = L loc' dct' })
+              , fvs ) }
+  where
+    rn_deriv_ty :: [Name] -> SDoc -> LHsSigType GhcPs
+                -> RnM (LHsSigType GhcRn, FreeVars)
+    rn_deriv_ty strat_tvs ppr_via_ty deriv_ty@(HsIB {hsib_body = L loc _}) =
+      rnAndReportFloatingViaTvs strat_tvs loc ppr_via_ty "class" $
+      rnHsSigType doc deriv_ty
+    rn_deriv_ty _ _ (XHsImplicitBndrs _) = panic "rn_deriv_ty"
+rnLHsDerivingClause _ (L _ (XHsDerivingClause _))
   = panic "rnLHsDerivingClause"
+
+rnLDerivStrategy :: forall a.
+                    HsDocContext
+                 -> Maybe (LDerivStrategy GhcPs)
+                 -> ([Name]   -- The tyvars bound by the via type
+                      -> SDoc -- The pretty-printed via type (used for
+                              -- error message reporting)
+                      -> RnM (a, FreeVars))
+                 -> RnM (Maybe (LDerivStrategy GhcRn), a, FreeVars)
+rnLDerivStrategy doc mds thing_inside
+  = case mds of
+      Nothing -> boring_case Nothing
+      Just ds -> do (ds', thing, fvs) <- rn_deriv_strat ds
+                    pure (Just ds', thing, fvs)
+  where
+    rn_deriv_strat :: LDerivStrategy GhcPs
+                   -> RnM (LDerivStrategy GhcRn, a, FreeVars)
+    rn_deriv_strat (L loc ds) = do
+      let extNeeded :: LangExt.Extension
+          extNeeded
+            | ViaStrategy{} <- ds
+            = LangExt.DerivingVia
+            | otherwise
+            = LangExt.DerivingStrategies
+
+      unlessXOptM extNeeded $
+        failWith $ illegalDerivStrategyErr ds
+
+      case ds of
+        StockStrategy    -> boring_case (L loc StockStrategy)
+        AnyclassStrategy -> boring_case (L loc AnyclassStrategy)
+        NewtypeStrategy  -> boring_case (L loc NewtypeStrategy)
+        ViaStrategy via_ty ->
+          do (via_ty', fvs1) <- rnHsSigType doc via_ty
+             let HsIB { hsib_ext  = HsIBRn { hsib_vars = via_imp_tvs }
+                      , hsib_body = via_body } = via_ty'
+                 (via_exp_tv_bndrs, _, _) = splitLHsSigmaTy via_body
+                 via_exp_tvs = map hsLTyVarName via_exp_tv_bndrs
+                 via_tvs = via_imp_tvs ++ via_exp_tvs
+             (thing, fvs2) <- extendTyVarEnvFVRn via_tvs $
+                              thing_inside via_tvs (ppr via_ty')
+             pure (L loc (ViaStrategy via_ty'), thing, fvs1 `plusFV` fvs2)
+
+    boring_case :: mds
+                -> RnM (mds, a, FreeVars)
+    boring_case mds = do
+      (thing, fvs) <- thing_inside [] empty
+      pure (mds, thing, fvs)
+
+-- | Errors if a @via@ type binds any floating type variables.
+-- See @Note [Floating `via` type variables]@
+rnAndReportFloatingViaTvs
+  :: forall a. Outputable a
+  => [Name]  -- ^ The bound type variables from a @via@ type.
+  -> SrcSpan -- ^ The source span (for error reporting only).
+  -> SDoc    -- ^ The pretty-printed @via@ type (for error reporting only).
+  -> String  -- ^ A description of what the @via@ type scopes over
+             --   (for error reporting only).
+  -> RnM (a, FreeVars) -- ^ The thing the @via@ type scopes over.
+  -> RnM (a, FreeVars)
+rnAndReportFloatingViaTvs tv_names loc ppr_via_ty via_scope_desc thing_inside
+  = do (thing, thing_fvs) <- thing_inside
+       setSrcSpan loc $ mapM_ (report_floating_via_tv thing thing_fvs) tv_names
+       pure (thing, thing_fvs)
+  where
+    report_floating_via_tv :: a -> FreeVars -> Name -> RnM ()
+    report_floating_via_tv thing used_names tv_name
+      = unless (tv_name `elemNameSet` used_names) $ addErr $ vcat
+          [ text "Type variable" <+> quotes (ppr tv_name) <+>
+            text "is bound in the" <+> quotes (text "via") <+>
+            text "type" <+> quotes ppr_via_ty
+          , text "but is not mentioned in the derived" <+>
+            text via_scope_desc <+> quotes (ppr thing) <>
+            text ", which is illegal" ]
+
+{-
+Note [Floating `via` type variables]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Imagine the following `deriving via` clause:
+
+    data Quux
+      deriving Eq via (Const a Quux)
+
+This should be rejected. Why? Because it would generate the following instance:
+
+    instance Eq Quux where
+      (==) = coerce @(Quux         -> Quux         -> Bool)
+                    @(Const a Quux -> Const a Quux -> Bool)
+                    (==)
+
+This instance is ill-formed, as the `a` in `Const a Quux` is unbound. The
+problem is that `a` is never used anywhere in the derived class `Eq`. Since
+`a` is bound but has no use sites, we refer to it as "floating".
+
+We use the rnAndReportFloatingViaTvs function to check that any type renamed
+within the context of the `via` deriving strategy actually uses all bound
+`via` type variables, and if it doesn't, it throws an error.
+-}
 
 badGadtStupidTheta :: HsDocContext -> SDoc
 badGadtStupidTheta _
   = vcat [text "No context is allowed on a GADT-style data declaration",
           text "(You can put a context on each constructor, though.)"]
 
-illegalDerivStrategyErr :: Maybe DerivStrategy -> SDoc
+illegalDerivStrategyErr :: DerivStrategy GhcPs -> SDoc
 illegalDerivStrategyErr ds
-  = vcat [ text "Illegal deriving strategy" <> colon <+> maybe empty ppr ds
-         , text "Use DerivingStrategies to enable this extension" ]
+  = vcat [ text "Illegal deriving strategy" <> colon <+> derivStrategyName ds
+         , text enableStrategy ]
+
+  where
+    enableStrategy :: String
+    enableStrategy
+      | ViaStrategy{} <- ds
+      = "Use DerivingVia to enable this extension"
+      | otherwise
+      = "Use DerivingStrategies to enable this extension"
 
 multipleDerivClausesErr :: SDoc
 multipleDerivClausesErr
@@ -2187,8 +2251,6 @@ add gp@(HsGroup {hs_annds  = ts}) l (AnnD _ d) ds
   = addl (gp { hs_annds = L l d : ts }) ds
 add gp@(HsGroup {hs_ruleds  = ts}) l (RuleD _ d) ds
   = addl (gp { hs_ruleds = L l d : ts }) ds
-add gp@(HsGroup {hs_vects  = ts}) l (VectD _ d) ds
-  = addl (gp { hs_vects = L l d : ts }) ds
 add gp l (DocD _ d) ds
   = addl (gp { hs_docs = (L l d) : (hs_docs gp) })  ds
 add (HsGroup {}) _ (SpliceD _ (XSpliceDecl _)) _ = panic "RnSource.add"

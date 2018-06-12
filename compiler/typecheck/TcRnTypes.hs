@@ -46,7 +46,7 @@ module TcRnTypes(
         pprTcTyThingCategory, pprPECategory, CompleteMatch(..),
 
         -- Desugaring types
-        DsM, DsLclEnv(..), DsGblEnv(..), PArrBuiltin(..),
+        DsM, DsLclEnv(..), DsGblEnv(..),
         DsMetaEnv, DsMetaVal(..), CompleteMatchMap,
         mkCompleteMatchMap, extendCompleteMatchMap,
 
@@ -64,6 +64,9 @@ module TcRnTypes(
         TcIdSigInst(..), TcPatSynInfo(..),
         isPartialSig, hasCompleteSig,
 
+        -- QCInst
+        QCInst(..), isPendingScInst,
+
         -- Canonical constraints
         Xi, Ct(..), Cts, emptyCts, andCts, andManyCts, pprCts,
         singleCt, listToCts, ctsElts, consCts, snocCts, extendCtsList,
@@ -78,7 +81,7 @@ module TcRnTypes(
         mkNonCanonical, mkNonCanonicalCt, mkGivens,
         mkIrredCt, mkInsolubleCt,
         ctEvPred, ctEvLoc, ctEvOrigin, ctEvEqRel,
-        ctEvExpr, ctEvCoercion, ctEvEvId,
+        ctEvExpr, ctEvTerm, ctEvCoercion, ctEvEvId,
         tyCoVarsOfCt, tyCoVarsOfCts,
         tyCoVarsOfCtList, tyCoVarsOfCtsList,
 
@@ -362,25 +365,6 @@ a @UniqueSupply@ and some annotations, which
 presumably include source-file location information:
 -}
 
--- If '-XParallelArrays' is given, the desugarer populates this table with the corresponding
--- variables found in 'Data.Array.Parallel'.
---
-data PArrBuiltin
-        = PArrBuiltin
-        { lengthPVar         :: Var     -- ^ lengthP
-        , replicatePVar      :: Var     -- ^ replicateP
-        , singletonPVar      :: Var     -- ^ singletonP
-        , mapPVar            :: Var     -- ^ mapP
-        , filterPVar         :: Var     -- ^ filterP
-        , zipPVar            :: Var     -- ^ zipP
-        , crossMapPVar       :: Var     -- ^ crossMapP
-        , indexPVar          :: Var     -- ^ (!:)
-        , emptyPVar          :: Var     -- ^ emptyP
-        , appPVar            :: Var     -- ^ (+:+)
-        , enumFromToPVar     :: Var     -- ^ enumFromToP
-        , enumFromThenToPVar :: Var     -- ^ enumFromThenToP
-        }
-
 data DsGblEnv
         = DsGblEnv
         { ds_mod          :: Module             -- For SCC profiling
@@ -389,11 +373,6 @@ data DsGblEnv
         , ds_msgs    :: IORef Messages          -- Warning messages
         , ds_if_env  :: (IfGblEnv, IfLclEnv)    -- Used for looking up global,
                                                 -- possibly-imported things
-        , ds_dph_env :: GlobalRdrEnv            -- exported entities of 'Data.Array.Parallel.Prim'
-                                                -- iff '-fvectorise' flag was given as well as
-                                                -- exported entities of 'Data.Array.Parallel' iff
-                                                -- '-XParallelArrays' was given; otherwise, empty
-        , ds_parr_bi :: PArrBuiltin             -- desugarer names for '-XParallelArrays'
         , ds_complete_matches :: CompleteMatchMap
            -- Additional complete pattern matches
         , ds_cc_st   :: IORef CostCentreState
@@ -678,7 +657,6 @@ data TcGblEnv
         tcg_fam_insts :: [FamInst],          -- ...Family instances
         tcg_rules     :: [LRuleDecl GhcTc],  -- ...Rules
         tcg_fords     :: [LForeignDecl GhcTc], -- ...Foreign import & exports
-        tcg_vects     :: [LVectDecl GhcTc],   -- ...Vectorisation declarations
         tcg_patsyns   :: [PatSyn],            -- ...Pattern synonyms
 
         tcg_doc_hdr   :: Maybe LHsDocString, -- ^ Maybe Haddock header docs
@@ -1724,6 +1702,26 @@ data Ct
       cc_hole :: Hole
     }
 
+  | CQuantCan QCInst       -- A quantified constraint
+      -- NB: I expect to make more of the cases in Ct
+      --     look like this, with the payload in an
+      --     auxiliary type
+
+------------
+data QCInst  -- A much simplified version of ClsInst
+             -- See Note [Quantified constraints] in TcCanonical
+  = QCI { qci_ev   :: CtEvidence -- Always of type forall tvs. context => ty
+                                 -- Always Given
+        , qci_tvs  :: [TcTyVar]  -- The tvs
+        , qci_pred :: TcPredType -- The ty
+        , qci_pend_sc :: Bool    -- Same as cc_pend_sc flag in CDictCan
+                                 -- Invariant: True => qci_pred is a ClassPred
+    }
+
+instance Outputable QCInst where
+  ppr (QCI { qci_ev = ev }) = ppr ev
+
+------------
 -- | An expression or type hole
 data Hole = ExprHole UnboundVar
             -- ^ Either an out-of-scope variable or a "true" hole in an
@@ -1810,7 +1808,8 @@ mkGivens loc ev_ids
                                        , ctev_loc = loc })
 
 ctEvidence :: Ct -> CtEvidence
-ctEvidence = cc_ev
+ctEvidence (CQuantCan (QCI { qci_ev = ev })) = ev
+ctEvidence ct = cc_ev ct
 
 ctLoc :: Ct -> CtLoc
 ctLoc = ctEvLoc . ctEvidence
@@ -1823,7 +1822,7 @@ ctOrigin = ctLocOrigin . ctLoc
 
 ctPred :: Ct -> PredType
 -- See Note [Ct/evidence invariant]
-ctPred ct = ctEvPred (cc_ev ct)
+ctPred ct = ctEvPred (ctEvidence ct)
 
 ctEvId :: Ct -> EvVar
 -- The evidence Id for this Ct
@@ -1848,7 +1847,7 @@ ctEqRel :: Ct -> EqRel
 ctEqRel = ctEvEqRel . ctEvidence
 
 instance Outputable Ct where
-  ppr ct = ppr (cc_ev ct) <+> parens pp_sort
+  ppr ct = ppr (ctEvidence ct) <+> parens pp_sort
     where
       pp_sort = case ct of
          CTyEqCan {}      -> text "CTyEqCan"
@@ -1861,6 +1860,9 @@ instance Outputable Ct where
             | insol     -> text "CIrredCan(insol)"
             | otherwise -> text "CIrredCan(sol)"
          CHoleCan { cc_hole = hole } -> text "CHoleCan:" <+> ppr hole
+         CQuantCan (QCI { qci_pend_sc = pend_sc })
+            | pend_sc   -> text "CQuantCan(psc)"
+            | otherwise -> text "CQuantCan"
 
 {-
 ************************************************************************
@@ -1891,9 +1893,7 @@ tyCoFVsOfCt (CFunEqCan { cc_tyargs = tys, cc_fsk = fsk })
   = tyCoFVsOfTypes tys `unionFV` FV.unitFV fsk
                        `unionFV` tyCoFVsOfType (tyVarKind fsk)
 tyCoFVsOfCt (CDictCan { cc_tyargs = tys }) = tyCoFVsOfTypes tys
-tyCoFVsOfCt (CIrredCan { cc_ev = ev }) = tyCoFVsOfType (ctEvPred ev)
-tyCoFVsOfCt (CHoleCan { cc_ev = ev }) = tyCoFVsOfType (ctEvPred ev)
-tyCoFVsOfCt (CNonCanonical { cc_ev = ev }) = tyCoFVsOfType (ctEvPred ev)
+tyCoFVsOfCt ct = tyCoFVsOfType (ctPred ct)
 
 -- | Returns free variables of a bag of constraints as a non-deterministic
 -- set. See Note [Deterministic FV] in FV.
@@ -2094,13 +2094,13 @@ NB: we keep *all* derived insolubles under some circumstances:
 -}
 
 isWantedCt :: Ct -> Bool
-isWantedCt = isWanted . cc_ev
+isWantedCt = isWanted . ctEvidence
 
 isGivenCt :: Ct -> Bool
-isGivenCt = isGiven . cc_ev
+isGivenCt = isGiven . ctEvidence
 
 isDerivedCt :: Ct -> Bool
-isDerivedCt = isDerived . cc_ev
+isDerivedCt = isDerived . ctEvidence
 
 isCTyEqCan :: Ct -> Bool
 isCTyEqCan (CTyEqCan {})  = True
@@ -2195,10 +2195,17 @@ isUserTypeErrorCt ct = case getUserTypeErrorMsg ct of
                          _      -> False
 
 isPendingScDict :: Ct -> Maybe Ct
--- Says whether cc_pend_sc is True, AND if so flips the flag
+-- Says whether this is a CDictCan with cc_pend_sc is True,
+-- AND if so flips the flag
 isPendingScDict ct@(CDictCan { cc_pend_sc = True })
                   = Just (ct { cc_pend_sc = False })
 isPendingScDict _ = Nothing
+
+isPendingScInst :: QCInst -> Maybe QCInst
+-- Same as isPrendinScDict, but for QCInsts
+isPendingScInst qci@(QCI { qci_pend_sc = True })
+                  = Just (qci { qci_pend_sc = False })
+isPendingScInst _ = Nothing
 
 setPendingScDict :: Ct -> Ct
 -- Set the cc_pend_sc flag to True
@@ -2747,8 +2754,12 @@ ctEvEqRel = predTypeEqRel . ctEvPred
 ctEvRole :: CtEvidence -> Role
 ctEvRole = eqRelRole . ctEvEqRel
 
+ctEvTerm :: CtEvidence -> EvTerm
+ctEvTerm ev = EvExpr (ctEvExpr ev)
+
 ctEvExpr :: CtEvidence -> EvExpr
-ctEvExpr ev@(CtWanted { ctev_dest = HoleDest _ }) = evCoercion $ ctEvCoercion ev
+ctEvExpr ev@(CtWanted { ctev_dest = HoleDest _ })
+            = Coercion $ ctEvCoercion ev
 ctEvExpr ev = evId (ctEvEvId ev)
 
 ctEvCoercion :: CtEvidence -> Coercion
@@ -2881,7 +2892,7 @@ ctFlavourRole (CFunEqCan { cc_ev = ev })
 ctFlavourRole (CHoleCan { cc_ev = ev })
   = (ctEvFlavour ev, NomEq)
 ctFlavourRole ct
-  = ctEvFlavourRole (cc_ev ct)
+  = ctEvFlavourRole (ctEvidence ct)
 
 {- Note [eqCanRewrite]
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -3249,6 +3260,9 @@ data SkolemInfo
 
   | ReifySkol           -- Bound during Template Haskell reification
 
+  | QuantCtxtSkol       -- Quantified context, e.g.
+                        --   f :: forall c. (forall a. c a => c [a]) => blah
+
   | UnkSkol             -- Unhelpful info (until I improve it)
 
 instance Outputable SkolemInfo where
@@ -3277,6 +3291,8 @@ pprSkolInfo (UnifyForAllSkol ty) = text "the type" <+> ppr ty
 pprSkolInfo (TyConSkol flav name) = text "the" <+> ppr flav <+> text "declaration for" <+> quotes (ppr name)
 pprSkolInfo (DataConSkol name)= text "the data constructor" <+> quotes (ppr name)
 pprSkolInfo ReifySkol         = text "the type being reified"
+
+pprSkolInfo (QuantCtxtSkol {}) = text "a quantified context"
 
 -- UnkSkol
 -- For type variables the others are dealt with by pprSkolTvBinding.
@@ -3383,7 +3399,6 @@ data CtOrigin
   | NegateOrigin                        -- Occurrence of syntactic negation
 
   | ArithSeqOrigin (ArithSeqInfo GhcRn) -- [x..], [x..y] etc
-  | PArrSeqOrigin  (ArithSeqInfo GhcRn) -- [:x..y:] and [:x,y..z:]
   | SectionOrigin
   | TupleOrigin                        -- (..,..)
   | ExprSigOrigin       -- e :: ty
@@ -3523,12 +3538,10 @@ exprCtOrigin (HsMultiIf _ rhs)   = lGRHSCtOrigin rhs
 exprCtOrigin (HsLet _ _ e)       = lexprCtOrigin e
 exprCtOrigin (HsDo {})           = DoOrigin
 exprCtOrigin (ExplicitList {})   = Shouldn'tHappenOrigin "list"
-exprCtOrigin (ExplicitPArr {})   = Shouldn'tHappenOrigin "parallel array"
 exprCtOrigin (RecordCon {})      = Shouldn'tHappenOrigin "record construction"
 exprCtOrigin (RecordUpd {})      = Shouldn'tHappenOrigin "record update"
 exprCtOrigin (ExprWithTySig {})  = ExprSigOrigin
 exprCtOrigin (ArithSeq {})       = Shouldn'tHappenOrigin "arithmetic sequence"
-exprCtOrigin (PArrSeq {})      = Shouldn'tHappenOrigin "parallel array sequence"
 exprCtOrigin (HsSCC _ _ _ e)     = lexprCtOrigin e
 exprCtOrigin (HsCoreAnn _ _ _ e) = lexprCtOrigin e
 exprCtOrigin (HsBracket {})      = Shouldn'tHappenOrigin "TH bracket"
@@ -3675,7 +3688,6 @@ pprCtO ViewPatOrigin         = text "a view pattern"
 pprCtO IfOrigin              = text "an if expression"
 pprCtO (LiteralOrigin lit)   = hsep [text "the literal", quotes (ppr lit)]
 pprCtO (ArithSeqOrigin seq)  = hsep [text "the arithmetic sequence", quotes (ppr seq)]
-pprCtO (PArrSeqOrigin seq)   = hsep [text "the parallel array sequence", quotes (ppr seq)]
 pprCtO SectionOrigin         = text "an operator section"
 pprCtO TupleOrigin           = text "a tuple"
 pprCtO NegateOrigin          = text "a use of syntactic negation"

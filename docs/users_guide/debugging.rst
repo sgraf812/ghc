@@ -299,13 +299,6 @@ subexpression elimination pass.
     that ``foo`` is not being inlined. You can pass ``-dinline-check foo`` and
     you will see a report about why ``foo`` is not inlined.
 
-
-.. ghc-flag:: -ddump-vect
-    :shortdesc: Dump vectoriser input and output
-    :type: dynamic
-
-    Dumps the output of the vectoriser.
-
 .. ghc-flag:: -ddump-simpl
     :shortdesc: Dump final simplifier output
     :type: dynamic
@@ -351,12 +344,6 @@ subexpression elimination pass.
 
     Dump "occurrence analysis" output
 
-.. ghc-flag:: -ddump-vt-trace
-    :shortdesc: Trace vectoriser
-    :type: dynamic
-
-    Make the vectoriser be *real* chatty about what it is up to.
-
 .. ghc-flag:: -ddump-prep
     :shortdesc: Dump prepared core
     :type: dynamic
@@ -394,6 +381,9 @@ These flags dump various phases of GHC's C-\\- pipeline.
     Dump output from all C-\\- pipeline stages. In case of
     ``.cmm`` compilation this also dumps the result of
     file parsing.
+
+    Cmm dumps don't include unreachable blocks since we print
+    blocks in reverse post order.
 
 .. ghc-flag:: -ddump-cmm-from-stg
     :shortdesc: Dump STG-to-C-\\- output
@@ -770,6 +760,17 @@ Checking for consistency
 
     Compile with alignment checks for all info table dereferences. This can be
     useful when finding pointer tagging issues.
+
+.. ghc-flag:: -fproc-alignment
+    :shortdesc: Align functions at given boundry.
+    :type: dynamic
+
+    Align functions to multiples of the given value. Only valid values are powers
+    of two.
+
+    ``-fproc-alignment=64`` can be used to limit alignment impact on performance
+    as each function will start at a cache line.
+    However forcing larger alignments in general reduces performance.
 
 .. ghc-flag:: -fcatch-bottoms
     :shortdesc: Insert ``error`` expressions after bottoming expressions; useful

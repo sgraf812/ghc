@@ -11,7 +11,7 @@
 
 module TcBinds ( tcLocalBinds, tcTopBinds, tcRecSelBinds,
                  tcHsBootSigs, tcPolyCheck,
-                 tcVectDecls, addTypecheckedBinds,
+                 addTypecheckedBinds,
                  chooseInferredQuantifiers,
                  badBootDeclErr ) where
 
@@ -53,7 +53,6 @@ import NameSet
 import NameEnv
 import SrcLoc
 import Bag
-import ListSetOps
 import ErrUtils
 import Digraph
 import Maybes
@@ -68,7 +67,6 @@ import qualified GHC.LanguageExtensions as LangExt
 import ConLike
 
 import Control.Monad
-import Data.List.NonEmpty ( NonEmpty(..) )
 
 #include "HsVersions.h"
 
@@ -712,7 +710,7 @@ tcPolyCheck prag_fn
        ; (ev_binds, (co_fn, matches'))
             <- checkConstraints skol_info skol_tvs ev_vars $
                tcExtendBinderStack [TcIdBndr mono_id NotTopLevel]  $
-               tcExtendTyVarEnv2 tv_prs $
+               tcExtendNameTyVarEnv tv_prs $
                setSrcSpan loc           $
                tcMatchesFun (L nm_loc mono_name) matches (mkCheckExpType tau)
 
@@ -1215,78 +1213,6 @@ It also cleverly does an ambiguity check; for example, rejecting
 where F is a non-injective type function.
 -}
 
-{- *********************************************************************
-*                                                                      *
-                         Vectorisation
-*                                                                      *
-********************************************************************* -}
-
-tcVectDecls :: [LVectDecl GhcRn] -> TcM ([LVectDecl GhcTcId])
-tcVectDecls decls
-  = do { decls' <- mapM (wrapLocM tcVect) decls
-       ; let ids  = [lvectDeclName decl | decl <- decls', not $ lvectInstDecl decl]
-             dups = findDupsEq (==) ids
-       ; mapM_ reportVectDups dups
-       ; traceTcConstraints "End of tcVectDecls"
-       ; return decls'
-       }
-  where
-    reportVectDups (first :| (_second:_more))
-      = addErrAt (getSrcSpan first) $
-          text "Duplicate vectorisation declarations for" <+> ppr first
-    reportVectDups _ = return ()
-
---------------
-tcVect :: VectDecl GhcRn -> TcM (VectDecl GhcTcId)
--- FIXME: We can't typecheck the expression of a vectorisation declaration against the vectorised
---   type of the original definition as this requires internals of the vectoriser not available
---   during type checking.  Instead, constrain the rhs of a vectorisation declaration to be a single
---   identifier (this is checked in 'rnHsVectDecl').  Fix this by enabling the use of 'vectType'
---   from the vectoriser here.
-tcVect (HsVect _ s name rhs)
-  = addErrCtxt (vectCtxt name) $
-    do { var <- wrapLocM tcLookupId name
-       ; let L rhs_loc (HsVar noExt (L lv rhs_var_name)) = rhs
-       ; rhs_id <- tcLookupId rhs_var_name
-       ; return $ HsVect noExt s var (L rhs_loc (HsVar noExt (L lv rhs_id)))
-       }
-
-tcVect (HsNoVect _ s name)
-  = addErrCtxt (vectCtxt name) $
-    do { var <- wrapLocM tcLookupId name
-       ; return $ HsNoVect noExt s var
-       }
-tcVect (HsVectType (VectTypePR _ lname rhs_name) isScalar)
-  = addErrCtxt (vectCtxt lname) $
-    do { tycon <- tcLookupLocatedTyCon lname
-       ; checkTc (   not isScalar             -- either    we have a non-SCALAR declaration
-                 || isJust rhs_name           -- or        we explicitly provide a vectorised type
-                 || tyConArity tycon == 0     -- otherwise the type constructor must be nullary
-                 )
-                 scalarTyConMustBeNullary
-
-       ; rhs_tycon <- fmapMaybeM (tcLookupTyCon . unLoc) rhs_name
-       ; return $ HsVectType (VectTypeTc tycon rhs_tycon) isScalar
-       }
-tcVect (HsVectClass (VectClassPR _ lname))
-  = addErrCtxt (vectCtxt lname) $
-    do { cls <- tcLookupLocatedClass lname
-       ; return $ HsVectClass cls
-       }
-tcVect (HsVectInst linstTy)
-  = addErrCtxt (vectCtxt linstTy) $
-    do { (cls, tys) <- tcHsVectInst linstTy
-       ; inst       <- tcLookupInstance cls tys
-       ; return $ HsVectInst inst
-       }
-tcVect (XVectDecl {})
-  = panic "TcBinds.tcVect: Unexpected 'XVectDecl'"
-
-vectCtxt :: Outputable thing => thing -> SDoc
-vectCtxt thing = text "When checking the vectorisation declaration for" <+> ppr thing
-
-scalarTyConMustBeNullary :: MsgDoc
-scalarTyConMustBeNullary = text "VECTORISE SCALAR type constructor must be nullary"
 
 {-
 Note [SPECIALISE pragmas]
@@ -1531,8 +1457,8 @@ tcExtendTyVarEnvFromSig :: TcIdSigInst -> TcM a -> TcM a
 tcExtendTyVarEnvFromSig sig_inst thing_inside
   | TISI { sig_inst_skols = skol_prs, sig_inst_wcs = wcs } <- sig_inst
      -- Note [Use tcExtendTyVar not scopeTyVars in tcRhs]
-  = tcExtendTyVarEnv2 wcs $
-    tcExtendTyVarEnv2 skol_prs $
+  = tcExtendNameTyVarEnv wcs $
+    tcExtendNameTyVarEnv skol_prs $
     thing_inside
 
 tcExtendIdBinderStackForRhs :: [MonoBindInfo] -> TcM a -> TcM a

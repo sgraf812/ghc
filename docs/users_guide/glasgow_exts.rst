@@ -1228,7 +1228,6 @@ Parallel List Comprehensions
 
 .. extension:: ParallelListComp
     :shortdesc: Enable parallel list comprehensions.
-        Implied by :extension:`ParallelArrays`.
 
     :since: 6.8.1
 
@@ -4103,7 +4102,7 @@ causes the generated code to be ill-typed.
 
 As a general rule, if a data type has a derived ``Functor`` instance and its
 last type parameter occurs on the right-hand side of the data declaration, then
-either it must (1) occur bare (e.g., ``newtype Id a = a``), or (2) occur as the
+either it must (1) occur bare (e.g., ``newtype Id a = Id a``), or (2) occur as the
 last argument of a type constructor (as in ``Right`` above).
 
 There are two exceptions to this rule:
@@ -4614,6 +4613,9 @@ It is particularly galling that, since the constructor doesn't appear at
 run-time, this instance declaration defines a dictionary which is
 *wholly equivalent* to the ``Int`` dictionary, only slower!
 
+:extension:`DerivingVia` (see :ref:`deriving-via`) is a generalization of
+this idea.
+
 .. _generalized-newtype-deriving:
 
 Generalising the deriving clause
@@ -4718,7 +4720,7 @@ which really behave differently for the newtype and its representation.
         {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
         import Lib
-        
+
         newtype Int' = Int' Int
                      deriving (AClass)
 
@@ -4941,6 +4943,11 @@ isn't sophisticated enough to determine this, so you'll need to enable
 you do go down this route, make sure you can convince yourself that all of
 the type family instances you're deriving will eventually terminate if used!
 
+Note that :extension:`DerivingVia` (see :ref:`deriving-via`) uses essentially
+the same specification to derive instances of associated type families as well
+(except that it uses the ``via`` type instead of the underlying ``rep-type``
+of a newtype).
+
 .. _derive-any-class:
 
 Deriving any other class
@@ -5144,10 +5151,12 @@ Currently, the deriving strategies are:
 - ``stock``: Have GHC implement a "standard" instance for a data type,
   if possible (e.g., ``Eq``, ``Ord``, ``Generic``, ``Data``, ``Functor``, etc.)
 
-- ``anyclass``: Use :extension:`DeriveAnyClass`
+- ``anyclass``: Use :extension:`DeriveAnyClass` (see :ref:`derive-any-class`)
 
 - ``newtype``: Use :extension:`GeneralizedNewtypeDeriving`
+               (see :ref:`newtype-deriving`)
 
+- ``via``: Use :extension:`DerivingVia` (see :ref:`deriving-via`)
 
 .. _default-deriving-strategy:
 
@@ -5181,6 +5190,118 @@ In that case, GHC chooses the strategy as follows:
    user is warned about the ambiguity. The warning can be avoided by explicitly
    stating the desired deriving strategy.
 
+.. _deriving-via:
+
+Deriving via
+------------
+
+.. extension:: DerivingVia
+    :shortdesc: Enable deriving instances ``via`` types of the same runtime
+        representation.
+        Implies :extension:`DerivingStrategies`.
+
+    :implies: :extension:`DerivingStrategies`
+
+    :since: 8.6.1
+
+This allows ``deriving`` a class instance for a type by specifying
+another type of equal runtime representation (such that there exists a
+``Coercible`` instance between the two: see :ref:`coercible`) that is
+already an instance of the that class.
+
+:extension:`DerivingVia` is indicated by the use of the ``via``
+deriving strategy. ``via`` requires specifying another type (the ``via`` type)
+to ``coerce`` through. For example, this code: ::
+
+    {-# LANGUAGE DerivingVia #-}
+
+    import Numeric
+
+    newtype Hex a = Hex a
+
+    instance (Integral a, Show a) => Show (Hex a) where
+      show (Hex a) = "0x" ++ showHex a ""
+
+    newtype Unicode = U Int
+      deriving Show
+        via (Hex Int)
+
+    -- >>> euroSign
+    -- 0x20ac
+    euroSign :: Unicode
+    euroSign = U 0x20ac
+
+Generates the following instance ::
+
+    instance Show Unicode where
+      show :: Unicode -> String
+      show = Data.Coerce.coerce
+        @(Hex Int -> String)
+        @(Unicode -> String)
+        show
+
+This extension generalizes :extension:`GeneralizedNewtypeDeriving`. To
+derive ``Num Unicode`` with GND (``deriving newtype Num``) it must
+reuse the ``Num Int`` instance. With ``DerivingVia``, we can explicitly
+specify the representation type ``Int``: ::
+
+    newtype Unicode = U Int
+      deriving Num
+        via Int
+
+      deriving Show
+        via (Hex Int)
+
+    euroSign :: Unicode
+    euroSign = 0x20ac
+
+Code duplication is common in instance declarations. A familiar
+pattern is lifting operations over an ``Applicative`` functor.
+Instead of having catch-all instances for ``f a`` which overlap
+with all other such instances, like so: ::
+
+    instance (Applicative f, Semigroup a) => Semigroup (f a) ..
+    instance (Applicative f, Monoid    a) => Monoid    (f a) ..
+
+We can instead create a newtype ``App``
+(where ``App f a`` and ``f a`` are represented the same in memory)
+and use :extension:`DerivingVia` to explicitly enable uses of this
+pattern: ::
+
+    {-# LANGUAGE DerivingVia, DeriveFunctor, GeneralizedNewtypeDeriving #-}
+
+    import Control.Applicative
+
+    newtype App f a = App (f a) deriving newtype (Functor, Applicative)
+
+    instance (Applicative f, Semigroup a) => Semigroup (App f a) where
+      (<>) = liftA2 (<>)
+
+    instance (Applicative f, Monoid a) => Monoid (App f a) where
+      mempty = pure mempty
+
+    data Pair a = MkPair a a
+      deriving stock
+        Functor
+
+      deriving (Semigroup, Monoid)
+        via (App Pair a)
+
+    instance Applicative Pair where
+      pure a = MkPair a a
+
+      MkPair f g <*> MkPair a b = MkPair (f a) (g b)
+
+Note that the ``via`` type does not have to be a ``newtype``.
+The only restriction is that it is coercible with the
+original data type. This means there can be arbitrary nesting of newtypes,
+as in the following example: ::
+
+    newtype Kleisli m a b = (a -> m b)
+      deriving (Semigroup, Monoid)
+        via (a -> App m b)
+
+Here we make use of the ``Monoid ((->) a)`` instance.
 
 .. _pattern-synonyms:
 
@@ -6940,7 +7061,7 @@ Overloaded labels
 
 GHC supports *overloaded labels*, a form of identifier whose interpretation may
 depend both on its type and on its literal text.  When the
-:extension:`OverloadedLabels` extension is enabled, an overloaded label can written
+:extension:`OverloadedLabels` extension is enabled, an overloaded label can be written
 with a prefix hash, for example ``#foo``.  The type of this expression is
 ``IsLabel "foo" a => a``.
 
@@ -9009,6 +9130,24 @@ In this redefinition, we give an explicit kind for ``(:~~:)``, deferring the cho
 of ``k2`` until after the first argument (``a``) has been given. With this declaration
 for ``(:~~:)``, the instance for ``HTestEquality`` is accepted.
 
+Another difference between higher-rank kinds and types can be found in their
+treatment of inferred and user-specified type variables. Consider the following
+program: ::
+
+  newtype Foo (f :: forall k. k -> Type) = MkFoo (f Int)
+  data Proxy a = Proxy
+
+  foo :: Foo Proxy
+  foo = MkFoo Proxy
+
+The kind of ``Foo``'s parameter is ``forall k. k -> Type``, but the kind of
+``Proxy`` is ``forall {k}. k -> Type``, where ``{k}`` denotes that the kind
+variable ``k`` is to be inferred, not specified by the user. (See
+:ref:`visible-type-application` for more discussion on the inferred-specified
+distinction). GHC does not consider ``forall k. k -> Type`` and
+``forall {k}. k -> Type`` to be equal at the kind level, and thus rejects
+``Foo Proxy`` as ill-kinded.
+
 Constraints in kinds
 --------------------
 
@@ -9117,7 +9256,7 @@ variables. These variables may depend on each other, even in the same
 the body of the ``forall``. Here are some examples::
 
   data Proxy k (a :: k) = MkProxy   -- just to use below
-  
+
   f :: forall k a. Proxy k a        -- This is just fine. We see that (a :: k).
   f = undefined
 
@@ -9268,7 +9407,7 @@ stub out functions that return unboxed types.
 Printing levity-polymorphic types
 ---------------------------------
 
-.. ghc-flag:: -fprint-explicit-runtime-rep
+.. ghc-flag:: -fprint-explicit-runtime-reps
     :shortdesc: Print ``RuntimeRep`` variables in types which are
         runtime-representation polymorphic.
     :type: dynamic
@@ -9408,8 +9547,8 @@ the type level:
     GHC.TypeLits> natVal (lg (Proxy :: Proxy 2) (Proxy :: Proxy 8))
     3
 
-Constraints in types
-====================
+Equality constraints, Coercible, and the kind Constraint
+========================================================
 
 .. _equality-constraints:
 
@@ -9567,6 +9706,255 @@ You may write programs that use exotic sorts of constraints in instance
 contexts and superclasses, but to do so you must use
 :extension:`UndecidableInstances` to signal that you don't mind if the type
 checker fails to terminate.
+
+Quantified constraints
+======================
+
+The extension :extension:`QuantifiedConstraints` introduces **quantified constraints**,
+which give a new level of expressiveness in constraints. For example, consider ::
+
+ data Rose f a = Branch a (f (Rose f a))
+
+ instance (Eq a, ???) => Eq (Rose f a)
+   where
+     (Branch x1 c1) == (Branch x2 c2)
+        = x1==x1 && c1==c2
+
+From the ``x1==x2`` we need ``Eq a``, which is fine.  From ``c1==c2`` we need ``Eq (f (Rose f a))`` which
+is *not* fine in Haskell today; we have no way to solve such a constraint.
+
+:extension:`QuantifiedConstraints` lets us write this ::
+
+ instance (Eq a, forall b. (Eq b) => Eq (f b))
+        => Eq (Rose f a)
+   where
+     (Branch x1 c1) == (Branch x2 c2)
+        = x1==x1 && c1==c2
+
+Here, the quantified constraint ``forall b. (Eq b) => Eq (f b)`` behaves
+a bit like a local instance declaration, and makes the instance typeable.
+
+The paper `Quantified class constraints <http://i.cs.hku.hk/~bruno//papers/hs2017.pdf>`_ (by Bottu, Karachalias, Schrijvers, Oliveira, Wadler, Haskell Symposium 2017) describes this feature in technical detail, with examples, and so is a primary reference source for this proposal.
+
+Motivation
+----------------
+Introducing quantified constraints offers two main benefits:
+
+- Firstly, they enable terminating resolution where this was not possible before.  Consider for instance the following instance declaration for the general rose datatype ::
+
+   data Rose f x = Rose x (f (Rose f x))
+
+   instance (Eq a, forall b. Eq b => Eq (f b)) => Eq (Rose f a) where
+     (Rose x1 rs1) == (Rose x2 rs2) = x1 == x2 && rs1 == rs2
+
+  This extension allows us to write constraints of the form ``forall b. Eq b =>
+  Eq (f b)``, which is needed to solve the ``Eq (f (Rose f x))`` constraint
+  arising from the second usage of the ``(==)`` method.
+
+- Secondly, quantified constraints allow for more concise and precise specifications. As an example, consider the MTL type class for monad transformers::
+
+   class Trans t where
+     lift :: Monad m => m a -> (t m) a
+
+  The developer knows that a monad transformer takes a monad ``m`` into a new monad ``t m``.
+  But this property is not formally specified in the above declaration.
+  This omission becomes an issue when defining monad transformer composition::
+
+    newtype (t1 * t2) m a = C { runC :: t1 (t2 m) a }
+
+    instance (Trans t1, Trans t2) => Trans (t1 * t2) where
+      lift = C . lift . lift
+
+  The goal here is to ``lift`` from monad ``m`` to ``t2 m`` and
+  then ``lift`` this again into ``t1 (t2 m)``.
+  However, this second ``lift`` can only be accepted when ``(t2 m)`` is a monad
+  and there is no way of establishing that this fact universally holds.
+
+  Quantified constraints enable this property to be made explicit in the ``Trans``
+  class declaration::
+
+    class (forall m. Monad m => Monad (t m)) => Trans t where
+      lift :: Monad m => m a -> (t m) a
+
+This idea is very old; see Seciton 7 of `Derivable type classes <https://www.microsoft.com/en-us/research/publication/derivable-type-classes/>`_.
+
+Syntax changes
+----------------
+
+`Haskell 2010 <https://www.haskell.org/onlinereport/haskell2010/haskellch10.html#x17-18000010.5>`_ defines a ``context`` (the bit to the left of ``=>`` in a type) like this ::
+
+.. code-block:: none
+
+    context ::= class
+            |   ( class1, ..., classn )
+
+    class ::= qtycls tyvar
+            |  qtycls (tyvar atype1 ... atypen)
+
+We to extend ``class`` (warning: this is a rather confusingly named non-terminal symbol) with two extra forms, namely precisely what can appear in an instance declaration ::
+
+.. code-block:: none
+
+    class ::= ...
+          | context => qtycls inst
+          | context => tyvar inst
+
+The definition of ``inst`` is unchanged from the Haskell Report (roughly, just a type).
+That is the only syntactic change to the language.
+
+Notes:
+
+- Where GHC allows extensions instance declarations we allow exactly the same extensions to this new form of ``class``.  Specifically, with :extension:`ExplicitForAll` and :extension:`MultiParameterTypeClasses` the syntax becomes ::
+
+.. code-block:: none
+
+    class ::= ...
+           | [forall tyavrs .] context => qtycls inst1 ... instn
+           | [forall tyavrs .] context => tyvar inst1 ... instn
+
+  Note that an explicit ``forall`` is often absolutely essential. Consider the rose-tree example ::
+
+    instance (Eq a, forall b. Eq b => Eq (f b)) => Eq (Rose f a) where ...
+
+  Without the ``forall b``, the type variable ``b`` would be quantified over the whole instance declaration, which is not what is intended.
+
+- One of these new quantified constraints can appear anywhere that any other constraint can, not just in instance declarations.  Notably, it can appear in a type signature for a value binding, data constructor, or expression.  For example ::
+
+   f :: (Eq a, forall b. Eq b => Eq (f b)) => Rose f a -> Rose f a -> Bool
+   f t1 t2 = not (t1 == t2)
+
+- The form with a type variable at the head allows this::
+
+   instance (forall xx. c (Free c xx)) => Monad (Free c) where
+       Free f >>= g = f g
+
+  See `Iceland Jack's summary <https://ghc.haskell.org/trac/ghc/ticket/14733#comment:6>`_.  The key point is that the bit to the right of the ``=>`` may be headed by a type *variable* (``c`` in this case), rather than a class.  It should not be one of the forall'd variables, though.
+
+  (NB: this goes beyond what is described in `the paper <http://i.cs.hku.hk/~bruno//papers/hs2017.pdf>`_, but does not seem to introduce any new technical difficulties.)
+
+
+Typing changes
+----------------
+
+See `the paper <http://i.cs.hku.hk/~bruno//papers/hs2017.pdf>`_.
+
+Superclasses
+----------------
+
+Suppose we have::
+
+     f :: forall m. (forall a. Ord a => Ord (m a)) => m Int -> Bool
+     f x = x == x
+
+From the ``x==x`` we need an ``Eq (m Int)`` constraint, but the context only gives us a way to figure out ``Ord (m a)`` constraints.  But from the given constraint ``forall a. Ord a => Ord (m a)`` we derive a second given constraint ``forall a. Ord a => Eq (m a)``, and from that we can readily solve ``Eq (m Int)``.  This process is very similar to the way that superclasses already work: given an ``Ord a`` constraint we derive a second given ``Eq a`` constraint.
+
+NB: This treatment of superclasses goes beyond `the paper <http://i.cs.hku.hk/~bruno//papers/hs2017.pdf>`_, but is specifically desired by users.
+
+Overlap
+-------------
+
+Quantified constraints can potentially lead to overlapping local axioms.
+Consider for instance the following example::
+
+ class A a where {}
+ class B a where {}
+ class C a where {}
+ class (A a => C a) => D a where {}
+ class (B a => C a) => E a where {}
+
+ class C a => F a where {}
+ instance (B a, D a, E a) => F a where {}
+
+When type checking the instance declaration for ``F a``,
+we need to check that the superclass ``C`` of ``F`` holds.
+We thus try to entail the constraint ``C a`` under the theory containing:
+
+- The instance axioms : ``(B a, D a, E a) => F a``
+- The local axioms from the instance context : ``B a``, ``D a`` and ``E a``
+- The closure of the superclass relation over these local axioms : ``A a => C a`` and ``B a => C a``
+
+However, the ``A a => C a`` and ``B a => C a`` axioms both match the wanted constraint ``C a``.
+There are several possible approaches for handling these overlapping local axioms:
+
+- **Pick first**.  We can simply select the **first matching axiom** we encounter.
+  In the above example, this would be ``A a => C a``.
+  We'd then need to entail ``A a``, for which we have no matching axioms available, causing the above program to be rejected.
+
+  But suppose we made a slight adjustment to the order of the instance context, putting ``E a`` before ``D a``::
+
+   instance (B a, E a, D a) => F a where {}
+
+  The first matching axiom we encounter while entailing ``C a``, is ``B a => C a``.
+  We have a local axiom ``B a`` available, so now the program is suddenly accepted.
+  This behaviour, where the ordering of an instance context determines
+  whether or not the program is accepted, seems rather confusing for the developer.
+
+- **Reject if in doubt**.  An alternative approach would be to check for overlapping axioms,
+  when solving a constraint.
+  When multiple matching axioms are discovered, we **reject the program**.
+  This approach is a bit conservative, in that it may reject working programs.
+  But it seem much more transparent towards the developer, who
+  can be presented with a clear message, explaining why the program is rejected.
+
+- **Backtracking**.  Lastly, a simple form of **backtracking** could be introduced.
+  We simply select the first matching axiom we encounter and when the entailment fails,
+  we backtrack and look for other axioms that might match the wanted constraint.
+
+  This seems the most intuitive and transparent approach towards the developer,
+  who no longer needs to concern himself with the fact that his code might contain
+  overlapping axioms or with the ordering of his instance contexts.  But backtracking
+  would apply equally to ordinary instance selection (in the presence of overlapping
+  instances), so it is a much more pervasive change, with substantial consequences
+  for the type inference engine.
+
+GHC adopts **Reject if in doubt** for now.  We can see how painful it
+is in practice, and try something more ambitious if necessary.
+
+Instance lookup
+-------------------
+
+In the light of the overlap decision, instance lookup works like this when
+trying to solve a class constraint ``C t``
+
+1. First see if there is a given un-quantified constraint ``C t``.  If so, use it to solve the constraint.
+
+2. If not, look at all the available given quantified constraints; if exactly one one matches ``C t``, choose it; if more than one matches, report an error.
+
+3. If no quantified constraints match, look up in the global instances, as described in :ref:`instance-resolution` and :ref:`instance-overlap`.
+
+Termination
+---------------
+
+GHC uses the :ref:`Paterson Conditions <instance-termination>` to ensure
+that instance resolution terminates. How are those rules modified for quantified
+constraints? In two ways.
+
+- Each quantified constraint, taken by itself, must satisfy the termination rules for an instance declaration.
+
+- After "for each class constraint ``(C t1 ... tn)``", add "or each quantified constraint ``(forall as. context => C t1 .. tn)``"
+
+Note that the second item only at the *head* of the quantified constraint, not its context.  Reason: the head is the new goal that has to be solved if we use the instance declaration.
+
+Of course, ``UndecidableInstances`` lifts the Paterson Conditions, as now.
+
+Coherence
+-----------
+
+Although quantified constraints are a little like local instance declarations, they differ
+in one big way: the local instances are written by the compiler, not the user, and hence
+cannot introduce incoherence.  Consider ::
+
+  f :: (forall a. Eq a => Eq (f a)) => f b -> f Bool
+  f x = ...rhs...
+
+In ``...rhs...`` there is, in effect a local instance for ``Eq (f a)`` for any ``a``.  But
+at a call site for ``f`` the compiler itself produces evidence to pass to ``f``. For example,
+if we called ``f Nothing``, then ``f`` is ``Maybe`` and the compiler must prove (at the
+call site) that ``forall a. Eq a => Eq (Maybe a)`` holds.  It can do this easily, by
+appealing to the existing instance declaration for ``Eq (Maybe a)``.
+
+In short, quantifed constraints do not introduce incoherence.
+
 
 .. _extensions-to-type-signatures:
 
@@ -11156,7 +11544,7 @@ for typed holes:
                 with maxBound @Bool
               minBound :: forall a. Bounded a => a
                 with minBound @Bool
- 
+
 .. _typed-hole-valid-hole-fits:
 
 Valid Hole Fits
@@ -11202,7 +11590,7 @@ configurable by a few flags.
     By default, the hole fits show the type of the hole fit.
     This can be turned off by the reverse of this flag.
 
-     
+
 
 .. ghc-flag:: -fshow-type-app-of-hole-fits
     :shortdesc: Toggles whether to show the type application of the valid
@@ -11248,7 +11636,7 @@ configurable by a few flags.
     hole fit, i.e. where it was bound or defined, and what module
     it was originally defined in if it was imported. This can be toggled
     off using the reverse of this flag.
-           
+
 
 .. ghc-flag:: -funclutter-valid-hole-fits
     :shortdesc: Unclutter the list of valid hole fits by not showing
@@ -11338,7 +11726,7 @@ it will additionally offer up a list of refinement hole fits, in this case: ::
 
 Which shows that the hole could be replaced with e.g. ``foldl1 _``. While not
 fixing the hole, this can help users understand what options they have.
- 
+
 .. ghc-flag:: -frefinement-level-hole-fits=⟨n⟩
     :shortdesc: *default: off.* Sets the level of refinement of the
          refinement hole fits, where level ``n`` means that hole fits
@@ -11399,9 +11787,9 @@ fixing the hole, this can help users understand what options they have.
     for the hole ``_ :: [a] -> a``. If this flag is toggled off, the output
     will display only ``foldl1 _``, which can be used as a direct replacement
     for the hole, without requiring ``-XScopedTypeVariables``.
-   
-          
-    
+
+
+
 
 Sorting Valid Hole Fits
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -15439,7 +15827,7 @@ Roles
    single: roles
 
 Using :extension:`GeneralizedNewtypeDeriving`
-(:ref:`generalized-newtype-deriving`), a programmer can take existing
+(:ref:`newtype-deriving`), a programmer can take existing
 instances of classes and "lift" these into instances of that class for a
 newtype. However, this is not always safe. For example, consider the
 following:

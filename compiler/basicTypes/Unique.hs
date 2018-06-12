@@ -49,7 +49,7 @@ module Unique (
         mkPrimOpIdUnique,
         mkPreludeMiscIdUnique, mkPreludeDataConUnique,
         mkPreludeTyConUnique, mkPreludeClassUnique,
-        mkPArrDataConUnique, mkCoVarUnique,
+        mkCoVarUnique,
 
         mkVarOccUnique, mkDataOccUnique, mkTvOccUnique, mkTcOccUnique,
         mkRegSingleUnique, mkRegPairUnique, mkRegClassUnique, mkRegSubUnique,
@@ -64,7 +64,7 @@ module Unique (
         -- *** From TyCon name uniques
         tyConRepNameUnique,
         -- *** From DataCon name uniques
-        dataConWorkerUnique, dataConRepNameUnique
+        dataConWorkerUnique, dataConTyRepNameUnique
     ) where
 
 #include "HsVersions.h"
@@ -369,7 +369,6 @@ mkPreludeTyConUnique   :: Int -> Unique
 mkPreludeDataConUnique :: Arity -> Unique
 mkPrimOpIdUnique       :: Int -> Unique
 mkPreludeMiscIdUnique  :: Int -> Unique
-mkPArrDataConUnique    :: Int -> Unique
 mkCoVarUnique          :: Int -> Unique
 
 mkAlphaTyVarUnique   i = mkUnique '1' i
@@ -401,16 +400,13 @@ tyConRepNameUnique  u = incrUnique u
 mkPreludeDataConUnique i              = mkUnique '6' (3*i)    -- Must be alphabetic
 
 --------------------------------------------------
-dataConRepNameUnique, dataConWorkerUnique :: Unique -> Unique
+dataConTyRepNameUnique, dataConWorkerUnique :: Unique -> Unique
 dataConWorkerUnique  u = incrUnique u
-dataConRepNameUnique u = stepUnique u 2
+dataConTyRepNameUnique u = stepUnique u 2
 
 --------------------------------------------------
 mkPrimOpIdUnique op         = mkUnique '9' op
 mkPreludeMiscIdUnique  i    = mkUnique '0' i
-
--- No numbers left anymore, so I pick something different for the character tag
-mkPArrDataConUnique a           = mkUnique ':' (2*a)
 
 -- The "tyvar uniques" print specially nicely: a, b, c, etc.
 -- See pprUnique for details

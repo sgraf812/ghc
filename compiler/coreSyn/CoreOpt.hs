@@ -86,7 +86,7 @@ little dance in action; the full Simplifier is a lot more complicated.
 
 -}
 
-simpleOptExpr :: CoreExpr -> CoreExpr
+simpleOptExpr :: DynFlags -> CoreExpr -> CoreExpr
 -- See Note [The simple optimiser]
 -- Do simple optimisation on an expression
 -- The optimisation is very straightforward: just
@@ -103,9 +103,9 @@ simpleOptExpr :: CoreExpr -> CoreExpr
 -- in  (let x = y in ....) we substitute for x; so y's occ-info
 -- may change radically
 
-simpleOptExpr expr
+simpleOptExpr dflags expr
   = -- pprTrace "simpleOptExpr" (ppr init_subst $$ ppr expr)
-    simpleOptExprWith init_subst expr
+    simpleOptExprWith dflags init_subst expr
   where
     init_subst = mkEmptySubst (mkInScopeSet (exprFreeVars expr))
         -- It's potentially important to make a proper in-scope set
@@ -118,34 +118,35 @@ simpleOptExpr expr
         -- It's a bit painful to call exprFreeVars, because it makes
         -- three passes instead of two (occ-anal, and go)
 
-simpleOptExprWith :: Subst -> InExpr -> OutExpr
+simpleOptExprWith :: DynFlags -> Subst -> InExpr -> OutExpr
 -- See Note [The simple optimiser]
-simpleOptExprWith subst expr
+simpleOptExprWith dflags subst expr
   = simple_opt_expr init_env (occurAnalyseExpr expr)
   where
-    init_env = SOE { soe_inl = emptyVarEnv, soe_subst = subst }
+    init_env = SOE { soe_dflags = dflags
+                   , soe_inl = emptyVarEnv
+                   , soe_subst = subst }
 
 ----------------------
 simpleOptPgm :: DynFlags -> Module
-             -> CoreProgram -> [CoreRule] -> [CoreVect]
-             -> IO (CoreProgram, [CoreRule], [CoreVect])
+             -> CoreProgram -> [CoreRule]
+             -> IO (CoreProgram, [CoreRule])
 -- See Note [The simple optimiser]
-simpleOptPgm dflags this_mod binds rules vects
+simpleOptPgm dflags this_mod binds rules
   = do { dumpIfSet_dyn dflags Opt_D_dump_occur_anal "Occurrence analysis"
                        (pprCoreBindings occ_anald_binds $$ pprRules rules );
 
-       ; return (reverse binds', rules', vects') }
+       ; return (reverse binds', rules') }
   where
     occ_anald_binds  = occurAnalysePgm this_mod
                           (\_ -> True)  {- All unfoldings active -}
                           (\_ -> False) {- No rules active -}
-                          rules vects emptyVarSet binds
+                          rules binds
 
-    (final_env, binds') = foldl do_one (emptyEnv, []) occ_anald_binds
+    (final_env, binds') = foldl do_one (emptyEnv dflags, []) occ_anald_binds
     final_subst = soe_subst final_env
 
     rules' = substRulesForImportedIds final_subst rules
-    vects' = substVects final_subst vects
              -- We never unconditionally inline into rules,
              -- hence paying just a substitution
 
@@ -160,7 +161,8 @@ simpleOptPgm dflags this_mod binds rules vects
 type SimpleClo = (SimpleOptEnv, InExpr)
 
 data SimpleOptEnv
-  = SOE { soe_inl   :: IdEnv SimpleClo
+  = SOE { soe_dflags :: DynFlags
+        , soe_inl   :: IdEnv SimpleClo
              -- Deals with preInlineUnconditionally; things
              -- that occur exactly once and are inlined
              -- without having first been simplified
@@ -175,13 +177,15 @@ instance Outputable SimpleOptEnv where
                             , text "soe_subst =" <+> ppr subst ]
                    <+> text "}"
 
-emptyEnv :: SimpleOptEnv
-emptyEnv = SOE { soe_inl = emptyVarEnv
-               , soe_subst = emptySubst }
+emptyEnv :: DynFlags -> SimpleOptEnv
+emptyEnv dflags
+  = SOE { soe_dflags = dflags
+        , soe_inl = emptyVarEnv
+        , soe_subst = emptySubst }
 
 soeZapSubst :: SimpleOptEnv -> SimpleOptEnv
-soeZapSubst (SOE { soe_subst = subst })
-  = SOE { soe_inl = emptyVarEnv, soe_subst = zapSubstEnv subst }
+soeZapSubst env@(SOE { soe_subst = subst })
+  = env { soe_inl = emptyVarEnv, soe_subst = zapSubstEnv subst }
 
 soeSetInScope :: SimpleOptEnv -> SimpleOptEnv -> SimpleOptEnv
 -- Take in-scope set from env1, and the rest from env2
@@ -210,13 +214,13 @@ simple_opt_expr env expr
 
     go (App e1 e2)      = simple_app env e1 [(env,e2)]
     go (Type ty)        = Type     (substTy subst ty)
-    go (Coercion co)    = Coercion (optCoercion (getTCvSubst subst) co)
+    go (Coercion co)    = Coercion (optCoercion (soe_dflags env) (getTCvSubst subst) co)
     go (Lit lit)        = Lit lit
     go (Tick tickish e) = mkTick (substTickish subst tickish) (go e)
     go (Cast e co)      | isReflCo co' = go e
                         | otherwise    = Cast (go e) co'
                         where
-                          co' = optCoercion (getTCvSubst subst) co
+                          co' = optCoercion (soe_dflags env) (getTCvSubst subst) co
 
     go (Let bind body) = case simple_opt_bind env bind of
                            (env', Nothing)   -> simple_opt_expr env' body
@@ -351,7 +355,7 @@ simple_bind_pair env@(SOE { soe_inl = inl_env, soe_subst = subst })
     (env { soe_subst = extendTvSubst subst in_bndr out_ty }, Nothing)
 
   | Coercion co <- in_rhs
-  , let out_co = optCoercion (getTCvSubst (soe_subst rhs_env)) co
+  , let out_co = optCoercion (soe_dflags env) (getTCvSubst (soe_subst rhs_env)) co
   = ASSERT( isCoVar in_bndr )
     (env { soe_subst = extendCvSubst subst in_bndr out_co }, Nothing)
 
@@ -494,8 +498,8 @@ subst_opt_id_bndr :: SimpleOptEnv -> InId -> (SimpleOptEnv, OutId)
 -- It's important to zap fragile OccInfo (which CoreSubst.substIdBndr
 -- carefully does not do) because simplOptExpr invalidates it
 
-subst_opt_id_bndr (SOE { soe_subst = subst, soe_inl = inl }) old_id
-  = (SOE { soe_subst = new_subst, soe_inl = new_inl }, new_id)
+subst_opt_id_bndr env@(SOE { soe_subst = subst, soe_inl = inl }) old_id
+  = (env { soe_subst = new_subst, soe_inl = new_inl }, new_id)
   where
     Subst in_scope id_subst tv_subst cv_subst = subst
 
@@ -535,18 +539,6 @@ simpleUnfoldingFun id
 wrapLet :: Maybe (Id,CoreExpr) -> CoreExpr -> CoreExpr
 wrapLet Nothing      body = body
 wrapLet (Just (b,r)) body = Let (NonRec b r) body
-
-------------------
-substVects :: Subst -> [CoreVect] -> [CoreVect]
-substVects subst = map (substVect subst)
-
-------------------
-substVect :: Subst -> CoreVect -> CoreVect
-substVect subst  (Vect v rhs)        = Vect v (simpleOptExprWith subst rhs)
-substVect _subst vd@(NoVect _)       = vd
-substVect _subst vd@(VectType _ _ _) = vd
-substVect _subst vd@(VectClass _)    = vd
-substVect _subst vd@(VectInst _)     = vd
 
 {-
 Note [Inline prag in simplOpt]
@@ -915,7 +907,7 @@ exprIsLambda_maybe (in_scope_set, id_unf) e
     -- Make sure there is hope to get a lambda
     , Just rhs <- expandUnfolding_maybe (id_unf f)
     -- Optimize, for beta-reduction
-    , let e' =  simpleOptExprWith (mkEmptySubst in_scope_set) (rhs `mkApps` as)
+    , let e' = simpleOptExprWith unsafeGlobalDynFlags (mkEmptySubst in_scope_set) (rhs `mkApps` as)
     -- Recurse, because of possible casts
     , Just (x', e'', ts') <- exprIsLambda_maybe (in_scope_set, id_unf) e'
     , let res = Just (x', e'', ts++ts')

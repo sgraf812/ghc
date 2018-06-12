@@ -45,7 +45,6 @@ import TcPatSyn( tcPatSynBuilderOcc, nonBidirectionalErr )
 import TcPat
 import TcMType
 import TcType
-import DsMonad
 import Id
 import IdInfo
 import ConLike
@@ -533,15 +532,6 @@ tcExpr (ExplicitList _ witness exprs) res_ty
                      ; return $ ExplicitList elt_ty (Just fln') exprs' }
      where tc_elt elt_ty expr = tcPolyExpr expr elt_ty
 
-tcExpr (ExplicitPArr _ exprs) res_ty    -- maybe empty
-  = do  { res_ty <- expTypeToType res_ty
-        ; (coi, elt_ty) <- matchExpectedPArrTy res_ty
-        ; exprs' <- mapM (tc_elt elt_ty) exprs
-        ; return $
-          mkHsWrapCo coi $ ExplicitPArr elt_ty exprs' }
-  where
-    tc_elt elt_ty expr = tcPolyExpr expr elt_ty
-
 {-
 ************************************************************************
 *                                                                      *
@@ -1001,34 +991,6 @@ tcExpr e@(HsRecFld _ f) res_ty
 tcExpr (ArithSeq _ witness seq) res_ty
   = tcArithSeq witness seq res_ty
 
-tcExpr (PArrSeq _ seq@(FromTo expr1 expr2)) res_ty
-  = do  { res_ty <- expTypeToType res_ty
-        ; (coi, elt_ty) <- matchExpectedPArrTy res_ty
-        ; expr1' <- tcPolyExpr expr1 elt_ty
-        ; expr2' <- tcPolyExpr expr2 elt_ty
-        ; enumFromToP <- initDsTc $ dsDPHBuiltin enumFromToPVar
-        ; enum_from_to <- newMethodFromName (PArrSeqOrigin seq)
-                                 (idName enumFromToP) elt_ty
-        ; return $
-          mkHsWrapCo coi $ PArrSeq enum_from_to (FromTo expr1' expr2') }
-
-tcExpr (PArrSeq _ seq@(FromThenTo expr1 expr2 expr3)) res_ty
-  = do  { res_ty <- expTypeToType res_ty
-        ; (coi, elt_ty) <- matchExpectedPArrTy res_ty
-        ; expr1' <- tcPolyExpr expr1 elt_ty
-        ; expr2' <- tcPolyExpr expr2 elt_ty
-        ; expr3' <- tcPolyExpr expr3 elt_ty
-        ; enumFromThenToP <- initDsTc $ dsDPHBuiltin enumFromThenToPVar
-        ; eft <- newMethodFromName (PArrSeqOrigin seq)
-                      (idName enumFromThenToP) elt_ty        -- !!!FIXME: chak
-        ; return $
-          mkHsWrapCo coi $ PArrSeq eft (FromThenTo expr1' expr2' expr3') }
-
-tcExpr (PArrSeq {}) _
-  = panic "TcExpr.tcExpr: Infinite parallel array!"
-    -- the parser shouldn't have generated it and the renamer shouldn't have
-    -- let it through
-
 {-
 ************************************************************************
 *                                                                      *
@@ -1135,6 +1097,10 @@ arithSeqEltType (Just fl) res_ty
 data HsArg tm ty
   = HsValArg tm   -- Argument is an ordinary expression     (f arg)
   | HsTypeArg  ty -- Argument is a visible type application (f @ty)
+
+instance (Outputable tm, Outputable ty) => Outputable (HsArg tm ty) where
+  ppr (HsValArg tm) = text "HsValArg" <> ppr tm
+  ppr (HsTypeArg ty) = text "HsTypeArg" <> ppr ty
 
 isHsValArg :: HsArg tm ty -> Bool
 isHsValArg (HsValArg {}) = True
@@ -1621,7 +1587,7 @@ tcExprSig expr (CompleteSig { sig_bndr = poly_id, sig_loc = loc })
        ; let skol_info = SigSkol ExprSigCtxt (idType poly_id) tv_prs
              skol_tvs  = map snd tv_prs
        ; (ev_binds, expr') <- checkConstraints skol_info skol_tvs given $
-                              tcExtendTyVarEnv2 tv_prs $
+                              tcExtendNameTyVarEnv tv_prs $
                               tcPolyExprNC expr tau
 
        ; let poly_wrap = mkWpTyLams   skol_tvs
@@ -1634,8 +1600,8 @@ tcExprSig expr sig@(PartialSig { psig_name = name, sig_loc = loc })
     do { (tclvl, wanted, (expr', sig_inst))
              <- pushLevelAndCaptureConstraints  $
                 do { sig_inst <- tcInstSig sig
-                   ; expr' <- tcExtendTyVarEnv2 (sig_inst_skols sig_inst) $
-                              tcExtendTyVarEnv2 (sig_inst_wcs   sig_inst) $
+                   ; expr' <- tcExtendNameTyVarEnv (sig_inst_skols sig_inst) $
+                              tcExtendNameTyVarEnv (sig_inst_wcs   sig_inst) $
                               tcPolyExprNC expr (sig_inst_tau sig_inst)
                    ; return (expr', sig_inst) }
        -- See Note [Partial expression signatures]

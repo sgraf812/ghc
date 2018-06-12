@@ -28,6 +28,14 @@ Full details
 
 Language
 ~~~~~~~~
+- A new :extension:`DerivingVia` language extension has been added which allows
+  the use of the ``via`` deriving strategy. For instance: ::
+
+    newtype T = MkT Int
+      deriving Monoid via (Sum Int)
+
+  See :ref:`deriving-via` for more information.
+
 - GHC now permits the use of a wildcard type as the context of a standalone
   ``deriving`` declaration with the use of the
   :extension:`PartialTypeSignatures` language extension. For instance, this
@@ -118,6 +126,12 @@ Compiler
   :ghc-flag:`-fexternal-dynamic-refs`. If you don't know why you might
   need this, you don't need it.
 
+GHCi
+~~~~
+
+- Added an experimental :ghci-cmd:`:doc` command that displays the
+  documentation for a declaration.
+
 Runtime system
 ~~~~~~~~~~~~~~
 
@@ -134,6 +148,11 @@ Runtime system
 
 - The runtime now allows use of the :rts-flag:`-hT` profiling variety on
   programs built with :ghc-flag:`-prof`.
+
+- The STM assertions mechanism (namely the ``always`` and ``alwaysSucceeds``
+  functions) has been removed. This happened a bit earlier than proposed in the
+  deprecation pragma included in GHC 8.4, but due to community feedback we
+  decided to move ahead with the early removal.
 
 Template Haskell
 ~~~~~~~~~~~~~~~~

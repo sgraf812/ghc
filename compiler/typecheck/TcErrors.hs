@@ -459,9 +459,14 @@ warnRedundantConstraints ctxt env info ev_vars
    doc = text "Redundant constraint" <> plural redundant_evs <> colon
          <+> pprEvVarTheta redundant_evs
 
-   redundant_evs = case info of -- See Note [Redundant constraints in instance decls]
-                     InstSkol -> filterOut improving ev_vars
-                     _        -> ev_vars
+   redundant_evs =
+       filterOut is_type_error $
+       case info of -- See Note [Redundant constraints in instance decls]
+         InstSkol -> filterOut improving ev_vars
+         _        -> ev_vars
+
+   -- See #15232
+   is_type_error = isJust . userTypeError_maybe . idType
 
    improving ev_var = any isImprovementPred $
                       transSuperClasses (idType ev_var)
@@ -706,7 +711,7 @@ mkGivenErrorReporter implic ctxt cts
                              Nothing ty1 ty2
 
        ; traceTc "mkGivenErrorReporter" (ppr ct)
-       ; maybeReportError ctxt err }
+       ; reportWarning (Reason Opt_WarnInaccessibleCode) err }
   where
     (ct : _ )  = cts    -- Never empty
     (ty1, ty2) = getEqPredTys (ctPred ct)
@@ -864,11 +869,11 @@ addDeferredBinding ctxt err ct
 
        ; case dest of
            EvVarDest evar
-             -> addTcEvBind ev_binds_var $ mkWantedEvBind evar (EvExpr err_tm)
+             -> addTcEvBind ev_binds_var $ mkWantedEvBind evar err_tm
            HoleDest hole
              -> do { -- See Note [Deferred errors for coercion holes]
                      let co_var = coHoleCoVar hole
-                   ; addTcEvBind ev_binds_var $ mkWantedEvBind co_var (EvExpr err_tm)
+                   ; addTcEvBind ev_binds_var $ mkWantedEvBind co_var err_tm
                    ; fillCoercionHole hole (mkTcCoVarCo co_var) }}
 
   | otherwise   -- Do not set any evidence for Given/Derived

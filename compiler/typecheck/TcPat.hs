@@ -409,12 +409,12 @@ tc_pat penv (ViewPat _ expr pat) overall_pat_ty thing_inside
 tc_pat penv (SigPat sig_ty pat ) pat_ty thing_inside
   = do  { (inner_ty, tv_binds, wcs, wrap) <- tcPatSig (inPatBind penv)
                                                             sig_ty pat_ty
-                -- Using tcExtendTyVarEnv2 is appropriate here (not scopeTyVars2)
+                -- Using tcExtendNameTyVarEnv is appropriate here (not scopeTyVars2)
                 -- because we're not really bringing fresh tyvars into scope.
                 -- We're *naming* existing tyvars. Note that it is OK for a tyvar
                 -- from an outer scope to mention one of these tyvars in its kind.
-        ; (pat', res) <- tcExtendTyVarEnv2 wcs      $
-                         tcExtendTyVarEnv2 tv_binds $
+        ; (pat', res) <- tcExtendNameTyVarEnv wcs      $
+                         tcExtendNameTyVarEnv tv_binds $
                          tc_lpat pat (mkCheckExpType inner_ty) penv thing_inside
         ; pat_ty <- readExpType pat_ty
         ; return (mkHsWrapPat wrap (SigPat inner_ty pat') pat_ty, res) }
@@ -441,14 +441,6 @@ tc_pat penv (ListPat (Just e) pats) pat_ty thing_inside
                     ; return (pats', res, elt_ty) }
         ; return (ListPat (ListPatTc elt_ty (Just (tau_pat_ty,e'))) pats', res)
 }
-
-tc_pat penv (PArrPat _ pats ) pat_ty thing_inside
-  = do  { (coi, elt_ty) <- matchExpectedPatTy matchExpectedPArrTy penv pat_ty
-        ; (pats', res) <- tcMultiple (\p -> tc_lpat p (mkCheckExpType elt_ty))
-                                     pats penv thing_inside
-        ; pat_ty <- readExpType pat_ty
-        ; return (mkHsWrapPat coi (PArrPat elt_ty pats') pat_ty, res)
-        }
 
 tc_pat penv (TuplePat _ pats boxity) pat_ty thing_inside
   = do  { let arity = length pats

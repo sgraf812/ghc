@@ -85,6 +85,7 @@ module HscMain
 import GhcPrelude
 
 import Data.Data hiding (Fixity, TyCon)
+import Data.Maybe       ( isJust )
 import DynFlags         (addPluginModuleName)
 import Id
 import GHCi             ( addSptEntry )
@@ -100,7 +101,6 @@ import Panic
 import ConLike
 import Control.Concurrent
 
-import Avail            ( Avails )
 import Module
 import Packages
 import RdrName
@@ -142,6 +142,8 @@ import Fingerprint      ( Fingerprint )
 import Hooks
 import TcEnv
 import PrelNames
+import Plugins
+import DynamicLoading   ( initializePlugins )
 
 import DynFlags
 import ErrUtils
@@ -169,7 +171,6 @@ import System.IO (fixIO)
 import qualified Data.Map as Map
 import qualified Data.Set as S
 import Data.Set (Set)
-import DynamicLoading (initializePlugins)
 
 #include "HsVersions.h"
 
@@ -375,7 +376,7 @@ hscParse' mod_summary
             -- filter them out:
             srcs2 <- liftIO $ filterM doesFileExist srcs1
 
-            return HsParsedModule {
+            let res = HsParsedModule {
                       hpm_module    = rdr_module,
                       hpm_src_files = srcs2,
                       hpm_annotations
@@ -384,24 +385,17 @@ hscParse' mod_summary
                                                  :(annotations_comments pst)))
                    }
 
--- XXX: should this really be a Maybe X?  Check under which circumstances this
--- can become a Nothing and decide whether this should instead throw an
--- exception/signal an error.
-type RenamedStuff =
-        (Maybe (HsGroup GhcRn, [LImportDecl GhcRn], Maybe [(LIE GhcRn, Avails)],
-                Maybe LHsDocString))
+            -- apply parse transformation of plugins
+            let applyPluginAction p opts
+                  = parsedResultAction p opts mod_summary
+            withPlugins dflags applyPluginAction res
+
 
 -- -----------------------------------------------------------------------------
 -- | If the renamed source has been kept, extract it. Dump it if requested.
 extract_renamed_stuff :: TcGblEnv -> Hsc (TcGblEnv, RenamedStuff)
 extract_renamed_stuff tc_result = do
-
-    -- This 'do' is in the Maybe monad!
-    let rn_info = do decl <- tcg_rn_decls tc_result
-                     let imports = tcg_rn_imports tc_result
-                         exports = tcg_rn_exports tc_result
-                         doc_hdr = tcg_doc_hdr tc_result
-                     return (decl,imports,exports,doc_hdr)
+    let rn_info = getRenamedStuff tc_result
 
     dflags <- getDynFlags
     liftIO $ dumpIfSet_dyn dflags Opt_D_dump_rn_ast "Renamer" $
@@ -415,9 +409,8 @@ extract_renamed_stuff tc_result = do
 hscTypecheckRename :: HscEnv -> ModSummary -> HsParsedModule
                    -> IO (TcGblEnv, RenamedStuff)
 hscTypecheckRename hsc_env mod_summary rdr_module = runHsc hsc_env $ do
-    tc_result <- hscTypecheck True mod_summary (Just rdr_module)
-    extract_renamed_stuff tc_result
-
+      tc_result <- hscTypecheck True mod_summary (Just rdr_module)
+      extract_renamed_stuff tc_result
 
 hscTypecheck :: Bool -- ^ Keep renamed source?
              -> ModSummary -> Maybe HsParsedModule
@@ -460,39 +453,51 @@ tcRnModule' :: ModSummary -> Bool -> HsParsedModule
             -> Hsc TcGblEnv
 tcRnModule' sum save_rn_syntax mod = do
     hsc_env <- getHscEnv
+    dflags   <- getDynFlags
+
+    -- check if plugins need the renamed syntax
+    let plugin_needs_rn = any (isJust . renamedResultAction . lpPlugin)
+                              (plugins dflags)
+
     tcg_res <- {-# SCC "Typecheck-Rename" #-}
                ioMsgMaybe $
-                   tcRnModule hsc_env (ms_hsc_src sum) save_rn_syntax mod
+                   tcRnModule hsc_env sum
+                     (save_rn_syntax || plugin_needs_rn) mod
 
     -- See Note [Safe Haskell Overlapping Instances Implementation]
     -- although this is used for more than just that failure case.
     (tcSafeOK, whyUnsafe) <- liftIO $ readIORef (tcg_safeInfer tcg_res)
-    dflags   <- getDynFlags
     let allSafeOK = safeInferred dflags && tcSafeOK
 
     -- end of the safe haskell line, how to respond to user?
-    if not (safeHaskellOn dflags) || (safeInferOn dflags && not allSafeOK)
-        -- if safe Haskell off or safe infer failed, mark unsafe
-        then markUnsafeInfer tcg_res whyUnsafe
+    res <- if not (safeHaskellOn dflags)
+                || (safeInferOn dflags && not allSafeOK)
+             -- if safe Haskell off or safe infer failed, mark unsafe
+             then markUnsafeInfer tcg_res whyUnsafe
 
-        -- module (could be) safe, throw warning if needed
-        else do
-            tcg_res' <- hscCheckSafeImports tcg_res
-            safe <- liftIO $ fst <$> readIORef (tcg_safeInfer tcg_res')
-            when safe $ do
-              case wopt Opt_WarnSafe dflags of
-                True -> (logWarnings $ unitBag $
-                         makeIntoWarning (Reason Opt_WarnSafe) $
-                         mkPlainWarnMsg dflags (warnSafeOnLoc dflags) $
-                         errSafe tcg_res')
-                False | safeHaskell dflags == Sf_Trustworthy &&
-                        wopt Opt_WarnTrustworthySafe dflags ->
-                        (logWarnings $ unitBag $
-                         makeIntoWarning (Reason Opt_WarnTrustworthySafe) $
-                         mkPlainWarnMsg dflags (trustworthyOnLoc dflags) $
-                         errTwthySafe tcg_res')
-                False -> return ()
-            return tcg_res'
+             -- module (could be) safe, throw warning if needed
+             else do
+                 tcg_res' <- hscCheckSafeImports tcg_res
+                 safe <- liftIO $ fst <$> readIORef (tcg_safeInfer tcg_res')
+                 when safe $ do
+                   case wopt Opt_WarnSafe dflags of
+                     True -> (logWarnings $ unitBag $
+                              makeIntoWarning (Reason Opt_WarnSafe) $
+                              mkPlainWarnMsg dflags (warnSafeOnLoc dflags) $
+                              errSafe tcg_res')
+                     False | safeHaskell dflags == Sf_Trustworthy &&
+                             wopt Opt_WarnTrustworthySafe dflags ->
+                             (logWarnings $ unitBag $
+                              makeIntoWarning (Reason Opt_WarnTrustworthySafe) $
+                              mkPlainWarnMsg dflags (trustworthyOnLoc dflags) $
+                              errTwthySafe tcg_res')
+                     False -> return ()
+                 return tcg_res'
+
+    -- apply plugins to the type checking result
+
+
+    return res
   where
     pprMod t  = ppr $ moduleName $ tcg_mod t
     errSafe t = quotes (pprMod t) <+> text "has been inferred as safe!"

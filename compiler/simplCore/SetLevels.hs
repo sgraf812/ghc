@@ -100,6 +100,7 @@ import Type             ( Type
                         )
 import BasicTypes       ( Arity, RecFlag(..), isRec, isNonRec )
 import RepType          ( typePrimRep1 )
+import TyCoRep          ( closeOverKindsDSet )
 import DataCon          ( dataConOrigResTy )
 import TysWiredIn
 import UniqSupply
@@ -1111,7 +1112,7 @@ lvlBind env binding@(AnnNonRec (TB bndr _) rhs)
   where
     bndr_ty    = idType bndr
     is_fun     = isFunctionAnn rhs
-    
+
     deann_rhs  = deTag (deAnnotate rhs)
     mb_bot_str = exprBotStrictness_maybe deann_rhs
     is_bot     = isJust mb_bot_str
@@ -1131,7 +1132,7 @@ lvlBind env binding@(AnnNonRec (TB bndr _) rhs)
         -- We can't float an unlifted binding to top level (except literal
         -- strings), so we don't float it at all.  It's a bit brutal, but unlifted
         -- bindings aren't expensive either
-      = doNotFloat 
+      = doNotFloat
 
       -- Otherwise we are going to float
       | null abs_vars
@@ -1151,7 +1152,7 @@ lvlBind env binding@(AnnNonRec (TB bndr _) rhs)
           ; return (NonRec (TB bndr2 (FloatMe dest_lvl)) rhs', env') }
 
 lvlBind env binding@(AnnRec pairsTB) =
-  case decideBindFloat env is_fun is_bot is_join binding of 
+  case decideBindFloat env is_fun is_bot is_join binding of
     Just (dest_lvl, abs_vars)
         -- Only floating to the top level is allowed.
       | not (floatTopLvlOnly env) || isTopLvl dest_lvl -> -- float
@@ -1226,7 +1227,7 @@ decideBindFloat env is_fun is_bot is_join binding =
         ty_fvs   = foldr (unionVarSet . tyCoVarsOfType . idType) emptyVarSet bndrs
         dest_lvl = destLevel env bind_fvs ty_fvs is_fun is_bot is_join
         abs_vars = abstractVars dest_lvl env bind_fvs
- 
+
     lateLambdaLift fps
       | is_fun || (fps_floatLNE0 fps && is_join)
            -- only lift functions or zero-arity LNEs
@@ -1785,7 +1786,7 @@ initialEnv dflags float_lams = LE
   , le_join_ceil = panic "initialEnv"
   , le_lvl_env = emptyVarEnv
   , le_subst = emptySubst
-  , le_env = emptyVarEnv 
+  , le_env = emptyVarEnv
   , le_dflags = dflags
   }
 
@@ -1880,17 +1881,14 @@ abstractVars :: Level -> LevelEnv -> DVarSet -> [OutVar]
         -- Uniques are not deterministic.
 abstractVars dest_lvl (LE { le_subst = subst, le_lvl_env = lvl_env }) in_fvs
   =  -- NB: sortQuantVars might not put duplicates next to each other
-    map zap $ sortQuantVars $ uniq
-    [out_var | out_fv  <- dVarSetElems (substDVarSet subst in_fvs)
-             , out_var <- dVarSetElems (close out_fv)
-             , abstract_me out_var ]
+    map zap $ sortQuantVars $
+    filter abstract_me      $
+    dVarSetElems            $
+    closeOverKindsDSet      $
+    substDVarSet subst in_fvs
         -- NB: it's important to call abstract_me only on the OutIds the
         -- come from substDVarSet (not on fv, which is an InId)
   where
-    uniq :: [Var] -> [Var]
-        -- Remove duplicates, preserving order
-    uniq = dVarSetElems . mkDVarSet
-
     abstract_me v = case lookupVarEnv lvl_env v of
                         Just lvl -> dest_lvl `ltLvl` lvl
                         Nothing  -> False
@@ -1902,12 +1900,6 @@ abstractVars dest_lvl (LE { le_subst = subst, le_lvl_env = lvl_env }) in_fvs
                            text "absVarsOf: discarding info on" <+> ppr v )
                      setIdInfo v vanillaIdInfo
           | otherwise = v
-
-    close :: Var -> DVarSet  -- Close over variables free in the type
-                             -- Result includes the input variable itself
-    close v = foldDVarSet (unionDVarSet . close)
-                          (unitDVarSet v)
-                          (fvDVarSet $ varTypeTyCoFVs v)
 
 -- TODO SG 24 April 2018:
 --   There was an attempt to integrate PinnedLBFs
@@ -2390,7 +2382,7 @@ floatFVUp env mb_id use_case is_join rhs up =
 
           (n,bndrs) = case mb_id of
             -- TODO: typePrimRep1 is very approximate and will do the wrong
-            -- thing (well, underestimate) for unboxed sums and tuples. 
+            -- thing (well, underestimate) for unboxed sums and tuples.
             -- Might be enough for a heuristic, though.
             Nothing -> ((toArgRep $ typePrimRep1 $ exprType rhs):m,emptyDVarSet)
             Just id -> (m,unitDVarSet id)
@@ -2689,7 +2681,7 @@ computeRecRHSsFVs binders rhs_fvs =
   -- this use to call idRuleAndUnfoldingVars, but that was inlined into
   -- the isId branch of bndrRuleAndUnfoldingFVs. This means we ignore
   -- type-level lets, which is probably fine for this function's call sites.
-  foldr (unionDVarSet . bndrRuleAndUnfoldingVarsDSet) 
+  foldr (unionDVarSet . bndrRuleAndUnfoldingVarsDSet)
         (foldr unionDVarSet emptyDVarSet rhs_fvs)
         binders
 

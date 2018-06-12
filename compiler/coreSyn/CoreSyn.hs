@@ -5,6 +5,7 @@
 
 {-# LANGUAGE CPP, DeriveDataTypeable, FlexibleContexts #-}
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE BangPatterns #-}
 
 -- | CoreSyn holds all the main data types for use by for the Glasgow Haskell Compiler midsection
 module CoreSyn (
@@ -40,7 +41,7 @@ module CoreSyn (
         bindersOf, bindersOfBinds, rhssOfBind, rhssOfAlts,
         collectBinders, collectTyBinders, collectTyAndValBinders,
         collectNBinders,
-        collectArgs, collectArgsTicks, flattenBinds,
+        collectArgs, stripNArgs, collectArgsTicks, flattenBinds,
 
         exprToType, exprToCoercion_maybe,
         applyTypeToArg,
@@ -92,9 +93,6 @@ module CoreSyn (
         ruleArity, ruleName, ruleIdName, ruleActivation,
         setRuleIdName, ruleModule,
         isBuiltinRule, isLocalRule, isAutoRule,
-
-        -- * Core vectorisation declarations data type
-        CoreVect(..)
     ) where
 
 #include "HsVersions.h"
@@ -112,7 +110,6 @@ import NameEnv( NameEnv, emptyNameEnv )
 import Literal
 import DataCon
 import Module
-import TyCon
 import BasicTypes
 import DynFlags
 import Outputable
@@ -1305,23 +1302,6 @@ setRuleIdName nm ru = ru { ru_fn = nm }
 {-
 ************************************************************************
 *                                                                      *
-\subsection{Vectorisation declarations}
-*                                                                      *
-************************************************************************
-
-Representation of desugared vectorisation declarations that are fed to the vectoriser (via
-'ModGuts').
--}
-
-data CoreVect = Vect      Id   CoreExpr
-              | NoVect    Id
-              | VectType  Bool TyCon (Maybe TyCon)
-              | VectClass TyCon                     -- class tycon
-              | VectInst  Id                        -- instance dfun (always SCALAR)  !!!FIXME: should be superfluous now
-
-{-
-************************************************************************
-*                                                                      *
                 Unfoldings
 *                                                                      *
 ************************************************************************
@@ -2068,6 +2048,16 @@ collectArgs expr
   where
     go (App f a) as = go f (a:as)
     go e         as = (e, as)
+
+-- | Attempt to remove the last N arguments of a function call.
+-- Strip off any ticks or coercions encountered along the way and any
+-- at the end.
+stripNArgs :: Word -> Expr a -> Maybe (Expr a)
+stripNArgs !n (Tick _ e) = stripNArgs n e
+stripNArgs n (Cast f _) = stripNArgs n f
+stripNArgs 0 e = Just e
+stripNArgs n (App f _) = stripNArgs (n - 1) f
+stripNArgs _ _ = Nothing
 
 -- | Like @collectArgs@, but also collects looks through floatable
 -- ticks if it means that we can find more arguments.

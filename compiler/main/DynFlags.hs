@@ -394,7 +394,6 @@ data DumpFlag
    | Opt_D_dump_splices
    | Opt_D_th_dec_file
    | Opt_D_dump_BCOs
-   | Opt_D_dump_vect
    | Opt_D_dump_ticked
    | Opt_D_dump_rtti
    | Opt_D_source_stats
@@ -471,8 +470,6 @@ data GeneralFlag
    | Opt_UnboxSmallStrictFields
    | Opt_DictsCheap
    | Opt_EnableRewriteRules             -- Apply rewrite rules during simplification
-   | Opt_Vectorise
-   | Opt_VectorisationAvoidance
    | Opt_RegsGraph                      -- do graph coloring register allocation
    | Opt_RegsIterative                  -- do iterative coalescing graph coloring register allocation
    | Opt_PedanticBottoms                -- Be picky about how we treat bottom
@@ -685,8 +682,6 @@ optimisationFlags = EnumSet.fromList
    , Opt_UnboxSmallStrictFields
    , Opt_DictsCheap
    , Opt_EnableRewriteRules
-   , Opt_Vectorise
-   , Opt_VectorisationAvoidance
    , Opt_RegsGraph
    , Opt_RegsIterative
    , Opt_PedanticBottoms
@@ -826,6 +821,7 @@ data WarningFlag =
    | Opt_WarnMissingHomeModules           -- Since 8.2
    | Opt_WarnPartialFields                -- Since 8.4
    | Opt_WarnMissingExportList
+   | Opt_WarnInaccessibleCode
    deriving (Eq, Show, Enum)
 
 data Language = Haskell98 | Haskell2010
@@ -903,6 +899,8 @@ data DynFlags = DynFlags {
   lateFloatIfInClo      :: Maybe Int,   -- ^ Limit on # abstracted variables for floating a binding that occurs in a closure
   lateFloatCloGrowth    :: Maybe Int,   -- ^ Limit on # additional free variables for closures in which the function occurs
   lateFloatCloGrowthInLam :: Maybe Int,
+
+  cmmProcAlignment      :: Maybe Int,   -- ^ Align Cmm functions at this boundry or use default.
 
   historySize           :: Int,         -- ^ Simplification history size
 
@@ -1793,6 +1791,7 @@ defaultDynFlags mySettings (myLlvmTargets, myLlvmPasses) =
         lateFloatCloGrowthInLam = Just 0,
 
         floatLamArgs            = Just 0, -- Default: float only if no fvs
+        cmmProcAlignment        = Nothing,
 
         historySize             = 20,
         strictnessBefore        = [],
@@ -3239,8 +3238,6 @@ dynamic_flags_deps = [
         (setDumpFlag Opt_D_dump_hi)
   , make_ord_flag defGhcFlag "ddump-minimal-imports"
         (NoArg (setGeneralFlag Opt_D_dump_minimal_imports))
-  , make_ord_flag defGhcFlag "ddump-vect"
-        (setDumpFlag Opt_D_dump_vect)
   , make_ord_flag defGhcFlag "ddump-hpc"
         (setDumpFlag Opt_D_dump_ticked) -- back compat
   , make_ord_flag defGhcFlag "ddump-ticked"
@@ -3368,7 +3365,6 @@ dynamic_flags_deps = [
         ------ Optimisation flags ------------------------------------------
   , make_dep_flag defGhcFlag "Onot"   (noArgM $ setOptLevel 0 )
                                                             "Use -O0 instead"
-  , make_ord_flag defGhcFlag "Odph"   (noArgM setDPHOpt)
   , make_ord_flag defGhcFlag "O"      (optIntSuffixM (\mb_n ->
                                                 setOptLevel (mb_n `orElse` 1)))
                 -- If the number is missing, use 1
@@ -3468,6 +3464,10 @@ dynamic_flags_deps = [
       (noArg (\d -> d { lateFloatCloGrowthInLam = Nothing }))
   , make_ord_flag defFlag "fno-llf-clo-growth-in-lam"
       (noArg (\d -> d { lateFloatCloGrowthInLam = Just 0 }))
+
+  , make_ord_flag defFlag "fproc-alignment"
+      (intSuffix (\n d -> d { cmmProcAlignment = Just n }))
+
   , make_ord_flag defFlag "fhistory-size"
       (intSuffix (\n d -> d { historySize = n }))
   , make_ord_flag defFlag "funfolding-creation-threshold"
@@ -3836,6 +3836,7 @@ wWarningFlagsDeps = [
   flagSpec "redundant-constraints"       Opt_WarnRedundantConstraints,
   flagSpec "duplicate-exports"           Opt_WarnDuplicateExports,
   flagSpec "hi-shadowing"                Opt_WarnHiShadows,
+  flagSpec "inaccessible-code"           Opt_WarnInaccessibleCode,
   flagSpec "implicit-prelude"            Opt_WarnImplicitPrelude,
   flagSpec "incomplete-patterns"         Opt_WarnIncompletePatterns,
   flagSpec "incomplete-record-updates"   Opt_WarnIncompletePatternsRecUpd,
@@ -4044,8 +4045,6 @@ fFlagsDeps = [
   flagSpec "write-interface"                  Opt_WriteInterface,
   flagSpec "unbox-small-strict-fields"        Opt_UnboxSmallStrictFields,
   flagSpec "unbox-strict-fields"              Opt_UnboxStrictFields,
-  flagSpec "vectorisation-avoidance"          Opt_VectorisationAvoidance,
-  flagSpec "vectorise"                        Opt_Vectorise,
   flagSpec "version-macros"                   Opt_VersionMacros,
   flagSpec "worker-wrapper"                   Opt_WorkerWrapper,
   flagSpec "solve-constant-dicts"             Opt_SolveConstantDicts,
@@ -4113,10 +4112,6 @@ fLangFlagsDeps = [
     (deprecatedForExtension "ImplicitParams"),
   depFlagSpec' "scoped-type-variables"          LangExt.ScopedTypeVariables
     (deprecatedForExtension "ScopedTypeVariables"),
-  depFlagSpec' "parr"                           LangExt.ParallelArrays
-    (deprecatedForExtension "ParallelArrays"),
-  depFlagSpec' "PArr"                           LangExt.ParallelArrays
-    (deprecatedForExtension "ParallelArrays"),
   depFlagSpec' "allow-overlapping-instances"    LangExt.OverlappingInstances
     (deprecatedForExtension "OverlappingInstances"),
   depFlagSpec' "allow-undecidable-instances"    LangExt.UndecidableInstances
@@ -4194,6 +4189,7 @@ xFlagsDeps = [
   flagSpec "DeriveLift"                       LangExt.DeriveLift,
   flagSpec "DeriveTraversable"                LangExt.DeriveTraversable,
   flagSpec "DerivingStrategies"               LangExt.DerivingStrategies,
+  flagSpec "DerivingVia"                      LangExt.DerivingVia,
   flagSpec "DisambiguateRecordFields"         LangExt.DisambiguateRecordFields,
   flagSpec "DoAndIfThenElse"                  LangExt.DoAndIfThenElse,
   flagSpec "BlockArguments"                   LangExt.BlockArguments,
@@ -4267,6 +4263,7 @@ xFlagsDeps = [
   flagSpec "PatternSynonyms"                  LangExt.PatternSynonyms,
   flagSpec "PolyKinds"                        LangExt.PolyKinds,
   flagSpec "PolymorphicComponents"            LangExt.RankNTypes,
+  flagSpec "QuantifiedConstraints"            LangExt.QuantifiedConstraints,
   flagSpec "PostfixOperators"                 LangExt.PostfixOperators,
   flagSpec "QuasiQuotes"                      LangExt.QuasiQuotes,
   flagSpec "Rank2Types"                       LangExt.RankNTypes,
@@ -4390,6 +4387,7 @@ impliedXFlags :: [(LangExt.Extension, TurnOnFlag, LangExt.Extension)]
 impliedXFlags
 -- See Note [Updating flag description in the User's Guide]
   = [ (LangExt.RankNTypes,                turnOn, LangExt.ExplicitForAll)
+    , (LangExt.QuantifiedConstraints,     turnOn, LangExt.ExplicitForAll)
     , (LangExt.ScopedTypeVariables,       turnOn, LangExt.ExplicitForAll)
     , (LangExt.LiberalTypeSynonyms,       turnOn, LangExt.ExplicitForAll)
     , (LangExt.ExistentialQuantification, turnOn, LangExt.ExplicitForAll)
@@ -4399,6 +4397,8 @@ impliedXFlags
     , (LangExt.TypeFamilyDependencies,    turnOn, LangExt.TypeFamilies)
 
     , (LangExt.RebindableSyntax, turnOff, LangExt.ImplicitPrelude)      -- NB: turn off!
+
+    , (LangExt.DerivingVia, turnOn, LangExt.DerivingStrategies)
 
     , (LangExt.GADTs,            turnOn, LangExt.GADTSyntax)
     , (LangExt.GADTs,            turnOn, LangExt.MonoLocalBinds)
@@ -4456,11 +4456,6 @@ optLevelFlags -- see Note [Documenting optimisation flags]
     , ([0,1,2], Opt_DoEtaReduction)       -- See Note [Eta-reduction in -O0]
     , ([0,1,2], Opt_DmdTxDictSel)
     , ([0,1,2], Opt_LlvmTBAA)
-    , ([0,1,2], Opt_VectorisationAvoidance)
-                -- This one is important for a tiresome reason:
-                -- we want to make sure that the bindings for data
-                -- constructors are eta-expanded.  This is probably
-                -- a good thing anyway, but it seems fragile.
 
     , ([0],     Opt_IgnoreInterfacePragmas)
     , ([0],     Opt_OmitInterfacePragmas)
@@ -4591,7 +4586,8 @@ standardWarnings -- see Note [Documenting warning flags]
         Opt_WarnUnsupportedLlvmVersion,
         Opt_WarnTabs,
         Opt_WarnUnrecognisedWarningFlags,
-        Opt_WarnSimplifiableClassConstraints
+        Opt_WarnSimplifiableClassConstraints,
+        Opt_WarnInaccessibleCode
       ]
 
 -- | Things you get with -W
@@ -5204,17 +5200,6 @@ checkOptLevel n dflags
      = Left "-O conflicts with --interactive; -O ignored."
    | otherwise
      = Right dflags
-
--- -Odph is equivalent to
---
---    -O2                               optimise as much as possible
---    -fmax-simplifier-iterations20     this is necessary sometimes
---    -fsimplifier-phases=3             we use an additional simplifier phase for fusion
---
-setDPHOpt :: DynFlags -> DynP DynFlags
-setDPHOpt dflags = setOptLevel 2 (dflags { maxSimplIterations  = 20
-                                         , simplPhases         = 3
-                                         })
 
 setMainIs :: String -> DynP ()
 setMainIs arg

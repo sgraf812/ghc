@@ -1052,7 +1052,7 @@ tcSuperClasses dfun_id cls tyvars dfun_evs inst_tys dfun_ev_binds sc_theta
 
            ; sc_top_name  <- newName (mkSuperDictAuxOcc n (getOccName cls))
            ; sc_ev_id     <- newEvVar sc_pred
-           ; addTcEvBind ev_binds_var $ mkWantedEvBind sc_ev_id (EvExpr sc_ev_tm)
+           ; addTcEvBind ev_binds_var $ mkWantedEvBind sc_ev_id sc_ev_tm
            ; let sc_top_ty = mkInvForAllTys tyvars (mkLamTypes dfun_evs sc_pred)
                  sc_top_id = mkLocalId sc_top_name sc_top_ty
                  export = ABE { abe_ext  = noExt
@@ -1303,7 +1303,7 @@ tcMethods dfun_id clas tyvars dfun_ev_vars inst_tys
                                 , ib_derived    = is_derived })
       -- tcExtendTyVarEnv (not scopeTyVars) is OK because the TcLevel is pushed
       -- in checkInstConstraints
-  = tcExtendTyVarEnv2 (lexical_tvs `zip` tyvars) $
+  = tcExtendNameTyVarEnv (lexical_tvs `zip` tyvars) $
        -- The lexical_tvs scope over the 'where' part
     do { traceTc "tcInstMeth" (ppr sigs $$ ppr binds)
        ; checkMinimalDefinition

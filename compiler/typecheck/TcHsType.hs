@@ -6,6 +6,7 @@
 -}
 
 {-# LANGUAGE CPP, TupleSections, MultiWayIf, RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module TcHsType (
         -- Type signatures
@@ -15,7 +16,7 @@ module TcHsType (
         funsSigCtxt, addSigCtxt, pprSigCtxt,
 
         tcHsClsInstType,
-        tcHsDeriv, tcHsVectInst,
+        tcHsDeriv, tcDerivStrategy,
         tcHsTypeApp,
         UserTypeCtxt(..),
         tcImplicitTKBndrs, tcImplicitTKBndrsX,
@@ -274,7 +275,7 @@ tc_hs_sig_type skol_info (HsIB { hsib_ext = HsIBRn { hsib_vars = sig_vars }
 tc_hs_sig_type _ (XHsImplicitBndrs _) _ = panic "tc_hs_sig_type"
 
 -----------------
-tcHsDeriv :: LHsSigType GhcRn -> TcM ([TyVar], Class, [Type], [Kind])
+tcHsDeriv :: LHsSigType GhcRn -> TcM ([TyVar], (Class, [Type], [Kind]))
 -- Like tcHsSigType, but for the ...deriving( C t1 ty2 ) clause
 -- Returns the C, [ty1, ty2, and the kinds of C's remaining arguments
 -- E.g.    class C (a::*) (b::k->k)
@@ -291,8 +292,54 @@ tcHsDeriv hs_ty
        ; let (tvs, pred) = splitForAllTys ty
        ; let (args, _) = splitFunTys cls_kind
        ; case getClassPredTys_maybe pred of
-           Just (cls, tys) -> return (tvs, cls, tys, args)
+           Just (cls, tys) -> return (tvs, (cls, tys, args))
            Nothing -> failWithTc (text "Illegal deriving item" <+> quotes (ppr hs_ty)) }
+
+-- | Typecheck something within the context of a deriving strategy.
+-- This is of particular importance when the deriving strategy is @via@.
+-- For instance:
+--
+-- @
+-- deriving via (S a) instance C (T a)
+-- @
+--
+-- We need to typecheck @S a@, and moreover, we need to extend the tyvar
+-- environment with @a@ before typechecking @C (T a)@, since @S a@ quantified
+-- the type variable @a@.
+tcDerivStrategy
+  :: forall a.
+     UserTypeCtxt
+  -> Maybe (DerivStrategy GhcRn) -- ^ The deriving strategy
+  -> TcM ([TyVar], a) -- ^ The thing to typecheck within the context of the
+                      -- deriving strategy, which might quantify some type
+                      -- variables of its own.
+  -> TcM (Maybe (DerivStrategy GhcTc), [TyVar], a)
+     -- ^ The typechecked deriving strategy, all quantified tyvars, and
+     -- the payload of the typechecked thing.
+tcDerivStrategy user_ctxt mds thing_inside
+  = case mds of
+      Nothing -> boring_case Nothing
+      Just ds -> do (ds', tvs, thing) <- tc_deriv_strategy ds
+                    pure (Just ds', tvs, thing)
+  where
+    tc_deriv_strategy :: DerivStrategy GhcRn
+                      -> TcM (DerivStrategy GhcTc, [TyVar], a)
+    tc_deriv_strategy StockStrategy    = boring_case StockStrategy
+    tc_deriv_strategy AnyclassStrategy = boring_case AnyclassStrategy
+    tc_deriv_strategy NewtypeStrategy  = boring_case NewtypeStrategy
+    tc_deriv_strategy (ViaStrategy ty) = do
+      cls_kind <- newMetaKindVar
+      ty' <- checkNoErrs $
+             tc_hs_sig_type_and_gen (SigTypeSkol user_ctxt) ty cls_kind
+      let (via_tvs, via_pred) = splitForAllTys ty'
+      tcExtendTyVarEnv via_tvs $ do
+        (thing_tvs, thing) <- thing_inside
+        pure (ViaStrategy via_pred, via_tvs ++ thing_tvs, thing)
+
+    boring_case :: mds -> TcM (mds, [TyVar], a)
+    boring_case mds = do
+      (thing_tvs, thing) <- thing_inside
+      pure (mds, thing_tvs, thing)
 
 tcHsClsInstType :: UserTypeCtxt    -- InstDeclCtxt or SpecInstCtxt
                 -> LHsSigType GhcRn
@@ -302,22 +349,6 @@ tcHsClsInstType user_ctxt hs_inst_ty
   = setSrcSpan (getLoc (hsSigType hs_inst_ty)) $
     do { inst_ty <- tc_hs_sig_type_and_gen (SigTypeSkol user_ctxt) hs_inst_ty constraintKind
        ; checkValidInstance user_ctxt hs_inst_ty inst_ty }
-
--- Used for 'VECTORISE [SCALAR] instance' declarations
-tcHsVectInst :: LHsSigType GhcRn -> TcM (Class, [Type])
-tcHsVectInst ty
-  | let hs_cls_ty = hsSigType ty
-  , Just (L _ cls_name, tys) <- hsTyGetAppHead_maybe hs_cls_ty
-    -- Ignoring the binders looks pretty dodgy to me
-  = do { (cls, cls_kind) <- tcClass cls_name
-       ; (applied_class, _res_kind)
-           <- tcTyApps typeLevelMode hs_cls_ty (mkClassPred cls []) cls_kind tys
-       ; case tcSplitTyConApp_maybe applied_class of
-           Just (_tc, args) -> ASSERT( _tc == classTyCon cls )
-                               return (cls, args)
-           _ -> failWithTc (text "Too many arguments passed to" <+> ppr cls_name) }
-  | otherwise
-  = failWithTc $ text "Malformed instance type"
 
 ----------------------------------------------
 -- | Type-check a visible type application
@@ -678,12 +709,6 @@ tc_hs_type mode rn_ty@(HsListTy _ elt_ty) exp_kind
   = do { tau_ty <- tc_lhs_type mode elt_ty liftedTypeKind
        ; checkWiredInTyCon listTyCon
        ; checkExpectedKind rn_ty (mkListTy tau_ty) liftedTypeKind exp_kind }
-
-tc_hs_type mode rn_ty@(HsPArrTy _ elt_ty) exp_kind
-  = do { MASSERT( isTypeLevel (mode_level mode) )
-       ; tau_ty <- tc_lhs_type mode elt_ty liftedTypeKind
-       ; checkWiredInTyCon parrTyCon
-       ; checkExpectedKind rn_ty (mkPArrTy tau_ty) liftedTypeKind exp_kind }
 
 -- See Note [Distinguishing tuple kinds] in HsTypes
 -- See Note [Inferring tuple kinds]
@@ -1187,23 +1212,6 @@ tcTyVar mode name         -- Could be a tyvar, a tycon, or a datacon
                 _                -> do { traceTc "lk1 (loopy)" (ppr name)
                                        ; return tc_tc } }
 
-tcClass :: Name -> TcM (Class, TcKind)
-tcClass cls     -- Must be a class
-  = do { thing <- tcLookup cls
-       ; case thing of
-           ATcTyCon tc -> return (aThingErr "tcClass" cls, tyConKind tc)
-           AGlobal (ATyCon tc)
-             | Just cls <- tyConClass_maybe tc
-             -> return (cls, tyConKind tc)
-           _ -> wrongThingErr "class" thing cls }
-
-
-aThingErr :: String -> Name -> b
--- The type checker for types is sometimes called simply to
--- do *kind* checking; and in that case it ignores the type
--- returned. Which is a good thing since it may not be available yet!
-aThingErr str x = pprPanic "AThing evaluated unexpectedly" (text str <+> ppr x)
-
 {-
 Note [Type-checking inside the knot]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1555,7 +1563,7 @@ tcWildCardBindersX new_wc maybe_skol_info wc_names thing_inside
   where
     scope_tvs
       | Just info <- maybe_skol_info = scopeTyVars2 info
-      | otherwise                    = tcExtendTyVarEnv2
+      | otherwise                    = tcExtendNameTyVarEnv
 
 -- | Kind-check a 'LHsQTyVars'. If the decl under consideration has a complete,
 -- user-supplied kind signature (CUSK), generalise the result.
@@ -1610,7 +1618,7 @@ kcLHsQTyVars name flav cusk
           -- fully settled down by this point, and so this check will get
           -- a false positive.
        ; when (not_associated && not (null meta_tvs)) $
-         report_non_cusk_tvs (qkvs ++ tc_tvs)
+         report_non_cusk_tvs (qkvs ++ tc_tvs) res_kind
 
           -- If any of the scoped_kvs aren't actually mentioned in a binder's
           -- kind (or the return kind), then we're in the CUSK case from
@@ -1682,7 +1690,7 @@ kcLHsQTyVars name flav cusk
        | otherwise
        = mkAnonTyConBinder tv
 
-    report_non_cusk_tvs all_tvs
+    report_non_cusk_tvs all_tvs res_kind
       = do { all_tvs <- mapM zonkTyCoVarKind all_tvs
            ; let (_, tidy_tvs)         = tidyOpenTyCoVars emptyTidyEnv all_tvs
                  (meta_tvs, other_tvs) = partition isMetaTyVar tidy_tvs
@@ -1693,8 +1701,14 @@ kcLHsQTyVars name flav cusk
                           isOrAre meta_tvs <+> text "undetermined:")
                        2 (vcat (map pp_tv meta_tvs))
                   , text "Perhaps add a kind signature."
-                  , hang (text "Inferred kinds of user-written variables:")
-                       2 (vcat (map pp_tv other_tvs)) ] }
+                  , ppUnless (null other_tvs) $
+                    hang (text "Inferred kinds of user-written variables:")
+                       2 (vcat (map pp_tv other_tvs))
+                    -- It's possible that the result kind contains
+                    -- underdetermined, forall-bound variables which weren't
+                    -- reported earier (see #13777).
+                  , hang (text "Inferred result kind:")
+                       2 (ppr res_kind) ] }
       where
         pp_tv tv = ppr tv <+> dcolon <+> ppr (tyVarKind tv)
 kcLHsQTyVars _ _ _ (XLHsQTyVars _) _ = panic "kcLHsQTyVars"
@@ -1955,7 +1969,7 @@ scopeTyVars2 :: SkolemInfo -> [(Name, TcTyVar)] -> TcM a -> TcM a
 scopeTyVars2 skol_info prs thing_inside
   = fmap snd $ -- discard the TcEvBinds, which will always be empty
     checkConstraints skol_info (map snd prs) [{- no EvVars -}] $
-    tcExtendTyVarEnv2 prs $
+    tcExtendNameTyVarEnv prs $
     thing_inside
 
 ------------------
@@ -2112,7 +2126,7 @@ kcTyClTyVars :: Name -> TcM a -> TcM a
 kcTyClTyVars tycon_name thing_inside
   -- See Note [Use SigTvs in kind-checking pass] in TcTyClsDecls
   = do { tycon <- kcLookupTcTyCon tycon_name
-       ; tcExtendTyVarEnv2 (tcTyConScopedTyVars tycon) $ thing_inside }
+       ; tcExtendNameTyVarEnv (tcTyConScopedTyVars tycon) $ thing_inside }
 
 tcTyClTyVars :: Name
              -> ([TyConBinder] -> Kind -> TcM a) -> TcM a

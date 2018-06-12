@@ -29,6 +29,8 @@ TARGETS=(
     "i386-unknown-linux-gnu" "i386-unknown-linux" "x86_64-unknown-linux-gnu" "x86_64-unknown-linux"
     # Linux Android
     "armv7-unknown-linux-androideabi" "aarch64-unknown-linux-android"
+    # Linux ppc64le
+    "powerpc64le-unknown-linux"
 
     # QNX
     "arm-unknown-nto-qnx-eabi"
@@ -37,6 +39,9 @@ TARGETS=(
     "i386-apple-darwin" "x86_64-apple-darwin"
     # iOS
     "armv7-apple-ios arm64-apple-ios" "i386-apple-ios x86_64-apple-ios"
+
+    # FreeBSD ARM
+    "aarch64-unknown-freebsd" "armv6-unknown-freebsd-gnueabihf" "armv7-unknown-freebsd-gnueabihf"
 )
 
 # given the call to clang -c11 that clang --target -v generates,

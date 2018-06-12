@@ -17,12 +17,15 @@ module PmExpr (
 
 import GhcPrelude
 
+import BasicTypes (SourceText)
+import FastString (FastString, unpackFS)
 import HsSyn
 import Id
 import Name
 import NameSet
 import DataCon
 import ConLike
+import TcType (isStringTy)
 import TysWiredIn
 import Outputable
 import Util
@@ -238,13 +241,27 @@ hsExprToPmExpr :: HsExpr GhcTc -> PmExpr
 
 hsExprToPmExpr (HsVar        _ x) = PmExprVar (idName (unLoc x))
 hsExprToPmExpr (HsConLikeOut _ c) = PmExprVar (conLikeName c)
-hsExprToPmExpr (HsOverLit _ olit) = PmExprLit (PmOLit False olit)
-hsExprToPmExpr (HsLit      _ lit) = PmExprLit (PmSLit lit)
 
-hsExprToPmExpr e@(NegApp _ _ neg_e)
-  | PmExprLit (PmOLit False ol) <- synExprToPmExpr neg_e
-  = PmExprLit (PmOLit True ol)
+-- Desugar literal strings as a list of characters. For other literal values,
+-- keep it as it is.
+-- See `translatePat` in Check.hs (the `NPat` and `LitPat` case), and
+-- Note [Translate Overloaded Literal for Exhaustiveness Checking].
+hsExprToPmExpr (HsOverLit _ olit)
+  | OverLit (OverLitTc False ty) (HsIsString src s) _ <- olit, isStringTy ty
+  = stringExprToList src s
+  | otherwise = PmExprLit (PmOLit False olit)
+hsExprToPmExpr (HsLit     _ lit)
+  | HsString src s <- lit
+  = stringExprToList src s
+  | otherwise = PmExprLit (PmSLit lit)
+
+hsExprToPmExpr e@(NegApp _ (L _ neg_expr) _)
+  | PmExprLit (PmOLit False olit) <- hsExprToPmExpr neg_expr
+    -- NB: DON'T simply @(NegApp (NegApp olit))@ as @x@. when extension
+    -- @RebindableSyntax@ enabled, (-(-x)) may not equals to x.
+  = PmExprLit (PmOLit True olit)
   | otherwise = PmExprOther e
+
 hsExprToPmExpr (HsPar _ (L _ e)) = hsExprToPmExpr e
 
 hsExprToPmExpr e@(ExplicitTuple _ ps boxity)
@@ -260,10 +277,6 @@ hsExprToPmExpr e@(ExplicitList _  mb_ol elems)
   where
     cons x xs = mkPmExprData consDataCon [x,xs]
     nil       = mkPmExprData nilDataCon  []
-
-hsExprToPmExpr (ExplicitPArr _ elems)
-  = mkPmExprData (parrFakeCon (length elems)) (map lhsExprToPmExpr elems)
-
 
 -- we want this but we would have to make everything monadic :/
 -- ./compiler/deSugar/DsMonad.hs:397:dsLookupDataCon :: Name -> DsM DataCon
@@ -283,8 +296,12 @@ hsExprToPmExpr (ExprWithTySig      _ e) = lhsExprToPmExpr e
 hsExprToPmExpr (HsWrap           _ _ e) =  hsExprToPmExpr e
 hsExprToPmExpr e = PmExprOther e -- the rest are not handled by the oracle
 
-synExprToPmExpr :: SyntaxExpr GhcTc -> PmExpr
-synExprToPmExpr = hsExprToPmExpr . syn_expr  -- ignore the wrappers
+stringExprToList :: SourceText -> FastString -> PmExpr
+stringExprToList src s = foldr cons nil (map charToPmExpr (unpackFS s))
+  where
+    cons x xs      = mkPmExprData consDataCon [x,xs]
+    nil            = mkPmExprData nilDataCon  []
+    charToPmExpr c = PmExprLit (PmSLit (HsChar src c))
 
 {-
 %************************************************************************
@@ -395,7 +412,7 @@ needsParens (PmExprLit    l) = isNegatedPmLit l
 needsParens (PmExprEq    {}) = False -- will become a wildcard
 needsParens (PmExprOther {}) = False -- will become a wildcard
 needsParens (PmExprCon (RealDataCon c) es)
-  | isTupleDataCon c || isPArrFakeCon c
+  | isTupleDataCon c
   || isConsDataCon c || null es = False
   | otherwise                   = True
 needsParens (PmExprCon (PatSynCon _) es) = not (null es)
@@ -408,12 +425,10 @@ pprPmExprWithParens expr
 pprPmExprCon :: ConLike -> [PmExpr] -> PmPprM SDoc
 pprPmExprCon (RealDataCon con) args
   | isTupleDataCon con = mkTuple <$> mapM pprPmExpr args
-  |  isPArrFakeCon con = mkPArr  <$> mapM pprPmExpr args
-  |  isConsDataCon con = pretty_list
+  | isConsDataCon con  = pretty_list
   where
-    mkTuple, mkPArr :: [SDoc] -> SDoc
+    mkTuple :: [SDoc] -> SDoc
     mkTuple = parens     . fsep . punctuate comma
-    mkPArr  = paBrackets . fsep . punctuate comma
 
     -- lazily, to be used in the list case only
     pretty_list :: PmPprM SDoc

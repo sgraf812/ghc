@@ -359,11 +359,12 @@ cvtDec (TH.RoleAnnotD tc roles)
 
 cvtDec (TH.StandaloneDerivD ds cxt ty)
   = do { cxt' <- cvtContext cxt
+       ; ds'  <- traverse cvtDerivStrategy ds
        ; L loc ty'  <- cvtType ty
        ; let inst_ty' = mkHsQualTy cxt loc cxt' $ L loc ty'
        ; returnJustL $ DerivD noExt $
          DerivDecl { deriv_ext =noExt
-                   , deriv_strategy = fmap (L loc . cvtDerivStrategy) ds
+                   , deriv_strategy = ds'
                    , deriv_type = mkLHsSigWcType inst_ty'
                    , deriv_overlap_mode = Nothing } }
 
@@ -1229,14 +1230,17 @@ cvtPred = cvtType
 cvtDerivClause :: TH.DerivClause
                -> CvtM (LHsDerivingClause GhcPs)
 cvtDerivClause (TH.DerivClause ds ctxt)
-  = do { ctxt'@(L loc _) <- fmap (map mkLHsSigType) <$> cvtContext ctxt
-       ; let ds' = fmap (L loc . cvtDerivStrategy) ds
+  = do { ctxt' <- fmap (map mkLHsSigType) <$> cvtContext ctxt
+       ; ds'   <- traverse cvtDerivStrategy ds
        ; returnL $ HsDerivingClause noExt ds' ctxt' }
 
-cvtDerivStrategy :: TH.DerivStrategy -> Hs.DerivStrategy
-cvtDerivStrategy TH.StockStrategy    = Hs.StockStrategy
-cvtDerivStrategy TH.AnyclassStrategy = Hs.AnyclassStrategy
-cvtDerivStrategy TH.NewtypeStrategy  = Hs.NewtypeStrategy
+cvtDerivStrategy :: TH.DerivStrategy -> CvtM (Hs.LDerivStrategy GhcPs)
+cvtDerivStrategy TH.StockStrategy    = returnL Hs.StockStrategy
+cvtDerivStrategy TH.AnyclassStrategy = returnL Hs.AnyclassStrategy
+cvtDerivStrategy TH.NewtypeStrategy  = returnL Hs.NewtypeStrategy
+cvtDerivStrategy (TH.ViaStrategy ty) = do
+  ty' <- cvtType ty
+  returnL $ Hs.ViaStrategy (mkLHsSigType ty')
 
 cvtType :: TH.Type -> CvtM (LHsType GhcPs)
 cvtType = cvtTypeKind "type"
@@ -1340,7 +1344,7 @@ cvtTypeKind ty_str ty
                    }
 
            PromotedT nm -> do { nm' <- cName nm
-                              ; mk_apps (HsTyVar noExt NotPromoted
+                              ; mk_apps (HsTyVar noExt Promoted
                                                              (noLoc nm')) tys' }
                  -- Promoted data constructor; hence cName
 
@@ -1350,7 +1354,7 @@ cvtTypeKind ty_str ty
              | m == n   -- Saturated
              -> returnL (HsExplicitTupleTy noExt tys')
              | otherwise
-             -> mk_apps (HsTyVar noExt NotPromoted
+             -> mk_apps (HsTyVar noExt Promoted
                                (noLoc (getRdrName (tupleDataCon Boxed n)))) tys'
              where
                m = length tys'
@@ -1363,7 +1367,7 @@ cvtTypeKind ty_str ty
              | [ty1, L _ (HsExplicitListTy _ ip tys2)] <- tys'
              -> returnL (HsExplicitListTy noExt ip (ty1:tys2))
              | otherwise
-             -> mk_apps (HsTyVar noExt NotPromoted
+             -> mk_apps (HsTyVar noExt Promoted
                          (noLoc (getRdrName consDataCon)))
                         tys'
 
