@@ -1045,6 +1045,16 @@ If we float
 we have saved nothing: one pair will still be allocated for each
 call of 'f'.  Hence the (not float_is_lam) in float_me.
 
+Note [Lifting LNEs]
+~~~~~~~~~~~~~~~~~~~
+
+Lifting LNEs is dubious. The only benefit of lifting an LNE is the
+reduction in expression size increasing the likelihood of inlining,
+eg. LNEs do not allocate and by definition cannot pin other function
+closures.
+
+However a function call seems to be a bit slower than an LNE entry;
+TODO investigate the CMM difference.
 
 ************************************************************************
 *                                                                      *
@@ -1088,9 +1098,9 @@ lvlBind :: LevelEnv
         -> LvlM (LevelledBind, LevelEnv)
 
 lvlBind env binding@(AnnNonRec (TB bndr _) rhs)
-  | isTyVar bndr    -- Don't do anything for TyVar binders
+  |  isTyVar bndr    -- Don't do anything for TyVar binders
                     --   (simplifier gets rid of them pronto)
-  , isCoVar bndr    -- Difficult to fix up CoVar occurrences (see newPolyBndrs)
+  || isCoVar bndr    -- Difficult to fix up CoVar occurrences (see newPolyBndrs)
                     -- so we will ignore this case for now
   = doNotFloat
   | otherwise
@@ -1298,11 +1308,18 @@ decideLateLambdaFloat env isRec is_join all_one_shot abs_ids badTime spaceInfo i
     else badTime
          -- not floating, in order to not abstract over these
   where
-    floating = not $ isBadTime || isBadSpace
+    floating = not $ isBadTime || isBadSpace || abstractsJoinId
 
     msg = (if floating then "late-float" else "late-no-float")
           ++ (if isRec then "(rec " ++ show (length ids) ++ ")" else "")
           ++ if floating && isBadSpace then "(SAT)" else ""
+
+    -- TODO SG June 2018: Investigate why the join point isn't floated to
+    -- top-level. Happens in GHC.Integer.Types.normSizeofMutBigNat'#.
+    -- Probably because the join binding is just a simple application (and nullary).
+    -- Seems to be the right thing to do according to Note [Free join points].
+    -- But then again, things might be different for lambda lifting.
+    abstractsJoinId = anyDVarSet isJoinId abs_ids
 
     isBadTime = not (isEmptyVarSet badTime)
 
