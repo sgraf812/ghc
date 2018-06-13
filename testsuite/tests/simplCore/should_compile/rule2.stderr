@@ -9,6 +9,11 @@
 
 
 
+==================== FloatOut stats: ====================
+0 Lets floated to top level; 0 Lets floated elsewhere; from 3 Lambda groups
+
+
+
 ==================== Grand total simplifier statistics ====================
 Total ticks:     11
 
@@ -24,6 +29,6 @@ Total ticks:     11
   1 m
   1 b
   1 m
-8 SimplifierDone 8
+9 SimplifierDone 9
 
 
