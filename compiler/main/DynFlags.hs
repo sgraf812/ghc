@@ -1784,8 +1784,8 @@ defaultDynFlags mySettings (myLlvmTargets, myLlvmPasses) =
         specConstrRecursive     = 3,
         liberateCaseThreshold   = Just 2000,
 
-        lateFloatNonRecLam      = Just 0,
-        lateFloatRecLam         = Just 0,
+        lateFloatNonRecLam      = Just 10,
+        lateFloatRecLam         = Just 6,
         lateFloatIfInClo        = Nothing,
         lateFloatCloGrowth      = Just 0,
         lateFloatCloGrowthInLam = Just 0,
@@ -4376,12 +4376,16 @@ impliedGFlags :: [(GeneralFlag, TurnOnFlag, GeneralFlag)]
 impliedGFlags = [(Opt_DeferTypeErrors, turnOn, Opt_DeferTypedHoles)
                 ,(Opt_DeferTypeErrors, turnOn, Opt_DeferOutOfScopeVariables)
                 ,(Opt_Strictness, turnOn, Opt_WorkerWrapper)
+                ,(Opt_LLF, turnOn, Opt_FullLaziness)
                 ] ++ validHoleFitsImpliedGFlags
 
 -- General flags that are switched on/off when other general flags are switched
 -- off
 impliedOffGFlags :: [(GeneralFlag, TurnOnFlag, GeneralFlag)]
-impliedOffGFlags = [(Opt_Strictness, turnOff, Opt_WorkerWrapper)]
+impliedOffGFlags
+  = [ (Opt_Strictness, turnOff, Opt_WorkerWrapper)
+    , (Opt_FullLaziness, turnOff, Opt_LLF)
+    ]
 
 impliedXFlags :: [(LangExt.Extension, TurnOnFlag, LangExt.Extension)]
 impliedXFlags
@@ -4473,6 +4477,11 @@ optLevelFlags -- see Note [Documenting optimisation flags]
                                          --              in PrelRules
     , ([1,2],   Opt_FloatIn)
     , ([1,2],   Opt_FullLaziness)
+    , ([1,2],   Opt_LLF)
+    , ([1,2],   Opt_LLF_AbsUnsat)
+    , ([1,2],   Opt_LLF_Simpl)
+    , ([1,2],   Opt_LLF_UseStr)
+    , ([1,2],   Opt_LLF_OneShot)
     , ([1,2],   Opt_IgnoreAsserts)
     , ([1,2],   Opt_Loopification)
     , ([1,2],   Opt_Specialise)
