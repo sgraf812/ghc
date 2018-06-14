@@ -1093,7 +1093,6 @@ instance DeTag Bind where
   deTag (NonRec (TB bndr _) rhs) = NonRec bndr (deTag rhs)
   deTag (Rec pairs) = Rec $ map (\(bndr, rhs) -> (unTag bndr, deTag rhs)) pairs
 
-
 lvlBind :: LevelEnv
         -> CoreBindWithBoth
         -> LvlM (LevelledBind, LevelEnv)
@@ -1144,6 +1143,7 @@ lvlBind env binding@(AnnNonRec (TB bndr _) rhs)
           ; return (NonRec (TB bndr2 (FloatMe dest_lvl)) rhs', env') }
       | otherwise
       = do { -- Yes, type abstraction; create a new binder, extend substitution, etc
+            -- TODO: LLF also uses this for value abstractions.
             rhs' <- lvlFloatRhs abs_vars dest_lvl env NonRecursive
                                 is_bot mb_join_arity rhs
           ; (env', [bndr']) <- newPolyBndrs dest_lvl env abs_vars [bndr]
@@ -1218,12 +1218,11 @@ decideBindFloat env is_fun is_bot is_join binding =
           AnnRec ann_pairs          -> map (\(b,r) -> (unTag b, r)) ann_pairs
         (bndrs,_) = unzip pairs
         -- Finding the free vars of the binding group is annoying
-        bind_fvs = ((unionDVarSets [ fvsOf rhs | (_, rhs) <- pairs])
+        bind_fvs = (unionDVarSets (map (fvsOf . snd) pairs)
                     `unionDVarSet`
-                    (fvDVarSet $ unionsFV [ idFVs bndr
-                                          | (bndr, (_,_)) <- pairs]))
-                  `delDVarSetList`
-                    bndrs
+                    fvDVarSet (unionsFV (map (idFVs . fst) pairs)))
+                   `delDVarSetList`
+                   bndrs
         ty_fvs   = foldr (unionVarSet . tyCoVarsOfType . idType) emptyVarSet bndrs
         dest_lvl = destLevel env bind_fvs ty_fvs is_fun is_bot is_join
         abs_vars = abstractVars dest_lvl env bind_fvs
@@ -1240,7 +1239,7 @@ decideBindFloat env is_fun is_bot is_join binding =
         abs_vars = abstractVars tOP_LEVEL env bindings_fvs
         abs_ids  = expandFloatedIds env $ mapDVarEnv fii_var bindings_fiis
 
-        decider  = decideLateLambdaFloat env isRec is_join all_one_shot abs_ids badTime spaceInfo ids extra_sdoc fps
+        decider  = decideLateLambdaFloat env rec is_join all_one_shot abs_ids badTime spaceInfo ids extra_sdoc fps
 
         badTime   = wouldIncreaseRuntime    env (dVarSetToVarSet abs_ids) bindings_fiis
         spaceInfo = wouldIncreaseAllocation env is_join abs_ids rhs_silt_s scope_silt
@@ -1251,14 +1250,14 @@ decideBindFloat env is_fun is_bot is_join binding =
                   $$ text "abs_vars:"   <+> ppr abs_vars
 
     rhs_silt_s :: [(CoreBndr, FISilt)]
-    (   isRec , ids
+    (   rec , ids
       , scope_silt
       , bindings_fvs, bindings_fiis
       , rhs_silt_s
       , all_one_shot
       ) = case binding of
       AnnNonRec (TB bndr (_,bsilt)) rhs ->
-        ( False , [bndr]
+        ( NonRecursive, [bndr]
         , case bsilt of
             BoringB -> emptySilt
             CloB scope -> scope
@@ -1269,7 +1268,7 @@ decideBindFloat env is_fun is_bot is_join binding =
         where rhs_silt = siltOf rhs
       AnnRec pairs@((TB _ (_,bsilt),_):_) ->
                  -- the scope silt are the same for each
-        ( True , bndrs
+        ( Recursive, bndrs
         , case bsilt of
             BoringB -> emptySilt
             CloB scope -> scope
@@ -1287,9 +1286,16 @@ decideBindFloat env is_fun is_bot is_join binding =
     is_OneShot e = case collectBinders $ deTag $ deAnnotate e of
       (bs,_) -> all (\b -> isId b && isOneShotBndr b) bs
 
+tooManyValueLams :: LevelEnv -> RecFlag -> DIdSet -> Bool
+tooManyValueLams env rec abs_ids
+  | Just lim <- mb_limit = sizeDVarSet abs_ids > lim
+  | otherwise = False
+  where
+    mb_limit = if isRec rec then floatRecLams env else floatNonRecLams env
+
 decideLateLambdaFloat ::
   LevelEnv ->
-  Bool ->
+  RecFlag ->
   Bool ->
   Bool ->
   DIdSet ->
@@ -1301,18 +1307,18 @@ decideLateLambdaFloat ::
                -- Just x <=> do not float, not (null x) <=> forgetting
                -- fast calls to the ids in x are the only thing
                -- pinning this binding
-decideLateLambdaFloat env isRec is_join all_one_shot abs_ids badTime spaceInfo ids extra_sdoc fps
+decideLateLambdaFloat env rec is_join all_one_shot abs_ids badTime spaceInfo ids extra_sdoc fps
   = (if fps_trace fps then pprTrace ('\n' : msg) msg_sdoc else (\x -> x)) $
     if floating then Nothing else Just $
-    if isBadSpace
-    then emptyVarSet -- do not float, ever
-    else badTime
+    if isBadTime
+    then badTime
+    else emptyVarSet -- do not float, ever
          -- not floating, in order to not abstract over these
   where
-    floating = not $ isBadTime || isBadSpace || abstractsJoinId
+    floating = not $ isBadTime || isBadSpace || abstractsJoinId || tooManyArgs
 
     msg = (if floating then "late-float" else "late-no-float")
-          ++ (if isRec then "(rec " ++ show (length ids) ++ ")" else "")
+          ++ (if isRec rec then "(rec " ++ show (length ids) ++ ")" else "")
           ++ if floating && isBadSpace then "(SAT)" else ""
 
     -- TODO SG June 2018: Investigate why the join point isn't floated to
@@ -1321,6 +1327,10 @@ decideLateLambdaFloat env isRec is_join all_one_shot abs_ids badTime spaceInfo i
     -- Seems to be the right thing to do according to Note [Free join points].
     -- But then again, things might be different for lambda lifting.
     abstractsJoinId = anyDVarSet isJoinId abs_ids
+
+    -- Don't float if we abstract over more args than n (-fllf-*rec-lam-limit)
+    -- (think: number of hardware registers)
+    tooManyArgs = tooManyValueLams env rec abs_ids
 
     isBadTime = not (isEmptyVarSet badTime)
 
@@ -1391,7 +1401,7 @@ wouldIncreaseRuntime env abs_ids binding_group_fiis = case prjFlags `fmap` final
 
 -- if a free id was floated, then its abs_ids are now free ids
 expandFloatedIds :: LevelEnv -> {- In -} DIdSet -> {- Out -} DIdSet
-expandFloatedIds env = foldl snoc emptyDVarSet . dVarSetElems where
+expandFloatedIds env = Data.List.foldl' snoc emptyDVarSet . dVarSetElems where
   snoc acc id = case lookupVarEnv (le_env env) id of
     Nothing -> extendDVarSet acc id -- TODO is this case possible?
     Just (new_id,filter isId -> abs_ids)
@@ -1639,7 +1649,10 @@ destLevel env fvs fvs_ty is_function is_bot is_join
   --   This was removed in the original wip/llf branch.
   --   Why? Is this too heuristic? Without this code, there is no mention
   --   of floatOutLambdas...
-  | Just n_args <- floatLams env
+  --   Also, the code never mentions lateFloatRecLam (e.g. fps_rec).
+  --   It may have been deleted, because this is exactly what LLF is supposed
+  --   to do.
+  | Just n_args <- floatNonRecLams env
   , n_args > 0  -- n=0 case handled uniformly by the 'otherwise' case
   , is_function
   , countFreeIds fvs <= n_args
@@ -1802,8 +1815,11 @@ finalPass le = finalPass_ (le_switches le)
 isFinalPass :: LevelEnv -> Bool
 isFinalPass le = isJust (finalPass le)
 
-floatLams :: LevelEnv -> Maybe Int
-floatLams le = floatOutLambdas (le_switches le)
+floatNonRecLams :: LevelEnv -> Maybe Int
+floatNonRecLams le = floatOutLambdas (le_switches le)
+
+floatRecLams :: LevelEnv -> Maybe Int
+floatRecLams le = finalPass le >>= fps_rec
 
 floatConsts :: LevelEnv -> Bool
 floatConsts le = floatOutConstants (le_switches le)
