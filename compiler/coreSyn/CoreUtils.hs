@@ -32,6 +32,7 @@ module CoreUtils (
         exprIsTickedString, exprIsTickedString_maybe,
         exprIsTopLevelBindable,
         altsAreExhaustive,
+        foldMapVars,
 
         -- * Equality
         cheapEqExpr, cheapEqExpr', eqExpr,
@@ -1573,6 +1574,24 @@ altsAreExhaustive ((con1,_,_) : alts)
       -- enumerate all constructors, notably in a GADT match, but
       -- we behave conservatively here -- I don't think it's important
       -- enough to deserve special treatment
+
+foldMapVars :: Monoid m => (Id -> m) -> Expr b -> m
+foldMapVars f = go
+  where
+    go e = case e of
+      Var id -> f id
+      App g a -> go g `mappend` go a
+      Lam _ e -> go e
+      Let b e -> bind b `mappend` go e
+      Case e _ _ as -> go e `mappend` foldMap alt as
+      Cast e _ -> go e
+      Tick _ e -> go e
+      _ -> mempty
+
+    bind (NonRec _ rhs) = go rhs
+    bind (Rec pairs) = foldMap (go . snd) pairs
+
+    alt (_, _, e) = go e
 
 -- | True of dyadic operators that can fail only if the second arg is zero!
 isDivOp :: PrimOp -> Bool

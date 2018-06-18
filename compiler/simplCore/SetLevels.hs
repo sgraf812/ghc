@@ -72,6 +72,7 @@ import CoreUtils        ( exprType, exprIsHNF
                         , exprIsTopLevelBindable
                         , isExprLevPoly
                         , collectMakeStaticArgs
+                        , foldMapVars
                         )
 import CoreArity        ( exprBotStrictness_maybe )
 import CoreFVs          -- all of it
@@ -328,7 +329,7 @@ stabiliseUnfolding env bndr rhs
   where
     dflags = le_dflags env
     expose_all = gopt Opt_ExposeAllUnfoldings dflags
-    contains_makeStatic = getAny . foldMap (Any . (== makeStaticName) . varName)
+    contains_makeStatic = getAny . foldMapVars (Any . (== makeStaticName) . varName)
 
 lvl_top :: LevelEnv -> RecFlag -> Id -> CoreExpr -> LvlM LevelledExpr
 lvl_top env is_rec bndr rhs
