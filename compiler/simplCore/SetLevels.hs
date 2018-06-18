@@ -324,6 +324,7 @@ stabiliseUnfolding env bndr rhs
   , snd $ TidyPgm.addExternal expose_all bndr
   , isUnstableUnfolding (realIdUnfolding bndr)
   , not (contains_makeStatic rhs) -- makeStatic must be lowered in TidyPgm
+  , not (isStrongLoopBreaker (idOccInfo bndr)) -- Loopbreakers inhibit inlining
   = bndr `setIdUnfolding` mkInlinableUnfolding dflags rhs
   | otherwise = bndr
   where
