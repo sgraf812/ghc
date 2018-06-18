@@ -110,9 +110,11 @@ import FastString
 import UniqDFM
 import FV
 import Data.Maybe
+import Data.Monoid      ( Any(..) )
 import Data.Functor.Identity
 import qualified Data.List
 import MonadUtils       ( mapAccumLM, mapAndUnzipM )
+import PrelNames        ( makeStaticName )
 import SMRep            ( WordOff )
 import StgCmmArgRep     ( ArgRep(P), argRepSizeW, toArgRep )
 import StgCmmLayout     ( ClosureHeader(..), mkVirtHeapOffsets )
@@ -296,28 +298,37 @@ setLevels dflags float_lams binds us
 lvlTopBind :: LevelEnv -> Bind Id -> LvlM (LevelledBind, LevelEnv)
 lvlTopBind env (NonRec bndr rhs)
   = do { rhs' <- lvl_top env NonRecursive bndr rhs
-       ; let  -- lambda lifting impedes specialization, so: if the old
-              -- RHS has an unstable unfolding that will survive
-              -- TidyPgm, "stablize it" so that it ends up in the .hi
-              -- file as-is, prior to LLF squeezing all of the juice out
-              dflags     = le_dflags env
-              expose_all = gopt Opt_ExposeAllUnfoldings  dflags
-              stab_bndr
-                | isFinalPass env
-                , gopt Opt_LLF_Stabilize dflags
-                , snd $ TidyPgm.addExternal expose_all bndr
-                , isUnstableUnfolding (realIdUnfolding bndr)
-                  = bndr `setIdUnfolding` mkInlinableUnfolding dflags rhs
-                | otherwise = bndr
-       ; let (env', [bndr']) = substAndLvlBndrs NonRecursive env tOP_LEVEL [stab_bndr]
+       ; let stab_bndr = stabiliseUnfolding env bndr rhs
+             (env', [bndr']) = substAndLvlBndrs NonRecursive env tOP_LEVEL [stab_bndr]
        ; return (NonRec bndr' rhs', env') }
 
--- TODO, NSF 15 June 2014: shouldn't we stablize rec bindings too? They're not all loopbreakers
 lvlTopBind env (Rec pairs)
-  = do { let (env', bndrs') = substAndLvlBndrs Recursive env tOP_LEVEL
-                                               (map fst pairs)
+  = do { let stab_bndrs = map (uncurry (stabiliseUnfolding env)) pairs
+             (env', bndrs') = substAndLvlBndrs Recursive env tOP_LEVEL stab_bndrs
        ; rhss' <- mapM (\(b,r) -> lvl_top env' Recursive b r) pairs
        ; return (Rec (bndrs' `zip` rhss'), env') }
+
+-- | Lambda lifting impedes specialisation and reverts patterns such as the
+-- "manual static argument transformation", used in e.g. zipWith.
+-- That's good when we can't inline anyway. Otherwise we'd rather not see the
+-- result of lambda lifting, because of said specialisation effects.
+--
+-- So: if the old RHS has an unstable unfolding that will survive
+-- TidyPgm, "stabelise it" so that it ends up in the .hi
+-- file as-is, prior to LLF squeezing all of the juice out.
+stabiliseUnfolding :: LevelEnv -> CoreBndr -> CoreExpr -> CoreBndr
+stabiliseUnfolding env bndr rhs
+  | isFinalPass env
+  , gopt Opt_LLF_Stabilize dflags
+  , snd $ TidyPgm.addExternal expose_all bndr
+  , isUnstableUnfolding (realIdUnfolding bndr)
+  , not (contains_makeStatic rhs) -- makeStatic must be lowered in TidyPgm
+  = bndr `setIdUnfolding` mkInlinableUnfolding dflags rhs
+  | otherwise = bndr
+  where
+    dflags = le_dflags env
+    expose_all = gopt Opt_ExposeAllUnfoldings dflags
+    contains_makeStatic = getAny . foldMap (Any . (== makeStaticName) . varName)
 
 lvl_top :: LevelEnv -> RecFlag -> Id -> CoreExpr -> LvlM LevelledExpr
 lvl_top env is_rec bndr rhs

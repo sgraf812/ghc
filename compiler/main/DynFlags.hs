@@ -4482,6 +4482,7 @@ optLevelFlags -- see Note [Documenting optimisation flags]
     , ([1,2],   Opt_LLF_Simpl)
     , ([1,2],   Opt_LLF_UseStr)
     , ([1,2],   Opt_LLF_OneShot)
+    , ([1,2],   Opt_LLF_Stabilize)
     , ([1,2],   Opt_IgnoreAsserts)
     , ([1,2],   Opt_Loopification)
     , ([1,2],   Opt_Specialise)
