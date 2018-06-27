@@ -1265,7 +1265,8 @@ decideBindFloat env is_fun is_bot is_join binding =
     rhs_silt_s :: [(CoreBndr, FISilt)]
     (   rec , ids
       , scope_silt
-      , bindings_fvs, bindings_fiis
+      , bindings_fvs
+      , bindings_fiis
       , rhs_silt_s
       , all_one_shot
       ) = case binding of
@@ -1274,7 +1275,8 @@ decideBindFloat env is_fun is_bot is_join binding =
         , case bsilt of
             BoringB -> emptySilt
             CloB scope -> scope
-        , fvsOf rhs `unionDVarSet` dIdFreeVars bndr   ,   siltFIIs rhs_silt
+        , fvsOf rhs
+        , siltFIIs rhs_silt
         , [(bndr, rhs_silt)]
         , is_OneShot rhs
         )
@@ -1293,7 +1295,7 @@ decideBindFloat env is_fun is_bot is_join binding =
               bndrs = map unTag tbs
               rhs_silt_s = map (\(b,rhs) -> (unTag b,siltOf rhs)) pairs
               rhss_silt = foldr bothSilt emptySilt (map snd rhs_silt_s)
-              rhss_fvs  = computeRecRHSsFVs bndrs (map fvsOf rhss)
+              rhss_fvs  = unionDVarSets (map fvsOf rhss)
       _ -> panic "decideBindFloat"
 
     is_OneShot e = case collectBinders $ deTag $ deAnnotate e of
@@ -1328,7 +1330,7 @@ decideLateLambdaFloat env rec is_join all_one_shot abs_ids badTime spaceInfo ids
     else emptyVarSet -- do not float, ever
          -- not floating, in order to not abstract over these
   where
-    floating = not $ isBadTime || isBadSpace || abstractsJoinId || tooManyArgs
+    floating = not $ isBadTime || isBadSpace || spoilsJoinId || tooManyArgs
 
     msg = (if floating then "late-float" else "late-no-float")
           ++ (if isRec rec then "(rec " ++ show (length ids) ++ ")" else "")
@@ -1339,7 +1341,7 @@ decideLateLambdaFloat env rec is_join all_one_shot abs_ids badTime spaceInfo ids
     -- Probably because the join binding is just a simple application (and nullary).
     -- Seems to be the right thing to do according to Note [Free join points].
     -- But then again, things might be different for lambda lifting.
-    abstractsJoinId = anyDVarSet isJoinId abs_ids
+    spoilsJoinId = anyDVarSet isJoinId abs_ids
 
     -- Don't float if we abstract over more args than n (-fllf-*rec-lam-limit)
     -- (think: number of hardware registers)
@@ -1374,6 +1376,7 @@ decideLateLambdaFloat env rec is_join all_one_shot abs_ids badTime spaceInfo ids
     msg_sdoc = vcat (zipWith space ids spaceInfo) where
       space v (badPAP, closureSize, cg, cgil) = vcat
        [ ppr v <+> if is_join then parens (text "join") else empty
+       , text "arity:" <+> ppr (idArity v)
        , text "size:" <+> ppr closureSize
        , text "abs_ids:" <+> ppr (sizeDVarSet abs_ids) <+> ppr abs_ids
        , text "createsPAPs:" <+> ppr badPAP
@@ -2164,6 +2167,10 @@ type UseInfo = (Bool,Bool,Bool,Bool)
 bothUseInfo :: UseInfo -> UseInfo -> UseInfo
 bothUseInfo (a,b,c,d) (w,x,y,z) = (a||w,b||x,c||y,d||z)
 
+-- | Neutral element to 'bothUseInfo'. Not sure of the semantics.
+nilUseInfo :: UseInfo
+nilUseInfo = (False, False, False, False)
+
 bothFII :: FII -> FII -> FII
 bothFII (FII v l) (FII _ r) = FII v $ l `bothUseInfo` r
 
@@ -2174,6 +2181,9 @@ emptyFIIs = emptyDVarEnv
 
 unitFIIs :: Id -> UseInfo -> FIIs
 unitFIIs v usage = unitDVarEnv v $ FII v usage
+
+mkFIIs :: [(Id, UseInfo)] -> FIIs
+mkFIIs = mkDVarEnv . map (\(v, u) -> (v, FII v u))
 
 bothFIIs :: FIIs -> FIIs -> FIIs
 bothFIIs = plusDVarEnv_C bothFII
@@ -2263,6 +2273,12 @@ emptyFloats = FIFloats OkToSpec [] emptyDVarSet emptyFIIs NilSk
 emptySilt :: FISilt
 emptySilt = FISilt [] emptyDVarEnv NilSk
 
+-- | This returns an 'FISilt' with the given 'FIIs', but does not set an
+-- 'ArgRep' at all.
+-- This is used for variable mentions in RULEs and Unfoldings.
+nilSilt :: FIIs -> FISilt
+nilSilt fiis = FISilt [] fiis NilSk
+
 delBindersSilt :: [Var] -> FISilt -> FISilt
 delBindersSilt bs (FISilt m fiis sk) =
   FISilt m (fiis `delDVarEnvList` bs) sk
@@ -2295,6 +2311,10 @@ wrapFloats :: FIFloats -> FISilt -> FISilt
 wrapFloats (FIFloats _ n bndrs fiis1 skFl) (FISilt m fiis2 skBody) =
   FISilt (m Data.List.\\ n) -- floated sat ids are always OccOnce!, so
                             -- it's correct to remove them 1-for-1
+                            -- TODO SG June 2018: this is a [ArgRep]. I don't
+                            -- think this does the right thing, as the map
+                            -- Id -> ArgRep isn't neccessarily injective.
+                            -- Not sure how to do this better, though.
     (bothFIIs fiis1 $ minusDVarEnv fiis2 bndrs)
     (skFl `bothSk` skBody)
 
@@ -2602,6 +2622,7 @@ analyzeFVsM env (Case scrut bndr ty alts) = do
 
   ret up $ AnnCase scrut2 (boringBinder bndr) ty alts2
 
+-- TODO SG June 2018: Unify with Recursive case
 analyzeFVsM env (Let (NonRec binder rhs) body) = do
   -- step 1: recur
   let rEnv = unappliedEnv env
@@ -2615,16 +2636,15 @@ analyzeFVsM env (Let (NonRec binder rhs) body) = do
 
   let is_join    = isJoinId binder
   let binding_up = floatFVUp env (Just binder) use_case is_join rhs $
-                   perhapsWrapFloatsFVUp NonRecursive use_case rhs rhs_up
+                   addRuleAndUnfoldingIds binder $
+                   perhapsWrapFloatsFVUp NonRecursive use_case rhs $
+                   rhs_up
 
   -- lastly: merge the Ups
   let up = FVUp {
-        fvu_fvs = fvu_fvs binding_up
-                    `unionDVarSet` (fvu_fvs body_up `delDVarSet` binder)
-                    `unionDVarSet` bndrRuleAndUnfoldingVarsDSet binder,
+        fvu_fvs = delBindersFVs [binder] (fvu_fvs body_up `unionDVarSet` fvu_fvs binding_up),
         fvu_floats = fvu_floats binding_up `appendFloats` fvu_floats body_up,
-        fvu_silt = delBindersSilt [binder] $ fvu_silt body_up,
-
+        fvu_silt = delBindersSilt [binder] (fvu_silt body_up),
         fvu_isTrivial = fvu_isTrivial body_up
         }
 
@@ -2639,25 +2659,22 @@ analyzeFVsM env (Let (Rec binds) body) = do
 
   -- step 1: recur
   let recur = analyzeFVsM $ unappliedEnv $ extendEnv binders $ letBoundsEnv binds env
-  (rhss2,rhs_up_s) <- flip mapAndUnzipM binds $ \(_,rhs) -> do
+  (rhss2,rhs_up_s) <- flip mapAndUnzipM binds $ \(binder,rhs) -> do
     (rhss2,rhs_up) <- recur rhs
-    return $ (,) rhss2 $ perhapsWrapFloatsFVUp Recursive False rhs rhs_up
+    let rhs_up' = addRuleAndUnfoldingIds binder $ perhapsWrapFloatsFVUp Recursive False rhs rhs_up
+    return (rhss2,rhs_up')
   (body2,body_up) <- recur body
 
   -- step 2: approximate floating the bindings
   let is_join = isJoinId (fst (head binds))
   let binding_up_s = flip map (zip binds rhs_up_s) $ \((binder,rhs),rhs_up) ->
-        floatFVUp env (Just binder) False is_join rhs $
-        rhs_up {fvu_silt = delBindersSilt [binder] (fvu_silt rhs_up)}
+        floatFVUp env (Just binder) False is_join rhs rhs_up
 
   -- lastly: merge Ups
   let up = FVUp {
-        fvu_fvs = delBindersFVs binders $
-                  fvu_fvs body_up `unionDVarSet`
-                    computeRecRHSsFVs binders (map fvu_fvs binding_up_s),
-        fvu_floats = foldr appendFloats (fvu_floats body_up) $ map fvu_floats binding_up_s,
-        fvu_silt   = delBindersSilt binders $ fvu_silt body_up,
-
+        fvu_fvs = delBindersFVs binders (unionDVarSets (map fvu_fvs (body_up : binding_up_s))),
+        fvu_floats = foldr appendFloats (fvu_floats body_up) (map fvu_floats binding_up_s),
+        fvu_silt   = delBindersSilt binders (fvu_silt body_up),
         fvu_isTrivial = fvu_isTrivial body_up
         }
 
@@ -2703,16 +2720,14 @@ analyzeFVsM _env (Type ty) = ret (typeFVUp $ tyCoVarsOfTypeDSet ty) $ AnnType ty
 
 analyzeFVsM _env (Coercion co) = ret (typeFVUp $ tyCoVarsOfCoDSet co) $ AnnCoercion co
 
-
-
-computeRecRHSsFVs :: [Var] -> [DVarSet] -> DVarSet
-computeRecRHSsFVs binders rhs_fvs =
-  -- this use to call idRuleAndUnfoldingVars, but that was inlined into
-  -- the isId branch of bndrRuleAndUnfoldingFVs. This means we ignore
-  -- type-level lets, which is probably fine for this function's call sites.
-  foldr (unionDVarSet . bndrRuleAndUnfoldingVarsDSet)
-        (foldr unionDVarSet emptyDVarSet rhs_fvs)
-        binders
+addRuleAndUnfoldingIds :: Id -> FVUp -> FVUp
+addRuleAndUnfoldingIds binder up = up
+  { fvu_fvs  = fvu_fvs up `unionDVarSet` fvs
+  , fvu_silt = fvu_silt up `bothSilt` nil_silt_for_fvs
+  } where
+      fvs = bndrRuleAndUnfoldingVarsDSet binder
+      fids = filter isId (dVarSetElems fvs)
+      nil_silt_for_fvs = nilSilt (mkFIIs (map (\v -> (v, nilUseInfo)) fids))
 
 -- should mirror CorePrep.cpeApp.collect_args
 computeArgumentDemands :: CoreExpr -> [Bool]
