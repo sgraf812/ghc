@@ -13,16 +13,19 @@ module FloatOut ( floatOutwards ) where
 
 import GhcPrelude
 
+import BasicTypes       ( isStrongLoopBreaker )
 import CoreSyn
 import CoreUtils
 import MkCore
 import CoreArity        ( etaExpand )
 import CoreMonad        ( FloatOutSwitches(..) )
+import CoreUnfold       ( mkInlinableUnfolding )
 
 import DynFlags
 import ErrUtils         ( dumpIfSet_dyn )
-import Id               ( Id, idArity, idType, isBottomingId,
-                          isJoinId, isJoinId_maybe )
+import Id
+import Var
+import PrelNames        ( makeStaticName )
 import SetLevels
 import UniqSupply       ( UniqSupply )
 import Bag
@@ -30,9 +33,11 @@ import Util
 import Maybes
 import Outputable
 import Type
+import qualified TidyPgm
 import qualified Data.IntMap as M
 
 import Data.List        ( partition )
+import Data.Monoid      ( Any(..) )
 
 #include "HsVersions.h"
 
@@ -171,7 +176,7 @@ floatOutwards :: FloatOutSwitches
 floatOutwards float_sws dflags us pgm
   = do {
         let { annotated_w_levels = setLevels dflags float_sws pgm us ;
-              (fss, binds_s')    = unzip (map floatTopBind annotated_w_levels)
+              (fss, binds_s')    = unzip (zipWith (floatTopBind float_sws dflags) pgm annotated_w_levels)
             } ;
 
         dumpIfSet_dyn dflags Opt_D_verbose_core2core "Levels added:"
@@ -187,16 +192,55 @@ floatOutwards float_sws dflags us pgm
         return (bagToList (unionManyBags binds_s'))
     }
 
-floatTopBind :: LevelledBind -> (FloatStats, Bag CoreBind)
-floatTopBind bind
-  = case (floatBind bind) of { (fs, floats, bind') ->
-    let float_bag = flattenTopFloats floats
-    in case bind' of
+floatTopBind :: FloatOutSwitches -> DynFlags -> CoreBind -> LevelledBind -> (FloatStats, Bag CoreBind)
+floatTopBind float_sws dflags before_bind bind
+  = let (fs, floats, binds') = floatBind bind
+        float_bag            = flattenTopFloats floats
+        finish (Rec prs)     = (fs, unitBag (Rec (addTopFloatPairs float_bag prs)))
+        finish (NonRec b e)  = (fs, float_bag `snocBag` NonRec b e)
+    in case binds' of
       -- bind' can't have unlifted values or join points, so can only be one
       -- value bind, rec or non-rec (see comment on floatBind)
-      [Rec prs]    -> (fs, unitBag (Rec (addTopFloatPairs float_bag prs)))
-      [NonRec b e] -> (fs, float_bag `snocBag` NonRec b e)
-      _            -> pprPanic "floatTopBind" (ppr bind') }
+      [bind'] ->
+        if not (isEmptyBag float_bag) && isJust (finalPass_ float_sws)
+          then finish (stabiliseUnfoldings dflags before_bind bind')
+          else finish bind'
+      _       -> pprPanic "floatTopBind" (ppr binds')
+
+-- | Lambda lifting impedes specialisation and reverts patterns such as the
+-- "manual static argument transformation", used in e.g. zipWith.
+-- That's good when we can't inline anyway. Otherwise we'd rather not see the
+-- result of lambda lifting, because of said specialisation effects.
+--
+-- So: if the old RHS has an unstable unfolding that will survive
+-- TidyPgm, "stabelise it" so that it ends up in the .hi
+-- file as-is, prior to LLF squeezing all of the juice out.
+--
+-- On the other hand, stabilising all unfoldings regresses Edlib.lhs in veritas
+-- by 60%! Clearly, we should only stabilise with the before binding when we
+-- actually late-lambda-lifted a binding.
+stabiliseUnfoldings :: DynFlags -> CoreBind -> CoreBind -> CoreBind
+stabiliseUnfoldings dflags before after = zip_with_binds stab before after
+  where
+    stab (bndr, rhs) (bndr', rhs')
+      | gopt Opt_LLF_Stabilize dflags
+      , snd $ TidyPgm.addExternal expose_all bndr
+      , isUnstableUnfolding (realIdUnfolding bndr)
+      , not (contains_makeStatic rhs) -- makeStatic must be lowered in TidyPgm
+      , not (isStrongLoopBreaker (idOccInfo bndr)) -- Loopbreakers inhibit inlining
+      = (bndr' `setIdUnfolding` mkInlinableUnfolding dflags rhs, rhs')
+      | otherwise = (bndr', rhs')
+
+    expose_all = gopt Opt_ExposeAllUnfoldings dflags
+    contains_makeStatic = getAny . foldMapVars (Any . (== makeStaticName) . varName)
+
+    zip_with_binds f (NonRec b rhs) (NonRec b' rhs')
+      = uncurry NonRec (f (b, rhs) (b', rhs'))
+    zip_with_binds f (Rec binds) (Rec binds')
+      = Rec (zipWith f binds binds')
+    zip_with_binds _ _ _
+      = pprPanic "stabiliseUnfoldings" (ppr before $$ ppr after)
+
 
 {-
 ************************************************************************
