@@ -1307,11 +1307,6 @@ decideLateLambdaFloat env rec is_join all_one_shot abs_ids badTime spaceInfo ids
           ++ (if isRec rec then "(rec " ++ show (length ids) ++ ")" else "")
           ++ if floating && isBadSpace then "(SAT)" else ""
 
-    -- TODO SG June 2018: Investigate why the join point isn't floated to
-    -- top-level. Happens in GHC.Integer.Types.normSizeofMutBigNat'#.
-    -- Probably because the join binding is just a simple application (and nullary).
-    -- Seems to be the right thing to do according to Note [Free join points].
-    -- But then again, things might be different for lambda lifting.
     spoilsJoinId = anyDVarSet isJoinId abs_ids
 
     -- Don't float if we abstract over more args than n (-fllf-*rec-lam-limit)
@@ -1686,7 +1681,6 @@ instance HasVar (TaggedBndr tag) where getVar (TB id _) = id
 isFunctionAnn :: HasVar b => AnnExpr b annot -> Bool
 isFunctionAnn = isFunction . deAnnotate
 
--- TODO: Just look at idArity
 isFunction :: HasVar b => Expr b -> Bool
 -- The idea here is that we want to float *functions* to
 -- the top level.  This saves no work, but
@@ -1762,7 +1756,7 @@ where out_x is an OutVar, and a,b are its arguments (when
 we perform abstraction at the same time as floating).
 
   le_subst maps to CoreExpr
-  le_env   maps to <type application>
+  le_env   maps to (f, <free (type) variables of f's RHS>)
 
 Since the range is always a variable or application, there is never
 any difference between the two, but sadly the types differ.  The
@@ -1771,8 +1765,7 @@ when we find a Var.
 
 In addition the le_env records a [OutVar] of variables free in the
 OutExpr/LevelledExpr, just so we don't have to call freeVars
-repeatedly.  This list is always non-empty, and the first element is
-out_x
+repeatedly.
 
 The domain of the both envs is *pre-cloned* Ids, though
 
