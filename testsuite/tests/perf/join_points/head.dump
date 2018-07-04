@@ -1,0 +1,945 @@
+[1 of 1] Compiling Main             ( join004.hs, join004.o )
+
+==================== Tidy Core ====================
+Result size of Tidy Core
+  = {terms: 129, types: 68, coercions: 3, joins: 3/4}
+
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
+Main.$trModule4 :: GHC.Prim.Addr#
+[GblId,
+ Caf=NoCafRefs,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 20 0}]
+Main.$trModule4 = "main"#
+
+-- RHS size: {terms: 2, types: 0, coercions: 0, joins: 0/0}
+Main.$trModule3 :: GHC.Types.TrName
+[GblId,
+ Caf=NoCafRefs,
+ Str=m1,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 10 20}]
+Main.$trModule3 = GHC.Types.TrNameS Main.$trModule4
+
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
+Main.$trModule2 :: GHC.Prim.Addr#
+[GblId,
+ Caf=NoCafRefs,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 20 0}]
+Main.$trModule2 = "Main"#
+
+-- RHS size: {terms: 2, types: 0, coercions: 0, joins: 0/0}
+Main.$trModule1 :: GHC.Types.TrName
+[GblId,
+ Caf=NoCafRefs,
+ Str=m1,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 10 20}]
+Main.$trModule1 = GHC.Types.TrNameS Main.$trModule2
+
+-- RHS size: {terms: 3, types: 0, coercions: 0, joins: 0/0}
+Main.$trModule :: GHC.Types.Module
+[GblId,
+ Caf=NoCafRefs,
+ Str=m,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 10 30}]
+Main.$trModule = GHC.Types.Module Main.$trModule3 Main.$trModule1
+
+-- RHS size: {terms: 44, types: 14, coercions: 0, joins: 1/2}
+$wslowDivDiv :: GHC.Prim.Int# -> GHC.Prim.Int# -> GHC.Prim.Int#
+[GblId, Arity=2, Caf=NoCafRefs, Str=<S,U><S,U>, Unf=OtherCon []]
+$wslowDivDiv
+  = \ (ww :: GHC.Prim.Int#) (ww1 :: GHC.Prim.Int#) ->
+      let {
+        $wdivPos [InlPrag=NOINLINE, Dmd=<C(S),C(U)>]
+          :: GHC.Prim.Int# -> GHC.Prim.Int#
+        [LclId, Arity=1, Str=<S,U>, Unf=OtherCon []]
+        $wdivPos
+          = \ (ww2 :: GHC.Prim.Int#) ->
+              joinrec {
+                $wgo1 [InlPrag=NOUSERINLINE[2], Occ=LoopBreaker]
+                  :: GHC.Prim.Int# -> GHC.Prim.Int# -> GHC.Prim.Int#
+                [LclId[JoinId(2)], Arity=2, Str=<S,U><S,U>, Unf=OtherCon []]
+                $wgo1 (ww3 :: GHC.Prim.Int#) (ww4 :: GHC.Prim.Int#)
+                  = case GHC.Prim.>=# ww3 ww1 of {
+                      __DEFAULT -> ww4;
+                      1# -> jump $wgo1 (GHC.Prim.-# ww3 ww1) (GHC.Prim.+# ww4 1#)
+                    }; } in
+              jump $wgo1 ww2 0# } in
+      case GHC.Prim.>=# ww 0# of {
+        __DEFAULT ->
+          case $wdivPos (GHC.Prim.negateInt# ww) of ww2 { __DEFAULT ->
+          $wdivPos (GHC.Prim.negateInt# ww2)
+          };
+        1# -> case $wdivPos ww of ww2 { __DEFAULT -> $wdivPos ww2 }
+      }
+
+Rec {
+-- RHS size: {terms: 44, types: 15, coercions: 0, joins: 2/2}
+Main.$wgo [InlPrag=NOUSERINLINE[2], Occ=LoopBreaker]
+  :: GHC.Prim.Int# -> GHC.Prim.Int# -> GHC.Prim.Int#
+[GblId, Arity=2, Caf=NoCafRefs, Str=<S,U><S,U>, Unf=OtherCon []]
+Main.$wgo
+  = \ (w :: GHC.Prim.Int#) (ww :: GHC.Prim.Int#) ->
+      join {
+        exit [Dmd=<C(C(S)),C(C1(U))>]
+          :: GHC.Prim.Int# -> GHC.Prim.Int# -> GHC.Prim.Int#
+        [LclId[JoinId(2)], Arity=2, Str=<S,U><S,U>]
+        exit (ww1 [OS=OneShot] :: GHC.Prim.Int#)
+             (ww2 [OS=OneShot] :: GHC.Prim.Int#)
+          = case w of wild {
+              __DEFAULT -> Main.$wgo (GHC.Prim.+# wild 1#) (GHC.Prim.+# ww1 ww2);
+              1000# -> GHC.Prim.+# ww1 ww2
+            } } in
+      joinrec {
+        $wgo1 [InlPrag=NOUSERINLINE[2], Occ=LoopBreaker]
+          :: GHC.Prim.Int# -> GHC.Prim.Int# -> GHC.Prim.Int#
+        [LclId[JoinId(2)], Arity=2, Str=<S,U><S,U>, Unf=OtherCon []]
+        $wgo1 (w1 :: GHC.Prim.Int#) (ww1 :: GHC.Prim.Int#)
+          = case $wslowDivDiv w w1 of ww2 { __DEFAULT ->
+            case w1 of wild {
+              __DEFAULT ->
+                jump $wgo1 (GHC.Prim.+# wild 1#) (GHC.Prim.+# ww1 ww2);
+              1000# -> jump exit ww1 ww2
+            }
+            }; } in
+      jump $wgo1 1# ww
+end Rec }
+
+-- RHS size: {terms: 14, types: 12, coercions: 0, joins: 0/0}
+Main.main1 :: String
+[GblId,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=False, ConLike=False,
+         WorkFree=False, Expandable=False, Guidance=IF_ARGS [] 100 30}]
+Main.main1
+  = case Main.$wgo 1# 0# of ww { __DEFAULT ->
+    case GHC.Show.$wshowSignedInt 0# ww (GHC.Types.[] @ Char) of
+    { (# ww5, ww6 #) ->
+    GHC.Types.: @ Char ww5 ww6
+    }
+    }
+
+-- RHS size: {terms: 4, types: 0, coercions: 0, joins: 0/0}
+main :: IO ()
+[GblId,
+ Arity=1,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 40 60}]
+main
+  = GHC.IO.Handle.Text.hPutStr'
+      GHC.IO.Handle.FD.stdout Main.main1 GHC.Types.True
+
+-- RHS size: {terms: 2, types: 1, coercions: 0, joins: 0/0}
+Main.main2
+  :: GHC.Prim.State# GHC.Prim.RealWorld
+     -> (# GHC.Prim.State# GHC.Prim.RealWorld, () #)
+[GblId,
+ Arity=1,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 20 60}]
+Main.main2 = GHC.TopHandler.runMainIO1 @ () main
+
+-- RHS size: {terms: 1, types: 0, coercions: 3, joins: 0/0}
+:Main.main :: IO ()
+[GblId,
+ Arity=1,
+ Unf=Unf{Src=InlineStable, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True,
+         Guidance=ALWAYS_IF(arity=0,unsat_ok=True,boring_ok=True)
+         Tmpl= Main.main2
+               `cast` (Sym (GHC.Types.N:IO[0] <()>_R)
+                       :: (GHC.Prim.State# GHC.Prim.RealWorld
+                           -> (# GHC.Prim.State# GHC.Prim.RealWorld, () #))
+                          ~R# IO ())}]
+:Main.main
+  = Main.main2
+    `cast` (Sym (GHC.Types.N:IO[0] <()>_R)
+            :: (GHC.Prim.State# GHC.Prim.RealWorld
+                -> (# GHC.Prim.State# GHC.Prim.RealWorld, () #))
+               ~R# IO ())
+
+
+
+
+==================== Output Cmm ====================
+[]
+
+
+
+==================== Output Cmm ====================
+[section ""cstring" . Main.$trModule4_bytes" {
+     Main.$trModule4_bytes:
+         I8[] [109,97,105,110]
+ }]
+
+
+
+==================== Asm code ====================
+.section .rodata.str,"aMS",@progbits,1
+.align 1
+.align 1
+.globl Main.$trModule4_bytes
+.type Main.$trModule4_bytes, @object
+Main.$trModule4_bytes:
+	.asciz "main"
+
+
+
+==================== Output Cmm ====================
+[section ""data" . Main.$trModule3_closure" {
+     Main.$trModule3_closure:
+         const GHC.Types.TrNameS_con_info;
+         const Main.$trModule4_bytes;
+ }]
+
+
+
+==================== Asm code ====================
+.section .data
+.align 8
+.align 1
+.globl Main.$trModule3_closure
+.type Main.$trModule3_closure, @object
+Main.$trModule3_closure:
+	.quad	GHC.Types.TrNameS_con_info
+	.quad	Main.$trModule4_bytes
+
+
+
+==================== Output Cmm ====================
+[section ""cstring" . Main.$trModule2_bytes" {
+     Main.$trModule2_bytes:
+         I8[] [77,97,105,110]
+ }]
+
+
+
+==================== Asm code ====================
+.section .rodata.str,"aMS",@progbits,1
+.align 1
+.align 1
+.globl Main.$trModule2_bytes
+.type Main.$trModule2_bytes, @object
+Main.$trModule2_bytes:
+	.asciz "Main"
+
+
+
+==================== Output Cmm ====================
+[section ""data" . Main.$trModule1_closure" {
+     Main.$trModule1_closure:
+         const GHC.Types.TrNameS_con_info;
+         const Main.$trModule2_bytes;
+ }]
+
+
+
+==================== Asm code ====================
+.section .data
+.align 8
+.align 1
+.globl Main.$trModule1_closure
+.type Main.$trModule1_closure, @object
+Main.$trModule1_closure:
+	.quad	GHC.Types.TrNameS_con_info
+	.quad	Main.$trModule2_bytes
+
+
+
+==================== Output Cmm ====================
+[section ""data" . Main.$trModule_closure" {
+     Main.$trModule_closure:
+         const GHC.Types.Module_con_info;
+         const Main.$trModule3_closure+1;
+         const Main.$trModule1_closure+1;
+         const 3;
+ }]
+
+
+
+==================== Asm code ====================
+.section .data
+.align 8
+.align 1
+.globl Main.$trModule_closure
+.type Main.$trModule_closure, @object
+Main.$trModule_closure:
+	.quad	GHC.Types.Module_con_info
+	.quad	Main.$trModule3_closure+1
+	.quad	Main.$trModule1_closure+1
+	.quad	3
+
+
+
+==================== Output Cmm ====================
+[$wdivPos_entry() //  [R2, R1]
+         { info_tbls: [(c4Si,
+                        label: $wdivPos_info
+                        rep: HeapRep 1 nonptrs { Fun {arity: 1 fun_type: ArgSpec 4} }
+                        srt: Nothing)]
+           stack_info: arg_space: 8 updfr_space: Just 8
+         }
+     {offset
+       _lbl_: // global
+           __locVar_::I64 = I64[R1 + 7];
+           __locVar_::I64 = 0;
+           __locVar_::I64 = R2;
+           goto c4Sl;
+       _lbl_: // global
+           if (%MO_S_Lt_W64(__locVar_::I64,
+                            __locVar_::I64)) goto c4Ss; else goto c4St;
+       _lbl_: // global
+           R1 = __locVar_::I64;
+           call (P64[Sp])(R1) args: 8, res: 0, upd: 8;
+       _lbl_: // global
+           __locVar_::I64 = __locVar_::I64 + 1;
+           __locVar_::I64 = __locVar_::I64 - __locVar_::I64;
+           goto c4Sl;
+     }
+ },
+ $wslowDivDiv_entry() //  [R3, R2]
+         { info_tbls: [(c4SF,
+                        label: $wslowDivDiv_info
+                        rep: HeapRep static { Fun {arity: 2 fun_type: ArgSpec 12} }
+                        srt: Nothing),
+                       (c4SO,
+                        label: block_info
+                        rep: StackRep [False]
+                        srt: Nothing),
+                       (c4SU,
+                        label: block_info
+                        rep: StackRep [False]
+                        srt: Nothing)]
+           stack_info: arg_space: 8 updfr_space: Just 8
+         }
+     {offset
+       _lbl_: // global
+           __locVar_::I64 = R3;
+           __locVar_::I64 = R2;
+           if ((Sp + -16) < SpLim) (likely: False) goto c4SG; else goto c4SH;
+       _lbl_: // global
+           Hp = Hp + 16;
+           if (Hp > HpLim) (likely: False) goto c4SJ; else goto c4SI;
+       _lbl_: // global
+           HpAlloc = 16;
+           goto c4SG;
+       _lbl_: // global
+           R3 = __locVar_::I64;
+           R2 = __locVar_::I64;
+           R1 = $wslowDivDiv_closure;
+           call (stg_gc_fun)(R3, R2, R1) args: 8, res: 0, upd: 8;
+       _lbl_: // global
+           I64[Hp - 8] = $wdivPos_info;
+           I64[Hp] = __locVar_::I64;
+           __locVar_::P64 = Hp - 7;
+           if (%MO_S_Lt_W64(__locVar_::I64, 0)) goto c4SD; else goto c4SE;
+       _lbl_: // global
+           I64[Sp - 16] = c4SO;
+           R2 = -__locVar_::I64;
+           R1 = __locVar_::P64;
+           P64[Sp - 8] = __locVar_::P64;
+           Sp = Sp - 16;
+           call $wdivPos_info(R2,
+                              R1) returns to c4SO, args: 8, res: 8, upd: 8;
+       _lbl_: // global
+           R2 = -R1;
+           R1 = P64[Sp + 8];
+           Sp = Sp + 16;
+           call $wdivPos_info(R2, R1) args: 8, res: 0, upd: 8;
+       _lbl_: // global
+           I64[Sp - 16] = c4SU;
+           R2 = __locVar_::I64;
+           R1 = __locVar_::P64;
+           P64[Sp - 8] = __locVar_::P64;
+           Sp = Sp - 16;
+           call $wdivPos_info(R2,
+                              R1) returns to c4SU, args: 8, res: 8, upd: 8;
+       _lbl_: // global
+           R2 = R1;
+           R1 = P64[Sp + 8];
+           Sp = Sp + 16;
+           call $wdivPos_info(R2, R1) args: 8, res: 0, upd: 8;
+     }
+ },
+ section ""data" . $wslowDivDiv_closure" {
+     $wslowDivDiv_closure:
+         const $wslowDivDiv_info;
+ }]
+
+
+
+==================== Asm code ====================
+.section .text
+.align 8
+.align 8
+	.quad	4294967300
+	.quad	4294967296
+	.long	10
+	.long	0
+$wdivPos_info:
+_c4Si:
+	movq 7(%rbx),%rax
+	xorl %ebx,%ebx
+_c4Sl:
+	cmpq %rax,%r14
+	jl _c4Ss
+_c4St:
+	incq %rbx
+	subq %rax,%r14
+	jmp _c4Sl
+_c4Ss:
+	jmp *(%rbp)
+	.size $wdivPos_info, .-$wdivPos_info
+
+
+
+==================== Asm code ====================
+.section .text
+.align 8
+.align 8
+	.quad	8589934604
+	.quad	0
+	.long	14
+	.long	0
+$wslowDivDiv_info:
+_c4SF:
+	leaq -16(%rbp),%rax
+	cmpq %r15,%rax
+	jb _c4SG
+_c4SH:
+	addq $16,%r12
+	cmpq 856(%r13),%r12
+	ja _c4SJ
+_c4SI:
+	movq $$wdivPos_info,-8(%r12)
+	movq %rsi,(%r12)
+	leaq -7(%r12),%rax
+	testq %r14,%r14
+	jl _c4SD
+_c4SE:
+	movq $block_info,-16(%rbp)
+	movq %rax,%rbx
+	movq %rax,-8(%rbp)
+	addq $-16,%rbp
+	jmp $wdivPos_info
+.align 8
+	.quad	1
+	.long	30
+	.long	0
+block_info:
+_c4SU:
+	movq %rbx,%r14
+	movq 8(%rbp),%rbx
+	addq $16,%rbp
+	jmp $wdivPos_info
+.align 8
+	.quad	1
+	.long	30
+	.long	0
+block_info:
+_c4SO:
+	movq %rbx,%r14
+	negq %r14
+	movq 8(%rbp),%rbx
+	addq $16,%rbp
+	jmp $wdivPos_info
+_c4SJ:
+	movq $16,904(%r13)
+_c4SG:
+	movl $$wslowDivDiv_closure,%ebx
+	jmp *-8(%r13)
+_c4SD:
+	movq $block_info,-16(%rbp)
+	negq %r14
+	movq %rax,%rbx
+	movq %rax,-8(%rbp)
+	addq $-16,%rbp
+	jmp $wdivPos_info
+	.size $wslowDivDiv_info, .-$wslowDivDiv_info
+
+
+
+==================== Asm code ====================
+.section .data
+.align 8
+.align 1
+$wslowDivDiv_closure:
+	.quad	$wslowDivDiv_info
+
+
+
+==================== Output Cmm ====================
+[Main.$wgo_entry() //  [R3, R2]
+         { info_tbls: [(c4Tf,
+                        label: Main.$wgo_info
+                        rep: HeapRep static { Fun {arity: 2 fun_type: ArgSpec 12} }
+                        srt: Nothing),
+                       (c4Tw,
+                        label: block_info
+                        rep: StackRep [True, True, True]
+                        srt: Nothing)]
+           stack_info: arg_space: 8 updfr_space: Just 8
+         }
+     {offset
+       _lbl_: // global
+           __locVar_::I64 = R3;
+           __locVar_::I64 = R2;
+           if ((Sp + -32) >= SpLim) (likely: True) goto c4T8; else goto c4Tg;
+       _lbl_: // global
+           __locVar_::I64 = __locVar_::I64;
+           __locVar_::I64 = 1;
+           goto c4Tt;
+       _lbl_: // global
+           I64[Sp - 32] = c4Tw;
+           R3 = __locVar_::I64;
+           R2 = __locVar_::I64;
+           I64[Sp - 24] = __locVar_::I64;
+           I64[Sp - 16] = __locVar_::I64;
+           I64[Sp - 8] = __locVar_::I64;
+           Sp = Sp - 32;
+           call $wslowDivDiv_info(R3,
+                                  R2) returns to c4Tw, args: 8, res: 8, upd: 8;
+       _lbl_: // global
+           __locVar_::I64 = I64[Sp + 8];
+           __locVar_::I64 = I64[Sp + 24];
+           __locVar_::I64 = I64[Sp + 16];
+           if (__locVar_::I64 != 1000) goto c4TE; else goto c4TF;
+       _lbl_: // global
+           Sp = Sp + 32;
+           __locVar_::I64 = __locVar_::I64 + R1;
+           __locVar_::I64 = __locVar_::I64 + 1;
+           goto c4Tt;
+       _lbl_: // global
+           if (__locVar_::I64 != 1000) goto c4To; else goto c4Ts;
+       _lbl_: // global
+           Sp = Sp + 32;
+           __locVar_::I64 = __locVar_::I64 + R1;
+           __locVar_::I64 = __locVar_::I64 + 1;
+           goto c4T8;
+       _lbl_: // global
+           R1 = __locVar_::I64 + R1;
+           Sp = Sp + 32;
+           call (P64[Sp])(R1) args: 8, res: 0, upd: 8;
+       _lbl_: // global
+           R3 = __locVar_::I64;
+           R2 = __locVar_::I64;
+           R1 = Main.$wgo_closure;
+           call (stg_gc_fun)(R3, R2, R1) args: 8, res: 0, upd: 8;
+     }
+ },
+ section ""data" . Main.$wgo_closure" {
+     Main.$wgo_closure:
+         const Main.$wgo_info;
+ }]
+
+
+
+==================== Asm code ====================
+.section .text
+.align 8
+.align 8
+	.quad	8589934604
+	.quad	0
+	.long	14
+	.long	0
+.globl Main.$wgo_info
+.type Main.$wgo_info, @object
+Main.$wgo_info:
+_c4Tf:
+	leaq -32(%rbp),%rax
+	cmpq %r15,%rax
+	jae _c4T8
+_c4Tg:
+	movl $Main.$wgo_closure,%ebx
+	jmp *-8(%r13)
+_c4To:
+	addq $32,%rbp
+	addq %rbx,%rcx
+	incq %rax
+_n4TX:
+	movq %rcx,%rsi
+	movq %rax,%r14
+_c4T8:
+	movl $1,%eax
+_c4Tt:
+	movq $block_info,-32(%rbp)
+	movq %rsi,%rbx
+	movq %rax,%rsi
+	movq %r14,%rcx
+	movq %rcx,-24(%rbp)
+	movq %rax,-16(%rbp)
+	movq %rbx,-8(%rbp)
+	addq $-32,%rbp
+	jmp $wslowDivDiv_info
+_c4TE:
+	addq $32,%rbp
+	addq %rbx,%rcx
+	leaq 1(%rdx),%rbx
+_n4TY:
+	movq %rcx,%rsi
+	movq %rax,%r14
+	movq %rbx,%rax
+	jmp _c4Tt
+.align 8
+	.quad	451
+	.long	30
+	.long	0
+block_info:
+_c4Tw:
+	movq 8(%rbp),%rax
+	movq 24(%rbp),%rcx
+	movq 16(%rbp),%rdx
+	cmpq $1000,%rdx
+	jne _c4TE
+_c4TF:
+	cmpq $1000,%rax
+	jne _c4To
+_c4Ts:
+	movq %rbx,%rax
+	movq %rcx,%rbx
+	addq %rax,%rbx
+	addq $32,%rbp
+	jmp *(%rbp)
+	.size Main.$wgo_info, .-Main.$wgo_info
+
+
+
+==================== Asm code ====================
+.section .data
+.align 8
+.align 1
+.globl Main.$wgo_closure
+.type Main.$wgo_closure, @object
+Main.$wgo_closure:
+	.quad	Main.$wgo_info
+
+
+
+==================== Output Cmm ====================
+[Main.main1_entry() //  [R1]
+         { info_tbls: [(c4U6,
+                        label: block_info
+                        rep: StackRep []
+                        srt: Nothing),
+                       (c4U8,
+                        label: Main.main1_info
+                        rep: HeapRep static { Thunk }
+                        srt: Nothing),
+                       (c4Ub,
+                        label: block_info
+                        rep: StackRep []
+                        srt: Nothing)]
+           stack_info: arg_space: 8 updfr_space: Just 8
+         }
+     {offset
+       _lbl_: // global
+           if ((Sp + -24) < SpLim) (likely: False) goto c4Ue; else goto c4Uf;
+       _lbl_: // global
+           R1 = R1;
+           call (stg_gc_enter_1)(R1) args: 8, res: 0, upd: 8;
+       _lbl_: // global
+           (__locVar_::I64) = call "ccall" arg hints:  [PtrHint,
+                                                        PtrHint]  result hints:  [PtrHint] newCAF(BaseReg, R1);
+           if (__locVar_::I64 == 0) goto c4U5; else goto c4U4;
+       _lbl_: // global
+           call (I64[R1])() args: 8, res: 0, upd: 8;
+       _lbl_: // global
+           I64[Sp - 16] = stg_bh_upd_frame_info;
+           I64[Sp - 8] = __locVar_::I64;
+           I64[Sp - 24] = c4U6;
+           R3 = 0;
+           R2 = 1;
+           Sp = Sp - 24;
+           call Main.$wgo_info(R3,
+                               R2) returns to c4U6, args: 8, res: 8, upd: 24;
+       _lbl_: // global
+           I64[Sp] = c4Ub;
+           R4 = GHC.Types.[]_closure+1;
+           R3 = R1;
+           R2 = 0;
+           call GHC.Show.$wshowSignedInt_info(R4,
+                                              R3,
+                                              R2) returns to c4Ub, args: 8, res: 8, upd: 24;
+       _lbl_: // global
+           Hp = Hp + 24;
+           if (Hp > HpLim) (likely: False) goto c4Uj; else goto c4Ui;
+       _lbl_: // global
+           HpAlloc = 24;
+           R2 = R2;
+           R1 = R1;
+           call stg_gc_pp(R2, R1) returns to c4Ub, args: 8, res: 8, upd: 24;
+       _lbl_: // global
+           I64[Hp - 16] = :_con_info;
+           P64[Hp - 8] = R1;
+           P64[Hp] = R2;
+           R1 = Hp - 14;
+           Sp = Sp + 8;
+           call (P64[Sp])(R1) args: 24, res: 0, upd: 24;
+     }
+ },
+ section ""data" . Main.main1_closure" {
+     Main.main1_closure:
+         const Main.main1_info;
+         const 0;
+         const 0;
+         const 0;
+ }]
+
+
+
+==================== Asm code ====================
+.section .text
+.align 8
+.align 8
+	.quad	0
+	.long	21
+	.long	0
+.globl Main.main1_info
+.type Main.main1_info, @object
+Main.main1_info:
+_c4U8:
+	leaq -24(%rbp),%rax
+	cmpq %r15,%rax
+	jb _c4Ue
+_c4Uf:
+	subq $8,%rsp
+	movq %r13,%rax
+	movq %rbx,%rsi
+	movq %rax,%rdi
+	xorl %eax,%eax
+	call newCAF
+	addq $8,%rsp
+	testq %rax,%rax
+	je _c4U5
+_c4U4:
+	movq $stg_bh_upd_frame_info,-16(%rbp)
+	movq %rax,-8(%rbp)
+	movq $block_info,-24(%rbp)
+	xorl %esi,%esi
+	movl $1,%r14d
+	addq $-24,%rbp
+	jmp Main.$wgo_info
+_c4Uj:
+	movq $24,904(%r13)
+	jmp stg_gc_pp
+.align 8
+	.quad	0
+	.long	30
+	.long	0
+block_info:
+_c4Ub:
+	addq $24,%r12
+	cmpq 856(%r13),%r12
+	ja _c4Uj
+_c4Ui:
+	movq $:_con_info,-16(%r12)
+	movq %rbx,-8(%r12)
+	movq %r14,(%r12)
+	leaq -14(%r12),%rbx
+	addq $8,%rbp
+	jmp *(%rbp)
+_c4Ue:
+	jmp *-16(%r13)
+.align 8
+	.quad	0
+	.long	30
+	.long	0
+block_info:
+_c4U6:
+	movq $block_info,(%rbp)
+	movl $GHC.Types.[]_closure+1,%edi
+	movq %rbx,%rsi
+	xorl %r14d,%r14d
+	jmp GHC.Show.$wshowSignedInt_info
+_c4U5:
+	jmp *(%rbx)
+	.size Main.main1_info, .-Main.main1_info
+
+
+
+==================== Asm code ====================
+.section .data
+.align 8
+.align 1
+.globl Main.main1_closure
+.type Main.main1_closure, @object
+Main.main1_closure:
+	.quad	Main.main1_info
+	.quad	0
+	.quad	0
+	.quad	0
+
+
+
+==================== Output Cmm ====================
+[Main.main_entry() //  []
+         { info_tbls: [(c4Ut,
+                        label: Main.main_info
+                        rep: HeapRep static { Fun {arity: 1 fun_type: ArgSpec 3} }
+                        srt: Nothing)]
+           stack_info: arg_space: 8 updfr_space: Just 8
+         }
+     {offset
+       _lbl_: // global
+           R4 = GHC.Types.True_closure+2;
+           R3 = Main.main1_closure;
+           R2 = GHC.IO.Handle.FD.stdout_closure;
+           call GHC.IO.Handle.Text.hPutStr'_info(R4,
+                                                 R3,
+                                                 R2) args: 8, res: 0, upd: 8;
+     }
+ },
+ section ""data" . Main.main_closure" {
+     Main.main_closure:
+         const Main.main_info;
+         const GHC.IO.Handle.FD.stdout_closure;
+         const GHC.IO.Handle.Text.hPutStr'_closure;
+         const Main.main1_closure;
+         const 0;
+ }]
+
+
+
+==================== Asm code ====================
+.section .text
+.align 8
+.align 8
+	.quad	4294967299
+	.quad	3
+	.long	14
+	.long	0
+.globl Main.main_info
+.type Main.main_info, @object
+Main.main_info:
+_c4Ut:
+	movl $GHC.Types.True_closure+2,%edi
+	movl $Main.main1_closure,%esi
+	movl $GHC.IO.Handle.FD.stdout_closure,%r14d
+	jmp GHC.IO.Handle.Text.hPutStr'_info
+	.size Main.main_info, .-Main.main_info
+
+
+
+==================== Asm code ====================
+.section .data
+.align 8
+.align 1
+.globl Main.main_closure
+.type Main.main_closure, @object
+Main.main_closure:
+	.quad	Main.main_info
+	.quad	GHC.IO.Handle.FD.stdout_closure
+	.quad	GHC.IO.Handle.Text.hPutStr'_closure
+	.quad	Main.main1_closure
+	.quad	0
+
+
+
+==================== Output Cmm ====================
+[Main.main2_entry() //  []
+         { info_tbls: [(c4UD,
+                        label: Main.main2_info
+                        rep: HeapRep static { Fun {arity: 1 fun_type: ArgSpec 3} }
+                        srt: Nothing)]
+           stack_info: arg_space: 8 updfr_space: Just 8
+         }
+     {offset
+       _lbl_: // global
+           R2 = Main.main_closure+1;
+           call GHC.TopHandler.runMainIO1_info(R2) args: 8, res: 0, upd: 8;
+     }
+ },
+ section ""data" . Main.main2_closure" {
+     Main.main2_closure:
+         const Main.main2_info;
+         const Main.main_closure;
+         const GHC.TopHandler.runMainIO1_closure;
+         const 0;
+ }]
+
+
+
+==================== Asm code ====================
+.section .text
+.align 8
+.align 8
+	.quad	4294967299
+	.quad	2
+	.long	14
+	.long	0
+.globl Main.main2_info
+.type Main.main2_info, @object
+Main.main2_info:
+_c4UD:
+	movl $Main.main_closure+1,%r14d
+	jmp GHC.TopHandler.runMainIO1_info
+	.size Main.main2_info, .-Main.main2_info
+
+
+
+==================== Asm code ====================
+.section .data
+.align 8
+.align 1
+.globl Main.main2_closure
+.type Main.main2_closure, @object
+Main.main2_closure:
+	.quad	Main.main2_info
+	.quad	Main.main_closure
+	.quad	GHC.TopHandler.runMainIO1_closure
+	.quad	0
+
+
+
+==================== Output Cmm ====================
+[:Main.main_entry() //  []
+         { info_tbls: [(c4UN,
+                        label: :Main.main_info
+                        rep: HeapRep static { Fun {arity: 1 fun_type: ArgSpec 3} }
+                        srt: Just Main.main2_closure)]
+           stack_info: arg_space: 8 updfr_space: Just 8
+         }
+     {offset
+       _lbl_: // global
+           call Main.main2_info() args: 8, res: 0, upd: 8;
+     }
+ },
+ section ""data" . :Main.main_closure" {
+     :Main.main_closure:
+         const :Main.main_info;
+         const 0;
+ }]
+
+
+
+==================== Asm code ====================
+.section .text
+.align 8
+.align 8
+	.quad	4294967299
+	.quad	0
+	.long	14
+	.long	Main.main2_closure-(:Main.main_info)+0
+.globl :Main.main_info
+.type :Main.main_info, @object
+:Main.main_info:
+_c4UN:
+	jmp Main.main2_info
+	.size :Main.main_info, .-:Main.main_info
+
+
+
+==================== Asm code ====================
+.section .data
+.align 8
+.align 1
+.globl :Main.main_closure
+.type :Main.main_closure, @object
+:Main.main_closure:
+	.quad	:Main.main_info
+	.quad	0
+
+
+Linking head ...
