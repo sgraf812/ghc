@@ -1272,9 +1272,9 @@ decideBindFloat env is_fun is_bot is_join binding =
     is_OneShot e = case collectBinders $ deTag $ deAnnotate e of
       (bs,_) -> all (\b -> isId b && isOneShotBndr b) bs
 
-tooManyValueLams :: LevelEnv -> RecFlag -> DIdSet -> Bool
-tooManyValueLams env rec abs_ids
-  | Just lim <- mb_limit = sizeDVarSet abs_ids > lim
+tooManyValueLams :: LevelEnv -> RecFlag -> Arity -> DIdSet -> Bool
+tooManyValueLams env rec arity abs_ids
+  | Just lim <- mb_limit = arity + sizeDVarSet abs_ids > lim
   | otherwise = False
   where
     mb_limit = if isRec rec then floatRecLams env else floatNonRecLams env
@@ -1311,7 +1311,7 @@ decideLateLambdaFloat env rec is_join all_one_shot abs_ids badTime spaceInfo ids
 
     -- Don't float if we abstract over more args than n (-fllf-*rec-lam-limit)
     -- (think: number of hardware registers)
-    tooManyArgs = tooManyValueLams env rec abs_ids
+    tooManyArgs = tooManyValueLams env rec (maximum (map idArity ids)) abs_ids
 
     isBadTime = not (isEmptyVarSet badTime)
 
