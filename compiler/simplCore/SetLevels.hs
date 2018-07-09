@@ -2196,7 +2196,7 @@ anything: thus some of the emulated decisions might be
 inaccurate. There are three functions that CorePrep uses to make
 decisions about floats:
 
-  * cpe_ExprIsTrivial - that was pretty easy to replicate; I think
+  * exprIsTrivial- that was pretty easy to replicate; I think
   it's accurately emulated via the fvu_isTrivial field.
 
   * exprIsHNF - non-trivial definition; foolish to
@@ -2346,7 +2346,7 @@ data FVUp = FVUp {
   fvu_silt :: FISilt, -- the things that did not float, E'
 
   fvu_isTrivial :: Bool
-    -- fvu_isTrivial up <=> cpe_ExprIsTrivial (perhapsWrapFloatsFVUp up)
+    -- fvu_isTrivial up <=> exprIsTrivial (perhapsWrapFloatsFVUp up)
   }
 
 litFVUp :: FVUp
