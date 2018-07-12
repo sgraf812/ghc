@@ -463,6 +463,7 @@ data GeneralFlag
    | Opt_StaticArgumentTransformation
    | Opt_CSE
    | Opt_StgCSE
+   | Opt_StgLiftLams
    | Opt_LiberateCase
    | Opt_SpecConstr
    | Opt_SpecConstrKeen
@@ -670,6 +671,7 @@ optimisationFlags = EnumSet.fromList
    , Opt_StaticArgumentTransformation
    , Opt_CSE
    , Opt_StgCSE
+   , Opt_StgLiftLams
    , Opt_LiberateCase
    , Opt_SpecConstr
    , Opt_SpecConstrKeen
@@ -4011,6 +4013,7 @@ fFlagsDeps = [
   flagSpec "cmm-sink"                         Opt_CmmSink,
   flagSpec "cse"                              Opt_CSE,
   flagSpec "stg-cse"                          Opt_StgCSE,
+  flagSpec "stg-lift-lams"                    Opt_StgLiftLams,
   flagSpec "cpr-anal"                         Opt_CprAnal,
   flagSpec "defer-type-errors"                Opt_DeferTypeErrors,
   flagSpec "defer-typed-holes"                Opt_DeferTypedHoles,
@@ -4541,6 +4544,7 @@ optLevelFlags -- see Note [Documenting optimisation flags]
     , ([1,2],   Opt_CmmSink)
     , ([1,2],   Opt_CSE)
     , ([1,2],   Opt_StgCSE)
+    , ([1,2],   Opt_StgLiftLams)
     , ([1,2],   Opt_EnableRewriteRules)  -- Off for -O0; see Note [Scoping for Builtin rules]
                                          --              in PrelRules
     , ([1,2],   Opt_FloatIn)

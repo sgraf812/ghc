@@ -433,6 +433,7 @@ Library
         SimplStg
         StgStats
         StgCse
+        StgLiftLams
         UnariseStg
         RepType
         Rules
