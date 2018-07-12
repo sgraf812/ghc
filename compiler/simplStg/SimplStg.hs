@@ -18,6 +18,7 @@ import StgLint          ( lintStgTopBindings )
 import StgStats         ( showStgStats )
 import UnariseStg       ( unarise )
 import StgCse           ( stgCse )
+import StgLiftLams      ( stgLiftLams )
 
 import DynFlags
 import ErrUtils
@@ -55,7 +56,10 @@ stg2stg dflags binds
     -------------------------------------------
     do_stg_pass binds to_do
       = case to_do of
-          D_stg_stats ->
+          StgDoNothing ->
+            return binds
+
+          StgStats ->
              trace (showStgStats binds) (return binds)
 
           StgCSE ->
@@ -64,6 +68,13 @@ stg2stg dflags binds
                  binds' = stgCse binds
              in
              end_pass "StgCse" binds'
+
+          StgLiftLams ->
+             {-# SCC "StgLiftLams" #-}
+             let
+                 binds' = stgLiftLams binds
+             in
+             end_pass "StgLiftLams" binds'
 
     end_pass what binds2
       = do -- report verbosely, if required
@@ -78,12 +89,25 @@ stg2stg dflags binds
 -- | Optional Stg-to-Stg passes.
 data StgToDo
   = StgCSE
-  | D_stg_stats
+  -- ^ Common subexpression elimination
+  | StgLiftLams
+  -- ^ Lambda lifting closure variables, trading stack/register allocation for
+  -- heap allocation
+  | StgStats
+  | StgDoNothing
+  -- ^ Useful for building up 'getStgToDo'
+  deriving Eq
 
 -- | Which optional Stg-to-Stg passes to run. Depends on flags, ways etc.
 getStgToDo :: DynFlags -> [StgToDo]
-getStgToDo dflags
-  = [ StgCSE                   | gopt Opt_StgCSE dflags] ++
-    [ D_stg_stats              | stg_stats ]
-  where
-        stg_stats = gopt Opt_StgStats dflags
+getStgToDo dflags =
+  filter (/= StgDoNothing)
+    [ optional Opt_StgCSE StgCSE
+    , optional Opt_StgLiftLams StgLiftLams
+    , optional Opt_StgStats StgStats
+    ] where
+      optional opt = runWhen (gopt opt dflags)
+  
+runWhen :: Bool -> StgToDo -> StgToDo
+runWhen True todo = todo
+runWhen _    _    = StgDoNothing
