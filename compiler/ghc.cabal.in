@@ -424,6 +424,7 @@ Library
         StgStats
         StgCse
         StgLiftLams
+        StgSubst
         UnariseStg
         RepType
         Rules
