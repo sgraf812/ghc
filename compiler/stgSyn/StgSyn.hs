@@ -10,6 +10,7 @@ generation.
 -}
 
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE DeriveFunctor #-}
 
 module StgSyn (
         GenStgArg(..),
@@ -50,6 +51,7 @@ import GhcPrelude
 
 import CoreSyn     ( AltCon, Tickish )
 import CostCentre  ( CostCentreStack )
+import Data.Bifunctor
 import Data.ByteString ( ByteString )
 import Data.List   ( intersperse )
 import DataCon
@@ -107,6 +109,7 @@ data GenStgBinding bndr occ
 data GenStgArg occ
   = StgVarArg  occ
   | StgLitArg  Literal
+  deriving Functor
 
 -- | Does this constructor application refer to
 -- anything in a different *Windows* DLL?
@@ -374,7 +377,7 @@ Finally for @hpc@ expressions we introduce a new STG construct.
 -}
 
   | StgTick
-    (Tickish bndr)
+    (Tickish Id)
     (GenStgExpr bndr occ)       -- sub expression
 
 -- END of GenStgExpr
@@ -654,6 +657,42 @@ data StgOp
         -- The Unique is occasionally needed by the C pretty-printer
         -- (which lacks a unique supply), notably when generating a
         -- typedef for foreign-export-dynamic
+
+{-
+************************************************************************
+*                                                                      *
+\subsection[Mapping]{Mapping over binders and occurrences}
+*                                                                      *
+************************************************************************
+-}
+
+instance Bifunctor GenStgTopBinding where
+  bimap f _ (StgTopStringLit bndr lit) = StgTopStringLit (f bndr) lit
+  bimap f g (StgTopLifted binding) = StgTopLifted (bimap f g binding)
+
+instance Bifunctor GenStgBinding where
+  bimap f g (StgNonRec bndr rhs) = StgNonRec (f bndr) (bimap f g rhs)
+  bimap f g (StgRec pairs) = StgRec (map (\(bndr, rhs) -> (f bndr, bimap f g rhs)) pairs)
+
+instance Bifunctor GenStgExpr where
+  bimap f g = go
+    where
+      go (StgApp fun args) = StgApp (g fun) (map (fmap g) args)
+      go (StgLit lit) = StgLit lit
+      go (StgConApp con args tys) = StgConApp con (map (fmap g) args) tys
+      go (StgOpApp op args ty) = StgOpApp op (map (fmap g) args) ty
+      go (StgLam bndrs body) = StgLam (fmap f bndrs) body
+      go (StgCase scrut bndr ty alts) = StgCase (go scrut) (f bndr) ty (map alt alts)
+        where
+          alt (con, bndrs, rhs) = (con, map f bndrs, go rhs)
+      go (StgLet bind body) = StgLet (bimap f g bind) (go body)
+      go (StgLetNoEscape bind body) = StgLetNoEscape (bimap f g bind) (go body)
+      go (StgTick t e) = StgTick t (go e)
+
+instance Bifunctor GenStgRhs where
+  bimap _ g (StgRhsCon ccs con args) = StgRhsCon ccs con (map (fmap g) args)
+  bimap f g (StgRhsClosure ccs sbi fvs upd bndrs body)
+    = StgRhsClosure ccs sbi (map g fvs) upd (map f bndrs) (bimap f g body)
 
 {-
 ************************************************************************
