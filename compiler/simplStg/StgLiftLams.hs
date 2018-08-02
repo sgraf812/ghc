@@ -405,12 +405,16 @@ goodToLift dflags top_lvl _ expander outer_binder_occurs pairs = not $ fancy_or 
   , ("join point", is_join_point)
   , ("abstracts join points", abstracts_join_ids)
   , ("occs of outer rec binder", outer_binder_occurs) -- TODO: Occurrence analysis :(
+  , ("args spill on stack", args_spill_on_stack)
   , ("increases allocation", inc_allocs)
   ] where
       ppr_deciders = vcat . map (text . fst) . filter snd
       fancy_or deciders
         = llTrace "stgLiftLams:goodToLift" (ppr (map fst pairs) $$ ppr_deciders deciders) $
           any snd deciders
+          
+      bndrs = map (binderInfoBndr . fst) pairs
+      rhss = map snd pairs
 
       -- We don't lift updatable thunks or constructors
       any_memoized = any (is_memoized_rhs . snd) pairs
@@ -428,6 +432,17 @@ goodToLift dflags top_lvl _ expander outer_binder_occurs pairs = not $ fancy_or 
       -- Abstracting over join points/let-no-escapes spoils them.
       abstracts_join_ids = any isJoinId (concatMap (freeVarsOfRhs . snd) pairs)
 
+      -- In case we decide to lift, we abstract over this set of free vars of
+      -- the whole binding group, which then must be be available at call sites.
+      abs_ids = unionDVarSets $ map (expander . mkDVarSet . freeVarsOfRhs . snd) pairs
+
+      -- Number of arguments of a RHS in the current binding group if we decide
+      -- to lift it
+      n_args rhs = sizeDVarSet abs_ids + length (rhsLambdaBndrs rhs)
+      -- We have 5 hardware registers on x86_64 to pass arguments in. Any excess
+      -- args are passed on the stack, which means slow memory accesses
+      args_spill_on_stack = maximum (map n_args rhss) > 5
+
       -- We don't allow any closure growth under multi-shot lambdas and only
       -- perform the lift if allocations didn't increase.
       inc_allocs = cgil <= 0 && allocs <= 0
@@ -441,15 +456,15 @@ goodToLift dflags top_lvl _ expander outer_binder_occurs pairs = not $ fancy_or 
         . expander
         . mkDVarSet
         $ freeVarsOfRhs rhs
-      (cg, cgil) = costToLift expander (idClosureFootprint dflags) bndrs abs_ids scope
-      bndrs = mkVarSet (map (binderInfoBndr . fst) pairs)
-      -- In case we decide to lift, we abstract over this set of free vars of
-      -- the whole binding group, which then must be be available at call sites.
-      abs_ids = unionDVarSets $ map (expander . mkDVarSet . freeVarsOfRhs . snd) pairs
+      (cg, cgil) = costToLift expander (idClosureFootprint dflags) (mkVarSet bndrs) abs_ids scope
       scope = case pairs of
         (BindsClosure lbi, _):_ -> lbi_scope lbi
         (BoringBinder id, _):_ -> pprPanic "goodToLift" (text "Can't lift boring binders" $$ ppr id)
         [] -> pprPanic "goodToLift" (text "empty binding group")
+
+rhsLambdaBndrs :: GenStgRhs id occ -> [id]
+rhsLambdaBndrs StgRhsCon{} = []
+rhsLambdaBndrs (StgRhsClosure _ _ _ _ bndrs _) = bndrs
 
 -- | The size in words of a function closure closing over the given 'Id's,
 -- including the header.
