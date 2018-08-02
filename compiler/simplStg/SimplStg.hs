@@ -5,6 +5,7 @@
 -}
 
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module SimplStg ( stg2stg ) where
 
@@ -22,9 +23,22 @@ import StgLiftLams      ( stgLiftLams )
 
 import DynFlags
 import ErrUtils
-import UniqSupply       ( mkSplitUniqSupply )
+import SrcLoc
+import UniqSupply
 import Outputable
 import Control.Monad
+import Control.Monad.IO.Class
+import Control.Monad.Trans.State.Strict
+
+newtype StgM a = StgM { _unStgM :: StateT UniqSupply IO a }
+  deriving (Functor, Applicative, Monad, MonadIO)
+
+instance MonadUnique StgM where
+  getUniqueSupplyM = StgM (state splitUniqSupply)
+  getUniqueM = StgM (state takeUniqFromSupply)
+
+runStgM :: UniqSupply -> StgM a -> IO a
+runStgM us (StgM m) = evalStateT m us
 
 stg2stg :: DynFlags                  -- includes spec of what stg-to-stg passes to do
         -> [StgTopBinding]           -- input...
@@ -34,54 +48,54 @@ stg2stg dflags binds
   = do  { showPass dflags "Stg2Stg"
         ; us <- mkSplitUniqSupply 'g'
 
-                -- Do the main business!
-        ; dumpIfSet_dyn dflags Opt_D_dump_stg "Pre unarise:"
-                        (pprStgTopBindings binds)
-
-        ; stg_linter False "Pre-unarise" binds
-        ; let un_binds = unarise us binds
-        ; stg_linter True "Unarise" un_binds
-
-        ; dumpIfSet_dyn dflags Opt_D_dump_stg "STG syntax:"
-                        (pprStgTopBindings un_binds)
-
-        ; foldM do_stg_pass un_binds (getStgToDo dflags)
-        }
+        -- Do the main business!
+        ; binds' <- runStgM us $
+            foldM do_stg_pass binds (getStgToDo dflags)
+        ; dump_when Opt_D_dump_stg "STG syntax:" binds'
+        ; return binds'
+   }
 
   where
-    stg_linter unarised
-      | gopt Opt_DoStgLinting dflags = lintStgTopBindings dflags unarised
+    stg_linter what
+      | gopt Opt_DoStgLinting dflags = lintStgTopBindings dflags what
       | otherwise                    = \ _whodunnit _binds -> return ()
 
     -------------------------------------------
+    do_stg_pass :: [StgTopBinding] -> StgToDo -> StgM [StgTopBinding]
     do_stg_pass binds to_do
       = case to_do of
           StgDoNothing ->
             return binds
 
           StgStats ->
-             trace (showStgStats binds) (return binds)
+            trace (showStgStats binds) (return binds)
 
-          StgCSE ->
-             {-# SCC "StgCse" #-}
-             let
-                 binds' = stgCse binds
-             in
-             end_pass "StgCse" binds'
+          StgCSE -> do
+            let binds' = {-# SCC "StgCse" #-} stgCse binds
+            end_pass "StgCse" binds'
 
-          StgLiftLams ->
-             {-# SCC "StgLiftLams" #-}
-             let
-                 binds' = stgLiftLams binds
-             in
-             end_pass "StgLiftLams" binds'
+          StgLiftLams -> do
+            us <- getUniqueSupplyM
+            let binds' = {-# SCC "StgLiftLams" #-} stgLiftLams dflags us binds
+            end_pass "StgLiftLams" binds'
+
+          StgUnarise -> do
+            dump_when Opt_D_dump_stg "Pre unarise:" binds
+            us <- getUniqueSupplyM
+            liftIO (stg_linter False "Pre-unarise" binds)
+            let binds' = unarise us binds
+            liftIO (stg_linter True "Unarise" binds')
+            return binds'
+
+    dump_when flag header binds
+      = liftIO (dumpIfSet_dyn dflags flag header (pprStgTopBindings binds))
 
     end_pass what binds2
-      = do -- report verbosely, if required
-           dumpIfSet_dyn dflags Opt_D_verbose_stg2stg what
-              (pprStgTopBindings binds2)
-           stg_linter True what binds2
-           return binds2
+      = liftIO $ do -- report verbosely, if required
+          dumpIfSet_dyn dflags Opt_D_verbose_stg2stg what
+            (vcat (map ppr binds2))
+          stg_linter False what binds2
+          return binds2
 
 -- -----------------------------------------------------------------------------
 -- StgToDo:  abstraction of stg-to-stg passes to run.
@@ -94,19 +108,23 @@ data StgToDo
   -- ^ Lambda lifting closure variables, trading stack/register allocation for
   -- heap allocation
   | StgStats
+  | StgUnarise
+  -- ^ Final mandatory unarise pass, desugaring unboxed tuple and sum binders
   | StgDoNothing
   -- ^ Useful for building up 'getStgToDo'
   deriving Eq
 
--- | Which optional Stg-to-Stg passes to run. Depends on flags, ways etc.
+-- | Which Stg-to-Stg passes to run. Depends on flags, ways etc.
 getStgToDo :: DynFlags -> [StgToDo]
 getStgToDo dflags =
   filter (/= StgDoNothing)
     [ optional Opt_StgCSE StgCSE
     , optional Opt_StgLiftLams StgLiftLams
+    , mandatory StgUnarise
     , optional Opt_StgStats StgStats
     ] where
       optional opt = runWhen (gopt opt dflags)
+      mandatory = id
   
 runWhen :: Bool -> StgToDo -> StgToDo
 runWhen True todo = todo
