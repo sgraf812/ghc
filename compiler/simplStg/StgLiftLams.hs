@@ -13,11 +13,11 @@ import BasicTypes
 import DynFlags
 import Id
 import IdInfo
+import SMRep ( WordOff )
 import StgSyn
 import StgSubst
 import qualified StgCmmArgRep
 import qualified StgCmmClosure
-import StgCmmLayout ( ArgRep )
 import qualified StgCmmLayout
 import FastString
 import Name
@@ -28,7 +28,6 @@ import UniqSupply
 import Util
 import VarEnv
 import VarSet
-import Control.Arrow ( (***) )
 import Control.Monad ( when )
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.RWS.Strict ( RWST, runRWST )
@@ -432,15 +431,7 @@ goodToLift dflags top_lvl _ expander outer_binder_occurs pairs = not $ fancy_or 
       -- We don't allow any closure growth under multi-shot lambdas and only
       -- perform the lift if allocations didn't increase.
       inc_allocs = cgil <= 0 && allocs <= 0
-      cost_bind (BoringBinder id, _) = pprPanic "goodToLift" (text "Can't lift boring binders" $$ ppr id)
-      cost_bind (BindsClosure lbi, rhs)
-        = costToLift expander sizer (lbi_bndr lbi) (expander $ mkDVarSet $ freeVarsOfRhs rhs) (lbi_scope lbi)
-      (cg, cgil) = (sum *** sum) . unzip . map cost_bind $ pairs
       allocs = cg - closuresSize
-
-      sizer :: Id -> Int
-      sizer = argRep_sizer . StgCmmLayout.toArgRep . StgCmmClosure.idPrimRep
-
       -- We calculate and then add up the size of each binding's closure.
       -- GHC does not currently share closure environments, and we either lift
       -- the entire recursive binding group or none of it.
@@ -450,12 +441,20 @@ goodToLift dflags top_lvl _ expander outer_binder_occurs pairs = not $ fancy_or 
         . expander
         . mkDVarSet
         $ freeVarsOfRhs rhs
+      (cg, cgil) = costToLift expander (idClosureFootprint dflags) bndrs abs_ids scope
+      bndrs = mkVarSet (map (binderInfoBndr . fst) pairs)
+      -- In case we decide to lift, we abstract over this set of free vars of
+      -- the whole binding group, which then must be be available at call sites.
+      abs_ids = unionDVarSets $ map (expander . mkDVarSet . freeVarsOfRhs . snd) pairs
+      scope = case pairs of
+        (BindsClosure lbi, _):_ -> lbi_scope lbi
+        (BoringBinder id, _):_ -> pprPanic "goodToLift" (text "Can't lift boring binders" $$ ppr id)
+        [] -> pprPanic "goodToLift" (text "empty binding group")
 
-      argRep_sizer :: ArgRep -> Int
-      argRep_sizer = StgCmmArgRep.argRepSizeW dflags
-
-closureSize :: DynFlags -> [Id] -> Int
-closureSize dflags ids = words + sTD_HDR_SIZE dflags 
+-- | The size in words of a function closure closing over the given 'Id's,
+-- including the header.
+closureSize :: DynFlags -> [Id] -> WordOff
+closureSize dflags ids = words
   where
     (words, _, _)
       -- Functions have a StdHeader (as opposed to ThunkHeader)
@@ -463,6 +462,15 @@ closureSize dflags ids = words + sTD_HDR_SIZE dflags
       . StgCmmClosure.addIdReps
       . StgCmmClosure.nonVoidIds
       $ ids
+
+-- | The number of words a single 'Id' adds to a closure's size.
+idClosureFootprint:: DynFlags -> Id -> WordOff
+-- 'idPrimRep' needs a prior pass of StgUnarise, otherwise it will crash
+-- on things like unboxed tuples.
+idClosureFootprint dflags
+  = StgCmmArgRep.argRepSizeW dflags
+  . StgCmmLayout.toArgRep
+  . StgCmmClosure.idPrimRep
 
 freeVarsOfRhs :: GenStgRhs bndr occ -> [occ]
 freeVarsOfRhs (StgRhsCon _ _ args) = [ id | StgVarArg id <- args ]
@@ -623,15 +631,18 @@ tagSkeletonAlt (con, bndrs, rhs) = (alt_skel, (con, map BoringBinder bndrs, rhs'
     (alt_skel, rhs') = tagSkeletonExpr rhs
 
 -- | @costToLift expander sizer f fvs@ computes the closure growth and closure
--- growth under (multi-shot) lambdas as a result of lifting @f@ to top-level.
+-- growth under (multi-shot) lambdas in words as a result of lifting @f@ to
+-- top-level.
 costToLift
   :: (DIdSet -> DIdSet) -- ^ Expands outer free ids that were lifted to their free vars
   -> (Id -> Int)        -- ^ Computes the closure footprint of an identifier
-  -> Id                 -- ^ Function for which lifting is to be decided
-  -> DIdSet             -- ^ Free vars of the function prior to lifting it
+  -> IdSet              -- ^ Binding group for which lifting is to be decided
+  -> DIdSet             -- ^ Free vars of the whole binding group prior to lifting it.
+                        --   These must be available at call sites if we decide
+                        --   to lift the binding group.
   -> Skeleton           -- ^ Abstraction of the scope of the function
-  -> (Int, Int)         -- ^ Closure growth and closure growth under (multi-shot) lambdas
-costToLift expander sizer f fvs = go
+  -> (WordOff, WordOff) -- ^ Closure growth and closure growth under (multi-shot) lambdas
+costToLift expander sizer group abs_ids = go
   where
     go NilSk = (0, 0)
     go (BothSk a b) = (cg1 + cg2, max cgil1 cgil2)
@@ -651,11 +662,12 @@ costToLift expander sizer f fvs = go
       -- itself is certain.
       where
         (!cg_body, !cgil_body) = go body
+        n_occs = sizeDVarSet (clo_fvs' `dVarSetIntersectVarSet` group)
+        cg = if n_occs > 0 then cost else 0
         -- What we close over considering prior lifting decisions
         clo_fvs' = expander clo_fvs
-        -- Variables that would additional occur free in the closure body if we
+        -- Variables that would additionally occur free in the closure body if we
         -- lift @f@
-        newbies = fvs `minusDVarSet` clo_fvs'
+        newbies = abs_ids `minusDVarSet` clo_fvs'
         -- Lifting @f@ removes @f@ from the closure but adds all @newbies@
-        cost = foldDVarSet (\id size -> sizer id + size) 0 newbies - sizer f
-        cg = if f `elemDVarSet` clo_fvs' then cost else 0
+        cost = foldDVarSet (\id size -> sizer id + size) 0 newbies - n_occs
