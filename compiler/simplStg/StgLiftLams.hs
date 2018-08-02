@@ -579,51 +579,61 @@ tagSkeletonExpr (StgLetNoEscape bind body) = (skel, StgLetNoEscape bind' body')
     skel = foldr (bothSk . lbi_rhs) body_skel let_bound_infos
 
 tagSkeletonBinding :: Skeleton -> StgBinding -> ([LetBoundInfo], StgBindingSkel)
-tagSkeletonBinding scope (StgNonRec bndr rhs)
+tagSkeletonBinding body_scope (StgNonRec bndr rhs)
   = ([lbi], StgNonRec (BindsClosure lbi) rhs')
   where
-    (lbi, rhs') = tagSkeletonRhs scope bndr (unitDVarSet bndr) rhs
-tagSkeletonBinding scope (StgRec pairs) = (lbis, StgRec pairs')
-  where
-    bndrs = mkDVarSet (map fst pairs)
-    (lbis, pairs')
-      = unzip
-      . map (\(lbi, rhs') -> (lbi, (BindsClosure lbi, rhs')))
-      . map (\(bndr, rhs) -> tagSkeletonRhs scope bndr bndrs rhs)
-      $ pairs
-
-tagSkeletonRhs :: Skeleton -> Id -> DIdSet ->StgRhs -> (LetBoundInfo, StgRhsSkel)
-tagSkeletonRhs scope bndr defined_bndr_group (StgRhsCon ccs dc args)
-  = (lbi, StgRhsCon ccs dc args)
-  where
-    fvs = minusDVarSet (mkDVarSet [ id | StgVarArg id <- args ]) defined_bndr_group
+    (skel_rhs, rhs') = tagSkeletonRhs rhs
+    -- Compared to the recursive case, this exploits the fact that @bndr@ is
+    -- never free in @rhs@.
     lbi
       = LetBoundInfo
       { lbi_bndr = bndr
-      , lbi_rhs = ClosureSk bndr fvs NilSk
-      , lbi_scope = scope
+      , lbi_rhs = ClosureSk bndr (mkDVarSet $ freeVarsOfRhs rhs') skel_rhs
+      , lbi_scope = body_scope
       }
-tagSkeletonRhs scope bndr defined_bndr_group (StgRhsClosure ccs sbi fvs upd bndrs body)
-  = (lbi, StgRhsClosure ccs sbi fvs upd bndrs' body')
+tagSkeletonBinding body_scope (StgRec pairs) = (lbis, StgRec pairs')
   where
+    (bndrs, rhss) = unzip pairs
     -- Local recursive STG bindings also regard the defined binders as free
     -- vars. We want to delete those for our cost model, as these are known
-    -- calls anyway.
-    fvs_set = minusDVarSet (mkDVarSet fvs) defined_bndr_group
+    -- calls anyway when we add them to the same top-level recursive group as
+    -- the top-level binding currently being analysed.
+    fvs_set_of_rhs rhs = minusDVarSet (mkDVarSet (freeVarsOfRhs rhs)) (mkDVarSet bndrs)
+    skel_rhs_and_rhss' = map tagSkeletonRhs rhss
+    -- @skel_rhss@ aren't yet wrapped in closures. We'll do that in a moment,
+    -- but we also need the un-wrapped skeletons for calculating the @lbi_scope@
+    -- of the group, as the outer closures don't contribute to closure growth
+    -- when we lift this specific binding.
+    scope = foldr (bothSk . fst) body_scope skel_rhs_and_rhss'
+    -- Now we can build the actual 'LetBoundInfo's just by iterating over each
+    -- bind pair.
+    (lbis, pairs')
+      = unzip
+      . map (\(lbi, rhs') -> (lbi, (BindsClosure lbi, rhs')))
+      . zipWith (\bndr (skel_rhs, rhs') -> (mk_lbi bndr skel_rhs rhs', rhs')) bndrs
+      $ skel_rhs_and_rhss'
+    mk_lbi bndr skel_rhs rhs'
+      = LetBoundInfo
+      { lbi_bndr = bndr
+      -- Here, we finally add the closure around each @skel_rhs@.
+      , lbi_rhs = ClosureSk bndr (fvs_set_of_rhs rhs') skel_rhs
+      -- Note that all binders share the same scope.
+      , lbi_scope = scope
+      }
+
+tagSkeletonRhs :: StgRhs -> (Skeleton, StgRhsSkel)
+tagSkeletonRhs (StgRhsCon ccs dc args) = (NilSk, StgRhsCon ccs dc args)
+tagSkeletonRhs (StgRhsClosure ccs sbi fvs upd bndrs body)
+  = (rhs_skel, StgRhsClosure ccs sbi fvs upd bndrs' body')
+  where
+    bndrs' = map BoringBinder bndrs
     (body_skel, body') = tagSkeletonExpr body
-    rhs_skel = ClosureSk bndr fvs_set $ case bndrs of
+    rhs_skel = case bndrs of
       -- We take allocation under multi-shot lambdas serious
       (lam_bndr:_) | not (isOneShotBndr lam_bndr) -> MultiShotLamSk body_skel
       -- Thunks and one-shot functions only evaluate (hence allocate) their RHS
       -- once, so no special annotation is needed
       _ -> body_skel
-    bndrs' = map BoringBinder bndrs
-    lbi
-      = LetBoundInfo
-      { lbi_bndr = bndr
-      , lbi_rhs = rhs_skel
-      , lbi_scope = scope
-      }
 
 tagSkeletonAlt :: StgAlt -> (Skeleton, StgAltSkel)
 tagSkeletonAlt (con, bndrs, rhs) = (alt_skel, (con, map BoringBinder bndrs, rhs'))
