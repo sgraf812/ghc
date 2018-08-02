@@ -37,7 +37,7 @@ import Control.Monad.Trans.Cont ( ContT (..) )
 import Data.ByteString ( ByteString )
 import Data.Maybe ( isNothing )
 
-
+llTrace :: String -> SDoc -> a -> a 
 llTrace _ _ c = c
 -- llTrace a b c = pprTrace a b c
 
@@ -406,7 +406,7 @@ goodToLift dflags top_lvl _ expander outer_binder_occurs pairs = not $ fancy_or 
   , ("join point", is_join_point)
   , ("abstracts join points", abstracts_join_ids)
   , ("occs of outer rec binder", outer_binder_occurs) -- TODO: Occurrence analysis :(
-  -- , ("increases allocation", inc_allocs)
+  , ("increases allocation", inc_allocs)
   ] where
       ppr_deciders = vcat . map (text . fst) . filter snd
       fancy_or deciders
