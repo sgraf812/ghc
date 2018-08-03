@@ -119,8 +119,8 @@ getStgToDo :: DynFlags -> [StgToDo]
 getStgToDo dflags =
   filter (/= StgDoNothing)
     [ optional Opt_StgCSE StgCSE
-    , optional Opt_StgLiftLams StgLiftLams
     , mandatory StgUnarise
+    , optional Opt_StgLiftLams StgLiftLams
     , optional Opt_StgStats StgStats
     ] where
       optional opt = runWhen (gopt opt dflags)
