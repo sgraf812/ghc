@@ -48,10 +48,16 @@ stg2stg dflags binds
   = do  { showPass dflags "Stg2Stg"
         ; us <- mkSplitUniqSupply 'g'
 
+        ; when (dopt Opt_D_verbose_stg2stg dflags)
+               (putLogMsg dflags NoReason SevDump noSrcSpan
+                  (defaultDumpStyle dflags) (text "VERBOSE STG-TO-STG:"))
+
         -- Do the main business!
         ; binds' <- runStgM us $
             foldM do_stg_pass binds (getStgToDo dflags)
+
         ; dump_when Opt_D_dump_stg "STG syntax:" binds'
+        
         ; return binds'
    }
 
@@ -80,7 +86,7 @@ stg2stg dflags binds
             end_pass "StgLiftLams" binds'
 
           StgUnarise -> do
-            dump_when Opt_D_dump_stg "Pre unarise:" binds
+            dump_when Opt_D_dump_stg "Pre unarise" binds
             us <- getUniqueSupplyM
             liftIO (stg_linter False "Pre-unarise" binds)
             let binds' = unarise us binds
@@ -109,7 +115,7 @@ data StgToDo
   -- heap allocation
   | StgStats
   | StgUnarise
-  -- ^ Final mandatory unarise pass, desugaring unboxed tuple and sum binders
+  -- ^ Mandatory unarise pass, desugaring unboxed tuple and sum binders
   | StgDoNothing
   -- ^ Useful for building up 'getStgToDo'
   deriving Eq
@@ -118,8 +124,8 @@ data StgToDo
 getStgToDo :: DynFlags -> [StgToDo]
 getStgToDo dflags =
   filter (/= StgDoNothing)
-    [ optional Opt_StgCSE StgCSE
-    , mandatory StgUnarise
+    [ mandatory StgUnarise
+    , optional Opt_StgCSE StgCSE
     , optional Opt_StgLiftLams StgLiftLams
     , optional Opt_StgStats StgStats
     ] where

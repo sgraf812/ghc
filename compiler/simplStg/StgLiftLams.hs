@@ -243,7 +243,7 @@ inNonCaffyContext action
   = LiftM (RWS.local (\e -> e { e_in_caffy_context = False }) (unwrapLiftM action))
 
 stgLiftLams :: DynFlags -> UniqSupply -> [InStgTopBinding] -> [OutStgTopBinding]
-stgLiftLams dflags us = runLiftM dflags us . foldr liftTopLvl (pure ())
+stgLiftLams dflags us = runLiftM dflags us . (>> pprTrace "stgLiftLams:end" empty (return ())) . foldr liftTopLvl (pure ())
 
 liftTopLvl :: InStgTopBinding -> LiftM () -> LiftM ()
 liftTopLvl (StgTopStringLit bndr lit) rest = withSubstBndr bndr $ \bndr' -> do
@@ -486,6 +486,9 @@ closureSize dflags ids = words
   where
     (words, _, _)
       -- Functions have a StdHeader (as opposed to ThunkHeader)
+      -- TODO: Note that mkVirtHeadOffsets will account for profiling headers, so
+      -- lifting decisions vary if we begin to profile stuff. Maybe we shouldn't
+      -- do this or deactivate profiling in @dflags@?
       = StgCmmLayout.mkVirtHeapOffsets dflags StgCmmLayout.StdHeader
       . StgCmmClosure.addIdReps
       . StgCmmClosure.nonVoidIds
