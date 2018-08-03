@@ -105,12 +105,13 @@ collectFloats = go (0 :: Int) []
         | n == 0 -> top_bind : go n binds rest
         | otherwise -> pprPanic "collectFloats" (text "plain top binding inside group")
       LiftedBinding bind
-        | n == 0 -> StgTopLifted bind : go n binds rest
+        | n == 0 -> StgTopLifted (rm_cccs bind) : go n binds rest
         | otherwise -> go n (bind:binds) rest
 
-    rm_cccs = map (second removeRhsCCCS)
+    map_rhss f = uncurry mkStgBinding . second (map (second f)) . decomposeStgBinding
+    rm_cccs = map_rhss removeRhsCCCS
     merge_binds binds = ASSERT( any is_rec binds )
-                        StgRec (concatMap (rm_cccs . snd . decomposeStgBinding) binds)
+                        StgRec (concatMap (snd . decomposeStgBinding . rm_cccs) binds)
     is_rec StgRec{} = True
     is_rec _ = False
 
