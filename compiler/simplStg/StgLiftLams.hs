@@ -10,6 +10,7 @@ module StgLiftLams (stgLiftLams) where
 import GhcPrelude
 
 import BasicTypes
+import CostCentre ( isCurrentCCS, dontCareCCS )
 import DynFlags
 import Id
 import IdInfo
@@ -28,6 +29,7 @@ import UniqSupply
 import Util
 import VarEnv
 import VarSet
+import Control.Arrow ( second )
 import Control.Monad ( when )
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.RWS.Strict ( RWST, runRWST )
@@ -37,8 +39,8 @@ import Data.ByteString ( ByteString )
 import Data.Maybe ( isNothing )
 
 llTrace :: String -> SDoc -> a -> a 
-llTrace _ _ c = c
--- llTrace a b c = pprTrace a b c
+-- llTrace _ _ c = c
+llTrace a b c = pprTrace a b c
 
 -- | Environment threaded around in a scoped, @Reader@-like fashion.
 data Env
@@ -106,10 +108,21 @@ collectFloats = go (0 :: Int) []
         | n == 0 -> StgTopLifted bind : go n binds rest
         | otherwise -> go n (bind:binds) rest
 
+    rm_cccs = map (second removeRhsCCCS)
     merge_binds binds = ASSERT( any is_rec binds )
-                        StgRec (concatMap (snd . decomposeStgBinding) binds)
+                        StgRec (concatMap (rm_cccs . snd . decomposeStgBinding) binds)
     is_rec StgRec{} = True
     is_rec _ = False
+
+-- TODO: Is 'DontCareCCS' the right thing?
+removeRhsCCCS :: GenStgRhs id occ -> GenStgRhs id occ
+removeRhsCCCS (StgRhsClosure ccs sbi fvs upd bndrs body)
+  | isCurrentCCS ccs
+  = StgRhsClosure dontCareCCS sbi fvs upd bndrs body
+removeRhsCCCS (StgRhsCon ccs con args)
+  | isCurrentCCS ccs
+  = StgRhsCon dontCareCCS con args
+removeRhsCCCS rhs = rhs
 
 newtype LiftM a
   = LiftM { unwrapLiftM :: RWST Env (OrdList FloatLang) () UniqSM a }
