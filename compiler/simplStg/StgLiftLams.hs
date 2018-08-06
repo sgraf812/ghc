@@ -39,8 +39,8 @@ import Data.ByteString ( ByteString )
 import Data.Maybe ( isNothing )
 
 llTrace :: String -> SDoc -> a -> a 
--- llTrace _ _ c = c
-llTrace a b c = pprTrace a b c
+llTrace _ _ c = c
+-- llTrace a b c = pprTrace a b c
 
 -- | Environment threaded around in a scoped, @Reader@-like fashion.
 data Env
@@ -306,7 +306,7 @@ withLiftedBindPairs top rec pairs k = do
   -- parameters when lifted, as these are known calls.
   let fvs' = expander (delDVarSetList fvs bndrs) -- turns InIds into OutIds
   --outer_occ <- outerBinderOccurs fvs
-  if goodToLift dflags top rec expander False pairs
+  if goodToLift dflags top rec expander pairs
     then do
       llTrace "StgLiftLams:lifting" (ppr bndrs $$ ppr fvs') (return ())
       withLiftedBndrs fvs' bndrs $ \bndrs' -> do
@@ -407,21 +407,19 @@ goodToLift
   -> TopLevelFlag
   -> RecFlag
   -> (DIdSet -> DIdSet)
-  -> Bool
-  -- ^ True <=> We are in the RHS of an outer recursive binding and one of those
-  -- binders occurs free in the current local binding. See 'outerBinderOccurs'.
   -> [(BinderInfo, StgRhsSkel)]
   -> Bool
-goodToLift dflags top_lvl _ expander outer_binder_occurs pairs = not $ fancy_or $
+goodToLift dflags top_lvl _ expander pairs = ppr_costs $ not $ fancy_or $
   [ ("top-level", isTopLevel top_lvl)
   , ("memoized", any_memoized)
   , ("non-saturated calls", has_non_sat_calls)
   , ("join point", is_join_point)
   , ("abstracts join points", abstracts_join_ids)
-  , ("occs of outer rec binder", outer_binder_occurs) -- TODO: Occurrence analysis :(
   , ("args spill on stack", args_spill_on_stack)
   , ("increases allocation", inc_allocs)
   ] where
+      ppr_costs False = False
+      ppr_costs True = llTrace "stgLiftLams:costs" (ppr cg <+> ppr cgil $$ ppr scope) True
       ppr_deciders = vcat . map (text . fst) . filter snd
       fancy_or deciders
         = llTrace "stgLiftLams:goodToLift" (ppr (map fst pairs) $$ ppr_deciders deciders) $
@@ -459,7 +457,9 @@ goodToLift dflags top_lvl _ expander outer_binder_occurs pairs = not $ fancy_or 
 
       -- We don't allow any closure growth under multi-shot lambdas and only
       -- perform the lift if allocations didn't increase.
-      inc_allocs = cgil <= 0 && allocs <= 0
+      -- Also, abstracting over LNEs is unacceptable. LNEs might return
+      -- unlifted tuples, which idClosureFootprint can't cope with.
+      inc_allocs = abstracts_join_ids || cgil > 0 || allocs > 0
       allocs = cg - closuresSize
       -- We calculate and then add up the size of each binding's closure.
       -- GHC does not currently share closure environments, and we either lift
@@ -496,9 +496,10 @@ closureSize dflags ids = words
       $ ids
 
 -- | The number of words a single 'Id' adds to a closure's size.
+-- Note that this can't handle unboxed tuples (which may still be present in
+-- let-no-escapes, even after Unarise), in which case
+-- @"StgCmmClosure".'idPrimRep'@ will crash.
 idClosureFootprint:: DynFlags -> Id -> WordOff
--- 'idPrimRep' needs a prior pass of StgUnarise, otherwise it will crash
--- on things like unboxed tuples.
 idClosureFootprint dflags
   = StgCmmArgRep.argRepSizeW dflags
   . StgCmmLayout.toArgRep
@@ -524,6 +525,10 @@ altSk :: Skeleton -> Skeleton -> Skeleton
 altSk NilSk b = b
 altSk a NilSk = a
 altSk a b     = AltSk a b
+
+multiShotLamSk :: Skeleton -> Skeleton
+multiShotLamSk NilSk = NilSk
+multiShotLamSk s = MultiShotLamSk s
 
 data LetBoundInfo
   = LetBoundInfo
@@ -662,7 +667,7 @@ tagSkeletonRhs (StgRhsClosure ccs sbi fvs upd bndrs body)
     (body_skel, body') = tagSkeletonExpr body
     rhs_skel = case bndrs of
       -- We take allocation under multi-shot lambdas serious
-      (lam_bndr:_) | not (isOneShotBndr lam_bndr) -> MultiShotLamSk body_skel
+      (lam_bndr:_) | not (isOneShotBndr lam_bndr) -> multiShotLamSk body_skel
       -- Thunks and one-shot functions only evaluate (hence allocate) their RHS
       -- once, so no special annotation is needed
       _ -> body_skel
