@@ -48,10 +48,6 @@ stg2stg dflags binds
   = do  { showPass dflags "Stg2Stg"
         ; us <- mkSplitUniqSupply 'g'
 
-        ; when (dopt Opt_D_verbose_stg2stg dflags)
-               (putLogMsg dflags NoReason SevDump noSrcSpan
-                  (defaultDumpStyle dflags) (text "VERBOSE STG-TO-STG:"))
-
         -- Do the main business!
         ; binds' <- runStgM us $
             foldM do_stg_pass binds (getStgToDo dflags)
