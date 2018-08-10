@@ -23,7 +23,6 @@ import StgLiftLams      ( stgLiftLams )
 
 import DynFlags
 import ErrUtils
-import SrcLoc
 import UniqSupply
 import Outputable
 import Control.Monad
@@ -82,7 +81,7 @@ stg2stg dflags binds
             end_pass "StgLiftLams" binds'
 
           StgUnarise -> do
-            dump_when Opt_D_dump_stg "Pre unarise" binds
+            dump_when Opt_D_dump_stg "Pre unarise:" binds
             us <- getUniqueSupplyM
             liftIO (stg_linter False "Pre-unarise" binds)
             let binds' = unarise us binds
