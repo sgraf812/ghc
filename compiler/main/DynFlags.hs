@@ -890,6 +890,8 @@ data DynFlags = DynFlags {
   floatLamArgs          :: Maybe Int,   -- ^ Arg count for lambda floating
                                         --   See CoreMonad.FloatOutSwitches
 
+  liftLamArgs           :: Maybe Int,   -- ^ Maximum number of arguments after a lambda lift
+
   cmmProcAlignment      :: Maybe Int,   -- ^ Align Cmm functions at this boundary or use default.
 
   historySize           :: Int,         -- ^ Simplification history size
@@ -1774,6 +1776,7 @@ defaultDynFlags mySettings (myLlvmTargets, myLlvmPasses) =
         specConstrRecursive     = 3,
         liberateCaseThreshold   = Just 2000,
         floatLamArgs            = Just 0, -- Default: float only if no fvs
+        liftLamArgs             = Just 5, -- Default: the number of available argument hardware registers on x86_64
         cmmProcAlignment        = Nothing,
 
         historySize             = 20,
@@ -3425,6 +3428,10 @@ dynamic_flags_deps = [
       (intSuffix (\n d -> d { floatLamArgs = Just n }))
   , make_ord_flag defFlag "ffloat-all-lams"
       (noArg (\d -> d { floatLamArgs = Nothing }))
+  , make_ord_flag defFlag "fstg-lift-lam-args"
+      (intSuffix (\n d -> d { liftLamArgs = Just n }))
+  , make_ord_flag defFlag "fstg-lift-all-lams"
+      (noArg (\d -> d { liftLamArgs = Nothing }))
   , make_ord_flag defFlag "fproc-alignment"
       (intSuffix (\n d -> d { cmmProcAlignment = Just n }))
 

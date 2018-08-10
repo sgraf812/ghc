@@ -453,7 +453,9 @@ goodToLift dflags top_lvl _ expander pairs = ppr_costs $ not $ fancy_or $
       n_args rhs = sizeDVarSet abs_ids + length (rhsLambdaBndrs rhs)
       -- We have 5 hardware registers on x86_64 to pass arguments in. Any excess
       -- args are passed on the stack, which means slow memory accesses
-      args_spill_on_stack = maximum (map n_args rhss) > 5
+      args_spill_on_stack
+        | Just n <- liftLamArgs dflags = maximum (map n_args rhss) > n
+        | otherwise = False
 
       -- We don't allow any closure growth under multi-shot lambdas and only
       -- perform the lift if allocations didn't increase.
