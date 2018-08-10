@@ -244,7 +244,7 @@ inNonCaffyContext action
   = LiftM (RWS.local (\e -> e { e_in_caffy_context = False }) (unwrapLiftM action))
 
 stgLiftLams :: DynFlags -> UniqSupply -> [InStgTopBinding] -> [OutStgTopBinding]
-stgLiftLams dflags us = runLiftM dflags us . (>> pprTrace "stgLiftLams:end" empty (return ())) . foldr liftTopLvl (pure ())
+stgLiftLams dflags us = runLiftM dflags us . (>> llTrace "stgLiftLams:end" empty (return ())) . foldr liftTopLvl (pure ())
 
 liftTopLvl :: InStgTopBinding -> LiftM () -> LiftM ()
 liftTopLvl (StgTopStringLit bndr lit) rest = withSubstBndr bndr $ \bndr' -> do
@@ -253,7 +253,7 @@ liftTopLvl (StgTopStringLit bndr lit) rest = withSubstBndr bndr $ \bndr' -> do
 liftTopLvl (StgTopLifted bind) rest = do
   let is_rec = isRec $ fst $ decomposeStgBinding bind
   when is_rec startBindingGroup
-  withLiftedBind TopLevel (tagSkeleton bind) $ \mb_bind' -> do
+  withLiftedBind TopLevel (tagSkeletonTopBind bind) $ \mb_bind' -> do
     -- We signal lifting of a binding through returning Nothing.
     -- Should never happen for a top-level binding, though, since we are already
     -- at top-level.
@@ -586,8 +586,10 @@ instance OutputableBndr BinderInfo where
   pprInfixOcc = pprInfixOcc . binderInfoBndr
   bndrIsJoin_maybe = bndrIsJoin_maybe . binderInfoBndr
 
-tagSkeleton :: StgBinding -> StgBindingSkel
-tagSkeleton = snd . tagSkeletonBinding NilSk -- NilSk is OK when tagging top-level bindings
+tagSkeletonTopBind :: StgBinding -> StgBindingSkel
+-- NilSk is OK when tagging top-level bindings
+-- Also, top-level things are never let-no-escapes (thus we pass False)
+tagSkeletonTopBind = snd . tagSkeletonBinding NilSk False
 
 -- TODO: Saturation of applications
 tagSkeletonExpr :: StgExpr -> (Skeleton, StgExprSkel)
@@ -608,17 +610,17 @@ tagSkeletonExpr (StgTick t e) = (skel, StgTick t e')
 tagSkeletonExpr (StgLet bind body) = (skel, StgLet bind' body')
   where
     (body_skel, body') = tagSkeletonExpr body
-    (let_bound_infos, bind') = tagSkeletonBinding body_skel bind
+    (let_bound_infos, bind') = tagSkeletonBinding body_skel False bind
     skel = foldr (bothSk . lbi_rhs) body_skel let_bound_infos
 -- TODO: This doesn't actually allocate. Think harder about LNEs.
 tagSkeletonExpr (StgLetNoEscape bind body) = (skel, StgLetNoEscape bind' body')
   where
     (body_skel, body') = tagSkeletonExpr body
-    (let_bound_infos, bind') = tagSkeletonBinding body_skel bind
+    (let_bound_infos, bind') = tagSkeletonBinding body_skel True bind
     skel = foldr (bothSk . lbi_rhs) body_skel let_bound_infos
 
-tagSkeletonBinding :: Skeleton -> StgBinding -> ([LetBoundInfo], StgBindingSkel)
-tagSkeletonBinding body_scope (StgNonRec bndr rhs)
+tagSkeletonBinding :: Skeleton -> Bool -> StgBinding -> ([LetBoundInfo], StgBindingSkel)
+tagSkeletonBinding body_scope is_lne (StgNonRec bndr rhs)
   = ([lbi], StgNonRec (BindsClosure lbi) rhs')
   where
     (skel_rhs, rhs') = tagSkeletonRhs rhs
@@ -627,10 +629,12 @@ tagSkeletonBinding body_scope (StgNonRec bndr rhs)
     lbi
       = LetBoundInfo
       { lbi_bndr = bndr
-      , lbi_rhs = ClosureSk bndr (mkDVarSet $ freeVarsOfRhs rhs') skel_rhs
+      , lbi_rhs = if is_lne
+          then skel_rhs -- no closure is allocated for let-no-escapes
+          else ClosureSk bndr (mkDVarSet $ freeVarsOfRhs rhs') skel_rhs
       , lbi_scope = body_scope
       }
-tagSkeletonBinding body_scope (StgRec pairs) = (lbis, StgRec pairs')
+tagSkeletonBinding body_scope is_lne (StgRec pairs) = (lbis, StgRec pairs')
   where
     (bndrs, rhss) = unzip pairs
     -- Local recursive STG bindings also regard the defined binders as free
@@ -655,7 +659,9 @@ tagSkeletonBinding body_scope (StgRec pairs) = (lbis, StgRec pairs')
       = LetBoundInfo
       { lbi_bndr = bndr
       -- Here, we finally add the closure around each @skel_rhs@.
-      , lbi_rhs = ClosureSk bndr (fvs_set_of_rhs rhs') skel_rhs
+      , lbi_rhs = if is_lne
+          then skel_rhs -- no closure is allocated for let-no-escapes
+          else ClosureSk bndr (fvs_set_of_rhs rhs') skel_rhs
       -- Note that all binders share the same scope.
       , lbi_scope = scope
       }
