@@ -413,6 +413,7 @@ goodToLift dflags top_lvl _rec expander pairs = ppr_costs $ not $ fancy_or $
   , ("non-saturated calls", has_non_sat_calls)
   , ("join point", is_join_point)
   , ("abstracts join points", abstracts_join_ids)
+  , ("abstracts known local function", abstracts_known_local_fun)
   , ("args spill on stack", args_spill_on_stack)
   , ("increases allocation", inc_allocs)
   ] where
@@ -445,6 +446,25 @@ goodToLift dflags top_lvl _rec expander pairs = ppr_costs $ not $ fancy_or $
       -- In case we decide to lift, we abstract over this set of free vars of
       -- the whole binding group, which then must be be available at call sites.
       abs_ids = unionDVarSets $ map (expander . mkDVarSet . freeVarsOfRhs . snd) pairs
+
+      -- Abstracting over known local functions that aren't floated themselves
+      -- turns a known, fast call into an unknown, slow call:
+      --
+      --    let f x = ...
+      --        g y = ... f x ... -- this was a known call
+      --    in g 4
+      --
+      -- After lifting @g@, but not @f@:
+      --
+      --    l_g f y = ... f y ... -- this is now an unknown call
+      --    let f x = ...
+      --    in l_g f 4
+      --
+      -- We can abuse the results of arity analysis for this:
+      -- idArity f > 0 ==> known
+      known_fun id = idArity id > 0
+      abstracts_known_local_fun
+        = not (liftLamOverKnown dflags) && any known_fun abs_ids
 
       -- Number of arguments of a RHS in the current binding group if we decide
       -- to lift it

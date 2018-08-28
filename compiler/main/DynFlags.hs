@@ -903,7 +903,9 @@ data DynFlags = DynFlags {
   floatLamArgs          :: Maybe Int,   -- ^ Arg count for lambda floating
                                         --   See CoreMonad.FloatOutSwitches
 
-  liftLamArgs           :: Maybe Int,   -- ^ Maximum number of arguments after a lambda lift
+  liftLamArgs           :: Maybe Int,   -- ^ Maximum number of arguments after a lambda lift.
+  liftLamOverKnown      :: Bool,        -- ^ Lambda lift even when this turns a known call
+                                        --   into an unknown call.
 
   cmmProcAlignment      :: Maybe Int,   -- ^ Align Cmm functions at this boundary or use default.
 
@@ -1868,6 +1870,7 @@ defaultDynFlags mySettings (myLlvmTargets, myLlvmPasses) =
         liberateCaseThreshold   = Just 2000,
         floatLamArgs            = Just 0, -- Default: float only if no fvs
         liftLamArgs             = Just 5, -- Default: the number of available argument hardware registers on x86_64
+        liftLamOverKnown        = False,  -- Default: don't turn known calls into unknown ones
         cmmProcAlignment        = Nothing,
 
         historySize             = 20,
@@ -3526,6 +3529,10 @@ dynamic_flags_deps = [
       (intSuffix (\n d -> d { liftLamArgs = Just n }))
   , make_ord_flag defFlag "fstg-lift-all-lams"
       (noArg (\d -> d { liftLamArgs = Nothing }))
+  , make_ord_flag defFlag "fstg-lift-lam-over-known"
+      (noArg (\d -> d { liftLamOverKnown = True }))
+  , make_ord_flag defFlag "fno-stg-lift-lam-over-known"
+      (noArg (\d -> d { liftLamOverKnown = False }))
   , make_ord_flag defFlag "fproc-alignment"
       (intSuffix (\n d -> d { cmmProcAlignment = Just n }))
   , make_ord_flag defFlag "fblock-layout-weights"
