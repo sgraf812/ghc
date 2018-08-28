@@ -304,11 +304,12 @@ withLiftedBindPairs top rec pairs k = do
   -- track recursive occurrences in their free variable set. We neither want
   -- to apply our cost model to them (see tagSkeletonRhs), nor pass them as
   -- parameters when lifted, as these are known calls.
-  let fvs' = expander (delDVarSetList fvs bndrs) -- turns InIds into OutIds
-  if goodToLift dflags top rec expander pairs
+  -- We call the resulting set the variables we abstract over, thus abs_ids.
+  let abs_ids = expander (delDVarSetList fvs bndrs) -- turns InIds into OutIds
+  if goodToLift dflags top rec expander abs_ids pairs
     then do
-      llTrace "StgLiftLams:lifting" (ppr bndrs $$ ppr fvs') (return ())
-      withLiftedBndrs fvs' bndrs $ \bndrs' -> do
+      llTrace "StgLiftLams:lifting" (ppr bndrs $$ ppr abs_ids) (return ())
+      withLiftedBndrs abs_ids bndrs $ \bndrs' -> do
         -- Within this block, all binders in @bndrs@ will be noted as lifted, so
         -- that the return value of @liftedIdsExpander@ in this context will also
         -- expand the bindings in @bndrs@ to their free variables.
@@ -316,7 +317,7 @@ withLiftedBindPairs top rec pairs k = do
         -- bindings. We pass the set of expanded free variables (thus OutIds) on
         -- to @liftRhs@ so that it can add them as parameter binders.
         when (isRec rec) startBindingGroup
-        rhss' <- traverse (liftRhs (Just fvs')) rhss
+        rhss' <- traverse (liftRhs (Just abs_ids)) rhss
         let pairs' = zip bndrs' rhss'
         addLiftedBinding (mkStgBinding rec pairs')
         when (isRec rec) endBindingGroup
@@ -404,10 +405,11 @@ goodToLift
   :: DynFlags
   -> TopLevelFlag
   -> RecFlag
-  -> (DIdSet -> DIdSet)
+  -> (DIdSet -> DIdSet) -- ^ turns 'InId's into 'OutId's
+  -> DIdSet             -- ^ 'OutId's
   -> [(BinderInfo, StgRhsSkel)]
   -> Bool
-goodToLift dflags top_lvl _rec expander pairs = ppr_costs $ not $ fancy_or $
+goodToLift dflags top_lvl _rec expander abs_ids pairs = ppr_costs $ not $ fancy_or $
   [ ("top-level", isTopLevel top_lvl)
   , ("memoized", any_memoized)
   , ("non-saturated calls", has_non_sat_calls)
@@ -425,27 +427,24 @@ goodToLift dflags top_lvl _rec expander pairs = ppr_costs $ not $ fancy_or $
           any snd deciders
           
       bndrs = map (binderInfoBndr . fst) pairs
+      bndrs_set = mkVarSet bndrs
       rhss = map snd pairs
 
       -- We don't lift updatable thunks or constructors
-      any_memoized = any (is_memoized_rhs . snd) pairs
+      any_memoized = any is_memoized_rhs rhss
       is_memoized_rhs StgRhsCon{} = True
       is_memoized_rhs (StgRhsClosure _ _ _ upd _ _) = isUpdatable upd
 
       -- Don't create partial applications. Probably subsumes @any_memoized@.
-      has_non_sat_calls = any (non_sat . snd) pairs
+      has_non_sat_calls = any non_sat rhss
       non_sat StgRhsCon{} = True
       non_sat (StgRhsClosure _ sbi _ _ _ _) = not (satCallsOnly sbi)
 
       -- These don't allocate anyway.
-      is_join_point = any (isJoinId . binderInfoBndr . fst) pairs
+      is_join_point = any isJoinId bndrs
 
       -- Abstracting over join points/let-no-escapes spoils them.
-      abstracts_join_ids = any isJoinId (concatMap (freeVarsOfRhs . snd) pairs)
-
-      -- In case we decide to lift, we abstract over this set of free vars of
-      -- the whole binding group, which then must be be available at call sites.
-      abs_ids = unionDVarSets $ map (expander . mkDVarSet . freeVarsOfRhs . snd) pairs
+      abstracts_join_ids = any isJoinId (dVarSetElems abs_ids)
 
       -- Abstracting over known local functions that aren't floated themselves
       -- turns a known, fast call into an unknown, slow call:
@@ -464,7 +463,7 @@ goodToLift dflags top_lvl _rec expander pairs = ppr_costs $ not $ fancy_or $
       -- idArity f > 0 ==> known
       known_fun id = idArity id > 0
       abstracts_known_local_fun
-        = not (liftLamOverKnown dflags) && any known_fun abs_ids
+        = not (liftLamOverKnown dflags) && any known_fun (dVarSetElems abs_ids)
 
       -- Number of arguments of a RHS in the current binding group if we decide
       -- to lift it
@@ -484,13 +483,14 @@ goodToLift dflags top_lvl _rec expander pairs = ppr_costs $ not $ fancy_or $
       -- We calculate and then add up the size of each binding's closure.
       -- GHC does not currently share closure environments, and we either lift
       -- the entire recursive binding group or none of it.
-      closuresSize = sum $ flip map pairs $ \(_, rhs) ->
+      closuresSize = sum $ flip map rhss $ \rhs ->
         closureSize dflags
         . dVarEnvElts
         . expander
+        . flip dVarSetMinusVarSet bndrs_set
         . mkDVarSet
         $ freeVarsOfRhs rhs
-      (cg, cgil) = costToLift expander (idClosureFootprint dflags) (mkVarSet bndrs) abs_ids scope
+      (cg, cgil) = costToLift expander (idClosureFootprint dflags) bndrs_set abs_ids scope
       scope = case pairs of
         (BindsClosure lbi, _):_ -> lbi_scope lbi
         (BoringBinder id, _):_ -> pprPanic "goodToLift" (text "Can't lift boring binders" $$ ppr id)
@@ -522,8 +522,7 @@ closureSize dflags ids = words
 idClosureFootprint:: DynFlags -> Id -> WordOff
 idClosureFootprint dflags
   = StgCmmArgRep.argRepSizeW dflags
-  . StgCmmLayout.toArgRep
-  . StgCmmClosure.idPrimRep
+  . StgCmmArgRep.idArgRep
 
 freeVarsOfRhs :: GenStgRhs bndr occ -> [occ]
 freeVarsOfRhs (StgRhsCon _ _ args) = [ id | StgVarArg id <- args ]
