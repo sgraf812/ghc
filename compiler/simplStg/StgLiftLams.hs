@@ -417,6 +417,7 @@ goodToLift dflags top_lvl _rec expander abs_ids pairs = ppr_costs $ not $ fancy_
   , ("abstracts join points", abstracts_join_ids)
   , ("abstracts known local function", abstracts_known_local_fun)
   , ("args spill on stack", args_spill_on_stack)
+  , ("args turn slow ap into very slow ap", args_slow_to_very_slow)
   , ("increases allocation", inc_allocs)
   ] where
       ppr_costs False = False
@@ -474,6 +475,18 @@ goodToLift dflags top_lvl _rec expander abs_ids pairs = ppr_costs $ not $ fancy_
         | Just n <- liftLamArgs dflags = maximum (map n_args rhss) > n
         | otherwise = False
 
+      -- Imagine lifting out a function that could previously be called via a
+      -- fast generic apply. In doing so, the function will additionally
+      -- abstract over @abs_ids@ and there might be no corresponding
+      -- @slowCallPattern@, which means the function translates into multiple
+      -- slow calls. We don't want this!
+      is_very_slow_call reps = length reps > snd (StgCmmArgRep.slowCallPattern reps)
+      arg_reps = map StgCmmArgRep.idArgRep
+      slows_rhs rhs
+        = not (is_very_slow_call (arg_reps (rhsLambdaBndrs rhs)))
+        &&     is_very_slow_call (arg_reps (dVarSetElems abs_ids ++ rhsLambdaBndrs rhs))
+      args_slow_to_very_slow = any slows_rhs rhss
+
       -- We don't allow any closure growth under multi-shot lambdas and only
       -- perform the lift if allocations didn't increase.
       -- Also, abstracting over LNEs is unacceptable. LNEs might return
@@ -496,9 +509,9 @@ goodToLift dflags top_lvl _rec expander abs_ids pairs = ppr_costs $ not $ fancy_
         (BoringBinder id, _):_ -> pprPanic "goodToLift" (text "Can't lift boring binders" $$ ppr id)
         [] -> pprPanic "goodToLift" (text "empty binding group")
 
-rhsLambdaBndrs :: GenStgRhs id occ -> [id]
+rhsLambdaBndrs :: StgRhsSkel -> [Id]
 rhsLambdaBndrs StgRhsCon{} = []
-rhsLambdaBndrs (StgRhsClosure _ _ _ _ bndrs _) = bndrs
+rhsLambdaBndrs (StgRhsClosure _ _ _ _ bndrs _) = map binderInfoBndr bndrs
 
 -- | The size in words of a function closure closing over the given 'Id's,
 -- including the header.
