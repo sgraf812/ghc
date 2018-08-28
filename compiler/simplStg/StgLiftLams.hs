@@ -305,7 +305,6 @@ withLiftedBindPairs top rec pairs k = do
   -- to apply our cost model to them (see tagSkeletonRhs), nor pass them as
   -- parameters when lifted, as these are known calls.
   let fvs' = expander (delDVarSetList fvs bndrs) -- turns InIds into OutIds
-  --outer_occ <- outerBinderOccurs fvs
   if goodToLift dflags top rec expander pairs
     then do
       llTrace "StgLiftLams:lifting" (ppr bndrs $$ ppr fvs') (return ())
@@ -316,7 +315,6 @@ withLiftedBindPairs top rec pairs k = do
         -- Now we can recurse into the RHSs and see if we can lift any further
         -- bindings. We pass the set of expanded free variables (thus OutIds) on
         -- to @liftRhs@ so that it can add them as parameter binders.
-        --rhss' <- withOuterBindingGroup bndrs (traverse (liftRhs (Just fvs')) rhss)
         when (isRec rec) startBindingGroup
         rhss' <- traverse (liftRhs (Just fvs')) rhss
         let pairs' = zip bndrs' rhss'
@@ -409,7 +407,7 @@ goodToLift
   -> (DIdSet -> DIdSet)
   -> [(BinderInfo, StgRhsSkel)]
   -> Bool
-goodToLift dflags top_lvl _ expander pairs = ppr_costs $ not $ fancy_or $
+goodToLift dflags top_lvl _rec expander pairs = ppr_costs $ not $ fancy_or $
   [ ("top-level", isTopLevel top_lvl)
   , ("memoized", any_memoized)
   , ("non-saturated calls", has_non_sat_calls)
