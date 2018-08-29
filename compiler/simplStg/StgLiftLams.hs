@@ -412,7 +412,7 @@ goodToLift
 goodToLift dflags top_lvl _rec expander abs_ids pairs = ppr_costs $ not $ fancy_or $
   [ ("top-level", isTopLevel top_lvl)
   , ("memoized", any_memoized)
-  , ("non-saturated calls", has_non_sat_calls)
+  , ("undersaturated calls", has_undersat_calls)
   , ("join point", is_join_point)
   , ("abstracts join points", abstracts_join_ids)
   , ("abstracts known local function", abstracts_known_local_fun)
@@ -437,9 +437,9 @@ goodToLift dflags top_lvl _rec expander abs_ids pairs = ppr_costs $ not $ fancy_
       is_memoized_rhs (StgRhsClosure _ _ _ upd _ _) = isUpdatable upd
 
       -- Don't create partial applications. Probably subsumes @any_memoized@.
-      has_non_sat_calls = any non_sat rhss
-      non_sat StgRhsCon{} = True
-      non_sat (StgRhsClosure _ sbi _ _ _ _) = not (satCallsOnly sbi)
+      has_undersat_calls = any undersat rhss
+      undersat StgRhsCon{} = True
+      undersat (StgRhsClosure _ sbi _ _ _ _) = not (satCallsOnly sbi)
 
       -- These don't allocate anyway.
       is_join_point = any isJoinId bndrs
