@@ -1,6 +1,7 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE MagicHash #-}
+{-# LANGUAGE UnboxedTuples #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE Trustworthy #-}
@@ -552,11 +553,45 @@ efdtInt x1 x2 y
  | isTrue# (x2 >=# x1) = efdtIntUp x1 x2 y
  | otherwise           = efdtIntDn x1 x2 y
 
-{-# INLINE [0] efdtIntFB #-} -- See Note [Inline FB functions] in GHC.List
+opposed :: Ordering -> Ordering -> Bool
+opposed LT GT = True
+opposed GT LT = True
+opposed _  _  = False
+
+-- | Implements `enumFromThenTo @Int` as per section 6.3.4 of the Haskell2010
+-- report:
+-- https://www.haskell.org/onlinereport/haskell2010/haskellch6.html#dx13-131001.
 efdtIntFB :: (Int -> r -> r) -> r -> Int# -> Int# -> Int# -> r
-efdtIntFB c n x1 x2 y
- | isTrue# (x2 >=# x1) = efdtIntUpFB c n x1 x2 y
- | otherwise           = efdtIntDnFB c n x1 x2 y
+efdtIntFB c n x1 x2 y = emit first x1
+  -- Be very careful not to have more than one "c"
+  -- so that when efdtWordFB is inlined we can inline
+  -- whatever is bound to "c" (#8763)
+  where
+    -- We can safely emit the first element if an iteration
+    -- doesn't move away from @y@. That's exactly the case when
+    -- @dir_x2@ is not opposed to @dir_y@.
+    !first  = not (opposed dir_x2 dir_y)
+           && (dir_x2 /= EQ || dir_y /= LT) -- [1,1..0] == []
+    !dir_x2 = x2 `compareInt#` x1
+    !dir_y  = y  `compareInt#` x1
+    -- We need the overflow flag in 'emit'.
+    !(# delta, delta_ovf #) = x2 `subIntC#` x1
+
+    -- | Think of @emit :: Maybe Int -> [Int]@, only unboxed.
+    -- If the argument is 'Nothing', we reached the end of the list.
+    -- If the argument is 'Just', we emit an element, compute
+    -- the next candidate, validate it and recurse.
+    emit False _ = n
+    emit True  x = I# x `c` emit next_ok next
+      where
+        -- Check that @next@ didn't move past @y@.
+        -- Also, overflow is only allowed iff the computation for
+        -- @delta@ overflowed.
+        !(# next, next_ovf #) = addIntC# x delta
+        !next_ok =  isTrue# (next_ovf ==# delta_ovf)
+                 && not (opposed (y `compareInt#` next) dir_y)
+                 -- TODO: evaluate strict && for branchless code
+{-# INLINE[0] efdtIntFB #-} -- See Note [Inline FB functions] in GHC.List
 
 -- Requires x2 >= x1
 efdtIntUp :: Int# -> Int# -> Int# -> [Int]
@@ -573,30 +608,6 @@ efdtIntUp x1 x2 y    -- Be careful about overflow!
                            | otherwise         = I# x : go_up (x +# delta)
                in I# x1 : go_up x2
 
--- Requires x2 >= x1
-{-# INLINE [0] efdtIntUpFB #-} -- See Note [Inline FB functions] in GHC.List
-efdtIntUpFB :: (Int -> r -> r) -> r -> Int# -> Int# -> Int# -> r
-efdtIntUpFB c n x1 x2 y    -- Be careful about overflow!
-  | isTrue# (y <# x1)
-  = n
-  | otherwise
-  = go_up x1    -- Common case: x1 <= y
-  where
-    !single = isTrue# (y <# x2) -- protect against underflow in y'
-    !delta = x2 -# x1   -- >= 0
-    !y' = y -# delta    -- not single => x1 <= y' <= y
-                        -- hence y' is representable
-
-        -- Invariant: x <= y
-        -- Note that: not single && x <= y' => x + delta won't overflow
-        -- so we are guaranteed not to overflow if/when we recurse
-    go_up x = I# x `c` if single || isTrue# (x ># y')
-                       then n
-                       else go_up (x +# delta)
-        -- Be very careful not to have more than one "c"
-        -- so that when efdtIntFB is inlined we can inline
-        -- whatever is bound to "c" (#8763)
-
 -- Requires x2 <= x1
 efdtIntDn :: Int# -> Int# -> Int# -> [Int]
 efdtIntDn x1 x2 y    -- Be careful about underflow!
@@ -611,30 +622,6 @@ efdtIntDn x1 x2 y    -- Be careful about underflow!
                    go_dn x | isTrue# (x <# y') = [I# x]
                            | otherwise         = I# x : go_dn (x +# delta)
    in I# x1 : go_dn x2
-
--- Requires x2 <= x1
-{-# INLINE [0] efdtIntDnFB #-} -- See Note [Inline FB functions] in GHC.List
-efdtIntDnFB :: (Int -> r -> r) -> r -> Int# -> Int# -> Int# -> r
-efdtIntDnFB c n x1 x2 y    -- Be careful about underflow!
-  | isTrue# (y ># x1)
-  = n
-  | otherwise
-  = go_dn x1    -- Common case: x1 >= y
-  where
-    !single = isTrue# (y ># x2) -- protect against overflow in y'
-    !delta = x2 -# x1   -- <= 0
-    !y' = y -# delta    -- not single => y <= y' <= x1
-                        -- hence y' is representable
-
-        -- Invariant: x >= y
-        -- Note that: not single && x >= y' => x + delta won't underflow
-        -- so we are guaranteed not to underflow if/when we recurse
-    go_dn x = I# x `c` if single || isTrue# (x <# y')
-                       then n
-                       else go_dn (x +# delta)
-        -- Be very careful not to have more than one "c"
-        -- so that when efdtIntFB is inlined we can inline
-        -- whatever is bound to "c" (#8763)
 
 
 ------------------------------------------------------------------------
@@ -749,11 +736,40 @@ efdtWord x1 x2 y
  | isTrue# (x2 `geWord#` x1) = efdtWordUp x1 x2 y
  | otherwise                 = efdtWordDn x1 x2 y
 
-{-# INLINE [0] efdtWordFB #-} -- See Note [Inline FB functions] in GHC.List
+-- | Implements `enumFromThenTo @Word` as per section 6.3.4 of the Haskell2010
+-- report:
+-- https://www.haskell.org/onlinereport/haskell2010/haskellch6.html#dx13-131001.
 efdtWordFB :: (Word -> r -> r) -> r -> Word# -> Word# -> Word# -> r
-efdtWordFB c n x1 x2 y
- | isTrue# (x2 `geWord#` x1) = efdtWordUpFB c n x1 x2 y
- | otherwise                 = efdtWordDnFB c n x1 x2 y
+efdtWordFB c n x1 x2 y = emit first x1
+  -- Be very careful not to have more than one "c"
+  -- so that when efdtWordFB is inlined we can inline
+  -- whatever is bound to "c" (#8763)
+  where
+    -- We can safely emit the first element if an iteration
+    -- doesn't move away from @y@. That's exactly the case when
+    -- @dir_x2@ is not opposed to @dir_y@.
+    !first  = not (opposed dir_x2 dir_y)
+           && (dir_x2 /= EQ || dir_y /= LT) -- [1,1..0] == []
+    !dir_x2 = x2 `compareWord#` x1
+    !dir_y  = y  `compareWord#` x1
+    -- We need the carry flag in 'emit'.
+    !(# delta, delta_carry #) = x2 `subWordC#` x1
+
+    -- | Think of @emit :: Maybe Word -> [Word]@, only unboxed.
+    -- If the argument is 'Nothing', we reached the end of the list.
+    -- If the argument is 'Just', we emit an element, compute
+    -- the next candidate, validate it and recurse.
+    emit False _ = n
+    emit True  x = W# x `c` emit next_ok next
+      where
+        -- Check that @next@ didn't move past @y@.
+        -- Also, carry is only allowed iff the computation for
+        -- @delta@ overflowed.
+        !(# next, next_carry #) = addWordC# x delta
+        !next_ok =  isTrue# (next_carry ==# delta_carry)
+                 && not (opposed (y `compareWord#` next) dir_y)
+                 -- TODO: evaluate strict && for branchless code
+{-# INLINE[0] efdtWordFB #-} -- See Note [Inline FB functions] in GHC.List
 
 -- Requires x2 >= x1
 efdtWordUp :: Word# -> Word# -> Word# -> [Word]
@@ -770,29 +786,6 @@ efdtWordUp x1 x2 y    -- Be careful about overflow!
                            | otherwise                = W# x : go_up (x `plusWord#` delta)
                in W# x1 : go_up x2
 
--- Requires x2 >= x1
-{-# INLINE [0] efdtWordUpFB #-} -- See Note [Inline FB functions] in GHC.List
-efdtWordUpFB :: (Word -> r -> r) -> r -> Word# -> Word# -> Word# -> r
-efdtWordUpFB c n x1 x2 y    -- Be careful about overflow!
-  | isTrue# (y `ltWord#` x1)
-  = n
-  | otherwise
-  = go_up x1    -- Common case: x1 <= y
-  where
-    !single = isTrue# (y `ltWord#` x2) -- protect against underflow in y'
-    !delta = x2 `minusWord#` x1 -- >= 0
-    !y' = y `minusWord#` delta  -- not single => x1 <= y' <= y
-                                -- hence y' is representable
-
-        -- Invariant: x <= y
-        -- Note that: not single && x <= y' => x + delta won't overflow
-        -- so we are guaranteed not to overflow if/when we recurse
-    go_up x = W# x `c` if single || isTrue# (x `gtWord#` y')
-                       then n
-                       else go_up (x `plusWord#` delta)
-        -- Be very careful not to have more than one "c"
-        -- so that when efdtWordFB is inlined we can inline
-        -- whatever is bound to "c" (#8763)
 
 -- Requires x2 <= x1
 efdtWordDn :: Word# -> Word# -> Word# -> [Word]
@@ -808,30 +801,6 @@ efdtWordDn x1 x2 y    -- Be careful about underflow!
                    go_dn x | isTrue# (x `ltWord#` y') = [W# x]
                            | otherwise                = W# x : go_dn (x `plusWord#` delta)
    in W# x1 : go_dn x2
-
--- Requires x2 <= x1
-{-# INLINE [0] efdtWordDnFB #-} -- See Note [Inline FB functions] in GHC.List
-efdtWordDnFB :: (Word -> r -> r) -> r -> Word# -> Word# -> Word# -> r
-efdtWordDnFB c n x1 x2 y    -- Be careful about underflow!
-  | isTrue# (y `gtWord#` x1)
-  = n
-  | otherwise
-  = go_dn x1    -- Common case: x1 >= y
-  where
-    !single = isTrue# (y `gtWord#` x2) -- protect against overflow in y'
-    !delta = x2 `minusWord#` x1 -- <= 0
-    !y' = y `minusWord#` delta  -- not single => y <= y' <= x1
-                                -- hence y' is representable
-
-        -- Invariant: x >= y
-        -- Note that: not single && x >= y' => x + delta won't underflow
-        -- so we are guaranteed not to underflow if/when we recurse
-    go_dn x = W# x `c` if single || isTrue# (x `ltWord#` y')
-                       then n
-                       else go_dn (x `plusWord#` delta)
-        -- Be very careful not to have more than one "c"
-        -- so that when efdtIntFB is inlined we can inline
-        -- whatever is bound to "c" (#8763)
 
 ------------------------------------------------------------------------
 -- Integer
