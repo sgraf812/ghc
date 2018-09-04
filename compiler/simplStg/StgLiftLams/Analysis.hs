@@ -245,7 +245,7 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
         = Nothing
       ppr_deciders = vcat . map (text . fst) . filter snd
       fancy_or deciders
-        = llTrace "stgLiftLams:goodToLift" (ppr (map fst pairs) $$ ppr_deciders deciders) $
+        = llTrace "stgLiftLams:goodToLift" (ppr bndrs $$ ppr_deciders deciders) $
           any snd deciders
 
       bndrs = map (binderInfoBndr . fst) pairs
@@ -258,7 +258,7 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
       -- variables that will have to be passed through parameters.
       -- That same set will be noted in 'LiftM.e_expansions' for each of the
       -- variables if we perform the lift.
-      fvs = unionDVarSets (map (mkDVarSet . freeVarsOfRhs . snd) pairs)
+      fvs = unionDVarSets (map (mkDVarSet . freeVarsOfRhs) rhss)
       -- To lift the binding to top-level, we want to delete the lifted binders
       -- themselves from the free var set. Local let bindings seem to
       -- track recursive occurrences in their free variable set. We neither want
@@ -308,7 +308,7 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
       n_args rhs = sizeDVarSet abs_ids + length (rhsLambdaBndrs rhs)
       max_n_args
         | isRec rec_flag = liftLamsRecArgs dflags
-        | otherwise        = liftLamsNonRecArgs dflags
+        | otherwise      = liftLamsNonRecArgs dflags
       -- We have 5 hardware registers on x86_64 to pass arguments in. Any excess
       -- args are passed on the stack, which means slow memory accesses
       args_spill_on_stack
