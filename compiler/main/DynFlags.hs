@@ -890,7 +890,10 @@ data DynFlags = DynFlags {
   floatLamArgs          :: Maybe Int,   -- ^ Arg count for lambda floating
                                         --   See CoreMonad.FloatOutSwitches
 
-  liftLamsArgs          :: Maybe Int,   -- ^ Maximum number of arguments after a lambda lift.
+  liftLamsRecArgs       :: Maybe Int,   -- ^ Maximum number of arguments after lambda lifting a
+                                        --   recursive function.
+  liftLamsNonRecArgs    :: Maybe Int,   -- ^ Maximum number of arguments after lambda lifting a
+                                        --   non-recursive function.
   liftLamsKnown         :: Bool,        -- ^ Lambda lift even when this turns a known call
                                         --   into an unknown call.
 
@@ -1778,7 +1781,8 @@ defaultDynFlags mySettings (myLlvmTargets, myLlvmPasses) =
         specConstrRecursive     = 3,
         liberateCaseThreshold   = Just 2000,
         floatLamArgs            = Just 0, -- Default: float only if no fvs
-        liftLamsArgs            = Just 5, -- Default: the number of available argument hardware registers on x86_64
+        liftLamsRecArgs         = Just 5, -- Default: the number of available argument hardware registers on x86_64
+        liftLamsNonRecArgs      = Just 5, -- Default: the number of available argument hardware registers on x86_64
         liftLamsKnown           = False,  -- Default: don't turn known calls into unknown ones
         cmmProcAlignment        = Nothing,
 
@@ -3431,10 +3435,14 @@ dynamic_flags_deps = [
       (intSuffix (\n d -> d { floatLamArgs = Just n }))
   , make_ord_flag defFlag "ffloat-all-lams"
       (noArg (\d -> d { floatLamArgs = Nothing }))
-  , make_ord_flag defFlag "fstg-lift-lams-args"
-      (intSuffix (\n d -> d { liftLamsArgs = Just n }))
-  , make_ord_flag defFlag "fstg-lift-lams-args-any"
-      (noArg (\d -> d { liftLamsArgs = Nothing }))
+  , make_ord_flag defFlag "fstg-lift-lams-rec-args"
+      (intSuffix (\n d -> d { liftLamsRecArgs = Just n }))
+  , make_ord_flag defFlag "fstg-lift-lams-rec-args-any"
+      (noArg (\d -> d { liftLamsRecArgs = Nothing }))
+  , make_ord_flag defFlag "fstg-lift-lams-non-rec-args"
+      (intSuffix (\n d -> d { liftLamsRecArgs = Just n }))
+  , make_ord_flag defFlag "fstg-lift-lams-non-rec-args-any"
+      (noArg (\d -> d { liftLamsRecArgs = Nothing }))
   , make_ord_flag defFlag "fstg-lift-lams-known"
       (noArg (\d -> d { liftLamsKnown = True }))
   , make_ord_flag defFlag "fno-stg-lift-lams-known"

@@ -224,7 +224,7 @@ goodToLift
   -> Maybe DIdSet       -- ^ @Just abs_ids@ <=> This binding is beneficial to
                         -- lift and @abs_ids@ are the variables it would
                         -- abstract over
-goodToLift dflags top_lvl _rec expander pairs = decide
+goodToLift dflags top_lvl rec_flag expander pairs = decide
   [ ("top-level", isTopLevel top_lvl)
   , ("memoized", any_memoized)
   , ("undersaturated calls", has_undersat_calls)
@@ -306,10 +306,13 @@ goodToLift dflags top_lvl _rec expander pairs = decide
       -- Number of arguments of a RHS in the current binding group if we decide
       -- to lift it
       n_args rhs = sizeDVarSet abs_ids + length (rhsLambdaBndrs rhs)
+      max_n_args
+        | isRec rec_flag = liftLamsRecArgs dflags
+        | otherwise        = liftLamsNonRecArgs dflags
       -- We have 5 hardware registers on x86_64 to pass arguments in. Any excess
       -- args are passed on the stack, which means slow memory accesses
       args_spill_on_stack
-        | Just n <- liftLamsArgs dflags = maximum (map n_args rhss) > n
+        | Just n <- max_n_args = maximum (map n_args rhss) > n
         | otherwise = False
 
       -- We don't allow any closure growth under multi-shot lambdas and only
