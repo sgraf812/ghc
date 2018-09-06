@@ -512,20 +512,27 @@ deriving instance Foldable Down
 -- | Monadic fold over the elements of a structure,
 -- associating to the right, i.e. from right to left.
 foldrM :: (Foldable t, Monad m) => (a -> b -> m b) -> b -> t a -> m b
-foldrM f z0 xs = foldl f' return xs z0
-  where f' k x z = f x z >>= k
+foldrM f z0 xs = foldl c return xs z0
+  -- See Note [List fusion and continuations in 'c']
+  where c k x z = f x z >>= k
+        {-# INLINE c #-}
 
 -- | Monadic fold over the elements of a structure,
 -- associating to the left, i.e. from left to right.
 foldlM :: (Foldable t, Monad m) => (b -> a -> m b) -> b -> t a -> m b
-foldlM f z0 xs = foldr f' return xs z0
-  where f' x k z = f z x >>= k
+foldlM f z0 xs = foldr c return xs z0
+  -- See Note [List fusion and continuations in 'c']
+  where c x k z = f z x >>= k
+        {-# INLINE c #-}
 
 -- | Map each element of a structure to an action, evaluate these
 -- actions from left to right, and ignore the results. For a version
 -- that doesn't ignore the results see 'Data.Traversable.traverse'.
 traverse_ :: (Foldable t, Applicative f) => (a -> f b) -> t a -> f ()
-traverse_ f = foldr ((*>) . f) (pure ())
+traverse_ f = foldr c (pure ())
+  -- See Note [List fusion and continuations in 'c']
+  where c x k = f x *> k
+        {-# INLINE c #-}
 
 -- | 'for_' is 'traverse_' with its arguments flipped. For a version
 -- that doesn't ignore the results see 'Data.Traversable.for'.
@@ -547,7 +554,10 @@ for_ = flip traverse_
 -- As of base 4.8.0.0, 'mapM_' is just 'traverse_', specialized to
 -- 'Monad'.
 mapM_ :: (Foldable t, Monad m) => (a -> m b) -> t a -> m ()
-mapM_ f= foldr ((>>) . f) (return ())
+mapM_ f = foldr c (return ())
+  -- See Note [List fusion and continuations in 'c']
+  where c x k = f x >> k
+        {-# INLINE c #-}
 
 -- | 'forM_' is 'mapM_' with its arguments flipped. For a version that
 -- doesn't ignore the results see 'Data.Traversable.forM'.
@@ -561,7 +571,10 @@ forM_ = flip mapM_
 -- ignore the results. For a version that doesn't ignore the results
 -- see 'Data.Traversable.sequenceA'.
 sequenceA_ :: (Foldable t, Applicative f) => t (f a) -> f ()
-sequenceA_ = foldr (*>) (pure ())
+sequenceA_ = foldr c (pure ())
+  -- See Note [List fusion and continuations in 'c']
+  where c m k = m *> k
+        {-# INLINE c #-}
 
 -- | Evaluate each monadic action in the structure from left to right,
 -- and ignore the results. For a version that doesn't ignore the
@@ -570,7 +583,10 @@ sequenceA_ = foldr (*>) (pure ())
 -- As of base 4.8.0.0, 'sequence_' is just 'sequenceA_', specialized
 -- to 'Monad'.
 sequence_ :: (Foldable t, Monad m) => t (m a) -> m ()
-sequence_ = foldr (>>) (return ())
+sequence_ = foldr c (return ())
+  -- See Note [List fusion and continuations in 'c']
+  where c m k = m >> k
+        {-# INLINE c #-}
 
 -- | The sum of a collection of actions, generalizing 'concat'.
 --
@@ -648,6 +664,35 @@ notElem x = not . elem x
 -- 'Nothing' if there is no such element.
 find :: Foldable t => (a -> Bool) -> t a -> Maybe a
 find p = getFirst . foldMap (\ x -> First (if p x then Just x else Nothing))
+
+{-
+Note [List fusion and continuations in 'c']
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Some list consumers like forM_ are used with huge loop bodies that inhibit the
+expression from properly fusing with a list producer, because the 'c' argument
+is bound to a huge function that can't be inlined multiple times (see
+https://ghc.haskell.org/trac/ghc/ticket/8763#comment:74). Example:
+
+  forM_ (build g) (\n -> huge_body)
+= foldr ((>>) . (\n -> huge_body)) (return ()) (build g)
+= foldr (\x k -> huge_body x >> k) (return ()) (build g)
+= g (\x k -> huge_body x >> k) (return ())
+
+If at this point, 'huge_body' is inlined (single occurrence), we get a lambda
+that is too huge to inline when there are multiple occurences of the 'c'
+parameter of 'g. This spoils recursive join points within 'g' that pass
+themselves as the 'k' parameter to the lambda, which occurs in tail position.
+Inlining the lambda exposes the tail call and GHC recognizes crucial join
+points.
+
+The solution is to give the lambda expression a name ('c', by convention) and
+mark it as INLINE. Crisis averted!
+
+This is valuable advice everywhere we apply a producer that can't easily honour
+the "single occurrence of 'c'" best practice to a consumer function.
+Sadly, this means all our consumers where the huge body problem might occur have
+to be aware of that.
+-}
 
 {-
 Note [maximumBy/minimumBy space usage]
