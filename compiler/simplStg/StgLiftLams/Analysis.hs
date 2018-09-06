@@ -305,7 +305,11 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
 
       -- Number of arguments of a RHS in the current binding group if we decide
       -- to lift it
-      n_args rhs = sizeDVarSet abs_ids + length (rhsLambdaBndrs rhs)
+      n_args
+        = length
+        . StgCmmClosure.nonVoidIds -- void parameters don't appear in Cmm
+        . (dVarSetElems abs_ids ++)
+        . rhsLambdaBndrs
       max_n_args
         | isRec rec_flag = liftLamsRecArgs dflags
         | otherwise      = liftLamsNonRecArgs dflags
