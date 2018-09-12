@@ -395,14 +395,18 @@ costToLift expander sizer group abs_ids = go
     go (MultiShotLamSk body) = (0, max cg cgil)
       where
         (!cg, !cgil) = go body
-    go (ClosureSk _ clo_fvs body) = (cg + max 0 cg_body, max 0 cgil_body)
-      -- (max 0) the growths from the body, since the closure might not be
-      -- entered. In contrast, the effect on the closure's allocation @cg@
-      -- itself is certain.
+    go (ClosureSk _ clo_fvs body) = (cg, cgil)
       where
-        (!cg_body, !cgil_body) = go body
+        -- If no binder of the group occurs free in the closure, we can return
+        -- the lifting decision won't have any effect on it.
+        (cg, cgil)
+          | n_occs > 0 = (cost + max 0 cg_body, max 0 cgil_body)
+          -- (max 0) the growths from the body, since the closure might not be
+          -- entered. In contrast, the effect on the closure's allocation @cost@
+          -- itself is certain.
+          | otherwise  = (0, 0)
         n_occs = sizeDVarSet (clo_fvs' `dVarSetIntersectVarSet` group)
-        cg = if n_occs > 0 then cost else 0
+        (cg_body, cgil_body) = go body
         -- What we close over considering prior lifting decisions
         clo_fvs' = expander clo_fvs
         -- Variables that would additionally occur free in the closure body if we
