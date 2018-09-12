@@ -238,7 +238,7 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
         | not (fancy_or deciders)
         = llTrace "stgLiftLams:lifting"
                   (ppr bndrs <+> ppr abs_ids $$
-                   ppr cg <+> ppr cgil $$
+                   ppr cg <+> ppr cg_lam $$
                    ppr scope) $
           Just abs_ids
         | otherwise
@@ -323,7 +323,7 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
       -- perform the lift if allocations didn't increase.
       -- Also, abstracting over LNEs is unacceptable. LNEs might return
       -- unlifted tuples, which idClosureFootprint can't cope with.
-      inc_allocs = abstracts_join_ids || cgil > 0 || allocs > 0
+      inc_allocs = abstracts_join_ids || cg_lam || allocs > 0
       allocs = cg - closuresSize
       -- We calculate and then add up the size of each binding's closure.
       -- GHC does not currently share closure environments, and we either lift
@@ -335,7 +335,7 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
         . flip dVarSetMinusVarSet bndrs_set
         . mkDVarSet
         $ freeVarsOfRhs rhs
-      (cg, cgil) = costToLift expander (idClosureFootprint dflags) bndrs_set abs_ids scope
+      (cg, cg_lam) = costToLift expander (idClosureFootprint dflags) bndrs_set abs_ids scope
       scope = case pairs of
         (BindsClosure lbi, _):_ -> lbi_scope lbi
         (BoringBinder id, _):_ -> pprPanic "goodToLift" (text "Can't lift boring binders" $$ ppr id)
@@ -369,9 +369,9 @@ idClosureFootprint dflags
   = StgCmmArgRep.argRepSizeW dflags
   . StgCmmArgRep.idArgRep
 
--- | @costToLift expander sizer f fvs@ computes the closure growth and closure
--- growth under (multi-shot) lambdas in words as a result of lifting @f@ to
--- top-level.
+-- | @costToLift expander sizer f fvs@ computes the closure growth in words and
+-- if there is any growing closure under a (multi-shot) lambdas as a result of
+-- lifting @f@ to top-level.
 costToLift
   :: (DIdSet -> DIdSet) -- ^ Expands outer free ids that were lifted to their free vars
   -> (Id -> Int)        -- ^ Computes the closure footprint of an identifier
@@ -380,33 +380,34 @@ costToLift
                         --   These must be available at call sites if we decide
                         --   to lift the binding group.
   -> Skeleton           -- ^ Abstraction of the scope of the function
-  -> (WordOff, WordOff) -- ^ Closure growth and closure growth under (multi-shot) lambdas
+  -> (WordOff, Bool)    -- ^ Closure growth and if there is any growth under a
+                        --   (multi-shot) lambda
 costToLift expander sizer group abs_ids = go
   where
-    go NilSk = (0, 0)
-    go (BothSk a b) = (cg1 + cg2, max cgil1 cgil2)
+    go NilSk = (0, False)
+    go (BothSk a b) = (cg1 + cg2, cg_lam1 || cg_lam2)
       where
-        (!cg1, !cgil1) = go a
-        (!cg2, !cgil2) = go b
-    go (AltSk a b) = (max cg1 cg2, max cgil1 cgil2)
+        (!cg1, !cg_lam1) = go a
+        (!cg2, !cg_lam2) = go b
+    go (AltSk a b) = (max cg1 cg2, cg_lam1 || cg_lam2)
       where
-        (!cg1, !cgil1) = go a
-        (!cg2, !cgil2) = go b
-    go (MultiShotLamSk body) = (0, max cg cgil)
+        (!cg1, !cg_lam1) = go a
+        (!cg2, !cg_lam2) = go b
+    go (MultiShotLamSk body) = (0, cg > 0 || cg_lam)
       where
-        (!cg, !cgil) = go body
-    go (ClosureSk _ clo_fvs body) = (cg, cgil)
+        (!cg, !cg_lam) = go body
+    go (ClosureSk _ clo_fvs body) = (cg, cg_lam)
       where
-        -- If no binder of the group occurs free in the closure, we can return
-        -- the lifting decision won't have any effect on it.
-        (cg, cgil)
-          | n_occs > 0 = (cost + max 0 cg_body, max 0 cgil_body)
-          -- (max 0) the growths from the body, since the closure might not be
+        -- If no binder of the @group@ occurs free in the closure, the lifting
+        -- won't have any effect on it.
+        (cg, cg_lam)
+          | n_occs > 0 = (cost + max 0 cg_body, cg_lam_body)
+          -- @max 0@ the growth from the body, since the closure might not be
           -- entered. In contrast, the effect on the closure's allocation @cost@
           -- itself is certain.
-          | otherwise  = (0, 0)
+          | otherwise  = (0, False)
         n_occs = sizeDVarSet (clo_fvs' `dVarSetIntersectVarSet` group)
-        (cg_body, cgil_body) = go body
+        (cg_body, cg_lam_body) = go body
         -- What we close over considering prior lifting decisions
         clo_fvs' = expander clo_fvs
         -- Variables that would additionally occur free in the closure body if we
