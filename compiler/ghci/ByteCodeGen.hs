@@ -1304,7 +1304,7 @@ mkDummyLiteral dflags pr
         WordRep   -> mkMachWord dflags 0
         Int64Rep  -> mkMachInt64 0
         Word64Rep -> mkMachWord64 0
-        AddrRep   -> MachNullAddr
+        AddrRep   -> nullLit addrPrimTy
         DoubleRep -> MachDouble 0
         FloatRep  -> MachFloat 0
         _         -> pprPanic "mkDummyLiteral" (ppr pr)
@@ -1423,7 +1423,7 @@ implement_tagToId d s p arg names
            slide_ws = bytesToWords dflags (d - s + arg_bytes)
 
        return (push_arg
-               `appOL` unitOL (PUSH_UBX MachNullAddr 1)
+               `appOL` unitOL (PUSH_UBX (nullLit addrPrimTy) 1)
                    -- Push bogus word (see Note [Implementing tagToEnum#])
                `appOL` concatOL steps
                `appOL` toOL [ LABEL label_fail, CASEFAIL,
@@ -1527,7 +1527,7 @@ pushAtom _ _ (AnnLit lit) = do
         MachFloat _   -> code F
         MachDouble _  -> code D
         MachChar _    -> code N
-        MachNullAddr  -> code N
+        MachNull _    -> code N
         MachStr _     -> code N
         LitNumber nt _ _ -> case nt of
           LitNumInt     -> code N

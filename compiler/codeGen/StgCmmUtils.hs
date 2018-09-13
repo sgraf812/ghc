@@ -93,7 +93,7 @@ cgLit other_lit   = do dflags <- getDynFlags
 
 mkSimpleLit :: DynFlags -> Literal -> CmmLit
 mkSimpleLit dflags (MachChar   c)    = CmmInt (fromIntegral (ord c)) (wordWidth dflags)
-mkSimpleLit dflags MachNullAddr      = zeroCLit dflags
+mkSimpleLit dflags (MachNull _)      = zeroCLit dflags
 mkSimpleLit dflags (LitNumber LitNumInt i _)    = CmmInt i (wordWidth dflags)
 mkSimpleLit _      (LitNumber LitNumInt64 i _)  = CmmInt i W64
 mkSimpleLit dflags (LitNumber LitNumWord i _)   = CmmInt i (wordWidth dflags)

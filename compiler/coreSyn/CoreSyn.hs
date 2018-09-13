@@ -317,7 +317,7 @@ instance Ord AltCon where
     compare (dataConTag con1) (dataConTag con2)
   compare (DataAlt _) _ = GT
   compare _ (DataAlt _) = LT
-  compare (LitAlt l1) (LitAlt l2) = compare l1 l2
+  compare (LitAlt l1) (LitAlt l2) = cmpLit l1 l2
   compare (LitAlt _) DEFAULT = GT
   compare DEFAULT DEFAULT = EQ
   compare DEFAULT _ = LT
@@ -1705,7 +1705,7 @@ cmpAltCon DEFAULT      _           = LT
 
 cmpAltCon (DataAlt d1) (DataAlt d2) = dataConTag d1 `compare` dataConTag d2
 cmpAltCon (DataAlt _)  DEFAULT      = GT
-cmpAltCon (LitAlt  l1) (LitAlt  l2) = l1 `compare` l2
+cmpAltCon (LitAlt  l1) (LitAlt  l2) = l1 `cmpLit` l2
 cmpAltCon (LitAlt _)   DEFAULT      = GT
 
 cmpAltCon con1 con2 = WARN( True, text "Comparing incomparable AltCons" <+>

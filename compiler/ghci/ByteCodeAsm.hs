@@ -447,7 +447,7 @@ assembleI dflags i = case i of
      -- On Windows, stdcall labels have a suffix indicating the no. of
      -- arg words, e.g. foo@8.  testcase: ffi012(ghci)
     literal (MachLabel fs _ _) = litlabel fs
-    literal MachNullAddr       = int 0
+    literal (MachNull _)       = int 0
     literal (MachFloat r)      = float (fromRational r)
     literal (MachDouble r)     = double (fromRational r)
     literal (MachChar c)       = int (ord c)

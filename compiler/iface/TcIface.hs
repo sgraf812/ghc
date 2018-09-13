@@ -49,6 +49,7 @@ import MkId
 import IdInfo
 import Class
 import TyCon
+import TysPrim
 import ConLike
 import DataCon
 import PrelNames
@@ -1363,20 +1364,25 @@ tcIfaceTickish (IfaceSCC  cc tick push) = return (ProfNote cc tick push)
 tcIfaceTickish (IfaceSource src name)   = return (SourceNote src name)
 
 -------------------------
-tcIfaceLit :: Literal -> IfL Literal
--- Integer literals deserialise to (LitInteger i <error thunk>)
--- so tcIfaceLit just fills in the type.
--- See Note [Integer literals] in Literal
-tcIfaceLit (LitNumber LitNumInteger i _)
-  = do t <- tcIfaceTyConByName integerTyConName
-       return (mkLitInteger i (mkTyConTy t))
--- Natural literals deserialise to (LitNatural i <error thunk>)
--- so tcIfaceLit just fills in the type.
--- See Note [Natural literals] in Literal
-tcIfaceLit (LitNumber LitNumNatural i _)
-  = do t <- tcIfaceTyConByName naturalTyConName
-       return (mkLitNatural i (mkTyConTy t))
-tcIfaceLit lit = return lit
+tcIfaceLit :: IfaceLiteral -> IfL Literal
+tcIfaceLit (IfaceMachChar c)          = return (MachChar c)
+tcIfaceLit (IfaceMachStr bs)          = return (MachStr bs)
+tcIfaceLit (IfaceMachNull t)          = MachNull <$> tcIfaceType t
+tcIfaceLit (IfaceMachFloat r)         = return (MachFloat r)
+tcIfaceLit (IfaceMachDouble r)        = return (MachDouble r)
+tcIfaceLit (IfaceMachLabel fs mb fod) = return (MachLabel fs mb fod)
+tcIfaceLit (IfaceLitNumber nt i)
+  = case nt of
+      LitNumInt -> return (LitNumber nt i intPrimTy)
+      LitNumInt64 -> return (LitNumber nt i int64PrimTy)
+      LitNumWord -> return (LitNumber nt i wordPrimTy)
+      LitNumWord64 -> return (LitNumber nt i word64PrimTy)
+      LitNumInteger -> do
+        t <- tcIfaceTyConByName integerTyConName
+        return (mkLitInteger i (mkTyConTy t))
+      LitNumNatural -> do
+        t <- tcIfaceTyConByName naturalTyConName
+        return (mkLitInteger i (mkTyConTy t))
 
 -------------------------
 tcIfaceAlt :: CoreExpr -> (TyCon, [Type])

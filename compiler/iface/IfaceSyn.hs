@@ -11,7 +11,7 @@ module IfaceSyn (
         IfaceDecl(..), IfaceFamTyConFlav(..), IfaceClassOp(..), IfaceAT(..),
         IfaceConDecl(..), IfaceConDecls(..), IfaceEqSpec,
         IfaceExpr(..), IfaceAlt, IfaceLetBndr(..), IfaceJoinInfo(..),
-        IfaceBinding(..), IfaceConAlt(..),
+        IfaceBinding(..), IfaceLiteral(..), IfaceConAlt(..),
         IfaceIdInfo(..), IfaceIdDetails(..), IfaceUnfolding(..),
         IfaceInfoItem(..), IfaceRule(..), IfaceAnnotation(..), IfaceAnnTarget,
         IfaceClsInst(..), IfaceFamInst(..), IfaceTickish(..),
@@ -53,6 +53,7 @@ import FieldLabel
 import NameSet
 import CoAxiom ( BranchIndex )
 import Name
+import FastString
 import CostCentre
 import Literal
 import ForeignCall
@@ -71,6 +72,8 @@ import DataCon (SrcStrictness(..), SrcUnpackedness(..))
 import Lexeme (isLexSym)
 import DynFlags
 
+import Data.ByteString ( ByteString )
+import Numeric ( fromRat )
 import Control.Monad
 import System.IO.Unsafe
 
@@ -487,9 +490,18 @@ data IfaceExpr
   | IfaceECase  IfaceExpr IfaceType     -- See Note [Empty case alternatives]
   | IfaceLet    IfaceBinding  IfaceExpr
   | IfaceCast   IfaceExpr IfaceCoercion
-  | IfaceLit    Literal
+  | IfaceLit    IfaceLiteral
   | IfaceFCall  ForeignCall IfaceType
   | IfaceTick   IfaceTickish IfaceExpr    -- from Tick tickish E
+
+data IfaceLiteral
+  = IfaceMachChar   Char
+  | IfaceLitNumber  LitNumType Integer
+  | IfaceMachStr    ByteString
+  | IfaceMachNull   IfaceType
+  | IfaceMachFloat  Rational
+  | IfaceMachDouble Rational
+  | IfaceMachLabel  FastString (Maybe Int) FunctionOrData
 
 data IfaceTickish
   = IfaceHpcTick Module Int                -- from HpcTick x
@@ -504,7 +516,7 @@ type IfaceAlt = (IfaceConAlt, [IfLclName], IfaceExpr)
 
 data IfaceConAlt = IfaceDefault
                  | IfaceDataAlt IfExtName
-                 | IfaceLitAlt Literal
+                 | IfaceLitAlt IfaceLiteral
 
 data IfaceBinding
   = IfaceNonRec IfaceLetBndr IfaceExpr
@@ -1202,6 +1214,26 @@ ppr_bind :: (IfaceLetBndr, IfaceExpr) -> SDoc
 ppr_bind (IfLetBndr b ty info ji, rhs)
   = sep [hang (ppr b <+> dcolon <+> ppr ty) 2 (ppr ji <+> ppr info),
          equals <+> pprIfaceExpr noParens rhs]
+
+------------------
+instance Outputable IfaceLiteral where
+    ppr (IfaceMachChar c)     = pprPrimChar c
+    ppr (IfaceMachStr s)      = pprHsBytes s
+    ppr (IfaceMachNull _)     = text "__NULL"
+    ppr (IfaceMachFloat f)    = float (fromRat f) <> primFloatSuffix
+    ppr (IfaceMachDouble d)   = double (fromRat d) <> primDoubleSuffix
+    ppr (IfaceLitNumber nt i)
+      = case nt of
+          LitNumInteger -> integer i
+          LitNumNatural -> integer i
+          LitNumInt     -> pprPrimInt i
+          LitNumInt64   -> pprPrimInt64 i
+          LitNumWord    -> pprPrimWord i
+          LitNumWord64  -> pprPrimWord64 i
+    ppr (IfaceMachLabel l mb fod) = text "__label" <+> b <+> ppr fod
+        where b = case mb of
+                  Nothing -> pprHsString l
+                  Just x  -> doubleQuotes (text (unpackFS l ++ '@':show x))
 
 ------------------
 pprIfaceTickish :: IfaceTickish -> SDoc
@@ -2159,6 +2191,49 @@ instance Binary IfaceExpr where
                      b <- get bh
                      return (IfaceECase a b)
             _ -> panic ("get IfaceExpr " ++ show h)
+
+instance Binary IfaceLiteral where
+    put_ bh (IfaceMachChar aa)     = do putByte bh 0; put_ bh aa
+    put_ bh (IfaceMachStr ab)      = do putByte bh 1; put_ bh ab
+    put_ bh (IfaceMachNull t)      = do putByte bh 2; put_ bh t
+    put_ bh (IfaceMachFloat ah)    = do putByte bh 3; put_ bh ah
+    put_ bh (IfaceMachDouble ai)   = do putByte bh 4; put_ bh ai
+    put_ bh (IfaceMachLabel aj mb fod)
+        = do putByte bh 5
+             put_ bh aj
+             put_ bh mb
+             put_ bh fod
+    put_ bh (IfaceLitNumber nt i)
+        = do putByte bh 6
+             put_ bh nt
+             put_ bh i
+    get bh = do
+            h <- getByte bh
+            case h of
+              0 -> do
+                    aa <- get bh
+                    return (IfaceMachChar aa)
+              1 -> do
+                    ab <- get bh
+                    return (IfaceMachStr ab)
+              2 -> do
+                    t <- get bh
+                    return (IfaceMachNull t)
+              3 -> do
+                    ah <- get bh
+                    return (IfaceMachFloat ah)
+              4 -> do
+                    ai <- get bh
+                    return (IfaceMachDouble ai)
+              5 -> do
+                    aj <- get bh
+                    mb <- get bh
+                    fod <- get bh
+                    return (IfaceMachLabel aj mb fod)
+              _ -> do
+                    nt <- get bh
+                    i  <- get bh
+                    return (IfaceLitNumber nt i)
 
 instance Binary IfaceTickish where
     put_ bh (IfaceHpcTick m ix) = do

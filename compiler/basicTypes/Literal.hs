@@ -36,6 +36,7 @@ module Literal
         , isZeroLit
         , litFitsInChar
         , litValue, isLitValue, isLitValue_maybe, mapLitValue
+        , cmpLit
 
         -- ** Coercions
         , word2IntLit, int2WordLit
@@ -44,7 +45,7 @@ module Literal
         , narrow8WordLit, narrow16WordLit, narrow32WordLit
         , char2IntLit, int2CharLit
         , float2IntLit, int2FloatLit, double2IntLit, int2DoubleLit
-        , nullAddrLit, float2DoubleLit, double2FloatLit
+        , nullLit, float2DoubleLit, double2FloatLit
         ) where
 
 #include "HsVersions.h"
@@ -62,6 +63,7 @@ import Binary
 import Constants
 import DynFlags
 import Platform
+import RepType
 import UniqFM
 import Util
 
@@ -110,9 +112,10 @@ data Literal
                                 -- at runtime.  Also emitted with a @'\0'@
                                 -- terminator. Create with 'mkMachString'
 
-  | MachNullAddr                -- ^ The @NULL@ pointer, the only pointer value
+  | MachNull    Type            -- ^ The @NULL@ pointer, the only pointer value
                                 -- that can be represented as a Literal. Create
-                                -- with 'nullAddrLit'
+                                -- with 'nullLit'. Can represent any type of
+                                -- of 'UnliftedRep' or 'AddrRep'.
 
   | MachFloat   Rational        -- ^ @Float#@. Create with 'mkMachFloat'
   | MachDouble  Rational        -- ^ @Double#@. Create with 'mkMachDouble'
@@ -162,12 +165,6 @@ They only get converted into real Core,
 during the CorePrep phase, although TidyPgm looks ahead at what the
 core will be, so that it can see whether it involves CAFs.
 
-When we initally build an Integer literal, notably when
-deserialising it from an interface file (see the Binary instance
-below), we don't have convenient access to the mkInteger Id.  So we
-just use an error thunk, and fill in the real Id when we do tcIfaceLit
-in TcIface.
-
 Note [Natural literals]
 ~~~~~~~~~~~~~~~~~~~~~~~
 Similar to Integer literals.
@@ -180,72 +177,11 @@ instance Binary LitNumType where
       h <- getByte bh
       return (toEnum (fromIntegral h))
 
-instance Binary Literal where
-    put_ bh (MachChar aa)     = do putByte bh 0; put_ bh aa
-    put_ bh (MachStr ab)      = do putByte bh 1; put_ bh ab
-    put_ bh (MachNullAddr)    = do putByte bh 2
-    put_ bh (MachFloat ah)    = do putByte bh 3; put_ bh ah
-    put_ bh (MachDouble ai)   = do putByte bh 4; put_ bh ai
-    put_ bh (MachLabel aj mb fod)
-        = do putByte bh 5
-             put_ bh aj
-             put_ bh mb
-             put_ bh fod
-    put_ bh (LitNumber nt i _)
-        = do putByte bh 6
-             put_ bh nt
-             put_ bh i
-    get bh = do
-            h <- getByte bh
-            case h of
-              0 -> do
-                    aa <- get bh
-                    return (MachChar aa)
-              1 -> do
-                    ab <- get bh
-                    return (MachStr ab)
-              2 -> do
-                    return (MachNullAddr)
-              3 -> do
-                    ah <- get bh
-                    return (MachFloat ah)
-              4 -> do
-                    ai <- get bh
-                    return (MachDouble ai)
-              5 -> do
-                    aj <- get bh
-                    mb <- get bh
-                    fod <- get bh
-                    return (MachLabel aj mb fod)
-              _ -> do
-                    nt <- get bh
-                    i  <- get bh
-                    let t = case nt of
-                            LitNumInt     -> intPrimTy
-                            LitNumInt64   -> int64PrimTy
-                            LitNumWord    -> wordPrimTy
-                            LitNumWord64  -> word64PrimTy
-                            -- See Note [Integer literals]
-                            LitNumInteger ->
-                              panic "Evaluated the place holder for mkInteger"
-                            -- and Note [Natural literals]
-                            LitNumNatural ->
-                              panic "Evaluated the place holder for mkNatural"
-                    return (LitNumber nt i t)
-
 instance Outputable Literal where
     ppr lit = pprLiteral (\d -> d) lit
 
 instance Eq Literal where
-    a == b = case (a `compare` b) of { EQ -> True;   _ -> False }
-    a /= b = case (a `compare` b) of { EQ -> False;  _ -> True  }
-
-instance Ord Literal where
-    a <= b = case (a `compare` b) of { LT -> True;  EQ -> True;  GT -> False }
-    a <  b = case (a `compare` b) of { LT -> True;  EQ -> False; GT -> False }
-    a >= b = case (a `compare` b) of { LT -> False; EQ -> True;  GT -> True  }
-    a >  b = case (a `compare` b) of { LT -> False; EQ -> False; GT -> True  }
-    compare a b = cmpLit a b
+    a == b = a `eqLit` b
 
 {-
         Construction
@@ -515,8 +451,15 @@ float2DoubleLit l              = pprPanic "float2DoubleLit" (ppr l)
 double2FloatLit (MachDouble d) = MachFloat  d
 double2FloatLit l              = pprPanic "double2FloatLit" (ppr l)
 
-nullAddrLit :: Literal
-nullAddrLit = MachNullAddr
+-- | Constructs a @NULL@ pointer for the given type of 'UnliftedRep' or
+-- 'AddrRep'. Panics for any other type.
+nullLit :: Type -> Literal
+nullLit ty
+  | [rep] <- typePrimRep ty
+  , rep == UnliftedRep || rep == AddrRep
+  = MachNull ty
+  | otherwise
+  = pprPanic "nullLit" (ppr ty <+> text "is not of UnliftedRep or AddrRep")
 
 {-
         Predicates
@@ -603,7 +546,7 @@ litIsLifted _               = False
 
 -- | Find the Haskell 'Type' the literal occupies
 literalType :: Literal -> Type
-literalType MachNullAddr      = addrPrimTy
+literalType (MachNull t)      = t
 literalType (MachChar _)      = charPrimTy
 literalType (MachStr  _)      = addrPrimTy
 literalType (MachFloat _)     = floatPrimTy
@@ -611,14 +554,17 @@ literalType (MachDouble _)    = doublePrimTy
 literalType (MachLabel _ _ _) = addrPrimTy
 literalType (LitNumber _ _ t) = t
 
-absentLiteralOf :: TyCon -> Maybe Literal
+absentLiteralOf :: Type -> Maybe Literal
 -- Return a literal of the appropriate primitive
--- TyCon, to use as a placeholder when it doesn't matter
-absentLiteralOf tc = lookupUFM absent_lits (tyConName tc)
+-- Type, to use as a placeholder when it doesn't matter
+absentLiteralOf ty
+  | typePrimRep ty == [UnliftedRep]
+  = Just (nullLit ty)
+  | otherwise
+  = tyConAppTyCon_maybe ty >>= lookupUFM absent_lits . tyConName
 
 absent_lits :: UniqFM Literal
-absent_lits = listToUFM [ (addrPrimTyConKey,    MachNullAddr)
-                        , (charPrimTyConKey,    MachChar 'x')
+absent_lits = listToUFM [ (charPrimTyConKey,    MachChar 'x')
                         , (intPrimTyConKey,     mkMachIntUnchecked 0)
                         , (int64PrimTyConKey,   mkMachInt64Unchecked 0)
                         , (wordPrimTyConKey,    mkMachWordUnchecked 0)
@@ -632,13 +578,28 @@ absent_lits = listToUFM [ (addrPrimTyConKey,    MachNullAddr)
         ~~~~~~~~~~
 -}
 
+eqLit :: Literal -> Literal -> Bool
+eqLit (MachChar      a)     (MachChar       b)     = a  == b
+eqLit (MachStr       a)     (MachStr        b)     = a  == b
+eqLit (MachNull     t1)     (MachNull      t2)     = t1 `eqType` t2
+eqLit (MachFloat     a)     (MachFloat      b)     = a  == b
+eqLit (MachDouble    a)     (MachDouble     b)     = a  == b
+eqLit (MachLabel     a _ _) (MachLabel      b _ _) = a  == b
+eqLit (LitNumber nt1 a _)   (LitNumber nt2  b _)
+  | nt1 == nt2 = a   == b
+  | otherwise  = nt1 == nt2
+eqLit _ _ = False
+
+-- | 'MachNull's of different 'Type's are considered equal, lacking a comparison
+-- operator for 'Type's. Note that in this regard, 'cmpLit' disagrees with
+-- '=='.
 cmpLit :: Literal -> Literal -> Ordering
-cmpLit (MachChar      a)     (MachChar       b)     = a `compare` b
-cmpLit (MachStr       a)     (MachStr        b)     = a `compare` b
-cmpLit (MachNullAddr)        (MachNullAddr)         = EQ
-cmpLit (MachFloat     a)     (MachFloat      b)     = a `compare` b
-cmpLit (MachDouble    a)     (MachDouble     b)     = a `compare` b
-cmpLit (MachLabel     a _ _) (MachLabel      b _ _) = a `compare` b
+cmpLit (MachChar      a)     (MachChar       b)     = a  `compare` b
+cmpLit (MachStr       a)     (MachStr        b)     = a  `compare` b
+cmpLit (MachNull      _)     (MachNull       _)     = EQ -- Hack alert
+cmpLit (MachFloat     a)     (MachFloat      b)     = a  `compare` b
+cmpLit (MachDouble    a)     (MachDouble     b)     = a  `compare` b
+cmpLit (MachLabel     a _ _) (MachLabel      b _ _) = a  `compare` b
 cmpLit (LitNumber nt1 a _)   (LitNumber nt2  b _)
   | nt1 == nt2 = a   `compare` b
   | otherwise  = nt1 `compare` nt2
@@ -649,7 +610,7 @@ cmpLit lit1 lit2
 litTag :: Literal -> Int
 litTag (MachChar      _)   = 1
 litTag (MachStr       _)   = 2
-litTag (MachNullAddr)      = 3
+litTag (MachNull      _)   = 3
 litTag (MachFloat     _)   = 4
 litTag (MachDouble    _)   = 5
 litTag (MachLabel _ _ _)   = 6
@@ -664,7 +625,7 @@ litTag (LitNumber  {})     = 7
 pprLiteral :: (SDoc -> SDoc) -> Literal -> SDoc
 pprLiteral _       (MachChar c)     = pprPrimChar c
 pprLiteral _       (MachStr s)      = pprHsBytes s
-pprLiteral _       (MachNullAddr)   = text "__NULL"
+pprLiteral _       (MachNull _)     = text "__NULL"
 pprLiteral _       (MachFloat f)    = float (fromRat f) <> primFloatSuffix
 pprLiteral _       (MachDouble d)   = double (fromRat d) <> primDoubleSuffix
 pprLiteral add_par (LitNumber nt i _)
@@ -711,7 +672,7 @@ Literal         Output             Output if context requires
 -------         -------            ----------------------
 MachChar        'a'#
 MachStr         "aaa"#
-MachNullAddr    "__NULL"
+MachNull        "__NULL"
 MachInt         -1#
 MachInt64       -1L#
 MachWord         1##

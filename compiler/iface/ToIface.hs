@@ -50,6 +50,7 @@ import IfaceSyn
 import DataCon
 import Id
 import IdInfo
+import Literal
 import CoreSyn
 import TyCon hiding ( pprPromotionQuote )
 import CoAxiom
@@ -464,7 +465,7 @@ toIfUnfolding _ NoUnfolding = Nothing
 
 toIfaceExpr :: CoreExpr -> IfaceExpr
 toIfaceExpr (Var v)         = toIfaceVar v
-toIfaceExpr (Lit l)         = IfaceLit l
+toIfaceExpr (Lit l)         = IfaceLit (toIfaceLiteral l)
 toIfaceExpr (Type ty)       = IfaceType (toIfaceType ty)
 toIfaceExpr (Coercion co)   = IfaceCo   (toIfaceCoercion co)
 toIfaceExpr (Lam x b)       = IfaceLam (toIfaceBndr x, toIfaceOneShot x) (toIfaceExpr b)
@@ -485,6 +486,28 @@ toIfaceOneShot id | isId id
                   | otherwise
                   = IfaceNoOneShot
 
+---------------------
+toIfaceLiteral :: Literal -> IfaceLiteral
+toIfaceLiteral (MachChar c) = IfaceMachChar c
+toIfaceLiteral (LitNumber nt i _) = IfaceLitNumber nt i
+toIfaceLiteral (MachStr bs) = IfaceMachStr bs
+toIfaceLiteral (MachNull t) = IfaceMachNull (toIfaceType t)
+toIfaceLiteral (MachFloat r) = IfaceMachFloat r
+toIfaceLiteral (MachDouble r) = IfaceMachDouble r
+toIfaceLiteral (MachLabel fs mi fod) = IfaceMachLabel fs mi fod 
+{-
+                    let t = case nt of
+                            LitNumInt     -> intPrimTy
+                            LitNumInt64   -> int64PrimTy
+                            LitNumWord    -> wordPrimTy
+                            LitNumWord64  -> word64PrimTy
+                            -- See Note [Integer literals]
+                            LitNumInteger ->
+                              panic "Evaluated the place holder for mkInteger"
+                            -- and Note [Natural literals]
+                            LitNumNatural ->
+                              panic "Evaluated the place holder for mkNatural"
+-}
 ---------------------
 toIfaceTickish :: Tickish Id -> Maybe IfaceTickish
 toIfaceTickish (ProfNote cc tick push) = Just (IfaceSCC cc tick push)
@@ -507,7 +530,7 @@ toIfaceAlt (c,bs,r) = (toIfaceCon c, map getOccFS bs, toIfaceExpr r)
 ---------------------
 toIfaceCon :: AltCon -> IfaceConAlt
 toIfaceCon (DataAlt dc) = IfaceDataAlt (getName dc)
-toIfaceCon (LitAlt l)   = IfaceLitAlt l
+toIfaceCon (LitAlt l)   = IfaceLitAlt (toIfaceLiteral l)
 toIfaceCon DEFAULT      = IfaceDefault
 
 ---------------------

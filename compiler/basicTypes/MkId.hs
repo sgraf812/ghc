@@ -1261,7 +1261,7 @@ nullAddrId :: Id
 nullAddrId = pcMiscPrelId nullAddrName addrPrimTy info
   where
     info = noCafIdInfo `setInlinePragInfo` alwaysInlinePragma
-                       `setUnfoldingInfo`  mkCompulsoryUnfolding (Lit nullAddrLit)
+                       `setUnfoldingInfo`  mkCompulsoryUnfolding (Lit (nullLit addrPrimTy))
                        `setNeverLevPoly`   addrPrimTy
 
 ------------------------------------------------
