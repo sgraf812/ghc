@@ -14,10 +14,10 @@ module Literal
         , LitNumType(..)
 
         -- ** Creating Literals
-        , mkMachInt, mkMachIntWrap, mkMachIntWrapC
-        , mkMachWord, mkMachWordWrap, mkMachWordWrapC
-        , mkMachInt64, mkMachInt64Wrap
-        , mkMachWord64, mkMachWord64Wrap
+        , mkMachInt, mkMachIntUnchecked, mkMachIntWrap, mkMachIntWrapC
+        , mkMachWord, mkMachWordUnchecked, mkMachWordWrap, mkMachWordWrapC
+        , mkMachInt64, mkMachInt64Unchecked, mkMachInt64Wrap
+        , mkMachWord64, mkMachWord64Unchecked, mkMachWord64Wrap
         , mkMachFloat, mkMachDouble
         , mkMachChar, mkMachString
         , mkLitInteger, mkLitNatural
@@ -25,7 +25,6 @@ module Literal
 
         -- ** Operations on Literals
         , literalType
-        , absentLiteralOf
         , pprLiteral
         , litNumIsSigned
         , litNumCheckRange
@@ -44,7 +43,7 @@ module Literal
         , narrow8WordLit, narrow16WordLit, narrow32WordLit
         , char2IntLit, int2CharLit
         , float2IntLit, int2FloatLit, double2IntLit, int2DoubleLit
-        , nullAddrLit, float2DoubleLit, double2FloatLit
+        , nullAddrLit, rubbishLit, float2DoubleLit, double2FloatLit
         ) where
 
 #include "HsVersions.h"
@@ -52,18 +51,19 @@ module Literal
 import GhcPrelude
 
 import TysPrim
-import PrelNames
 import Type
-import TyCon
+import {-# SOURCE #-} TysWiredIn
 import Outputable
 import FastString
+import Name
 import BasicTypes
 import Binary
 import Constants
 import DynFlags
 import Platform
-import UniqFM
+import Unique
 import Util
+import Var
 
 import Data.ByteString (ByteString)
 import Data.Int
@@ -113,6 +113,11 @@ data Literal
   | MachNullAddr                -- ^ The @NULL@ pointer, the only pointer value
                                 -- that can be represented as a Literal. Create
                                 -- with 'nullAddrLit'
+
+  | RubbishLit                  -- ^ A nonsense value, used when an unlifted
+                                -- binding is absent. May not appear in codegen
+                                -- and has type
+                                -- @forall (a :: 'TYPE' 'UnliftedRep'). a@.
 
   | MachFloat   Rational        -- ^ @Float#@. Create with 'mkMachFloat'
   | MachDouble  Rational        -- ^ @Double#@. Create with 'mkMachDouble'
@@ -195,6 +200,7 @@ instance Binary Literal where
         = do putByte bh 6
              put_ bh nt
              put_ bh i
+    put_ bh (RubbishLit)      = do putByte bh 7
     get bh = do
             h <- getByte bh
             case h of
@@ -217,7 +223,7 @@ instance Binary Literal where
                     mb <- get bh
                     fod <- get bh
                     return (MachLabel aj mb fod)
-              _ -> do
+              6 -> do
                     nt <- get bh
                     i  <- get bh
                     let t = case nt of
@@ -232,6 +238,8 @@ instance Binary Literal where
                             LitNumNatural ->
                               panic "Evaluated the place holder for mkNatural"
                     return (LitNumber nt i t)
+              _ -> do
+                    return (RubbishLit)
 
 instance Outputable Literal where
     ppr lit = pprLiteral (\d -> d) lit
@@ -240,6 +248,8 @@ instance Eq Literal where
     a == b = case (a `compare` b) of { EQ -> True;   _ -> False }
     a /= b = case (a `compare` b) of { EQ -> False;  _ -> True  }
 
+-- | Needed for the @Ord@ instance of 'AltCon', which in turn is needed in
+-- 'TrieMap.CoreMap'.
 instance Ord Literal where
     a <= b = case (a `compare` b) of { LT -> True;  EQ -> True;  GT -> False }
     a <  b = case (a `compare` b) of { LT -> True;  EQ -> False; GT -> False }
@@ -518,6 +528,10 @@ double2FloatLit l              = pprPanic "double2FloatLit" (ppr l)
 nullAddrLit :: Literal
 nullAddrLit = MachNullAddr
 
+-- | A nonsense literal of type @forall (a :: 'TYPE' 'UnliftedRep'). a@.
+rubbishLit :: Literal
+rubbishLit = RubbishLit
+
 {-
         Predicates
         ~~~~~~~~~~
@@ -610,22 +624,10 @@ literalType (MachFloat _)     = floatPrimTy
 literalType (MachDouble _)    = doublePrimTy
 literalType (MachLabel _ _ _) = addrPrimTy
 literalType (LitNumber _ _ t) = t
-
-absentLiteralOf :: TyCon -> Maybe Literal
--- Return a literal of the appropriate primitive
--- TyCon, to use as a placeholder when it doesn't matter
-absentLiteralOf tc = lookupUFM absent_lits (tyConName tc)
-
-absent_lits :: UniqFM Literal
-absent_lits = listToUFM [ (addrPrimTyConKey,    MachNullAddr)
-                        , (charPrimTyConKey,    MachChar 'x')
-                        , (intPrimTyConKey,     mkMachIntUnchecked 0)
-                        , (int64PrimTyConKey,   mkMachInt64Unchecked 0)
-                        , (wordPrimTyConKey,    mkMachWordUnchecked 0)
-                        , (word64PrimTyConKey,  mkMachWord64Unchecked 0)
-                        , (floatPrimTyConKey,   MachFloat 0)
-                        , (doublePrimTyConKey,  MachDouble 0)
-                        ]
+literalType (RubbishLit)      = mkForAllTy a Inferred (mkTyVarTy a)
+  where
+    name_a = mkSysTvName initTyVarUnique (mkFastString "a")
+    a = mkTyVar name_a (tYPE unliftedRepDataConTy)
 
 {-
         Comparison
@@ -642,6 +644,7 @@ cmpLit (MachLabel     a _ _) (MachLabel      b _ _) = a `compare` b
 cmpLit (LitNumber nt1 a _)   (LitNumber nt2  b _)
   | nt1 == nt2 = a   `compare` b
   | otherwise  = nt1 `compare` nt2
+cmpLit (RubbishLit)          (RubbishLit)           = EQ
 cmpLit lit1 lit2
   | litTag lit1 < litTag lit2 = LT
   | otherwise                 = GT
@@ -654,6 +657,7 @@ litTag (MachFloat     _)   = 4
 litTag (MachDouble    _)   = 5
 litTag (MachLabel _ _ _)   = 6
 litTag (LitNumber  {})     = 7
+litTag (RubbishLit)        = 8
 
 {-
         Printing
@@ -679,6 +683,7 @@ pprLiteral add_par (MachLabel l mb fod) = add_par (text "__label" <+> b <+> ppr 
     where b = case mb of
               Nothing -> pprHsString l
               Just x  -> doubleQuotes (text (unpackFS l ++ '@':show x))
+pprLiteral _       (RubbishLit)     = text "__RUBBISH"
 
 pprIntegerVal :: (SDoc -> SDoc) -> Integer -> SDoc
 -- See Note [Printing of literals in Core].
@@ -720,4 +725,5 @@ MachFloat       -1.0#
 MachDouble      -1.0##
 LitInteger      -1                 (-1)
 MachLabel       "__label" ...      ("__label" ...)
+RubbishLit      "__RUBBISH"
 -}

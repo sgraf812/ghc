@@ -26,17 +26,18 @@ import MkCore           ( mkAbsentErrorApp, mkCoreUbxTup
 import MkId             ( voidArgId, voidPrimId )
 import TysWiredIn       ( tupleDataCon )
 import TysPrim          ( voidPrimTy )
-import Literal          ( absentLiteralOf )
+import PrelNames
+import Literal
 import VarEnv           ( mkInScopeSet )
 import VarSet           ( VarSet )
 import Type
-import RepType          ( isVoidTy )
+import RepType          ( isVoidTy, typePrimRep )
 import Coercion
 import FamInstEnv
 import BasicTypes       ( Boxity(..) )
 import TyCon
+import UniqFM
 import UniqSupply
-import Unique
 import Maybes
 import Util
 import Outputable
@@ -922,7 +923,7 @@ buggily is used we'll get a runtime error message.
 
 Coping with absence for *unlifted* types is important; see, for
 example, Trac #4306.  For these we find a suitable literal,
-using Literal.absentLiteralOf.  We don't have literals for
+using absent_expr_of.  We don't have literals for
 every primitive type, so the function is partial.
 
 Note: I did try the experiment of using an error thunk for unlifted
@@ -949,9 +950,8 @@ mk_absent_let :: DynFlags -> Id -> Maybe (CoreExpr -> CoreExpr)
 mk_absent_let dflags arg
   | not (isUnliftedType arg_ty)
   = Just (Let (NonRec lifted_arg abs_rhs))
-  | Just tc <- tyConAppTyCon_maybe arg_ty
-  , Just lit <- absentLiteralOf tc
-  = Just (Let (NonRec arg (Lit lit)))
+  | Just e <- absent_expr_of arg_ty
+  = Just (Let (NonRec arg e))
   | arg_ty `eqType` voidPrimTy
   = Just (Let (NonRec arg (Var voidPrimId)))
   | otherwise
@@ -972,6 +972,26 @@ mk_absent_let dflags arg
               -- will have different lengths and hence different costs for
               -- the inliner leading to different inlining.
               -- See also Note [Unique Determinism] in Unique
+
+absent_expr_of :: Type -> Maybe CoreExpr
+-- Return a literal of the appropriate primitive
+-- Type, to use as a placeholder when it doesn't matter
+absent_expr_of ty
+  | [UnliftedRep] <- typePrimRep ty
+  = Just (mkTyApps (Lit RubbishLit) [ty])
+  | otherwise
+  = fmap Lit (tyConAppTyCon_maybe ty >>= lookupUFM absent_lits . tyConName)
+
+absent_lits :: UniqFM Literal
+absent_lits = listToUFM [ (addrPrimTyConKey,    MachNullAddr)
+                        , (charPrimTyConKey,    MachChar 'x')
+                        , (intPrimTyConKey,     mkMachIntUnchecked 0)
+                        , (int64PrimTyConKey,   mkMachInt64Unchecked 0)
+                        , (wordPrimTyConKey,    mkMachWordUnchecked 0)
+                        , (word64PrimTyConKey,  mkMachWord64Unchecked 0)
+                        , (floatPrimTyConKey,   MachFloat 0)
+                        , (doublePrimTyConKey,  MachDouble 0)
+                        ]
 
 mk_seq_case :: Id -> CoreExpr -> CoreExpr
 mk_seq_case arg body = Case (Var arg) (sanitiseCaseBndr arg) (exprType body) [(DEFAULT, [], body)]
