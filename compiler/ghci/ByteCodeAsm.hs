@@ -460,6 +460,7 @@ assembleI dflags i = case i of
       LitNumWord64  -> int64 (fromIntegral i)
       LitNumInteger -> panic "ByteCodeAsm.literal: LitNumInteger"
       LitNumNatural -> panic "ByteCodeAsm.literal: LitNumNatural"
+    literal RubbishLit         = int 0
 
     litlabel fs = lit [BCONPtrLbl fs]
     addr (RemotePtr a) = words [fromIntegral a]

@@ -395,6 +395,10 @@ coreToStgExpr
 coreToStgExpr (Lit (LitNumber LitNumInteger _ _)) = panic "coreToStgExpr: LitInteger"
 coreToStgExpr (Lit (LitNumber LitNumNatural _ _)) = panic "coreToStgExpr: LitNatural"
 coreToStgExpr (Lit l)      = return (StgLit l, emptyFVInfo)
+coreToStgExpr (App (Lit RubbishLit) _some_unlifted_type)
+  -- Manually erase the type from the application, otherwise myCollectArgs
+  -- gets confused
+  = return (StgLit RubbishLit, emptyFVInfo)
 coreToStgExpr (Var v)      = coreToStgApp Nothing v               [] []
 coreToStgExpr (Coercion _) = coreToStgApp Nothing coercionTokenId [] []
 
