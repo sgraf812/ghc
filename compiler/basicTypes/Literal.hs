@@ -115,9 +115,10 @@ data Literal
                                 -- with 'nullAddrLit'
 
   | RubbishLit                  -- ^ A nonsense value, used when an unlifted
-                                -- binding is absent. May not appear in codegen
-                                -- and has type
+                                -- binding is absent and has type
                                 -- @forall (a :: 'TYPE' 'UnliftedRep'). a@.
+                                -- May be lowered by code-gen to any possible
+                                -- value.
 
   | MachFloat   Rational        -- ^ @Float#@. Create with 'mkMachFloat'
   | MachDouble  Rational        -- ^ @Double#@. Create with 'mkMachDouble'
