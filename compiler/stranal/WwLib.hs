@@ -26,8 +26,7 @@ import MkCore           ( mkAbsentErrorApp, mkCoreUbxTup
 import MkId             ( voidArgId, voidPrimId )
 import TysWiredIn       ( tupleDataCon )
 import TysPrim          ( voidPrimTy )
-import PrelNames
-import Literal
+import Literal          ( absentLiteralOf, rubbishLit )
 import VarEnv           ( mkInScopeSet )
 import VarSet           ( VarSet )
 import Type
@@ -36,8 +35,8 @@ import Coercion
 import FamInstEnv
 import BasicTypes       ( Boxity(..) )
 import TyCon
-import UniqFM
 import UniqSupply
+import Unique
 import Maybes
 import Util
 import Outputable
@@ -922,9 +921,11 @@ The idea is that this binding will never be used; but if it
 buggily is used we'll get a runtime error message.
 
 Coping with absence for *unlifted* types is important; see, for
-example, Trac #4306.  For these we find a suitable literal,
-using absent_expr_of.  We don't have literals for
-every primitive type, so the function is partial.
+example, Trac #4306 and Trac #15627.  In the UnliftedRep case, we can
+use RubbishLit, which we need to apply to the required type.
+For the unlifted types of singleton kind like Float#, Addr#, etc. we
+also find a suitable literal, using Literal.absentLiteralOf.  We don't
+have literals for every primitive type, so the function is partial.
 
 Note: I did try the experiment of using an error thunk for unlifted
 things too, relying on the simplifier to drop it as dead code.
@@ -948,23 +949,32 @@ So absentError is only used for lifted types.
 
 mk_absent_let :: DynFlags -> Id -> Maybe (CoreExpr -> CoreExpr)
 mk_absent_let dflags arg
+  -- The lifted case: Bind 'absentError'
+  -- See Note [Absent errors]
   | not (isUnliftedType arg_ty)
   = Just (Let (NonRec lifted_arg abs_rhs))
-  | Just e <- absent_expr_of arg_ty
-  = Just (Let (NonRec arg e))
+  -- The 'UnliftedRep' (because polymorphic) case: Bind @__RUBBISH \@arg_ty@
+  -- See Note [Absent errors]
+  | [UnliftedRep] <- typePrimRep arg_ty
+  = Just (Let (NonRec arg unlifted_rhs))
+  -- The monomorphic unlifted cases: Bind to some literal, if possible
+  -- See Note [Absent errors]
+  | Just tc <- tyConAppTyCon_maybe arg_ty
+  , Just lit <- absentLiteralOf tc
+  = Just (Let (NonRec arg (Lit lit)))
   | arg_ty `eqType` voidPrimTy
   = Just (Let (NonRec arg (Var voidPrimId)))
   | otherwise
   = WARN( True, text "No absent value for" <+> ppr arg_ty )
     Nothing
   where
-    lifted_arg = arg `setIdStrictness` exnSig
+    lifted_arg   = arg `setIdStrictness` exnSig
               -- Note in strictness signature that this is bottoming
               -- (for the sake of the "empty case scrutinee not known to
               -- diverge for sure lint" warning)
-    arg_ty     = idType arg
-    abs_rhs    = mkAbsentErrorApp arg_ty msg
-    msg        = showSDoc (gopt_set dflags Opt_SuppressUniques)
+    arg_ty       = idType arg
+    abs_rhs      = mkAbsentErrorApp arg_ty msg
+    msg          = showSDoc (gopt_set dflags Opt_SuppressUniques)
                           (ppr arg <+> ppr (idType arg))
               -- We need to suppress uniques here because otherwise they'd
               -- end up in the generated code as strings. This is bad for
@@ -972,26 +982,7 @@ mk_absent_let dflags arg
               -- will have different lengths and hence different costs for
               -- the inliner leading to different inlining.
               -- See also Note [Unique Determinism] in Unique
-
-absent_expr_of :: Type -> Maybe CoreExpr
--- Return a literal of the appropriate primitive
--- Type, to use as a placeholder when it doesn't matter
-absent_expr_of ty
-  | [UnliftedRep] <- typePrimRep ty
-  = Just (mkTyApps (Lit RubbishLit) [ty])
-  | otherwise
-  = fmap Lit (tyConAppTyCon_maybe ty >>= lookupUFM absent_lits . tyConName)
-
-absent_lits :: UniqFM Literal
-absent_lits = listToUFM [ (addrPrimTyConKey,    MachNullAddr)
-                        , (charPrimTyConKey,    MachChar 'x')
-                        , (intPrimTyConKey,     mkMachIntUnchecked 0)
-                        , (int64PrimTyConKey,   mkMachInt64Unchecked 0)
-                        , (wordPrimTyConKey,    mkMachWordUnchecked 0)
-                        , (word64PrimTyConKey,  mkMachWord64Unchecked 0)
-                        , (floatPrimTyConKey,   MachFloat 0)
-                        , (doublePrimTyConKey,  MachDouble 0)
-                        ]
+    unlifted_rhs = mkTyApps (Lit rubbishLit) [arg_ty]
 
 mk_seq_case :: Id -> CoreExpr -> CoreExpr
 mk_seq_case arg body = Case (Var arg) (sanitiseCaseBndr arg) (exprType body) [(DEFAULT, [], body)]

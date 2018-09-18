@@ -14,10 +14,10 @@ module Literal
         , LitNumType(..)
 
         -- ** Creating Literals
-        , mkMachInt, mkMachIntUnchecked, mkMachIntWrap, mkMachIntWrapC
-        , mkMachWord, mkMachWordUnchecked, mkMachWordWrap, mkMachWordWrapC
-        , mkMachInt64, mkMachInt64Unchecked, mkMachInt64Wrap
-        , mkMachWord64, mkMachWord64Unchecked, mkMachWord64Wrap
+        , mkMachInt, mkMachIntWrap, mkMachIntWrapC
+        , mkMachWord, mkMachWordWrap, mkMachWordWrapC
+        , mkMachInt64, mkMachInt64Wrap
+        , mkMachWord64, mkMachWord64Wrap
         , mkMachFloat, mkMachDouble
         , mkMachChar, mkMachString
         , mkLitInteger, mkLitNatural
@@ -25,6 +25,7 @@ module Literal
 
         -- ** Operations on Literals
         , literalType
+        , absentLiteralOf
         , pprLiteral
         , litNumIsSigned
         , litNumCheckRange
@@ -51,7 +52,9 @@ module Literal
 import GhcPrelude
 
 import TysPrim
+import PrelNames
 import Type
+import TyCon
 import Outputable
 import FastString
 import BasicTypes
@@ -59,6 +62,7 @@ import Binary
 import Constants
 import DynFlags
 import Platform
+import UniqFM
 import Util
 
 import Data.ByteString (ByteString)
@@ -624,6 +628,25 @@ literalType (LitNumber _ _ t) = t
 literalType (RubbishLit)      = mkForAllTy a Inferred (mkTyVarTy a)
   where
     a = alphaTyVarUnliftedRep
+
+absentLiteralOf :: TyCon -> Maybe Literal
+-- Return a literal of the appropriate primitive
+-- TyCon, to use as a placeholder when it doesn't matter
+-- RubbishLits are handled in WwLib, because
+--  1. Looking at the TyCon is not enough, we need the actual type
+--  2. This would need to return a type application to a literal
+absentLiteralOf tc = lookupUFM absent_lits (tyConName tc)
+
+absent_lits :: UniqFM Literal
+absent_lits = listToUFM [ (addrPrimTyConKey,    MachNullAddr)
+                        , (charPrimTyConKey,    MachChar 'x')
+                        , (intPrimTyConKey,     mkMachIntUnchecked 0)
+                        , (int64PrimTyConKey,   mkMachInt64Unchecked 0)
+                        , (wordPrimTyConKey,    mkMachWordUnchecked 0)
+                        , (word64PrimTyConKey,  mkMachWord64Unchecked 0)
+                        , (floatPrimTyConKey,   MachFloat 0)
+                        , (doublePrimTyConKey,  MachDouble 0)
+                        ]
 
 {-
         Comparison
