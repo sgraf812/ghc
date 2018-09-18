@@ -1184,9 +1184,8 @@ liftedRepDataConTyCon :: TyCon
 liftedRepDataConTyCon = promoteDataCon liftedRepDataCon
 
 -- The type ('LiftedRep)
--- FIXME: this is just 'liftedRepDataConTy' from above.
 liftedRepTy :: Type
-liftedRepTy = mkTyConTy liftedRepDataConTyCon
+liftedRepTy = liftedRepDataConTy
 
 {- *********************************************************************
 *                                                                      *
