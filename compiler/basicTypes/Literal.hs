@@ -52,18 +52,14 @@ import GhcPrelude
 
 import TysPrim
 import Type
-import {-# SOURCE #-} TysWiredIn
 import Outputable
 import FastString
-import Name
 import BasicTypes
 import Binary
 import Constants
 import DynFlags
 import Platform
-import Unique
 import Util
-import Var
 
 import Data.ByteString (ByteString)
 import Data.Int
@@ -627,8 +623,7 @@ literalType (MachLabel _ _ _) = addrPrimTy
 literalType (LitNumber _ _ t) = t
 literalType (RubbishLit)      = mkForAllTy a Inferred (mkTyVarTy a)
   where
-    name_a = mkSysTvName initTyVarUnique (mkFastString "a")
-    a = mkTyVar name_a (tYPE unliftedRepDataConTy)
+    a = alphaTyVarUnliftedRep
 
 {-
         Comparison
