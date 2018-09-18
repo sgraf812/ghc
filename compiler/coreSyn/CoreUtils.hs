@@ -1508,10 +1508,13 @@ expr_ok primop_ok (Case scrut bndr _ alts)
 
 expr_ok primop_ok other_expr
   = case collectArgs other_expr of
-        (Lit RubbishLit, [_some_type_arg])
-                     -> True
         (expr, args) | Var f <- stripTicksTopE (not . tickishCounts) expr
                      -> app_ok primop_ok f args
+        -- 'RubbishLit' is the only literal that can occur in the head of an
+        -- application and will not be matched by the above case (Var /= Lit),
+        -- so we treat it specially.
+        (Lit RubbishLit, [_some_type_arg])
+                     -> True
         _            -> False
 
 -----------------------------
