@@ -947,6 +947,11 @@ But this is fragile
 So absentError is only used for lifted types.
 -}
 
+-- | Tries to find a suitable dummy RHS to bind the given absent identifier to.
+--
+-- If @mk_absent_let _ id == Just wrap@, then @wrap e@ will wrap a let binding
+-- for @id@ with that RHS around @e@. Otherwise, there could no suitable RHS be
+-- found (currently only happens for bindings of 'VecRep' representation).
 mk_absent_let :: DynFlags -> Id -> Maybe (CoreExpr -> CoreExpr)
 mk_absent_let dflags arg
   -- The lifted case: Bind 'absentError'
