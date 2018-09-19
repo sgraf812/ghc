@@ -105,10 +105,7 @@ mkSimpleLit _      (MachLabel fs ms fod)
         where
                 -- TODO: Literal labels might not actually be in the current package...
                 labelSrc = ForeignLabelInThisPackage
--- We can lower 'RubbishLit' to an arbitrary constant, but @NULL@ is most
--- likely to elicit a crash (rather than corrupt memory) in case absence
--- analysis messed up.
-mkSimpleLit dflags RubbishLit        = zeroCLit dflags
+-- NB: RubbishLit should have been lowered in "CoreToStg"
 mkSimpleLit _ other             = pprPanic "mkSimpleLit" (ppr other)
 
 --------------------------------------------------------------------------

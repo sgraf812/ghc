@@ -36,7 +36,7 @@ import Module
 import Name             ( isExternalName, nameOccName, nameModule_maybe )
 import OccName          ( occNameFS )
 import BasicTypes       ( Arity )
-import TysWiredIn       ( unboxedUnitDataCon )
+import TysWiredIn       ( unboxedUnitDataCon, unitDataConId )
 import Literal
 import Outputable
 import MonadUtils
@@ -396,9 +396,9 @@ coreToStgExpr (Lit (LitNumber LitNumInteger _ _)) = panic "coreToStgExpr: LitInt
 coreToStgExpr (Lit (LitNumber LitNumNatural _ _)) = panic "coreToStgExpr: LitNatural"
 coreToStgExpr (Lit l)      = return (StgLit l, emptyFVInfo)
 coreToStgExpr (App (Lit RubbishLit) _some_unlifted_type)
-  -- Erase the type application manually.
-  -- See the precondition of 'myCollectArgs'.
-  = return (StgLit RubbishLit, emptyFVInfo)
+  -- We lower 'RubbishLit' to @()@ here, which is much easier than doing it in
+  -- a STG to Cmm pass.
+  = coreToStgExpr (Var unitDataConId)
 coreToStgExpr (Var v)      = coreToStgApp Nothing v               [] []
 coreToStgExpr (Coercion _) = coreToStgApp Nothing coercionTokenId [] []
 
