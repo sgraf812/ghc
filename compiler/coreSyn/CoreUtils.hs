@@ -1507,15 +1507,13 @@ expr_ok primop_ok (Case scrut bndr _ alts)
   && altsAreExhaustive alts
 
 expr_ok primop_ok other_expr
-  = case collectArgs other_expr of
-        (expr, args) | Var f <- stripTicksTopE (not . tickishCounts) expr
-                     -> app_ok primop_ok f args
+  | (expr, args) <- collectArgs other_expr
+  = case stripTicksTopE (not . tickishCounts) expr of
+        Var f   -> app_ok primop_ok f args
         -- 'RubbishLit' is the only literal that can occur in the head of an
-        -- application and will not be matched by the above case (Var /= Lit),
-        -- so we treat it specially.
-        (Lit RubbishLit, [_some_type_arg])
-                     -> True
-        _            -> False
+        -- application and will not be matched by the above case (Var /= Lit).
+        Lit lit -> ASSERT( lit == rubbishLit ) True
+        _       -> False
 
 -----------------------------
 app_ok :: (PrimOp -> Bool) -> Id -> [CoreExpr] -> Bool
