@@ -396,8 +396,8 @@ coreToStgExpr (Lit (LitNumber LitNumInteger _ _)) = panic "coreToStgExpr: LitInt
 coreToStgExpr (Lit (LitNumber LitNumNatural _ _)) = panic "coreToStgExpr: LitNatural"
 coreToStgExpr (Lit l)      = return (StgLit l, emptyFVInfo)
 coreToStgExpr (App (Lit RubbishLit) _some_unlifted_type)
-  -- Manually erase the type from the application, otherwise myCollectArgs
-  -- gets confused when it sees a literal in the head of an application.
+  -- Erase the type application manually.
+  -- See the precondition of 'myCollectArgs'.
   = return (StgLit RubbishLit, emptyFVInfo)
 coreToStgExpr (Var v)      = coreToStgApp Nothing v               [] []
 coreToStgExpr (Coercion _) = coreToStgApp Nothing coercionTokenId [] []
@@ -1097,9 +1097,9 @@ myCollectBinders expr
     go bs (Cast e _)         = go bs e
     go bs e                  = (reverse bs, e)
 
+-- | Precondition: argument expression is an 'App', and there is a 'Var' at the
+-- head of the 'App' chain.
 myCollectArgs :: CoreExpr -> (Id, [CoreArg], [Tickish Id])
-        -- We assume that we only have variables
-        -- in the function position by now
 myCollectArgs expr
   = go expr [] []
   where
