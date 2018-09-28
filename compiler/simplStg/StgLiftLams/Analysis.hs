@@ -9,7 +9,7 @@ module StgLiftLams.Analysis (
     StgBindingSkel, StgExprSkel, StgRhsSkel, StgAltSkel, tagSkeletonTopBind,
     -- * Lifting decision
     goodToLift,
-    costToLift -- Exported just for the docs
+    closureGrowth -- Exported just for the docs
   ) where
 
 import GhcPrelude
@@ -252,12 +252,11 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
       bndrs_set = mkVarSet bndrs
       rhss = map snd pairs
 
+      -- FIXME: Rewrite these comments
       -- First objective: Calculate @abs_ids@, e.g. the former free variables
       -- the lifted binding would abstract over.
       -- We have to merge the free variables of all RHS to get the set of
       -- variables that will have to be passed through parameters.
-      -- That same set will be noted in 'LiftM.e_expansions' for each of the
-      -- variables if we perform the lift.
       fvs = unionDVarSets (map (mkDVarSet . freeVarsOfRhs) rhss)
       -- To lift the binding to top-level, we want to delete the lifted binders
       -- themselves from the free var set. Local let bindings seem to
@@ -266,6 +265,8 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
       -- as parameters when lifted, as these are known calls.
       -- We call the resulting set the identifiers we abstract over, thus
       -- @abs_ids@. These are all 'OutId's.
+      -- We will save the set in 'LiftM.e_expansions' for each of the variables
+      -- if we perform the lift.
       abs_ids = expander (delDVarSetList fvs bndrs)
 
       -- We don't lift updatable thunks or constructors
@@ -320,7 +321,7 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
         | otherwise = False
 
       -- We only perform the lift if allocations didn't increase.
-      -- Note that @clo_growth@ will be 'infinity' if there was positive growth#
+      -- Note that @clo_growth@ will be 'infinity' if there was positive growth
       -- under a multi-shot lambda.
       -- Also, abstracting over LNEs is unacceptable. LNEs might return
       -- unlifted tuples, which idClosureFootprint can't cope with.
@@ -336,7 +337,7 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
         . flip dVarSetMinusVarSet bndrs_set
         . mkDVarSet
         $ freeVarsOfRhs rhs
-      clo_growth = costToLift expander (idClosureFootprint dflags) bndrs_set abs_ids scope
+      clo_growth = closureGrowth expander (idClosureFootprint dflags) bndrs_set abs_ids scope
       scope = case pairs of
         (BindsClosure lbi, _):_ -> lbi_scope lbi
         (BoringBinder id, _):_ -> pprPanic "goodToLift" (text "Can't lift boring binders" $$ ppr id)
@@ -370,10 +371,10 @@ idClosureFootprint dflags
   = StgCmmArgRep.argRepSizeW dflags
   . StgCmmArgRep.idArgRep
 
--- | @costToLift expander sizer f fvs@ computes the closure growth in words as
--- a result of lifting @f@ to top-level. If there was any growing closure under
--- a multi-shot lambda, the result will be 'infinity'.
-costToLift
+-- | @closureGrowth expander sizer f fvs@ computes the closure growth in words
+-- as a result of lifting @f@ to top-level. If there was any growing closure
+-- under a multi-shot lambda, the result will be 'infinity'.
+closureGrowth
   :: (DIdSet -> DIdSet) -- ^ Expands outer free ids that were lifted to their free vars
   -> (Id -> Int)        -- ^ Computes the closure footprint of an identifier
   -> IdSet              -- ^ Binding group for which lifting is to be decided
@@ -383,7 +384,7 @@ costToLift
   -> Skeleton           -- ^ Abstraction of the scope of the function
   -> IntWithInf         -- ^ Closure growth. 'infinity' indicates there was
                         --   growth under a (multi-shot) lambda.
-costToLift expander sizer group abs_ids = go
+closureGrowth expander sizer group abs_ids = go
   where
     go NilSk = 0
     go (BothSk a b) = go a + go b
