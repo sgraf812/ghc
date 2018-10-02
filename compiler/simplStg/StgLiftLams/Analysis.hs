@@ -15,6 +15,7 @@ module StgLiftLams.Analysis (
 import GhcPrelude
 
 import BasicTypes
+import Demand
 import DynFlags
 import Id
 import SMRep ( WordOff )
@@ -26,7 +27,7 @@ import Outputable
 import VarEnv
 import VarSet
 
-llTrace :: String -> SDoc -> a -> a 
+llTrace :: String -> SDoc -> a -> a
 llTrace _ _ c = c
 -- llTrace a b c = pprTrace a b c
 
@@ -37,8 +38,8 @@ freeVarsOfRhs (StgRhsClosure _ _ fvs _ _ _) = fvs
 -- | Captures details of the syntax tree relevant to the cost model, such as
 -- closures, multi-shot lambdas and case expressions.
 data Skeleton
-  = ClosureSk !Id !DIdSet {- free vars -} !Skeleton
-  | MultiShotLamSk !Skeleton
+  = ClosureSk !Id !DIdSet {- ^ free vars -} !Skeleton
+  | RhsSk !DmdShell {- ^ how often the RHS was entered -} !Skeleton
   | AltSk !Skeleton !Skeleton
   | BothSk !Skeleton !Skeleton
   | NilSk
@@ -53,9 +54,9 @@ altSk NilSk b = b
 altSk a NilSk = a
 altSk a b     = AltSk a b
 
-multiShotLamSk :: Skeleton -> Skeleton
-multiShotLamSk NilSk = NilSk
-multiShotLamSk s = MultiShotLamSk s
+rhsSk :: DmdShell -> Skeleton -> Skeleton
+rhsSk _        NilSk = NilSk
+rhsSk body_dmd skel  = RhsSk body_dmd skel
 
 -- | Information attached to a binder in case it's not a 'BoringBinder'.
 data LetBoundInfo
@@ -89,11 +90,23 @@ instance Outputable Skeleton where
     , text "}"
     ]
   ppr (BothSk l r) = ppr l $$ ppr r
-  ppr (MultiShotLamSk body) = text "λω." <+> ppr body
-  ppr (ClosureSk f fvs body) = vcat
-    [ ppr f <+> ppr fvs
-    , nest 2 (ppr body)
+  ppr (ClosureSk f fvs body) = ppr f <+> ppr fvs $$ nest 2 (ppr body)
+  ppr (RhsSk body_dmd body) = hcat
+    [ text "λ["
+    , ppr str
+    , text ", "
+    , ppr use
+    , text "]. "
+    , ppr body
     ]
+    where
+      str
+        | isStrictDmd body_dmd = '1'
+        | otherwise = '0'
+      use
+        | isAbsDmd body_dmd = '0'
+        | isUsedOnce body_dmd = '1'
+        | otherwise = 'ω'
 
 instance Outputable LetBoundInfo where
   ppr lbi = hang header 2 body
@@ -150,7 +163,7 @@ tagSkeletonBinding :: Skeleton -> Bool -> StgBinding -> ([LetBoundInfo], StgBind
 tagSkeletonBinding body_scope is_lne (StgNonRec bndr rhs)
   = ([lbi], StgNonRec (BindsClosure lbi) rhs')
   where
-    (skel_rhs, rhs') = tagSkeletonRhs rhs
+    (skel_rhs, rhs') = tagSkeletonRhs bndr rhs
     -- Compared to the recursive case, this exploits the fact that @bndr@ is
     -- never free in @rhs@.
     lbi
@@ -163,13 +176,13 @@ tagSkeletonBinding body_scope is_lne (StgNonRec bndr rhs)
       }
 tagSkeletonBinding body_scope is_lne (StgRec pairs) = (lbis, StgRec pairs')
   where
-    (bndrs, rhss) = unzip pairs
+    (bndrs, _) = unzip pairs
     -- Local recursive STG bindings also regard the defined binders as free
     -- vars. We want to delete those for our cost model, as these are known
     -- calls anyway when we add them to the same top-level recursive group as
     -- the top-level binding currently being analysed.
     fvs_set_of_rhs rhs = minusDVarSet (mkDVarSet (freeVarsOfRhs rhs)) (mkDVarSet bndrs)
-    skel_rhs_and_rhss' = map tagSkeletonRhs rhss
+    skel_rhs_and_rhss' = map (uncurry tagSkeletonRhs) pairs
     -- @skel_rhss@ aren't yet wrapped in closures. We'll do that in a moment,
     -- but we also need the un-wrapped skeletons for calculating the @lbi_scope@
     -- of the group, as the outer closures don't contribute to closure growth
@@ -193,19 +206,22 @@ tagSkeletonBinding body_scope is_lne (StgRec pairs) = (lbis, StgRec pairs')
       , lbi_scope = scope
       }
 
-tagSkeletonRhs :: StgRhs -> (Skeleton, StgRhsSkel)
-tagSkeletonRhs (StgRhsCon ccs dc args) = (NilSk, StgRhsCon ccs dc args)
-tagSkeletonRhs (StgRhsClosure ccs sbi fvs upd bndrs body)
+tagSkeletonRhs :: Id -> StgRhs -> (Skeleton, StgRhsSkel)
+tagSkeletonRhs _ (StgRhsCon ccs dc args) = (NilSk, StgRhsCon ccs dc args)
+tagSkeletonRhs bndr (StgRhsClosure ccs sbi fvs upd bndrs body)
   = (rhs_skel, StgRhsClosure ccs sbi fvs upd bndrs' body')
   where
     bndrs' = map BoringBinder bndrs
     (body_skel, body') = tagSkeletonExpr body
-    rhs_skel = case bndrs of
-      -- We take allocation under multi-shot lambdas serious
-      (lam_bndr:_) | not (isOneShotBndr lam_bndr) -> multiShotLamSk body_skel
-      -- Thunks and one-shot functions only evaluate (hence allocate) their RHS
-      -- once, so no special annotation is needed
-      _ -> body_skel
+    rhs_skel = rhsSk (rhsDmdShell bndr) body_skel
+
+rhsDmdShell :: Id -> DmdShell
+rhsDmdShell bndr
+  | is_thunk = oneifyDmd ds
+  | otherwise = peelManyCalls (idArity bndr) cd
+  where
+    is_thunk = idArity bndr == 0
+    (ds, cd) = toCleanDmd (idDemandInfo bndr) (idType bndr) -- TODO: I hope this OK after unarise...
 
 tagSkeletonAlt :: StgAlt -> (Skeleton, StgAltSkel)
 tagSkeletonAlt (con, bndrs, rhs) = (alt_skel, (con, map BoringBinder bndrs, rhs'))
@@ -238,7 +254,7 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
         | not (fancy_or deciders)
         = llTrace "stgLiftLams:lifting"
                   (ppr bndrs <+> ppr abs_ids $$
-                   ppr clo_growth $$
+                   ppr allocs $$
                    ppr scope) $
           Just abs_ids
         | otherwise
@@ -389,17 +405,13 @@ closureGrowth expander sizer group abs_ids = go
     go NilSk = 0
     go (BothSk a b) = go a + go b
     go (AltSk a b) = max (go a) (go b)
-    go (MultiShotLamSk body)
-      | go body > 0 = infinity
-      | otherwise   = 0
-    go (ClosureSk _ clo_fvs body)
+    go (ClosureSk bndr clo_fvs rhs)
       -- If no binder of the @group@ occurs free in the closure, the lifting
       -- won't have any effect on it and we can omit the recursive call.
       | n_occs == 0 = 0
-      -- @max 0@ the growth from the body, since the closure might not be
-      -- entered. In contrast, the effect on the closure's allocation @cost@
-      -- itself is certain.
-      | otherwise   = mkIntWithInf cost + max 0 (go body)
+      -- Otherwise, we account the cost of allocating the closure and add it to
+      -- the closure growth of its RHS.
+      | otherwise   = mkIntWithInf cost + go rhs
       where
         n_occs = sizeDVarSet (clo_fvs' `dVarSetIntersectVarSet` group)
         -- What we close over considering prior lifting decisions
@@ -409,3 +421,20 @@ closureGrowth expander sizer group abs_ids = go
         newbies = abs_ids `minusDVarSet` clo_fvs'
         -- Lifting @f@ removes @f@ from the closure but adds all @newbies@
         cost = foldDVarSet (\id size -> sizer id + size) 0 newbies - n_occs
+    go (RhsSk body_dmd body)
+      -- The conservative assumption would be to assume that
+      --   1. Every RHS with positive growth would be called multiple times,
+      --      modulo thunks.
+      --   2. Every RHS with negative growth wouldn't be called at all.
+      --
+      -- In the first case, we'd have to return 'infinity', while in the
+      -- second case, we'd have to return 0. But we can do far better
+      -- considering information from the demand analyser, which provides us
+      -- with conservative estimates on minimum and maximum evaluation
+      -- cardinality.
+      | isAbsDmd body_dmd   = 0
+      | cg <= 0             = if isStrictDmd body_dmd then cg else 0
+      | isUsedOnce body_dmd = cg
+      | otherwise           = infinity
+      where
+        cg = go body
