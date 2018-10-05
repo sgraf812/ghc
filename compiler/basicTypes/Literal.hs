@@ -96,6 +96,9 @@ import Numeric ( fromRat )
 --
 -- * The literal derived from the label mentioned in a \"foreign label\"
 --   declaration ('MachLabel')
+--
+-- * A 'RubbishLit' to be used in place of values of 'UnliftedRep'
+--   (i.e. 'MutVar#') when the the value is never used.
 data Literal
   =     ------------------
         -- First the primitive guys
@@ -118,7 +121,7 @@ data Literal
                                 -- binding is absent and has type
                                 -- @forall (a :: 'TYPE' 'UnliftedRep'). a@.
                                 -- May be lowered by code-gen to any possible
-                                -- value.
+                                -- value. Also see Note [RubbishLit]
 
   | MachFloat   Rational        -- ^ @Float#@. Create with 'mkMachFloat'
   | MachDouble  Rational        -- ^ @Double#@. Create with 'mkMachDouble'
@@ -745,4 +748,59 @@ MachDouble      -1.0##
 LitInteger      -1                 (-1)
 MachLabel       "__label" ...      ("__label" ...)
 RubbishLit      "__RUBBISH"
+
+Note [RubbishLit]
+~~~~~~~~~~~~~~~~~
+During worker/wrapper after demand analysis, where an argument
+is unused (absent) we do the following w/w split (supposing that
+y is absent):
+
+  f x y z = e
+===>
+  f x y z = $wf x z
+  $wf x z = let y = <absent value>
+            in e
+
+Usually the binding for y is ultimately optimised away, and
+even if not it should never be evaluated -- but that's the
+way the w/w split starts off.
+
+What is <absent value>?
+* For lifted values <absent value> can be a call to 'error'.
+* For primitive types like Int# or Word# we can use any random
+  value of that type.
+* But what about /unlifted/ but /boxed/ types like MutVar# or
+  Array#?   We need a literal value of that type.
+
+That is 'RubbishLit'.  Since we need a rubbish literal for
+many boxed, unlifted types, we say that RubbishLit has type
+  RubbishLit :: forall (a :: TYPE UnliftedRep). a
+
+So we might see a w/w split like
+  $wf x z = let y :: Array# Int = RubbishLit @(Array# Int)
+            in e
+
+Recall that (TYPE UnliftedRep) is the kind of boxed, unlifted
+heap pointers.
+
+Here are the moving parts:
+
+* We define RubbishLit as a constructor in Literal.Literal
+
+* It is given its polymoprhic type by Literal.literalType
+
+* WwLib.mk_absent_let introduces a RubbishLit for absent
+  arguments of boxed, unliftd type.
+
+* In CoreToSTG we convert (RubishLit @t) to just ().  STG is
+  untyped, so it doesn't matter that it points to a lifted
+  value. The important thing is that it is a heap pointer,
+  which the garbage collector can follow if it encounters it.
+
+  We considered maintaining RubbishLit in STG, and lowering
+  it in the code genreators, but it seems simpler to do it
+  once and for all in CoreToSTG.
+
+  In ByteCodeAsm we just lower it as a 0 literal, because
+  it's all boxed and lifted to the host GC anyway.
 -}
