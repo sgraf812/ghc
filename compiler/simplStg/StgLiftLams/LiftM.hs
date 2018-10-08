@@ -86,7 +86,7 @@ data Env
   -- assume that functions we lift out aren't caffy either.
   }
 
-emptyEnv :: DynFlags -> Env 
+emptyEnv :: DynFlags -> Env
 emptyEnv dflags = Env dflags emptySubst emptyVarEnv False
 
 
@@ -112,12 +112,13 @@ emptyEnv dflags = Env dflags emptySubst emptyVarEnv False
 --
 -- But this very unnecessarily turns a known call to @f@ into an unknown one, in
 -- addition to complicating matters for the analysis.
--- Instead, we'd really like to put both functions in the same recursive group:
+-- Instead, we'd really like to put both functions in the same recursive group,
+-- thereby preserving the known call:
 --
 -- @
 --     Rec {
---       g f y = ... f y ...
---       f x = g f x
+--       g y = ... f y ...
+--       f x = g x
 --     }
 -- @
 --
