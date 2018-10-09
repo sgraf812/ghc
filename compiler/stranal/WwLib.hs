@@ -971,7 +971,7 @@ mk_absent_let dflags arg
   = Just (Let (NonRec arg (Var voidPrimId)))
   | otherwise
   = WARN( True, text "No absent value for" <+> ppr arg_ty )
-    Nothing -- Should only happen for unboxed sums/tuples and things of 'VecRep'
+    Nothing -- Can happen for 'State#' and things of 'VecRep'
   where
     lifted_arg   = arg `setIdStrictness` exnSig
               -- Note in strictness signature that this is bottoming
