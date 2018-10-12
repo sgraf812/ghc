@@ -281,8 +281,6 @@ withLiftedBndr :: DIdSet -> Id -> (Id -> LiftM a) -> LiftM a
 withLiftedBndr abs_ids bndr inner = do
   uniq <- getUniqueM
   let str = "$l" ++ occNameString (getOccName bndr)
-  -- TODO: Type applications?!
-  -- let's pray we don't also have to substitute the type
   let ty = mkLamTypes (dVarSetElems abs_ids) (idType bndr)
   -- When there the enclosing top-level binding is not caffy, then the lifted
   -- binding will not be caffy either. If we don't recognize this, non-caffy

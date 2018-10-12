@@ -221,7 +221,8 @@ rhsDmdShell bndr
   | otherwise = peelManyCalls (idArity bndr) cd
   where
     is_thunk = idArity bndr == 0
-    (ds, cd) = toCleanDmd (idDemandInfo bndr) (idType bndr) -- TODO: I hope this OK after unarise...
+    -- Let's pray this is still OK after unarise...
+    (ds, cd) = toCleanDmd (idDemandInfo bndr) (idType bndr)
 
 tagSkeletonAlt :: StgAlt -> (Skeleton, StgAltSkel)
 tagSkeletonAlt (con, bndrs, rhs) = (alt_skel, (con, map BoringBinder bndrs, rhs'))
@@ -369,8 +370,8 @@ closureSize :: DynFlags -> [Id] -> WordOff
 closureSize dflags ids = words
   where
     (words, _, _)
-      -- Functions have a StdHeader (as opposed to ThunkHeader)
-      -- TODO: Note that mkVirtHeadOffsets will account for profiling headers, so
+      -- Functions have a StdHeader (as opposed to ThunkHeader).
+      -- Note that mkVirtHeadOffsets will account for profiling headers, so
       -- lifting decisions vary if we begin to profile stuff. Maybe we shouldn't
       -- do this or deactivate profiling in @dflags@?
       = StgCmmLayout.mkVirtHeapOffsets dflags StgCmmLayout.StdHeader

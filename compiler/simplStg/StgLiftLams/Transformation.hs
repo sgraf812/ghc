@@ -46,9 +46,9 @@ liftTopLvl (StgTopLifted bind) rest = do
 withLiftedBind :: TopLevelFlag -> StgBindingSkel -> (Maybe OutStgBinding -> LiftM a) -> LiftM a
 withLiftedBind top_lvl bind k
   | isTopLevel top_lvl
-  = withCaffyness (is_caffy pairs) go 
+  = withCaffyness (is_caffy pairs) go
   | otherwise
-  = go 
+  = go
   where
     (rec, pairs) = decomposeStgBinding bind
     is_caffy = any (mayHaveCafRefs . idCafInfo . binderInfoBndr . fst)
@@ -56,9 +56,9 @@ withLiftedBind top_lvl bind k
 
 withLiftedBindPairs
   :: TopLevelFlag
-  -> RecFlag 
-  -> [(BinderInfo, StgRhsSkel)] 
-  -> (Maybe [(Id, OutStgRhs)] -> LiftM a) 
+  -> RecFlag
+  -> [(BinderInfo, StgRhsSkel)]
+  -> (Maybe [(Id, OutStgRhs)] -> LiftM a)
   -> LiftM a
 withLiftedBindPairs top rec pairs k = do
   let (infos, rhss) = unzip pairs
@@ -108,7 +108,7 @@ liftRhs (Just former_fvs) (StgRhsClosure ccs bi _ upd infos body) = do
   -- This RHS was lifted. Discard @fvs@, insert extra binders for @former_fvs@.
   withSubstBndrs (map binderInfoBndr infos) $ \bndrs' -> do
     body' <- liftExpr body
-    pure (StgRhsClosure ccs bi [] upd (dVarSetElems former_fvs ++ bndrs') body') -- TODO: bi?
+    pure (StgRhsClosure ccs bi [] upd (dVarSetElems former_fvs ++ bndrs') body')
 
 liftArgs :: InStgArg -> LiftM OutStgArg
 liftArgs a@(StgLitArg _) = pure a
@@ -119,7 +119,7 @@ liftArgs (StgVarArg occ) = do
 liftExpr :: StgExprSkel -> LiftM OutStgExpr
 liftExpr (StgLit lit) = pure (StgLit lit)
 liftExpr (StgTick t e) = StgTick t <$> liftExpr e
-liftExpr (StgApp f args) = do 
+liftExpr (StgApp f args) = do
   f' <- substOcc f
   args' <- traverse liftArgs args
   fvs' <- formerFreeVars f
