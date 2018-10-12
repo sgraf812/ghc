@@ -280,7 +280,7 @@ withSubstBndrs = runContT . traverse (ContT . withSubstBndr)
 withLiftedBndr :: DIdSet -> Id -> (Id -> LiftM a) -> LiftM a
 withLiftedBndr abs_ids bndr inner = do
   uniq <- getUniqueM
-  let str = "l_" ++ occNameString (getOccName bndr)
+  let str = "$l" ++ occNameString (getOccName bndr)
   -- TODO: Type applications?!
   -- let's pray we don't also have to substitute the type
   let ty = mkLamTypes (dVarSetElems abs_ids) (idType bndr)
