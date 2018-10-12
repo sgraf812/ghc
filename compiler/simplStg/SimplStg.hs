@@ -52,7 +52,7 @@ stg2stg dflags binds
             foldM do_stg_pass binds (getStgToDo dflags)
 
         ; dump_when Opt_D_dump_stg "STG syntax:" binds'
-        
+
         ; return binds'
    }
 
@@ -126,7 +126,7 @@ getStgToDo dflags =
     ] where
       optional opt = runWhen (gopt opt dflags)
       mandatory = id
-  
+
 runWhen :: Bool -> StgToDo -> StgToDo
 runWhen True todo = todo
 runWhen _    _    = StgDoNothing
