@@ -409,7 +409,7 @@ closureGrowth expander sizer group abs_ids = go
     go NilSk = 0
     go (BothSk a b) = go a + go b
     go (AltSk a b) = max (go a) (go b)
-    go (ClosureSk bndr clo_fvs rhs)
+    go (ClosureSk _ clo_fvs rhs)
       -- If no binder of the @group@ occurs free in the closure, the lifting
       -- won't have any effect on it and we can omit the recursive call.
       | n_occs == 0 = 0
