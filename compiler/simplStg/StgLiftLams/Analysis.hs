@@ -215,13 +215,16 @@ tagSkeletonRhs bndr (StgRhsClosure ccs sbi fvs upd bndrs body)
     (body_skel, body') = tagSkeletonExpr body
     rhs_skel = rhsSk (rhsDmdShell bndr) body_skel
 
+-- | How many times will the lambda body of the RHS bound to the given
+-- identifier be evaluated, relative to its defining context? This function
+-- computes the answer in form of a 'DmdShell'.
 rhsDmdShell :: Id -> DmdShell
 rhsDmdShell bndr
   | is_thunk = oneifyDmd ds
   | otherwise = peelManyCalls (idArity bndr) cd
   where
     is_thunk = idArity bndr == 0
-    -- Let's pray this is still OK after unarise...
+    -- Let's pray idDemandInfo is still OK after unarise...
     (ds, cd) = toCleanDmd (idDemandInfo bndr) (idType bndr)
 
 tagSkeletonAlt :: StgAlt -> (Skeleton, StgAltSkel)
@@ -423,7 +426,7 @@ closureGrowth expander sizer group abs_ids = go
         -- Lifting @f@ removes @f@ from the closure but adds all @newbies@
         cost = foldDVarSet (\id size -> sizer id + size) 0 newbies - n_occs
     go (RhsSk body_dmd body)
-      -- The conservative assumption would be to assume that
+      -- The conservative assumption would be that
       --   1. Every RHS with positive growth would be called multiple times,
       --      modulo thunks.
       --   2. Every RHS with negative growth wouldn't be called at all.
@@ -432,7 +435,9 @@ closureGrowth expander sizer group abs_ids = go
       -- second case, we'd have to return 0. But we can do far better
       -- considering information from the demand analyser, which provides us
       -- with conservative estimates on minimum and maximum evaluation
-      -- cardinality.
+      -- cardinality. The @body_dmd@ part of 'RhsSk' is the result of
+      -- 'rhsDmdShell' and accurately captures the cardinality of the RHSs body
+      -- relative to its defining context.
       | isAbsDmd body_dmd   = 0
       | cg <= 0             = if isStrictDmd body_dmd then cg else 0
       | isUsedOnce body_dmd = cg
