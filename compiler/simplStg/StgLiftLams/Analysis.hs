@@ -24,8 +24,11 @@ import qualified StgCmmArgRep
 import qualified StgCmmClosure
 import qualified StgCmmLayout
 import Outputable
+import Util
 import VarEnv
 import VarSet
+
+import Data.Maybe ( mapMaybe )
 
 llTrace :: String -> SDoc -> a -> a
 llTrace _ _ c = c
@@ -62,6 +65,7 @@ rhsSk body_dmd skel  = RhsSk body_dmd skel
 data LetBoundInfo
   = LetBoundInfo
   { lbi_bndr :: !Id
+  , lbi_occurs_as_arg :: !Bool
   , lbi_rhs :: !Skeleton
   , lbi_scope :: !Skeleton
   }
@@ -74,7 +78,13 @@ data BinderInfo
 -- | Gets the bound 'Id' out a 'BinderInfo'.
 binderInfoBndr :: BinderInfo -> Id
 binderInfoBndr (BoringBinder bndr) = bndr
-binderInfoBndr (BindsClosure lbi) = lbi_bndr lbi
+binderInfoBndr (BindsClosure lbi)  = lbi_bndr lbi
+
+-- | Returns the 'LetBoundInfo' associated with the 'BindsClosure' case, if
+-- possible.
+binderInfoClosureInfo :: BinderInfo -> Maybe LetBoundInfo
+binderInfoClosureInfo (BindsClosure lbi) = Just lbi
+binderInfoClosureInfo _                  = Nothing
 
 type StgExprSkel = GenStgExpr BinderInfo Id
 type StgBindingSkel = GenStgBinding BinderInfo Id
@@ -126,55 +136,84 @@ instance OutputableBndr BinderInfo where
   pprInfixOcc = pprInfixOcc . binderInfoBndr
   bndrIsJoin_maybe = bndrIsJoin_maybe . binderInfoBndr
 
+mkArgOccs :: [StgArg] -> IdSet
+mkArgOccs = mkVarSet . mapMaybe stg_arg_var
+  where
+    stg_arg_var (StgVarArg occ) = Just occ
+    stg_arg_var _               = Nothing
+
 -- | Tags every binder with its 'BinderInfo' by condensing expressions into
 -- 'Skeleton's.
 tagSkeletonTopBind :: StgBinding -> StgBindingSkel
--- NilSk is OK when tagging top-level bindings
--- Also, top-level things are never let-no-escapes (thus we pass False)
-tagSkeletonTopBind = snd . tagSkeletonBinding NilSk False
+-- NilSk is OK when tagging top-level bindings. Also, top-level things are never
+-- lambda-lifted, so no need to track their argument occurrences. They can also
+-- never be let-no-escapes (thus we pass False).
+tagSkeletonTopBind = thdOf3 . tagSkeletonBinding NilSk emptyVarSet False
 
-tagSkeletonExpr :: StgExpr -> (Skeleton, StgExprSkel)
-tagSkeletonExpr (StgLit lit) = (NilSk, StgLit lit)
-tagSkeletonExpr (StgConApp con args tys) = (NilSk, StgConApp con args tys)
-tagSkeletonExpr (StgOpApp op args ty) = (NilSk, StgOpApp op args ty)
-tagSkeletonExpr (StgApp f args) = (NilSk, StgApp f args)
+-- | Tags binders of an 'StgExpr' with its 'LetBoundInfo'. Additionally, returns
+-- its 'Skeleton' and the set of binder occurrences in argument position.
+tagSkeletonExpr :: StgExpr -> (Skeleton, IdSet, StgExprSkel)
+tagSkeletonExpr (StgLit lit)
+  = (NilSk, emptyVarSet, StgLit lit)
+tagSkeletonExpr (StgConApp con args tys)
+  = (NilSk, mkArgOccs args, StgConApp con args tys)
+tagSkeletonExpr (StgOpApp op args ty)
+  = (NilSk, mkArgOccs args, StgOpApp op args ty)
+tagSkeletonExpr (StgApp f args)
+  = (NilSk, mkArgOccs args, StgApp f args)
 tagSkeletonExpr (StgLam _ _) = pprPanic "stgLiftLams" (text "StgLam")
-tagSkeletonExpr (StgCase scrut bndr ty alts) = (skel, StgCase scrut' bndr' ty alts')
+tagSkeletonExpr (StgCase scrut bndr ty alts)
+  = (skel, arg_occs, StgCase scrut' bndr' ty alts')
   where
-    (scrut_skel, scrut') = tagSkeletonExpr scrut
-    (alt_skels, alts') = unzip (map tagSkeletonAlt alts)
+    (scrut_skel, scrut_arg_occs, scrut') = tagSkeletonExpr scrut
+    (alt_skels, alt_arg_occss, alts') = mapAndUnzip3 tagSkeletonAlt alts
     skel = bothSk scrut_skel (foldr altSk NilSk alt_skels)
+    arg_occs = unionVarSets (scrut_arg_occs:alt_arg_occss) `delVarSet` bndr
     bndr' = BoringBinder bndr
-tagSkeletonExpr (StgTick t e) = (skel, StgTick t e')
+tagSkeletonExpr (StgTick t e)
+  = (skel, arg_occs, StgTick t e')
   where
-    (skel, e') = tagSkeletonExpr e
-tagSkeletonExpr (StgLet bind body) = (skel, StgLet bind' body')
+    (skel, arg_occs, e') = tagSkeletonExpr e
+tagSkeletonExpr (StgLet bind body)
+  = (skel, arg_occs, StgLet bind' body')
   where
-    (body_skel, body') = tagSkeletonExpr body
-    (let_bound_infos, bind') = tagSkeletonBinding body_skel False bind
+    (body_skel, body_arg_occs, body') = tagSkeletonExpr body
+    (let_bound_infos, arg_occs, bind') = tagSkeletonBinding body_skel body_arg_occs False bind
     skel = foldr (bothSk . lbi_rhs) body_skel let_bound_infos
-tagSkeletonExpr (StgLetNoEscape bind body) = (skel, StgLetNoEscape bind' body')
+tagSkeletonExpr (StgLetNoEscape bind body)
+  = (skel, arg_occs, StgLetNoEscape bind' body')
   where
-    (body_skel, body') = tagSkeletonExpr body
-    (let_bound_infos, bind') = tagSkeletonBinding body_skel True bind
+    (body_skel, body_arg_occs, body') = tagSkeletonExpr body
+    (let_bound_infos, arg_occs, bind') = tagSkeletonBinding body_skel body_arg_occs True bind
     skel = foldr (bothSk . lbi_rhs) body_skel let_bound_infos
 
-tagSkeletonBinding :: Skeleton -> Bool -> StgBinding -> ([LetBoundInfo], StgBindingSkel)
-tagSkeletonBinding body_scope is_lne (StgNonRec bndr rhs)
-  = ([lbi], StgNonRec (BindsClosure lbi) rhs')
+tagSkeletonBinding
+  :: Skeleton
+  -- ^ An abstraction of how the binding is used in the let body
+  -> IdSet
+  -- ^ The set of binders occuring as arguments in the let body
+  -> Bool
+  -- ^ Is the binding a let-no-escape?
+  -> StgBinding
+  -> ([LetBoundInfo], IdSet, StgBindingSkel)
+tagSkeletonBinding body_scope body_arg_occs is_lne (StgNonRec bndr rhs)
+  = ([lbi], arg_occs, StgNonRec (BindsClosure lbi) rhs')
   where
-    (skel_rhs, rhs') = tagSkeletonRhs bndr rhs
+    (skel_rhs, rhs_arg_occs, rhs') = tagSkeletonRhs bndr rhs
+    arg_occs = (body_arg_occs `unionVarSet` rhs_arg_occs) `delVarSet` bndr
     -- Compared to the recursive case, this exploits the fact that @bndr@ is
     -- never free in @rhs@.
     lbi
       = LetBoundInfo
       { lbi_bndr = bndr
+      , lbi_occurs_as_arg = bndr `elemVarSet` body_arg_occs
       , lbi_rhs = if is_lne
           then skel_rhs -- no closure is allocated for let-no-escapes
           else ClosureSk bndr (mkDVarSet $ freeVarsOfRhs rhs') skel_rhs
       , lbi_scope = body_scope
       }
-tagSkeletonBinding body_scope is_lne (StgRec pairs) = (lbis, StgRec pairs')
+tagSkeletonBinding body_scope body_arg_occs is_lne (StgRec pairs)
+  = (lbis, arg_occs, StgRec pairs')
   where
     (bndrs, _) = unzip pairs
     -- Local recursive STG bindings also regard the defined binders as free
@@ -182,22 +221,25 @@ tagSkeletonBinding body_scope is_lne (StgRec pairs) = (lbis, StgRec pairs')
     -- calls anyway when we add them to the same top-level recursive group as
     -- the top-level binding currently being analysed.
     fvs_set_of_rhs rhs = minusDVarSet (mkDVarSet (freeVarsOfRhs rhs)) (mkDVarSet bndrs)
-    skel_rhs_and_rhss' = map (uncurry tagSkeletonRhs) pairs
+    skel_arg_occs_rhss' = map (uncurry tagSkeletonRhs) pairs
+    rhss_arg_occs = map sndOf3 skel_arg_occs_rhss'
+    scope_occs = unionVarSets (body_arg_occs:rhss_arg_occs)
+    arg_occs = scope_occs `delVarSetList` bndrs
     -- @skel_rhss@ aren't yet wrapped in closures. We'll do that in a moment,
     -- but we also need the un-wrapped skeletons for calculating the @lbi_scope@
     -- of the group, as the outer closures don't contribute to closure growth
     -- when we lift this specific binding.
-    scope = foldr (bothSk . fst) body_scope skel_rhs_and_rhss'
+    scope = foldr (bothSk . fstOf3) body_scope skel_arg_occs_rhss'
     -- Now we can build the actual 'LetBoundInfo's just by iterating over each
     -- bind pair.
     (lbis, pairs')
-      = unzip
-      . map (\(lbi, rhs') -> (lbi, (BindsClosure lbi, rhs')))
-      . zipWith (\bndr (skel_rhs, rhs') -> (mk_lbi bndr skel_rhs rhs', rhs')) bndrs
-      $ skel_rhs_and_rhss'
+      = mapAndUnzip (\(lbi, rhs') -> (lbi, (BindsClosure lbi, rhs')))
+      . zipWith (\bndr (skel_rhs, _, rhs') -> (mk_lbi bndr skel_rhs rhs', rhs')) bndrs
+      $ skel_arg_occs_rhss'
     mk_lbi bndr skel_rhs rhs'
       = LetBoundInfo
       { lbi_bndr = bndr
+      , lbi_occurs_as_arg = bndr `elemVarSet` scope_occs
       -- Here, we finally add the closure around each @skel_rhs@.
       , lbi_rhs = if is_lne
           then skel_rhs -- no closure is allocated for let-no-escapes
@@ -206,13 +248,14 @@ tagSkeletonBinding body_scope is_lne (StgRec pairs) = (lbis, StgRec pairs')
       , lbi_scope = scope
       }
 
-tagSkeletonRhs :: Id -> StgRhs -> (Skeleton, StgRhsSkel)
-tagSkeletonRhs _ (StgRhsCon ccs dc args) = (NilSk, StgRhsCon ccs dc args)
+tagSkeletonRhs :: Id -> StgRhs -> (Skeleton, IdSet, StgRhsSkel)
+tagSkeletonRhs _ (StgRhsCon ccs dc args)
+  = (NilSk, mkArgOccs args, StgRhsCon ccs dc args)
 tagSkeletonRhs bndr (StgRhsClosure ccs sbi fvs upd bndrs body)
-  = (rhs_skel, StgRhsClosure ccs sbi fvs upd bndrs' body')
+  = (rhs_skel, body_arg_occs, StgRhsClosure ccs sbi fvs upd bndrs' body')
   where
     bndrs' = map BoringBinder bndrs
-    (body_skel, body') = tagSkeletonExpr body
+    (body_skel, body_arg_occs, body') = tagSkeletonExpr body
     rhs_skel = rhsSk (rhsDmdShell bndr) body_skel
 
 -- | How many times will the lambda body of the RHS bound to the given
@@ -227,10 +270,12 @@ rhsDmdShell bndr
     -- Let's pray idDemandInfo is still OK after unarise...
     (ds, cd) = toCleanDmd (idDemandInfo bndr) (idType bndr)
 
-tagSkeletonAlt :: StgAlt -> (Skeleton, StgAltSkel)
-tagSkeletonAlt (con, bndrs, rhs) = (alt_skel, (con, map BoringBinder bndrs, rhs'))
+tagSkeletonAlt :: StgAlt -> (Skeleton, IdSet, StgAltSkel)
+tagSkeletonAlt (con, bndrs, rhs)
+  = (alt_skel, arg_occs, (con, map BoringBinder bndrs, rhs'))
   where
-    (alt_skel, rhs') = tagSkeletonExpr rhs
+    (alt_skel, alt_arg_occs, rhs') = tagSkeletonExpr rhs
+    arg_occs = alt_arg_occs `delVarSetList` bndrs
 
 -- | Combines several heuristics to decide whether to lambda-lift a given
 -- @let@-binding to top-level.
@@ -247,7 +292,7 @@ goodToLift
 goodToLift dflags top_lvl rec_flag expander pairs = decide
   [ ("top-level", isTopLevel top_lvl)
   , ("memoized", any_memoized)
-  , ("undersaturated calls", has_undersat_calls)
+  , ("argument occurrences", arg_occs)
   , ("join point", is_join_point)
   , ("abstracts join points", abstracts_join_ids)
   , ("abstracts known local function", abstracts_known_local_fun)
@@ -269,6 +314,7 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
           any snd deciders
 
       bndrs = map (binderInfoBndr . fst) pairs
+      infos = mapMaybe (binderInfoClosureInfo . fst) pairs
       bndrs_set = mkVarSet bndrs
       rhss = map snd pairs
 
@@ -293,10 +339,11 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
       is_memoized_rhs StgRhsCon{} = True
       is_memoized_rhs (StgRhsClosure _ _ _ upd _ _) = isUpdatable upd
 
-      -- Don't create partial applications. Probably subsumes @any_memoized@.
-      has_undersat_calls = any undersat rhss
-      undersat StgRhsCon{} = True
-      undersat (StgRhsClosure _ sbi _ _ _ _) = not (satCallsOnly sbi)
+      -- Don't lift binders occuring as arguments. This would result in complex
+      -- argument expressions which would have to be given a name, reintroducing
+      -- the very allocation at each call site that we wanted to get rid off in
+      -- the first place.
+      arg_occs = any lbi_occurs_as_arg infos
 
       -- These don't allocate anyway.
       is_join_point = any isJoinId bndrs
@@ -357,10 +404,9 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
         . mkDVarSet
         $ freeVarsOfRhs rhs
       clo_growth = closureGrowth expander (idClosureFootprint dflags) bndrs_set abs_ids scope
-      scope = case pairs of
-        (BindsClosure lbi, _):_ -> lbi_scope lbi
-        (BoringBinder id, _):_ -> pprPanic "goodToLift" (text "Can't lift boring binders" $$ ppr id)
-        [] -> pprPanic "goodToLift" (text "empty binding group")
+      scope = case infos of
+        lbi:_ -> lbi_scope lbi
+        [] -> pprPanic "goodToLift" (text "Can't lift boring binding group" $$ ppr bndrs)
 
 rhsLambdaBndrs :: StgRhsSkel -> [Id]
 rhsLambdaBndrs StgRhsCon{} = []

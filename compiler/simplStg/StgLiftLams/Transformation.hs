@@ -124,17 +124,6 @@ liftExpr (StgApp f args) = do
   args' <- traverse liftArgs args
   fvs' <- formerFreeVars f
   let top_lvl_args = map StgVarArg fvs' ++ args'
-  lifted <- isLifted f
-  let sat_call = idArity f' <= length top_lvl_args
-  let a ==> b = not a || b
-  let msg = vcat
-        [ text "Unsaturated call to lifted function"
-        , text "function:" <+> ppr f'
-        , text "former free vars:" <+> ppr fvs'
-        , text "arity:" <+> ppr (idArity f')
-        , text "args:" <+> ppr top_lvl_args
-        ]
-  MASSERT2 ( (lifted ==> sat_call), msg )
   pure (StgApp f' top_lvl_args)
 liftExpr (StgConApp con args tys) = StgConApp con <$> traverse liftArgs args <*> pure tys
 liftExpr (StgOpApp op args ty) = StgOpApp op <$> traverse liftArgs args <*> pure ty
