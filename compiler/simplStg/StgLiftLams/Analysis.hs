@@ -160,7 +160,16 @@ tagSkeletonExpr (StgConApp con args tys)
 tagSkeletonExpr (StgOpApp op args ty)
   = (NilSk, mkArgOccs args, StgOpApp op args ty)
 tagSkeletonExpr (StgApp f args)
-  = (NilSk, mkArgOccs args, StgApp f args)
+  = (NilSk, arg_occs, StgApp f args)
+  where
+    arg_occs
+      -- This is a little fishy: We also want to disallow turning nullary tail
+      -- calls into n-ary partial applications which would allocate. This
+      -- happens for CPS heavy code like in the CS benchmark. Convoluting this
+      -- case with detecting argument occurrences seems like the simplest
+      -- solution.
+      | null args = unitVarSet f
+      | otherwise = mkArgOccs args
 tagSkeletonExpr (StgLam _ _) = pprPanic "stgLiftLams" (text "StgLam")
 tagSkeletonExpr (StgCase scrut bndr ty alts)
   = (skel, arg_occs, StgCase scrut' bndr' ty alts')
