@@ -282,7 +282,7 @@ withLiftedBndr abs_ids bndr inner = do
   uniq <- getUniqueM
   let str = "$l" ++ occNameString (getOccName bndr)
   let ty = mkLamTypes (dVarSetElems abs_ids) (idType bndr)
-  -- When there the enclosing top-level binding is not caffy, then the lifted
+  -- When the enclosing top-level binding is not caffy, then the lifted
   -- binding will not be caffy either. If we don't recognize this, non-caffy
   -- things call caffy things and then codegen screws up.
   in_caffy_ctxt <- LiftM (RWS.asks e_in_caffy_context)
