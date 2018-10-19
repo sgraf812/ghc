@@ -272,19 +272,18 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
       bndrs_set = mkVarSet bndrs
       rhss = map snd pairs
 
-      -- FIXME: Rewrite these comments
       -- First objective: Calculate @abs_ids@, e.g. the former free variables
-      -- the lifted binding would abstract over.
-      -- We have to merge the free variables of all RHS to get the set of
-      -- variables that will have to be passed through parameters.
+      -- the lifted binding would abstract over. This called the required set in
+      -- the Johnsson paper. We have to merge the free variables of all RHS to
+      -- get the set of variables that will have to be passed through
+      -- parameters.
       fvs = unionDVarSets (map (mkDVarSet . freeVarsOfRhs) rhss)
       -- To lift the binding to top-level, we want to delete the lifted binders
-      -- themselves from the free var set. Local let bindings seem to
-      -- track recursive occurrences in their free variable set. We neither want
-      -- to apply our cost model to them (see 'tagSkeletonRhs'), nor pass them
-      -- as parameters when lifted, as these are known calls.
-      -- We call the resulting set the identifiers we abstract over, thus
-      -- @abs_ids@. These are all 'OutId's.
+      -- themselves from the free var set. Local let bindings track recursive
+      -- occurrences in their free variable set. We neither want to apply our
+      -- cost model to them (see 'tagSkeletonRhs'), nor pass them as parameters
+      -- when lifted, as these are known calls. We call the resulting set the
+      -- identifiers we abstract over, thus @abs_ids@. These are all 'OutId's.
       -- We will save the set in 'LiftM.e_expansions' for each of the variables
       -- if we perform the lift.
       abs_ids = expander (delDVarSetList fvs bndrs)
