@@ -4,6 +4,10 @@
 -- Most significantly, this employs a cost model to estimate impact on heap
 -- allocations, by looking at an STG expression's 'Skeleton'.
 module StgLiftLams.Analysis (
+    -- * When to lift #when#
+    -- $when
+    -- * Estimating closure growth #clogro#
+    -- $clogro
     -- * AST annotation
     Skeleton, LetBoundInfo, BinderInfo, binderInfoBndr,
     StgBindingSkel, StgExprSkel, StgRhsSkel, StgAltSkel, tagSkeletonTopBind,
@@ -29,6 +33,67 @@ import VarEnv
 import VarSet
 
 import Data.Maybe ( mapMaybe )
+
+-- Note [When to lift]
+-- $when
+-- The analysis proceeds in two steps:
+--
+--   1. It tags the syntax tree with analysis information in the form of
+--      'BinderInfo' by 'tagSkeletonTopBind' and friends. This provides
+--       'LetBoundInfo's for all let-bindings, contributing 'lbi_rhs'
+--       (See #clogro) and 'lbi_occurs_as_arg' for 'goodToLift'.
+--   2. The resulting syntax tree is treated by the "StgLiftLams.Transformation"
+--      module, calling out to 'goodToLift' to decide if a binding is worthwhile
+--      to lift.
+--
+-- So the annotations from 'tagSkeletonTopBind' fuel 'goodToLift', which
+-- employs a number of heuristics to identify and exclude lambda lifting
+-- opportunities deemed non-beneficial:
+--
+--  [Top-level bindings] can't be lifted.
+--  [Thunks] and data constructors shouldn't be lifted in order not to destroy
+--    sharing.
+--  [Argument occurrences] of binders prohibit them to be lifted. Doing the
+--    lift would re-introduce the very allocation at call sites that we tried to
+--    get rid off in the first place.
+--    We capture analysis information in 'lbi_occurs_as_arg'. Note that we also
+--    consider a nullary application as argument occurrence, because it would
+--    turn into an n-ary partial application created by a generic apply
+--    function. This occurs in CPS-heavy code like the CS benchmark.
+--  [Join points] should not be lifted, simply because there's no reduction in
+--    allocation to be had.
+--  [Abstracting over join points] destroys join points, because they end up as
+--    arguments to the lifted function.
+--  [Abstracting over known local functions] turns a known call into an unknown
+--    call (e.g. some @stg_ap_*@), which is generally slower. Can be turned off
+--    with @-fstg-lift-lams-known@.
+--  [Calling convention] Don't lift when the resulting function would have a
+--    higher arity than available argument registers for the calling convention.
+--    Can be influenced with @-fstg-lift-(non)rec-args(-any)@.
+--  [Closure growth] introduced when former free variables have to be available
+--    at call sites may actually lead to an increase in overall allocations
+--    resulting from a lift. Estimating closure growth is described in #clogro
+--    and is what most of this module is ultimately concerned with.
+--
+-- There's a wiki page at LateLamLift with some more background and history.
+
+-- Note [Estimating closure growth]
+-- $clogro
+-- We estimate closure growth by abstracting the syntax tree into a 'Skeleton',
+-- capturing only syntactic details relevant to 'closureGrowth', such as
+--
+--   * 'ClosureSk', representing closure allocation.
+--   * 'RhsSk', representing a RHS of a binding and how many times it's called
+--     by an appropriate 'DmdShell'.
+--   * 'AltSk', 'BothSk' and 'NilSk' for choice, sequence and empty element.
+--
+-- This abstraction is mostly so that the main analysis function 'closureGrowth'
+-- can stay simple and focused. Also, skeletons tend to be much smaller than
+-- the syntax tree they abstract, so it makes sense to construct them once and
+-- and operate on them instead of the actual syntax tree.
+--
+-- A more detailed treatment of computing closure growth, including examples,
+-- can be found in the paper referenced from the wiki page (Wiki LateLamLift).
 
 llTrace :: String -> SDoc -> a -> a
 llTrace _ _ c = c
@@ -287,7 +352,7 @@ tagSkeletonAlt (con, bndrs, rhs)
     arg_occs = alt_arg_occs `delVarSetList` bndrs
 
 -- | Combines several heuristics to decide whether to lambda-lift a given
--- @let@-binding to top-level.
+-- @let@-binding to top-level. See #when for details.
 goodToLift
   :: DynFlags
   -> TopLevelFlag
@@ -299,7 +364,7 @@ goodToLift
                         -- lift and @abs_ids@ are the variables it would
                         -- abstract over
 goodToLift dflags top_lvl rec_flag expander pairs = decide
-  [ ("top-level", isTopLevel top_lvl)
+  [ ("top-level", isTopLevel top_lvl) -- keep in sync with Note [When to lift]
   , ("memoized", any_memoized)
   , ("argument occurrences", arg_occs)
   , ("join point", is_join_point)
@@ -448,6 +513,7 @@ idClosureFootprint dflags
 -- | @closureGrowth expander sizer f fvs@ computes the closure growth in words
 -- as a result of lifting @f@ to top-level. If there was any growing closure
 -- under a multi-shot lambda, the result will be 'infinity'.
+-- Also see #clogro.
 closureGrowth
   :: (DIdSet -> DIdSet) -- ^ Expands outer free ids that were lifted to their free vars
   -> (Id -> Int)        -- ^ Computes the closure footprint of an identifier
