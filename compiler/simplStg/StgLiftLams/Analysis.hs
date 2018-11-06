@@ -401,10 +401,9 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
       rhss = map snd pairs
 
       -- First objective: Calculate @abs_ids@, e.g. the former free variables
-      -- the lifted binding would abstract over. This called the required set in
-      -- the Johnsson paper. We have to merge the free variables of all RHS to
-      -- get the set of variables that will have to be passed through
-      -- parameters.
+      -- the lifted binding would abstract over. We have to merge the free
+      -- variables of all RHS to get the set of variables that will have to be
+      -- passed through parameters.
       fvs = unionDVarSets (map (mkDVarSet . freeVarsOfRhs) rhss)
       -- To lift the binding to top-level, we want to delete the lifted binders
       -- themselves from the free var set. Local let bindings track recursive
