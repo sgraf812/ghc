@@ -53,13 +53,13 @@ import Data.Maybe ( mapMaybe )
 --  [Top-level bindings] can't be lifted.
 --  [Thunks] and data constructors shouldn't be lifted in order not to destroy
 --    sharing.
---  [Argument occurrences] of binders prohibit them to be lifted. Doing the
---    lift would re-introduce the very allocation at call sites that we tried to
---    get rid off in the first place.
---    We capture analysis information in 'lbi_occurs_as_arg'. Note that we also
---    consider a nullary application as argument occurrence, because it would
---    turn into an n-ary partial application created by a generic apply
---    function. This occurs in CPS-heavy code like the CS benchmark.
+--  [Argument occurrences] #arg_occs# of binders prohibit them to be lifted.
+--    Doing the lift would re-introduce the very allocation at call sites that
+--    we tried to get rid off in the first place. We capture analysis
+--    information in 'lbi_occurs_as_arg'. Note that we also consider a nullary
+--    application as argument occurrence, because it would turn into an n-ary
+--    partial application created by a generic apply function. This occurs in
+--    CPS-heavy code like the CS benchmark.
 --  [Join points] should not be lifted, simply because there's no reduction in
 --    allocation to be had.
 --  [Abstracting over join points] destroys join points, because they end up as
@@ -75,7 +75,8 @@ import Data.Maybe ( mapMaybe )
 --    resulting from a lift. Estimating closure growth is described in #clogro
 --    and is what most of this module is ultimately concerned with.
 --
--- There's a wiki page at LateLamLift with some more background and history.
+-- There's a <https://ghc.haskell.org/trac/ghc/wiki/LateLamLift wiki page> with
+-- some more background and history.
 
 -- Note [Estimating closure growth]
 -- $clogro
@@ -93,7 +94,8 @@ import Data.Maybe ( mapMaybe )
 -- and operate on them instead of the actual syntax tree.
 --
 -- A more detailed treatment of computing closure growth, including examples,
--- can be found in the paper referenced from the wiki page (Wiki LateLamLift).
+-- can be found in the paper referenced from the
+-- <https://ghc.haskell.org/trac/ghc/wiki/LateLamLift wiki page>.
 
 llTrace :: String -> SDoc -> a -> a
 llTrace _ _ c = c
@@ -130,9 +132,17 @@ rhsSk body_dmd skel  = RhsSk body_dmd skel
 data LetBoundInfo
   = LetBoundInfo
   { lbi_bndr :: !Id
+  -- ^ The augmented binder
   , lbi_occurs_as_arg :: !Bool
+  -- ^ Does this binder occur in argument position or in a nullary application?
+  -- See #arg_occs.
   , lbi_rhs :: !Skeleton
+  -- ^ The 'Skeleton' abstracting the binding's RHS.
   , lbi_scope :: !Skeleton
+  -- ^ The 'Skeleton' abstracting over the whole scope of the binding.
+  -- For non-recursive @let@s, this is just the @let@ body.
+  -- For recursive @let@s, this additionally includes the binding group that
+  -- defines 'lbi_bndr'.
   }
 
 -- | The binder type to be put in @id@ holes in 'GenStgExpr's.
@@ -207,7 +217,7 @@ mkArgOccs = mkVarSet . mapMaybe stg_arg_var
     stg_arg_var (StgVarArg occ) = Just occ
     stg_arg_var _               = Nothing
 
--- | Tags every binder with its 'BinderInfo' by condensing expressions into
+-- | Tags every binder with its 'BinderInfo' by abstracting expressions into
 -- 'Skeleton's.
 tagSkeletonTopBind :: StgBinding -> StgBindingSkel
 -- NilSk is OK when tagging top-level bindings. Also, top-level things are never
@@ -216,7 +226,8 @@ tagSkeletonTopBind :: StgBinding -> StgBindingSkel
 tagSkeletonTopBind = thdOf3 . tagSkeletonBinding NilSk emptyVarSet False
 
 -- | Tags binders of an 'StgExpr' with its 'LetBoundInfo'. Additionally, returns
--- its 'Skeleton' and the set of binder occurrences in argument position.
+-- its 'Skeleton' and the set of binder occurrences in argument and nullary
+-- application position (cf. #arg_occs).
 tagSkeletonExpr :: StgExpr -> (Skeleton, IdSet, StgExprSkel)
 tagSkeletonExpr (StgLit lit)
   = (NilSk, emptyVarSet, StgLit lit)
@@ -228,11 +239,8 @@ tagSkeletonExpr (StgApp f args)
   = (NilSk, arg_occs, StgApp f args)
   where
     arg_occs
-      -- This is a little fishy: We also want to disallow turning nullary tail
-      -- calls into n-ary partial applications which would allocate. This
-      -- happens for CPS heavy code like in the CS benchmark. Convoluting this
-      -- case with detecting argument occurrences seems like the simplest
-      -- solution.
+      -- This checks for nullary applications, which we treat the same as
+      -- argument occurrences, see #arg_occs.
       | null args = unitVarSet f
       | otherwise = mkArgOccs args
 tagSkeletonExpr (StgLam _ _) = pprPanic "stgLiftLams" (text "StgLam")
