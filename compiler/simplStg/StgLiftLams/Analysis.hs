@@ -4,12 +4,14 @@
 -- Most significantly, this employs a cost model to estimate impact on heap
 -- allocations, by looking at an STG expression's 'Skeleton'.
 module StgLiftLams.Analysis (
-    -- * When to lift #when#
+    -- * #when# When to lift
     -- $when
-    -- * Estimating closure growth #clogro#
+
+    -- * #clogro# Estimating closure growth
     -- $clogro
+
     -- * AST annotation
-    Skeleton, LetBoundInfo, BinderInfo, binderInfoBndr,
+    Skeleton(..), LetBoundInfo(..), BinderInfo(..), binderInfoBndr,
     StgBindingSkel, StgExprSkel, StgRhsSkel, StgAltSkel, tagSkeletonTopBind,
     -- * Lifting decision
     goodToLift,
@@ -40,8 +42,8 @@ import Data.Maybe ( mapMaybe )
 --
 --   1. It tags the syntax tree with analysis information in the form of
 --      'BinderInfo' by 'tagSkeletonTopBind' and friends. This provides
---       'LetBoundInfo's for all let-bindings, contributing 'lbi_rhs'
---       (See #clogro) and 'lbi_occurs_as_arg' for 'goodToLift'.
+--      'LetBoundInfo's for all let-bindings, contributing 'lbi_rhs' (See
+--      "StgLiftLams.Analysis#clogro") and 'lbi_occurs_as_arg' for 'goodToLift'.
 --   2. The resulting syntax tree is treated by the "StgLiftLams.Transformation"
 --      module, calling out to 'goodToLift' to decide if a binding is worthwhile
 --      to lift.
@@ -72,8 +74,9 @@ import Data.Maybe ( mapMaybe )
 --    Can be influenced with @-fstg-lift-(non)rec-args(-any)@.
 --  [Closure growth] introduced when former free variables have to be available
 --    at call sites may actually lead to an increase in overall allocations
---    resulting from a lift. Estimating closure growth is described in #clogro
---    and is what most of this module is ultimately concerned with.
+--  resulting from a lift. Estimating closure growth is described in
+--  "StgLiftLams.Analysis#clogro" and is what most of this module is ultimately
+--  concerned with.
 --
 -- There's a <https://ghc.haskell.org/trac/ghc/wiki/LateLamLift wiki page> with
 -- some more background and history.
@@ -360,7 +363,7 @@ tagSkeletonAlt (con, bndrs, rhs)
     arg_occs = alt_arg_occs `delVarSetList` bndrs
 
 -- | Combines several heuristics to decide whether to lambda-lift a given
--- @let@-binding to top-level. See #when for details.
+-- @let@-binding to top-level. See "StgLiftLams.Analysis#when" for details.
 goodToLift
   :: DynFlags
   -> TopLevelFlag
@@ -520,17 +523,22 @@ idClosureFootprint dflags
 -- | @closureGrowth expander sizer f fvs@ computes the closure growth in words
 -- as a result of lifting @f@ to top-level. If there was any growing closure
 -- under a multi-shot lambda, the result will be 'infinity'.
--- Also see #clogro.
+-- Also see "StgLiftLams.Analysis#clogro".
 closureGrowth
-  :: (DIdSet -> DIdSet) -- ^ Expands outer free ids that were lifted to their free vars
-  -> (Id -> Int)        -- ^ Computes the closure footprint of an identifier
-  -> IdSet              -- ^ Binding group for which lifting is to be decided
-  -> DIdSet             -- ^ Free vars of the whole binding group prior to lifting it.
-                        --   These must be available at call sites if we decide
-                        --   to lift the binding group.
-  -> Skeleton           -- ^ Abstraction of the scope of the function
-  -> IntWithInf         -- ^ Closure growth. 'infinity' indicates there was
-                        --   growth under a (multi-shot) lambda.
+  :: (DIdSet -> DIdSet)
+  -- ^ Expands outer free ids that were lifted to their free vars
+  -> (Id -> Int)
+  -- ^ Computes the closure footprint of an identifier
+  -> IdSet
+  -- ^ Binding group for which lifting is to be decided
+  -> DIdSet
+  -- ^ Free vars of the whole binding group prior to lifting it. These must be
+  --   available at call sites if we decide to lift the binding group.
+  -> Skeleton
+  -- ^ Abstraction of the scope of the function
+  -> IntWithInf
+  -- ^ Closure growth. 'infinity' indicates there was growth under a
+  --   (multi-shot) lambda.
 closureGrowth expander sizer group abs_ids = go
   where
     go NilSk = 0
@@ -547,8 +555,8 @@ closureGrowth expander sizer group abs_ids = go
         n_occs = sizeDVarSet (clo_fvs' `dVarSetIntersectVarSet` group)
         -- What we close over considering prior lifting decisions
         clo_fvs' = expander clo_fvs
-        -- Variables that would additionally occur free in the closure body if we
-        -- lift @f@
+        -- Variables that would additionally occur free in the closure body if
+        -- we lift @f@
         newbies = abs_ids `minusDVarSet` clo_fvs'
         -- Lifting @f@ removes @f@ from the closure but adds all @newbies@
         cost = foldDVarSet (\id size -> sizer id + size) 0 newbies - n_occs
