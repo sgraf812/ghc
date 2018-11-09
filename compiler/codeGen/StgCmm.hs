@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE DataKinds #-}
 
 -----------------------------------------------------------------------------
 --
@@ -30,6 +31,7 @@ import CmmUtils
 import CLabel
 
 import StgSyn
+import StgFVs ( annTopBindingsFreeVars )
 import DynFlags
 
 import HscTypes
@@ -61,7 +63,7 @@ codeGen :: DynFlags
         -> [StgTopBinding]             -- Bindings to convert
         -> HpcInfo
         -> Stream IO CmmGroup ()       -- Output as a stream, so codegen can
-                                        -- be interleaved with output
+                                       -- be interleaved with output
 
 codeGen dflags this_mod data_tycons
         cost_centre_info stg_binds hpc_info
@@ -88,7 +90,8 @@ codeGen dflags this_mod data_tycons
                -- Note [pipeline-split-init].
         ; cg (mkModuleInit cost_centre_info this_mod hpc_info)
 
-        ; mapM_ (cg . cgTopBinding dflags) stg_binds
+        ; let stg_binds_w_fvs = annTopBindingsFreeVars const stg_binds
+        ; mapM_ (cg . cgTopBinding dflags) stg_binds_w_fvs
 
                 -- Put datatype_stuff after code_stuff, because the
                 -- datatype closure table (for enumeration types) to
