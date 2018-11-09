@@ -32,6 +32,7 @@ import IdInfo
 import DataCon
 import CostCentre
 import VarEnv
+import VarSet
 import Module
 import Name             ( isExternalName, nameOccName, nameModule_maybe )
 import OccName          ( occNameFS )
@@ -736,8 +737,8 @@ mkTopStgRhs :: DynFlags -> Module -> CollectedCCs
 mkTopStgRhs dflags this_mod ccs rhs_fvs bndr rhs
   | StgLam bndrs body <- rhs
   = -- StgLam can't have empty arguments, so not CAF
-    ( StgRhsClosure dontCareCCS
-                    (getFVs rhs_fvs)
+    ( StgRhsClosure (getFVs rhs_fvs)
+                    dontCareCCS
                     ReEntrant
                     (toList bndrs) body
     , ccs )
@@ -752,14 +753,14 @@ mkTopStgRhs dflags this_mod ccs rhs_fvs bndr rhs
 
   -- Otherwise it's a CAF, see Note [Cost-centre initialization plan].
   | gopt Opt_AutoSccsOnIndividualCafs dflags
-  = ( StgRhsClosure caf_ccs
-                    (getFVs rhs_fvs)
+  = ( StgRhsClosure (getFVs rhs_fvs)
+                    caf_ccs
                     upd_flag [] rhs
     , collectCC caf_cc caf_ccs ccs )
 
   | otherwise
-  = ( StgRhsClosure all_cafs_ccs
-                    (getFVs rhs_fvs)
+  = ( StgRhsClosure (getFVs rhs_fvs)
+                    all_cafs_ccs
                     upd_flag [] rhs
     , ccs )
 
@@ -786,15 +787,15 @@ mkTopStgRhs dflags this_mod ccs rhs_fvs bndr rhs
 mkStgRhs :: FreeVarsInfo -> Id -> StgExpr -> StgRhs
 mkStgRhs rhs_fvs bndr rhs
   | StgLam bndrs body <- rhs
-  = StgRhsClosure currentCCS
-                  (getFVs rhs_fvs)
+  = StgRhsClosure (getFVs rhs_fvs)
+                  currentCCS
                   ReEntrant
                   (toList bndrs) body
 
   | isJoinId bndr -- must be a nullary join point
   = ASSERT(idJoinArity bndr == 0)
-    StgRhsClosure currentCCS
-                  (getFVs rhs_fvs)
+    StgRhsClosure (getFVs rhs_fvs)
+                  currentCCS
                   ReEntrant -- ignored for LNE
                   [] rhs
 
@@ -802,8 +803,8 @@ mkStgRhs rhs_fvs bndr rhs
   = StgRhsCon currentCCS con args
 
   | otherwise
-  = StgRhsClosure currentCCS
-                  (getFVs rhs_fvs)
+  = StgRhsClosure (getFVs rhs_fvs)
+                  currentCCS
                   upd_flag [] rhs
   where
     (_, unticked_rhs) = stripStgTicksTop (not . tickishIsCode) rhs
@@ -1004,12 +1005,12 @@ elementOfFVInfo :: Id -> FreeVarsInfo -> Bool
 elementOfFVInfo id fvs = isJust (lookupVarEnv fvs id)
 
 -- Non-top-level things only, both type variables and ids
-getFVs :: FreeVarsInfo -> [Var]
-getFVs fvs = [id | (id, how_bound) <- nonDetEltsUFM fvs,
+getFVs :: FreeVarsInfo -> IdSet
+getFVs fvs = mkVarSet [id | (id, how_bound) <- nonDetEltsUFM fvs,
   -- It's OK to use nonDetEltsUFM here because we're not aiming for
   -- bit-for-bit determinism.
   -- See Note [Unique Determinism and code generation]
-                    not (topLevelBound how_bound) ]
+                             not (topLevelBound how_bound) ]
 
 plusFVInfo :: (Var, HowBound)
            -> (Var, HowBound)

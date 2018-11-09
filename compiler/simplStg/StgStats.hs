@@ -33,6 +33,7 @@ import StgSyn
 
 import Id (Id)
 import Panic
+import VarSet ( sizeVarSet )
 
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -131,9 +132,9 @@ statRhs :: Bool -> (Id, StgRhs) -> StatEnv
 statRhs top (_, StgRhsCon _ _ _)
   = countOne (ConstructorBinds top)
 
-statRhs top (_, StgRhsClosure _ fv u _ body)
-  = statExpr body                       `combineSE`
-    countN FreeVariables (length fv)    `combineSE`
+statRhs top (_, StgRhsClosure fv _ u _ body)
+  = statExpr body                        `combineSE`
+    countN FreeVariables (sizeVarSet fv) `combineSE`
     countOne (
       case u of
         ReEntrant   -> ReEntrantBinds   top

@@ -44,6 +44,7 @@ import Name
 import Module
 import ListSetOps
 import Util
+import UniqSet ( nonDetEltsUniqSet )
 import BasicTypes
 import Outputable
 import FastString
@@ -206,9 +207,12 @@ cgRhs id (StgRhsCon cc con args)
       -- see Note [Post-unarisation invariants] in UnariseStg
 
 {- See Note [GC recovery] in compiler/codeGen/StgCmmClosure.hs -}
-cgRhs id (StgRhsClosure cc fvs upd_flag args body)
+cgRhs id (StgRhsClosure fvs cc upd_flag args body)
   = do dflags <- getDynFlags
-       mkRhsClosure dflags id cc (nonVoidIds fvs) upd_flag args body
+       mkRhsClosure dflags id cc (nonVoidIds (nonDetEltsUniqSet fvs)) upd_flag args body
+       -- It's OK to use nonDetEltsUniqSet here because we're not aiming for
+       -- bit-for-bit determinism.
+       -- See Note [Unique Determinism and code generation]
 
 ------------------------------------------------------------------------
 --              Non-constructor right hand sides

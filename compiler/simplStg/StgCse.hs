@@ -93,6 +93,7 @@ import Id
 import StgSyn
 import Outputable
 import VarEnv
+import VarSet
 import CoreSyn (AltCon(..))
 import Data.List (mapAccumL)
 import Data.Maybe (fromMaybe)
@@ -227,8 +228,8 @@ substArg :: CseEnv -> InStgArg -> OutStgArg
 substArg env (StgVarArg from) = StgVarArg (substVar env from)
 substArg _   (StgLitArg lit)  = StgLitArg lit
 
-substVars :: CseEnv -> [InId] -> [OutId]
-substVars env = map (substVar env)
+substVars :: CseEnv -> IdSet -> IdSet
+substVars env = mapVarSet (substVar env)
 
 substVar :: CseEnv -> InId -> OutId
 substVar env id = fromMaybe id $ lookupVarEnv (ce_subst env) id
@@ -402,11 +403,11 @@ stgCseRhs env bndr (StgRhsCon ccs dataCon args)
           pair = (bndr, StgRhsCon ccs dataCon args')
       in (Just pair, env')
   where args' = substArgs env args
-stgCseRhs env bndr (StgRhsClosure ccs occs upd args body)
+stgCseRhs env bndr (StgRhsClosure occs ccs upd args body)
     = let (env1, args') = substBndrs env args
           env2 = forgetCse env1 -- See note [Free variables of an StgClosure]
           body' = stgCseExpr env2 body
-      in (Just (substVar env bndr, StgRhsClosure ccs occs' upd args' body'), env)
+      in (Just (substVar env bndr, StgRhsClosure occs' ccs upd args' body'), env)
   where occs' = substVars env occs
 
 

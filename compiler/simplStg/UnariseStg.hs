@@ -213,9 +213,11 @@ import StgSyn
 import Type
 import TysPrim (intPrimTy,wordPrimTy,word64PrimTy)
 import TysWiredIn
+import UniqSet ( nonDetEltsUniqSet )
 import UniqSupply
 import Util
 import VarEnv
+import VarSet
 
 import Data.Bifunctor (second)
 import Data.Maybe (mapMaybe)
@@ -281,11 +283,11 @@ unariseBinding rho (StgRec xrhss)
   = StgRec <$> mapM (\(x, rhs) -> (x,) <$> unariseRhs rho rhs) xrhss
 
 unariseRhs :: UnariseEnv -> StgRhs -> UniqSM StgRhs
-unariseRhs rho (StgRhsClosure ccs fvs update_flag args expr)
+unariseRhs rho (StgRhsClosure fvs ccs update_flag args expr)
   = do (rho', args1) <- unariseFunArgBinders rho args
        expr' <- unariseExpr rho' expr
        let fvs' = unariseFreeVars rho fvs
-       return (StgRhsClosure ccs fvs' update_flag args1 expr')
+       return (StgRhsClosure fvs' ccs update_flag args1 expr')
 
 unariseRhs rho (StgRhsCon ccs con args)
   = ASSERT(not (isUnboxedTupleCon con || isUnboxedSumCon con))
@@ -723,9 +725,12 @@ unariseConArgBinders rho xs = second concat <$> mapAccumLM unariseConArgBinder r
 unariseConArgBinder :: UnariseEnv -> Id -> UniqSM (UnariseEnv, [Id])
 unariseConArgBinder = unariseArgBinder True
 
-unariseFreeVars :: UnariseEnv -> [InId] -> [OutId]
+unariseFreeVars :: UnariseEnv -> IdSet -> IdSet
 unariseFreeVars rho fvs
- = [ v | fv <- fvs, StgVarArg v <- unariseFreeVar rho fv ]
+ -- It's OK to use nonDetEltsUniqSet here because we're not aiming for
+ -- bit-for-bit determinism.
+ -- See Note [Unique Determinism and code generation]
+ = mkVarSet [ v | fv <- nonDetEltsUniqSet fvs, StgVarArg v <- unariseFreeVar rho fv ]
    -- Notice that we filter out any StgLitArgs
    -- e.g.   case e of (x :: (# Int | Bool #))
    --           (# v | #) ->  ... let {g = \y. ..x...} in ...
