@@ -310,7 +310,7 @@ coreTopBindToStg dflags this_mod env body_fvs ccs (Rec pairs)
 -- what CoreToStg has figured out about the binding's SRT.  The
 -- CafInfo will be exact in all cases except when CorePrep has
 -- floated out a binding, in which case it will be approximate.
-consistentCafInfo :: Id -> GenStgTopBinding Var Id -> Bool
+consistentCafInfo :: Id -> StgTopBinding -> Bool
 consistentCafInfo id bind
   = WARN( not (exact || is_sat_thing) , ppr id <+> ppr id_marked_caffy <+> ppr binding_is_caffy )
     safe
