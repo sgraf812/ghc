@@ -137,10 +137,10 @@ emptyEnv dflags = Env dflags emptySubst emptyVarEnv False
 -- business and will just manipulate it indirectly through actions in 'LiftM'.
 
 -- | We need to detect when we are lifting something out of the RHS of a
--- recursive binding (c.f. #floats), in which case that binding needs to be
--- added to the same top-level recursive group. This requires we detect a
--- certain nesting structure, which is encoded by 'StartBindingGroup' and
--- 'EndBindingGroup'.
+-- recursive binding (c.f. "StgLiftLams.LiftM#floats"), in which case that
+-- binding needs to be added to the same top-level recursive group. This
+-- requires we detect a certain nesting structure, which is encoded by
+-- 'StartBindingGroup' and 'EndBindingGroup'.
 --
 -- Although 'collectFloats' will only ever care if the current binding to be
 -- lifted (through 'LiftedBinding') will occur inside such a binding group or
