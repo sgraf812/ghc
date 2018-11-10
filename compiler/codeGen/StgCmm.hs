@@ -31,7 +31,6 @@ import CmmUtils
 import CLabel
 
 import StgSyn
-import StgFVs ( annTopBindingsFreeVars )
 import DynFlags
 
 import HscTypes
@@ -60,7 +59,7 @@ codeGen :: DynFlags
         -> Module
         -> [TyCon]
         -> CollectedCCs                -- (Local/global) cost-centres needing declaring/registering.
-        -> [StgTopBinding]             -- Bindings to convert
+        -> [CgStgTopBinding]           -- Bindings to convert
         -> HpcInfo
         -> Stream IO CmmGroup ()       -- Output as a stream, so codegen can
                                        -- be interleaved with output
@@ -90,8 +89,7 @@ codeGen dflags this_mod data_tycons
                -- Note [pipeline-split-init].
         ; cg (mkModuleInit cost_centre_info this_mod hpc_info)
 
-        ; let stg_binds_w_fvs = annTopBindingsFreeVars const stg_binds
-        ; mapM_ (cg . cgTopBinding dflags) stg_binds_w_fvs
+        ; mapM_ (cg . cgTopBinding dflags) stg_binds
 
                 -- Put datatype_stuff after code_stuff, because the
                 -- datatype closure table (for enumeration types) to
@@ -121,7 +119,7 @@ This is so that we can write the top level processing in a compositional
 style, with the increasing static environment being plumbed as a state
 variable. -}
 
-cgTopBinding :: DynFlags -> StgTopBinding -> FCode ()
+cgTopBinding :: DynFlags -> CgStgTopBinding -> FCode ()
 cgTopBinding dflags (StgTopLifted (StgNonRec id rhs))
   = do  { id' <- maybeExternaliseId dflags id
         ; let (info, fcode) = cgTopRhs dflags NonRecursive id' rhs
@@ -148,7 +146,7 @@ cgTopBinding dflags (StgTopStringLit id str)
         ; addBindC (litIdInfo dflags id' mkLFStringLit lit)
         }
 
-cgTopRhs :: DynFlags -> RecFlag -> Id -> StgRhs -> (CgIdInfo, FCode ())
+cgTopRhs :: DynFlags -> RecFlag -> Id -> CgStgRhs -> (CgIdInfo, FCode ())
         -- The Id is passed along for setting up a binding...
         -- It's already been externalised if necessary
 

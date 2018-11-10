@@ -32,7 +32,6 @@ import IdInfo
 import DataCon
 import CostCentre
 import VarEnv
-import VarSet
 import Module
 import Name             ( isExternalName, nameOccName, nameModule_maybe )
 import OccName          ( occNameFS )
@@ -47,7 +46,6 @@ import DynFlags
 import ForeignCall
 import Demand           ( isUsedOnce )
 import PrimOp           ( PrimCall(..) )
-import UniqFM
 import SrcLoc           ( mkGeneralSrcSpan )
 
 import Data.List.NonEmpty (nonEmpty, toList)
@@ -333,7 +331,7 @@ coreToTopStgRhs dflags ccs this_mod (bndr, rhs)
   = do { (new_rhs, rhs_fvs) <- coreToStgExpr rhs
 
        ; let (stg_rhs, ccs') =
-               mkTopStgRhs dflags this_mod ccs rhs_fvs bndr new_rhs
+               mkTopStgRhs dflags this_mod ccs bndr new_rhs
              stg_arity =
                stgRhsArity stg_rhs
 
@@ -726,18 +724,17 @@ coreToStgRhs :: (Id,CoreExpr)
 
 coreToStgRhs (bndr, rhs) = do
     (new_rhs, rhs_fvs) <- coreToStgExpr rhs
-    return (mkStgRhs rhs_fvs bndr new_rhs, rhs_fvs)
+    return (mkStgRhs bndr new_rhs, rhs_fvs)
 
 -- Generate a top-level RHS. Any new cost centres generated for CAFs will be
 -- appended to `CollectedCCs` argument.
 mkTopStgRhs :: DynFlags -> Module -> CollectedCCs
-            -> FreeVarsInfo -> Id -> StgExpr
-            -> (StgRhs, CollectedCCs)
+            -> Id -> StgExpr -> (StgRhs, CollectedCCs)
 
-mkTopStgRhs dflags this_mod ccs rhs_fvs bndr rhs
+mkTopStgRhs dflags this_mod ccs bndr rhs
   | StgLam bndrs body <- rhs
   = -- StgLam can't have empty arguments, so not CAF
-    ( StgRhsClosure (getFVs rhs_fvs)
+    ( StgRhsClosure noExtSilent
                     dontCareCCS
                     ReEntrant
                     (toList bndrs) body
@@ -753,13 +750,13 @@ mkTopStgRhs dflags this_mod ccs rhs_fvs bndr rhs
 
   -- Otherwise it's a CAF, see Note [Cost-centre initialization plan].
   | gopt Opt_AutoSccsOnIndividualCafs dflags
-  = ( StgRhsClosure (getFVs rhs_fvs)
+  = ( StgRhsClosure noExtSilent
                     caf_ccs
                     upd_flag [] rhs
     , collectCC caf_cc caf_ccs ccs )
 
   | otherwise
-  = ( StgRhsClosure (getFVs rhs_fvs)
+  = ( StgRhsClosure noExtSilent
                     all_cafs_ccs
                     upd_flag [] rhs
     , ccs )
@@ -784,17 +781,17 @@ mkTopStgRhs dflags this_mod ccs rhs_fvs bndr rhs
 
 -- Generate a non-top-level RHS. Cost-centre is always currentCCS,
 -- see Note [Cost-centre initialzation plan].
-mkStgRhs :: FreeVarsInfo -> Id -> StgExpr -> StgRhs
-mkStgRhs rhs_fvs bndr rhs
+mkStgRhs :: Id -> StgExpr -> StgRhs
+mkStgRhs bndr rhs
   | StgLam bndrs body <- rhs
-  = StgRhsClosure (getFVs rhs_fvs)
+  = StgRhsClosure noExtSilent
                   currentCCS
                   ReEntrant
                   (toList bndrs) body
 
   | isJoinId bndr -- must be a nullary join point
   = ASSERT(idJoinArity bndr == 0)
-    StgRhsClosure (getFVs rhs_fvs)
+    StgRhsClosure noExtSilent
                   currentCCS
                   ReEntrant -- ignored for LNE
                   [] rhs
@@ -803,7 +800,7 @@ mkStgRhs rhs_fvs bndr rhs
   = StgRhsCon currentCCS con args
 
   | otherwise
-  = StgRhsClosure (getFVs rhs_fvs)
+  = StgRhsClosure noExtSilent
                   currentCCS
                   upd_flag [] rhs
   where
@@ -891,11 +888,6 @@ data LetInfo
   = TopLet              -- top level things
   | NestedLet
   deriving (Eq)
-
-topLevelBound :: HowBound -> Bool
-topLevelBound ImportBound         = True
-topLevelBound (LetBound TopLet _) = True
-topLevelBound _                   = False
 
 -- For a let(rec)-bound variable, x, we record LiveInfo, the set of
 -- variables that are live if x is live.  This LiveInfo comprises
@@ -1003,14 +995,6 @@ minusFVBinder v fv = fv `delVarEnv` v
 
 elementOfFVInfo :: Id -> FreeVarsInfo -> Bool
 elementOfFVInfo id fvs = isJust (lookupVarEnv fvs id)
-
--- Non-top-level things only, both type variables and ids
-getFVs :: FreeVarsInfo -> IdSet
-getFVs fvs = mkVarSet [id | (id, how_bound) <- nonDetEltsUFM fvs,
-  -- It's OK to use nonDetEltsUFM here because we're not aiming for
-  -- bit-for-bit determinism.
-  -- See Note [Unique Determinism and code generation]
-                             not (topLevelBound how_bound) ]
 
 plusFVInfo :: (Var, HowBound)
            -> (Var, HowBound)

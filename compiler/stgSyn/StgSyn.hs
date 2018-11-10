@@ -27,8 +27,11 @@ module StgSyn (
 
         UpdateFlag(..), isUpdatable,
 
-        -- a set of synonyms for the most common (only :-) parameterisation
+        -- a set of synonyms for the vanilla parameterisation
         StgTopBinding, StgBinding, StgExpr, StgRhs, StgAlt,
+
+        -- a set of synonyms for the code gen parameterisation
+        CgStgTopBinding, CgStgBinding, CgStgExpr, CgStgRhs, CgStgAlt,
 
         -- a set of synonyms to distinguish in- and out variants
         InStgArg,  InStgTopBinding,  InStgBinding,  InStgExpr,  InStgRhs,  InStgAlt,
@@ -156,7 +159,7 @@ stgArgType (StgLitArg lit) = literalType lit
 
 
 -- | Strip ticks of a given type from an STG expression
-stripStgTicksTop :: (Tickish Id -> Bool) -> StgExpr -> ([Tickish Id], StgExpr)
+stripStgTicksTop :: (Tickish Id -> Bool) -> GenStgExpr p -> ([Tickish Id], GenStgExpr p)
 stripStgTicksTop p = go []
    where go ts (StgTick t e) | p t = go (t:ts) e
          go ts other               = (reverse ts, other)
@@ -580,11 +583,17 @@ data AltType
 This happens to be the only one we use at the moment.
 -}
 
-type StgTopBinding = GenStgTopBinding 'CodeGen
-type StgBinding  = GenStgBinding  'CodeGen
-type StgExpr     = GenStgExpr     'CodeGen
-type StgRhs      = GenStgRhs      'CodeGen
-type StgAlt      = GenStgAlt      'CodeGen
+type StgTopBinding = GenStgTopBinding 'Vanilla
+type StgBinding    = GenStgBinding    'Vanilla
+type StgExpr       = GenStgExpr       'Vanilla
+type StgRhs        = GenStgRhs        'Vanilla
+type StgAlt        = GenStgAlt        'Vanilla
+
+type CgStgTopBinding = GenStgTopBinding 'CodeGen
+type CgStgBinding    = GenStgBinding    'CodeGen
+type CgStgExpr       = GenStgExpr       'CodeGen
+type CgStgRhs        = GenStgRhs        'CodeGen
+type CgStgAlt        = GenStgAlt        'CodeGen
 
 {- Many passes apply a substitution, and it's very handy to have type
    synonyms to remind us whether or not the substitution has been applied.

@@ -33,7 +33,6 @@ import StgSyn
 
 import Id (Id)
 import Panic
-import VarSet ( sizeVarSet )
 
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -66,9 +65,6 @@ combineSEs = foldr combineSE emptySE
 
 countOne :: CounterType -> StatEnv
 countOne c = Map.singleton c 1
-
-countN :: CounterType -> Int -> StatEnv
-countN = Map.singleton
 
 {-
 ************************************************************************
@@ -132,9 +128,8 @@ statRhs :: Bool -> (Id, StgRhs) -> StatEnv
 statRhs top (_, StgRhsCon _ _ _)
   = countOne (ConstructorBinds top)
 
-statRhs top (_, StgRhsClosure fv _ u _ body)
+statRhs top (_, StgRhsClosure _ _ u _ body)
   = statExpr body                        `combineSE`
-    countN FreeVariables (sizeVarSet fv) `combineSE`
     countOne (
       case u of
         ReEntrant   -> ReEntrantBinds   top
