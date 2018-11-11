@@ -1,4 +1,6 @@
+-- | Free variable analysis on STG terms.
 module StgFVs (
+    XRhsClosureUpdate,
     annTopBindingsFreeVars,
     annBindingFreeVars,
     annExprFreeVars,
@@ -17,6 +19,10 @@ import Util
 
 import Data.Maybe ( mapMaybe )
 
+-- | A function that merges free variable information into a
+-- 'XRhsClosure' for a specific pass. For example, 'const'
+-- is a useful @XRhsClosureUpdate 'Vanilla 'CodeGen@ to turn
+-- 'StgRhsClosure's into 'CGStgRhsClosure'.
 type XRhsClosureUpdate p1 p2 = IdSet -> XRhsClosure p1 -> XRhsClosure p2
 
 data Env p1 p2
@@ -27,7 +33,12 @@ data Env p1 p2
 
 emptyEnv :: XRhsClosureUpdate p1 p2 -> Env p1 p2
 emptyEnv u = Env u emptyVarSet
-  
+
+addLocals :: [Id] -> Env p1 p2 -> Env p1 p2
+addLocals bndrs env
+  = env { locals = extendVarSetList (locals env) bndrs }
+
+-- | Annotates a top-level STG binding with its free variables.
 annTopBindingsFreeVars :: XRhsClosureUpdate p1 p2 -> [GenStgTopBinding p1] -> [GenStgTopBinding p2]
 annTopBindingsFreeVars u = map go
   where
@@ -35,25 +46,25 @@ annTopBindingsFreeVars u = map go
     go (StgTopLifted bind)
       = StgTopLifted (fst (binding (emptyEnv u) emptyVarSet bind))
 
+-- | Annotates an STG binding with its free variables.
 annBindingFreeVars :: XRhsClosureUpdate p1 p2 -> IdSet -> GenStgBinding p1 -> GenStgBinding p2
 annBindingFreeVars u body_fvs = fst . binding (emptyEnv u) body_fvs
 
+-- | Annotates an STG expression with its free variables.
 annExprFreeVars :: XRhsClosureUpdate p1 p2 -> GenStgExpr p1 -> GenStgExpr p2
 annExprFreeVars u = fst . expr (emptyEnv u)
 
+-- | Annotates an STG right-hand side with its free variables.
 annRhsFreeVars :: XRhsClosureUpdate p1 p2 -> GenStgRhs p1 -> GenStgRhs p2
 annRhsFreeVars u = fst . rhs (emptyEnv u)
 
+-- | Annotates an STG closure with its free variables.
 annAltFreeVars :: XRhsClosureUpdate p1 p2 -> GenStgAlt p1 -> GenStgAlt p2
 annAltFreeVars u = fst . alt (emptyEnv u)
 
 boundIds :: GenStgBinding p -> [Id]
 boundIds (StgNonRec b _) = [b]
 boundIds (StgRec pairs)  = map fst pairs
-
-addLocals :: [Id] -> Env p1 p2 -> Env p1 p2
-addLocals bndrs env
-  = env { locals = extendVarSetList (locals env) bndrs }
 
 -- Note [Tracking local binders]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
