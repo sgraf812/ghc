@@ -1427,7 +1427,7 @@ doCodeGen hsc_env this_mod data_tycons
               cost_centre_info stg_binds hpc_info = do
     let dflags = hsc_dflags hsc_env
 
-    let stg_binds_w_fvs = annTopBindingsFreeVars const stg_binds
+    let stg_binds_w_fvs = annTopBindingsFreeVars stg_binds
     let cmm_stream :: Stream IO CmmGroup ()
         cmm_stream = {-# SCC "StgCmm" #-}
             StgCmm.codeGen dflags this_mod data_tycons

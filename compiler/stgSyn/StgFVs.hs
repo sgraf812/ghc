@@ -1,11 +1,6 @@
 -- | Free variable analysis on STG terms.
 module StgFVs (
-    XRhsClosureUpdate,
-    annTopBindingsFreeVars,
-    annBindingFreeVars,
-    annExprFreeVars,
-    annRhsFreeVars,
-    annAltFreeVars
+    annTopBindingsFreeVars
   ) where
 
 import GhcPrelude
@@ -19,50 +14,27 @@ import Util
 
 import Data.Maybe ( mapMaybe )
 
--- | A function that merges free variable information into a
--- 'XRhsClosure' for a specific pass. For example, 'const'
--- is a useful @XRhsClosureUpdate 'Vanilla 'CodeGen@ to turn
--- 'StgRhsClosure's into 'CGStgRhsClosure'.
-type XRhsClosureUpdate p1 p2 = IdSet -> XRhsClosure p1 -> XRhsClosure p2
-
-data Env p1 p2
+newtype Env
   = Env
-  { updater :: XRhsClosureUpdate p1 p2
-  , locals :: IdSet
+  { locals :: IdSet
   }
 
-emptyEnv :: XRhsClosureUpdate p1 p2 -> Env p1 p2
-emptyEnv u = Env u emptyVarSet
+emptyEnv :: Env
+emptyEnv = Env emptyVarSet
 
-addLocals :: [Id] -> Env p1 p2 -> Env p1 p2
+addLocals :: [Id] -> Env -> Env
 addLocals bndrs env
   = env { locals = extendVarSetList (locals env) bndrs }
 
 -- | Annotates a top-level STG binding with its free variables.
-annTopBindingsFreeVars :: XRhsClosureUpdate p1 p2 -> [GenStgTopBinding p1] -> [GenStgTopBinding p2]
-annTopBindingsFreeVars u = map go
+annTopBindingsFreeVars :: [StgTopBinding] -> [CgStgTopBinding]
+annTopBindingsFreeVars = map go
   where
     go (StgTopStringLit id bs) = StgTopStringLit id bs
     go (StgTopLifted bind)
-      = StgTopLifted (fst (binding (emptyEnv u) emptyVarSet bind))
+      = StgTopLifted (fst (binding emptyEnv emptyVarSet bind))
 
--- | Annotates an STG binding with its free variables.
-annBindingFreeVars :: XRhsClosureUpdate p1 p2 -> IdSet -> GenStgBinding p1 -> GenStgBinding p2
-annBindingFreeVars u body_fvs = fst . binding (emptyEnv u) body_fvs
-
--- | Annotates an STG expression with its free variables.
-annExprFreeVars :: XRhsClosureUpdate p1 p2 -> GenStgExpr p1 -> GenStgExpr p2
-annExprFreeVars u = fst . expr (emptyEnv u)
-
--- | Annotates an STG right-hand side with its free variables.
-annRhsFreeVars :: XRhsClosureUpdate p1 p2 -> GenStgRhs p1 -> GenStgRhs p2
-annRhsFreeVars u = fst . rhs (emptyEnv u)
-
--- | Annotates an STG closure with its free variables.
-annAltFreeVars :: XRhsClosureUpdate p1 p2 -> GenStgAlt p1 -> GenStgAlt p2
-annAltFreeVars u = fst . alt (emptyEnv u)
-
-boundIds :: GenStgBinding p -> [Id]
+boundIds :: StgBinding -> [Id]
 boundIds (StgNonRec b _) = [b]
 boundIds (StgRec pairs)  = map fst pairs
 
@@ -81,16 +53,16 @@ boundIds (StgRec pairs)  = map fst pairs
 --      knot-tying.
 
 -- | This makes sure that only local, non-global free vars make it into the set.
-mkFreeVarSet :: Env p1 p2 -> [Id] -> IdSet
+mkFreeVarSet :: Env -> [Id] -> IdSet
 mkFreeVarSet env = mkVarSet . filter (`elemVarSet` locals env)
 
-args :: Env p1 p2 -> [StgArg] -> IdSet
+args :: Env -> [StgArg] -> IdSet
 args env = mkFreeVarSet env . mapMaybe f
   where
     f (StgVarArg occ) = Just occ
     f _               = Nothing
 
-binding :: Env p1 p2 -> IdSet -> GenStgBinding p1 -> (GenStgBinding p2, IdSet)
+binding :: Env -> IdSet -> StgBinding -> (CgStgBinding, IdSet)
 binding env body_fv (StgNonRec bndr r) = (StgNonRec bndr r', fvs)
   where
     -- See Note [Tacking local binders]
@@ -104,7 +76,7 @@ binding env body_fv (StgRec pairs) = (StgRec pairs', fvs)
     pairs' = zip bndrs rhss
     fvs = delVarSetList (unionVarSets (body_fv:rhs_fvss)) bndrs
 
-expr :: Env p1 p2 -> GenStgExpr p1 -> (GenStgExpr p2, IdSet)
+expr :: Env -> StgExpr -> (CgStgExpr, IdSet)
 expr env = go
   where
     go (StgApp occ as)
@@ -135,16 +107,16 @@ expr env = go
         (body', body_fvs) = expr env' body
         (bind', fvs) = binding env' body_fvs bind
 
-rhs :: Env p1 p2 -> GenStgRhs p1 -> (GenStgRhs p2, IdSet)
-rhs env (StgRhsClosure ext ccs uf bndrs body)
-  = (StgRhsClosure (updater env fvs ext) ccs uf bndrs body', fvs)
+rhs :: Env -> StgRhs -> (CgStgRhs, IdSet)
+rhs env (StgRhsClosure _ ccs uf bndrs body)
+  = (StgRhsClosure fvs ccs uf bndrs body', fvs)
   where
     -- See Note [Tacking local binders]
     (body', body_fvs) = expr (addLocals bndrs env) body
     fvs = delVarSetList body_fvs bndrs
 rhs env (StgRhsCon ccs dc as) = (StgRhsCon ccs dc as, args env as)
 
-alt :: Env p1 p2 -> GenStgAlt p1 -> (GenStgAlt p2, IdSet)
+alt :: Env -> StgAlt -> (CgStgAlt, IdSet)
 alt env (con, bndrs, e) = ((con, bndrs, e'), fvs)
   where
     -- See Note [Tacking local binders]
