@@ -5,7 +5,6 @@ module StgFVs (
 
 import GhcPrelude
 
-import BasicTypes
 import StgSyn
 import Id
 import VarSet
@@ -86,21 +85,13 @@ expr env = go
     go (StgConApp dc as tys) = (StgConApp dc as tys, args env as)
     go (StgOpApp op as ty) = (StgOpApp op as ty, args env as)
     go StgLam{} = pprPanic "StgFVs: StgLam" empty
-    go (StgCase scrut bndr ty alts) = (StgCase scrut' bndr' ty alts', fvs)
+    go (StgCase scrut bndr ty alts) = (StgCase scrut' bndr ty alts', fvs)
       where
         (scrut', scrut_fvs) = go scrut
         -- See Note [Tacking local binders]
         (alts', alt_fvss) = mapAndUnzip (alt (addLocals [bndr] env)) alts
         alt_fvs = unionVarSets alt_fvss
-        -- SG: I traced history from CoreToStg and it seems this was first
-        --     introduced in 0a4e3ee in 1999 in StgVarInfo, which was later
-        --     merged into CoreToStg.
-        -- Determine whether the default binder is dead or not
-        -- This helps the code generator to avoid generating an assignment
-        -- for the case binder (is extremely rare cases) ToDo: remove.
-        bndr' | bndr `elemVarSet` alt_fvs = bndr
-              | otherwise                  = bndr `setIdOccInfo` IAmDead
-        fvs = delVarSet (unionVarSet scrut_fvs alt_fvs) bndr'
+        fvs = delVarSet (unionVarSet scrut_fvs alt_fvs) bndr
     go (StgLet bind body) = go_bind StgLet bind body
     go (StgLetNoEscape bind body) = go_bind StgLetNoEscape bind body
     go (StgTick tick e) = (StgTick tick e', fvs')
