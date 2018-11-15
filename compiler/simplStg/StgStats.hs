@@ -129,7 +129,7 @@ statRhs top (_, StgRhsCon _ _ _)
   = countOne (ConstructorBinds top)
 
 statRhs top (_, StgRhsClosure _ _ u _ body)
-  = statExpr body                        `combineSE`
+  = statExpr body `combineSE`
     countOne (
       case u of
         ReEntrant   -> ReEntrantBinds   top
