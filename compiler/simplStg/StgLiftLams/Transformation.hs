@@ -12,6 +12,7 @@ import BasicTypes
 import DynFlags
 import Id
 import IdInfo
+import StgFVs ( annBindingFreeVars )
 import StgLiftLams.Analysis
 import StgLiftLams.LiftM
 import StgSyn
@@ -33,7 +34,8 @@ liftTopLvl (StgTopStringLit bndr lit) rest = withSubstBndr bndr $ \bndr' -> do
 liftTopLvl (StgTopLifted bind) rest = do
   let is_rec = isRec $ fst $ decomposeStgBinding bind
   when is_rec startBindingGroup
-  withLiftedBind TopLevel (tagSkeletonTopBind bind) $ \mb_bind' -> do
+  let bind_w_fvs = annBindingFreeVars bind
+  withLiftedBind TopLevel (tagSkeletonTopBind bind_w_fvs) NilSk $ \mb_bind' -> do
     -- We signal lifting of a binding through returning Nothing.
     -- Should never happen for a top-level binding, though, since we are already
     -- at top-level.
@@ -43,8 +45,13 @@ liftTopLvl (StgTopLifted bind) rest = do
     when is_rec endBindingGroup
     rest
 
-withLiftedBind :: TopLevelFlag -> StgBindingSkel -> (Maybe OutStgBinding -> LiftM a) -> LiftM a
-withLiftedBind top_lvl bind k
+withLiftedBind
+  :: TopLevelFlag
+  -> LlStgBinding
+  -> Skeleton
+  -> (Maybe OutStgBinding -> LiftM a)
+  -> LiftM a
+withLiftedBind top_lvl bind scope k
   | isTopLevel top_lvl
   = withCaffyness (is_caffy pairs) go
   | otherwise
@@ -52,20 +59,21 @@ withLiftedBind top_lvl bind k
   where
     (rec, pairs) = decomposeStgBinding bind
     is_caffy = any (mayHaveCafRefs . idCafInfo . binderInfoBndr . fst)
-    go = withLiftedBindPairs top_lvl rec pairs (k . fmap (mkStgBinding rec))
+    go = withLiftedBindPairs top_lvl rec pairs scope (k . fmap (mkStgBinding rec))
 
 withLiftedBindPairs
   :: TopLevelFlag
   -> RecFlag
-  -> [(BinderInfo, StgRhsSkel)]
+  -> [(BinderInfo, LlStgRhs)]
+  -> Skeleton
   -> (Maybe [(Id, OutStgRhs)] -> LiftM a)
   -> LiftM a
-withLiftedBindPairs top rec pairs k = do
+withLiftedBindPairs top rec pairs scope k = do
   let (infos, rhss) = unzip pairs
   let bndrs = map binderInfoBndr infos
   expander <- liftedIdsExpander
   dflags <- getDynFlags
-  case goodToLift dflags top rec expander pairs of
+  case goodToLift dflags top rec expander pairs scope of
     -- @abs_ids@ is the set of all variables that need to become parameters.
     Just abs_ids -> withLiftedBndrs abs_ids bndrs $ \bndrs' -> do
       -- Within this block, all binders in @bndrs@ will be noted as lifted, so
@@ -91,24 +99,20 @@ liftRhs
   :: Maybe (DIdSet)
   -- ^ @Just former_fvs@ <=> this RHS was lifted and we have to add @former_fvs@
   -- as lambda binders, discarding all free vars.
-  -> StgRhsSkel
+  -> LlStgRhs
   -> LiftM OutStgRhs
 liftRhs mb_former_fvs rhs@(StgRhsCon ccs con args)
   = ASSERT2 ( isNothing mb_former_fvs, text "Should never lift a constructor" $$ ppr rhs)
     StgRhsCon ccs con <$> traverse liftArgs args
-liftRhs Nothing (StgRhsClosure ccs bi fvs upd infos body) = do
-  -- This RHS wasn't lifted. We have to expand (not just substitute) the fvs
-  -- nonetheless.
-  expander <- liftedIdsExpander
-  let fvs' = dVarSetElems (expander (mkDVarSet fvs))
+liftRhs Nothing (StgRhsClosure _ ccs upd infos body) = do
+  -- This RHS wasn't lifted.
+  withSubstBndrs (map binderInfoBndr infos) $ \bndrs' ->
+    StgRhsClosure noExtSilent ccs upd bndrs' <$> liftExpr body
+liftRhs (Just former_fvs) (StgRhsClosure _ ccs upd infos body) = do
+  -- This RHS was lifted. Insert extra binders for @former_fvs@.
   withSubstBndrs (map binderInfoBndr infos) $ \bndrs' -> do
-    body' <- liftExpr body
-    pure (StgRhsClosure ccs bi fvs' upd bndrs' body')
-liftRhs (Just former_fvs) (StgRhsClosure ccs bi _ upd infos body) = do
-  -- This RHS was lifted. Discard @fvs@, insert extra binders for @former_fvs@.
-  withSubstBndrs (map binderInfoBndr infos) $ \bndrs' -> do
-    body' <- liftExpr body
-    pure (StgRhsClosure ccs bi [] upd (dVarSetElems former_fvs ++ bndrs') body')
+    let bndrs'' = dVarSetElems former_fvs ++ bndrs'
+    StgRhsClosure noExtSilent ccs upd bndrs'' <$> liftExpr body
 
 liftArgs :: InStgArg -> LiftM OutStgArg
 liftArgs a@(StgLitArg _) = pure a
@@ -116,7 +120,7 @@ liftArgs (StgVarArg occ) = do
   ASSERTM2( not <$> isLifted occ, text "StgArgs should never be lifted" $$ ppr occ )
   StgVarArg <$> substOcc occ
 
-liftExpr :: StgExprSkel -> LiftM OutStgExpr
+liftExpr :: LlStgExpr -> LiftM OutStgExpr
 liftExpr (StgLit lit) = pure (StgLit lit)
 liftExpr (StgTick t e) = StgTick t <$> liftExpr e
 liftExpr (StgApp f args) = do
@@ -133,17 +137,19 @@ liftExpr (StgCase scrut info ty alts) = do
   withSubstBndr (binderInfoBndr info) $ \bndr' -> do
     alts' <- traverse liftAlt alts
     pure (StgCase scrut' bndr' ty alts')
-liftExpr (StgLet bind body) = withLiftedBind NotTopLevel bind $ \mb_bind' -> do
-  body' <- liftExpr body
-  case mb_bind' of
-    Nothing -> pure body' -- withLiftedBindPairs decided to lift it and already added floats
-    Just bind' -> pure (StgLet bind' body')
-liftExpr (StgLetNoEscape bind body) = withLiftedBind NotTopLevel bind $ \mb_bind' -> do
-  body' <- liftExpr body
-  case mb_bind' of
-    Nothing -> pprPanic "stgLiftLams" (text "Should never decide to lift LNEs")
-    Just bind' -> pure (StgLetNoEscape bind' body')
+liftExpr (StgLet scope bind body)
+  = withLiftedBind NotTopLevel bind scope $ \mb_bind' -> do
+      body' <- liftExpr body
+      case mb_bind' of
+        Nothing -> pure body' -- withLiftedBindPairs decided to lift it and already added floats
+        Just bind' -> pure (StgLet noExtSilent bind' body')
+liftExpr (StgLetNoEscape scope bind body)
+  = withLiftedBind NotTopLevel bind scope $ \mb_bind' -> do
+      body' <- liftExpr body
+      case mb_bind' of
+        Nothing -> pprPanic "stgLiftLams" (text "Should never decide to lift LNEs")
+        Just bind' -> pure (StgLetNoEscape noExtSilent bind' body')
 
-liftAlt :: StgAltSkel -> LiftM OutStgAlt
+liftAlt :: LlStgAlt -> LiftM OutStgAlt
 liftAlt (con, infos, rhs) = withSubstBndrs (map binderInfoBndr infos) $ \bndrs' ->
   (,,) con bndrs' <$> liftExpr rhs

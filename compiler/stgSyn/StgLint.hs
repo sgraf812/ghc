@@ -120,7 +120,7 @@ lint_binds_help top_lvl (binder, rhs)
 -- | Top-level bindings can't inherit the cost centre stack from their
 -- (static) allocation site.
 checkNoCurrentCCS :: StgRhs -> LintM ()
-checkNoCurrentCCS (StgRhsClosure ccs _ _ _ _ _)
+checkNoCurrentCCS (StgRhsClosure _ ccs _ _ _)
   | isCurrentCCS ccs
   = addErrL (text "Top-level StgRhsClosure with CurrentCCS")
 checkNoCurrentCCS (StgRhsCon ccs _ _)
@@ -169,13 +169,13 @@ lintStgExpr (StgOpApp _ args _) =
 lintStgExpr lam@(StgLam _ _) =
     addErrL (text "Unexpected StgLam" <+> ppr lam)
 
-lintStgExpr (StgLet binds body) = do
+lintStgExpr (StgLet _ binds body) = do
     binders <- lintStgBinds NotTopLevel binds
     addLoc (BodyOfLetRec binders) $
       addInScopeVars binders $
         lintStgExpr body
 
-lintStgExpr (StgLetNoEscape binds body) = do
+lintStgExpr (StgLetNoEscape _ binds body) = do
     binders <- lintStgBinds NotTopLevel binds
     addLoc (BodyOfLetRec binders) $
       addInScopeVars binders $

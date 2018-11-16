@@ -12,11 +12,11 @@ generation.
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ConstraintKinds #-}
 
 module StgSyn (
         StgArg(..),
@@ -24,7 +24,8 @@ module StgSyn (
         GenStgTopBinding(..), GenStgBinding(..), GenStgExpr(..), GenStgRhs(..),
         GenStgAlt, AltType(..),
 
-        StgPass(..), XRhsClosure, NoExtSilent, noExtSilent,
+        StgPass(..), BinderP, XRhsClosure, XLet, XLetNoEscape,
+        NoExtSilent, noExtSilent,
 
         UpdateFlag(..), isUpdatable,
 
@@ -33,6 +34,9 @@ module StgSyn (
 
         -- a set of synonyms for the code gen parameterisation
         CgStgTopBinding, CgStgBinding, CgStgExpr, CgStgRhs, CgStgAlt,
+
+        -- a set of synonyms for the lambda lifting parameterisation
+        LlStgTopBinding, LlStgBinding, LlStgExpr, LlStgRhs, LlStgAlt,
 
         -- a set of synonyms to distinguish in- and out variants
         InStgArg,  InStgTopBinding,  InStgBinding,  InStgExpr,  InStgRhs,  InStgAlt,
@@ -57,7 +61,6 @@ import GhcPrelude
 
 import CoreSyn     ( AltCon, Tickish )
 import CostCentre  ( CostCentreStack )
-import Data.Bifunctor
 import Data.ByteString ( ByteString )
 import Data.Data   ( Data )
 import Data.List   ( intersperse )
@@ -103,8 +106,8 @@ data GenStgTopBinding pass
   | StgTopStringLit Id ByteString
 
 data GenStgBinding pass
-  = StgNonRec Id (GenStgRhs pass)
-  | StgRec    [(Id, GenStgRhs pass)]
+  = StgNonRec (BinderP pass) (GenStgRhs pass)
+  | StgRec    [(BinderP pass, GenStgRhs pass)]
 
 {-
 ************************************************************************
@@ -117,7 +120,6 @@ data GenStgBinding pass
 data StgArg
   = StgVarArg  Id
   | StgLitArg  Literal
-  deriving Functor
 
 -- | Does this constructor application refer to
 -- anything in a different *Windows* DLL?
@@ -248,7 +250,7 @@ TODO: Encode this via an extension to GenStgExpr à la TTG.
 -}
 
   | StgLam
-        (NonEmpty Id)
+        (NonEmpty (BinderP pass))
         StgExpr    -- Body of lambda
 
 {-
@@ -262,13 +264,9 @@ This has the same boxed/unboxed business as Core case expressions.
 -}
 
   | StgCase
-        (GenStgExpr pass)
-                    -- the thing to examine
-
-        Id          -- binds the result of evaluating the scrutinee
-
+        (GenStgExpr pass) -- the thing to examine
+        (BinderP pass) -- binds the result of evaluating the scrutinee
         AltType
-
         [GenStgAlt pass]
                     -- The DEFAULT case is always *first*
                     -- if it is there at all
@@ -368,10 +366,12 @@ And so the code for let(rec)-things:
 -}
 
   | StgLet
+        (XLet pass)
         (GenStgBinding pass)    -- right hand sides (see below)
         (GenStgExpr pass)       -- body
 
   | StgLetNoEscape
+        (XLetNoEscape pass)
         (GenStgBinding pass)    -- right hand sides (see below)
         (GenStgExpr pass)       -- body
 
@@ -408,7 +408,7 @@ data GenStgRhs pass
                            --   list just before 'CodeGen'.
         CostCentreStack    -- ^ CCS to be attached (default is CurrentCCS)
         !UpdateFlag        -- ^ 'ReEntrant' | 'Updatable' | 'SingleEntry'
-        [Id]               -- ^ arguments; if empty, then not a function;
+        [BinderP pass]     -- ^ arguments; if empty, then not a function;
                            --   as above, order is important.
         (GenStgExpr pass)  -- ^ body
 
@@ -440,8 +440,9 @@ The second flavour of right-hand-side is for constructors (simple but important)
 
 -- | Used as a data type index for the stgSyn AST
 data StgPass
-  = CodeGen
-  | Vanilla
+  = Vanilla
+  | LiftLams
+  | CodeGen
 
 -- | Like 'HsExpression.NoExt', but with an 'Outputable' instance that returns
 -- 'empty'.
@@ -458,9 +459,24 @@ noExtSilent = NoExtSilent
 -- TODO: Maybe move this to HsExtensions? I'm not sure about the implications
 -- on build time...
 
-type family XRhsClosure (pass :: StgPass) where
-  XRhsClosure 'CodeGen = IdSet -- code gen needs to track non-global free vars
-  XRhsClosure 'Vanilla = NoExtSilent
+-- TODO: Do we really want to the extension point type families to have a closed
+-- domain?
+type family BinderP (pass :: StgPass)
+type instance BinderP 'Vanilla = Id
+type instance BinderP 'CodeGen = Id
+
+type family XRhsClosure (pass :: StgPass)
+type instance XRhsClosure 'Vanilla = NoExtSilent
+-- | Code gen needs to track non-global free vars
+type instance XRhsClosure 'CodeGen = DIdSet
+
+type family XLet (pass :: StgPass)
+type instance XLet 'Vanilla = NoExtSilent
+type instance XLet 'CodeGen = NoExtSilent
+
+type family XLetNoEscape (pass :: StgPass)
+type instance XLetNoEscape 'Vanilla = NoExtSilent
+type instance XLetNoEscape 'CodeGen = NoExtSilent
 
 stgRhsArity :: StgRhs -> Int
 stgRhsArity (StgRhsClosure _ _ _ bndrs _)
@@ -509,9 +525,9 @@ exprHasCafRefs (StgLam _ body)
   = exprHasCafRefs body
 exprHasCafRefs (StgCase scrt _ _ alts)
   = exprHasCafRefs scrt || any altHasCafRefs alts
-exprHasCafRefs (StgLet bind body)
+exprHasCafRefs (StgLet _ bind body)
   = bindHasCafRefs bind || exprHasCafRefs body
-exprHasCafRefs (StgLetNoEscape bind body)
+exprHasCafRefs (StgLetNoEscape _ bind body)
   = bindHasCafRefs bind || exprHasCafRefs body
 exprHasCafRefs (StgTick _ expr)
   = exprHasCafRefs expr
@@ -565,7 +581,7 @@ rather than from the scrutinee type.
 
 type GenStgAlt pass
   = (AltCon,          -- alts: data constructor,
-     [Id],            -- constructor's parameters,
+     [BinderP pass],  -- constructor's parameters,
      GenStgExpr pass) -- ...right-hand side.
 
 data AltType
@@ -591,6 +607,12 @@ type StgBinding    = GenStgBinding    'Vanilla
 type StgExpr       = GenStgExpr       'Vanilla
 type StgRhs        = GenStgRhs        'Vanilla
 type StgAlt        = GenStgAlt        'Vanilla
+
+type LlStgTopBinding = GenStgTopBinding 'LiftLams
+type LlStgBinding    = GenStgBinding    'LiftLams
+type LlStgExpr       = GenStgExpr       'LiftLams
+type LlStgRhs        = GenStgRhs        'LiftLams
+type LlStgAlt        = GenStgAlt        'LiftLams
 
 type CgStgTopBinding = GenStgTopBinding 'CodeGen
 type CgStgBinding    = GenStgBinding    'CodeGen
@@ -671,42 +693,6 @@ data StgOp
 {-
 ************************************************************************
 *                                                                      *
-\subsection[Mapping]{Mapping over binders and occurrences}
-*                                                                      *
-************************************************************************
--}
-
-instance Bifunctor GenStgTopBinding where
-  bimap f _ (StgTopStringLit bndr lit) = StgTopStringLit (f bndr) lit
-  bimap f g (StgTopLifted binding) = StgTopLifted (bimap f g binding)
-
-instance Bifunctor GenStgBinding where
-  bimap f g (StgNonRec bndr rhs) = StgNonRec (f bndr) (bimap f g rhs)
-  bimap f g (StgRec pairs) = StgRec (map (\(bndr, rhs) -> (f bndr, bimap f g rhs)) pairs)
-
-instance Bifunctor GenStgExpr where
-  bimap f g = go
-    where
-      go (StgApp fun args) = StgApp (g fun) (map (fmap g) args)
-      go (StgLit lit) = StgLit lit
-      go (StgConApp con args tys) = StgConApp con (map (fmap g) args) tys
-      go (StgOpApp op args ty) = StgOpApp op (map (fmap g) args) ty
-      go (StgLam bndrs body) = StgLam (fmap f bndrs) body
-      go (StgCase scrut bndr ty alts) = StgCase (go scrut) (f bndr) ty (map alt alts)
-        where
-          alt (con, bndrs, rhs) = (con, map f bndrs, go rhs)
-      go (StgLet bind body) = StgLet (bimap f g bind) (go body)
-      go (StgLetNoEscape bind body) = StgLetNoEscape (bimap f g bind) (go body)
-      go (StgTick t e) = StgTick t (go e)
-
-instance Bifunctor GenStgRhs where
-  bimap _ g (StgRhsCon ccs con args) = StgRhsCon ccs con (map (fmap g) args)
-  bimap f g (StgRhsClosure ccs sbi fvs upd bndrs body)
-    = StgRhsClosure ccs sbi (map g fvs) upd (map f bndrs) (bimap f g body)
-
-{-
-************************************************************************
-*                                                                      *
 \subsection[Stg-pretty-printing]{Pretty-printing}
 *                                                                      *
 ************************************************************************
@@ -715,8 +701,15 @@ Robin Popplestone asked for semi-colon separators on STG binds; here's
 hoping he likes terminators instead...  Ditto for case alternatives.
 -}
 
+type OutputablePass pass =
+  ( Outputable (XLet pass)
+  , Outputable (XLetNoEscape pass)
+  , Outputable (XRhsClosure pass)
+  , OutputableBndr (BinderP pass)
+  )
+
 pprGenStgTopBinding
-  :: Outputable (XRhsClosure pass) => GenStgTopBinding pass -> SDoc
+  :: OutputablePass pass => GenStgTopBinding pass -> SDoc
 pprGenStgTopBinding (StgTopStringLit bndr str)
   = hang (hsep [pprBndr LetBind bndr, equals])
         4 (pprHsBytes str <> semi)
@@ -724,7 +717,7 @@ pprGenStgTopBinding (StgTopLifted bind)
   = pprGenStgBinding bind
 
 pprGenStgBinding
-  :: (Outputable (XRhsClosure pass)) => GenStgBinding pass -> SDoc
+  :: OutputablePass pass => GenStgBinding pass -> SDoc
 
 pprGenStgBinding (StgNonRec bndr rhs)
   = hang (hsep [pprBndr LetBind bndr, equals])
@@ -748,27 +741,23 @@ pprStgTopBindings binds
 instance Outputable StgArg where
     ppr = pprStgArg
 
-instance (Outputable (XRhsClosure pass))
-                => Outputable (GenStgTopBinding pass) where
+instance OutputablePass pass => Outputable (GenStgTopBinding pass) where
     ppr = pprGenStgTopBinding
 
-instance (Outputable (XRhsClosure pass))
-                => Outputable (GenStgBinding pass) where
+instance OutputablePass pass => Outputable (GenStgBinding pass) where
     ppr = pprGenStgBinding
 
-instance (Outputable (XRhsClosure pass))
-                => Outputable (GenStgExpr pass) where
+instance OutputablePass pass => Outputable (GenStgExpr pass) where
     ppr = pprStgExpr
 
-instance (Outputable (XRhsClosure pass))
-                => Outputable (GenStgRhs pass) where
+instance OutputablePass pass => Outputable (GenStgRhs pass) where
     ppr rhs = pprStgRhs rhs
 
 pprStgArg :: StgArg -> SDoc
 pprStgArg (StgVarArg var) = ppr var
 pprStgArg (StgLitArg con) = ppr con
 
-pprStgExpr :: (Outputable (XRhsClosure pass)) => GenStgExpr pass -> SDoc
+pprStgExpr :: OutputablePass pass => GenStgExpr pass -> SDoc
 -- special case
 pprStgExpr (StgLit lit)     = ppr lit
 
@@ -812,19 +801,19 @@ pprStgExpr (StgLet srt (StgNonRec bndr (StgRhsClosure cc bi free_vars upd_flag a
 
 -- special case: let ... in let ...
 
-pprStgExpr (StgLet bind expr@(StgLet _ _))
+pprStgExpr (StgLet ext bind expr@StgLet{})
   = ($$)
-      (sep [hang (text "let {")
+      (sep [hang (text "let" <+> ppr ext <+> text "{")
                 2 (hsep [pprGenStgBinding bind, text "} in"])])
       (ppr expr)
 
 -- general case
-pprStgExpr (StgLet bind expr)
-  = sep [hang (text "let {") 2 (pprGenStgBinding bind),
+pprStgExpr (StgLet ext bind expr)
+  = sep [hang (text "let" <+> ppr ext <+> text "{") 2 (pprGenStgBinding bind),
            hang (text "} in ") 2 (ppr expr)]
 
-pprStgExpr (StgLetNoEscape bind expr)
-  = sep [hang (text "let-no-escape {")
+pprStgExpr (StgLetNoEscape ext bind expr)
+  = sep [hang (text "let-no-escape" <+> ppr ext <+> text "{")
                 2 (pprGenStgBinding bind),
            hang (text "} in ")
                 2 (ppr expr)]
@@ -844,7 +833,7 @@ pprStgExpr (StgCase expr bndr alt_type alts)
            nest 2 (vcat (map pprStgAlt alts)),
            char '}']
 
-pprStgAlt :: (Outputable (XRhsClosure pass)) => GenStgAlt pass -> SDoc
+pprStgAlt :: OutputablePass pass => GenStgAlt pass -> SDoc
 pprStgAlt (con, params, expr)
   = hang (hsep [ppr con, sep (map (pprBndr CasePatBind) params), text "->"])
          4 (ppr expr <> semi)
@@ -860,7 +849,7 @@ instance Outputable AltType where
   ppr (AlgAlt tc)     = text "Alg"    <+> ppr tc
   ppr (PrimAlt tc)    = text "Prim"   <+> ppr tc
 
-pprStgRhs :: (Outputable (XRhsClosure pass)) => GenStgRhs pass -> SDoc
+pprStgRhs :: OutputablePass pass => GenStgRhs pass -> SDoc
 
 -- special case
 pprStgRhs (StgRhsClosure ext cc upd_flag [{-no args-}] (StgApp func []))

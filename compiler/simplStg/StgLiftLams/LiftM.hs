@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE TypeFamilies #-}
 
 -- | Hides away distracting bookkeeping while lambda lifting into a 'LiftM'
 -- monad.
@@ -48,11 +49,11 @@ import Control.Monad.Trans.Cont ( ContT (..) )
 import Data.ByteString ( ByteString )
 
 -- | @uncurry 'mkStgBinding' . 'decomposeStgBinding' = id@
-decomposeStgBinding :: GenStgBinding bndr occ -> (RecFlag, [(bndr, GenStgRhs bndr occ)])
+decomposeStgBinding :: GenStgBinding pass -> (RecFlag, [(BinderP pass, GenStgRhs pass)])
 decomposeStgBinding (StgRec pairs) = (Recursive, pairs)
 decomposeStgBinding (StgNonRec bndr rhs) = (NonRecursive, [(bndr, rhs)])
 
-mkStgBinding :: RecFlag -> [(bndr, GenStgRhs bndr occ)] -> GenStgBinding bndr occ
+mkStgBinding :: RecFlag -> [(BinderP pass, GenStgRhs pass)] -> GenStgBinding pass
 mkStgBinding Recursive = StgRec
 mkStgBinding NonRecursive = uncurry StgNonRec . head
 
@@ -193,10 +194,10 @@ collectFloats = go (0 :: Int) []
 
 -- | Omitting this makes for strange closure allocation schemes that crash the
 -- GC.
-removeRhsCCCS :: GenStgRhs id occ -> GenStgRhs id occ
-removeRhsCCCS (StgRhsClosure ccs sbi fvs upd bndrs body)
+removeRhsCCCS :: GenStgRhs pass -> GenStgRhs pass
+removeRhsCCCS (StgRhsClosure ext ccs upd bndrs body)
   | isCurrentCCS ccs
-  = StgRhsClosure dontCareCCS sbi fvs upd bndrs body
+  = StgRhsClosure ext dontCareCCS upd bndrs body
 removeRhsCCCS (StgRhsCon ccs con args)
   | isCurrentCCS ccs
   = StgRhsCon dontCareCCS con args
