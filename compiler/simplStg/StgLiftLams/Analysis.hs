@@ -38,6 +38,7 @@ import VarSet
 import Data.Maybe ( mapMaybe )
 
 -- Note [When to lift]
+-- ~~~~~~~~~~~~~~~~~~~
 -- $when
 -- The analysis proceeds in two steps:
 --
@@ -83,6 +84,7 @@ import Data.Maybe ( mapMaybe )
 -- some more background and history.
 
 -- Note [Estimating closure growth]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 -- $clogro
 -- We estimate closure growth by abstracting the syntax tree into a 'Skeleton',
 -- capturing only syntactic details relevant to 'closureGrowth', such as
