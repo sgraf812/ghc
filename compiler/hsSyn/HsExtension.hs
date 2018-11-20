@@ -65,19 +65,6 @@ instance Outputable NoExt where
 noExt :: NoExt
 noExt = NoExt
 
--- | Like 'HsExpression.NoExt', but with an 'Outputable' instance that returns
--- 'empty'.
-data NoExtSilent = NoExtSilent
-  deriving (Data, Eq, Ord)
-
-instance Outputable NoExtSilent where
-  ppr _ = empty
-
--- | Used when constructing a term with an unused extension point that should
--- not appear in pretty-printed output at all.
-noExtSilent :: NoExtSilent
-noExtSilent = NoExtSilent
-
 -- | Used as a data type index for the hsSyn AST
 data GhcPass (c :: Pass)
 deriving instance Eq (GhcPass c)
