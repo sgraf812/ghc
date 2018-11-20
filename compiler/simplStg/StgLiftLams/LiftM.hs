@@ -7,7 +7,7 @@
 module StgLiftLams.LiftM (
     decomposeStgBinding, mkStgBinding,
     Env (..),
-    -- * Handling floats
+    -- * #floats# Handling floats
     -- $floats
     FloatLang (..), collectFloats, -- Exported just for the docs
     -- * Transformation monad
@@ -94,7 +94,6 @@ emptyEnv dflags = Env dflags emptySubst emptyVarEnv False
 -- Note [Handling floats]
 -- ~~~~~~~~~~~~~~~~~~~~~~
 -- $floats
--- #floats#
 -- Consider the following expression:
 --
 -- @
