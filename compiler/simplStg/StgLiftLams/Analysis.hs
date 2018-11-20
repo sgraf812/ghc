@@ -43,15 +43,16 @@ import Data.Maybe ( mapMaybe )
 -- The analysis proceeds in two steps:
 --
 --   1. It tags the syntax tree with analysis information in the form of
---      'BinderInfo' by 'tagSkeletonTopBind' and friends. This provides
---      'LetBoundInfo's for all let-bindings, contributing 'lbi_rhs' (See
---      "StgLiftLams.Analysis#clogro") and 'lbi_occurs_as_arg' for 'goodToLift'.
+--      'BinderInfo' at each binder and 'Skeleton's at each let-binding
+--      by 'tagSkeletonTopBind' and friends.
 --   2. The resulting syntax tree is treated by the "StgLiftLams.Transformation"
 --      module, calling out to 'goodToLift' to decide if a binding is worthwhile
 --      to lift.
+--      'goodToLift' consults argument occurrence information in 'BinderInfo'
+--      and estimates 'closureGrowth', for which it needs the 'Skeleton'.
 --
--- So the annotations from 'tagSkeletonTopBind' fuel 'goodToLift', which
--- employs a number of heuristics to identify and exclude lambda lifting
+-- So the annotations from 'tagSkeletonTopBind' ultimately fuel 'goodToLift',
+-- which employs a number of heuristics to identify and exclude lambda lifting
 -- opportunities deemed non-beneficial:
 --
 --  [Top-level bindings] can't be lifted.
@@ -60,7 +61,7 @@ import Data.Maybe ( mapMaybe )
 --  [Argument occurrences] #arg_occs# of binders prohibit them to be lifted.
 --    Doing the lift would re-introduce the very allocation at call sites that
 --    we tried to get rid off in the first place. We capture analysis
---    information in 'lbi_occurs_as_arg'. Note that we also consider a nullary
+--    information in 'BinderInfo'. Note that we also consider a nullary
 --    application as argument occurrence, because it would turn into an n-ary
 --    partial application created by a generic apply function. This occurs in
 --    CPS-heavy code like the CS benchmark.
@@ -210,9 +211,10 @@ tagSkeletonTopBind bind = bind'
   where
     (_, _, _, bind') = tagSkeletonBinding False NilSk emptyVarSet bind
 
--- | Tags binders of an 'StgExpr' with its 'LetBoundInfo'. Additionally, returns
--- its 'Skeleton' and the set of binder occurrences in argument and nullary
--- application position (cf. "StgLiftLams.Analysis#arg_occs").
+-- | Tags binders of an 'StgExpr' with its 'BinderInfo' and let bindings with
+-- their 'Skeleton's. Additionally, returns its 'Skeleton' and the set of binder
+-- occurrences in argument and nullary application position
+-- (cf. "StgLiftLams.Analysis#arg_occs").
 tagSkeletonExpr :: CgStgExpr -> (Skeleton, IdSet, LlStgExpr)
 tagSkeletonExpr (StgLit lit)
   = (NilSk, emptyVarSet, StgLit lit)
