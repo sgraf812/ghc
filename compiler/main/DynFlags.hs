@@ -4566,7 +4566,7 @@ optLevelFlags -- see Note [Documenting optimisation flags]
     , ([1,2],   Opt_CmmSink)
     , ([1,2],   Opt_CSE)
     , ([1,2],   Opt_StgCSE)
-    , ([1,2],   Opt_StgLiftLams)
+    , ([2],     Opt_StgLiftLams)
     , ([1,2],   Opt_EnableRewriteRules)  -- Off for -O0; see Note [Scoping for Builtin rules]
                                          --              in PrelRules
     , ([1,2],   Opt_FloatIn)
