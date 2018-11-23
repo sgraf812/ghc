@@ -1006,7 +1006,7 @@ by saying ``-fno-wombat``.
 
 .. ghc-flag:: -fstg-lift-lams
     :shortdesc: Enable late lambda lifting on the STG intermediate
-        language. Implied by :ghc-flag:`-O`.
+        language. Implied by :ghc-flag:`-O2`.
     :type: dynamic
     :reverse: -fno-stg-lift-lams
     :category:
