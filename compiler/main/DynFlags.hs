@@ -896,6 +896,9 @@ data DynFlags = DynFlags {
                                         --   non-recursive function.
   liftLamsKnown         :: Bool,        -- ^ Lambda lift even when this turns a known call
                                         --   into an unknown call.
+  liftLamsAllocs        :: Bool,        -- ^ Lambda lift even when doing so could
+                                        --   increase allocations.
+  liftLamsDont          :: [String],    -- ^ Uniques that we don't want to lift
 
   cmmProcAlignment      :: Maybe Int,   -- ^ Align Cmm functions at this boundary or use default.
 
@@ -1784,6 +1787,8 @@ defaultDynFlags mySettings (myLlvmTargets, myLlvmPasses) =
         liftLamsRecArgs         = Just 5, -- Default: the number of available argument hardware registers on x86_64
         liftLamsNonRecArgs      = Just 5, -- Default: the number of available argument hardware registers on x86_64
         liftLamsKnown           = False,  -- Default: don't turn known calls into unknown ones
+        liftLamsAllocs          = False,  -- Default: don't increase allocations
+        liftLamsDont            = [],
         cmmProcAlignment        = Nothing,
 
         historySize             = 20,
@@ -3447,6 +3452,12 @@ dynamic_flags_deps = [
       (noArg (\d -> d { liftLamsKnown = True }))
   , make_ord_flag defFlag "fno-stg-lift-lams-known"
       (noArg (\d -> d { liftLamsKnown = False }))
+  , make_ord_flag defFlag "fstg-lift-lams-allocs"
+      (noArg (\d -> d { liftLamsAllocs = True }))
+  , make_ord_flag defFlag "fno-stg-lift-lams-allocs"
+      (noArg (\d -> d { liftLamsAllocs = False }))
+  , make_ord_flag defFlag "fdont-lift"
+      (sepArg (\s d -> d { liftLamsDont = s : liftLamsDont d }))
   , make_ord_flag defFlag "fproc-alignment"
       (intSuffix (\n d -> d { cmmProcAlignment = Just n }))
 

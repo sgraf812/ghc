@@ -46,6 +46,7 @@ import Control.Monad.Trans.RWS.Strict ( RWST, runRWST )
 import qualified Control.Monad.Trans.RWS.Strict as RWS
 import Control.Monad.Trans.Cont ( ContT (..) )
 import Data.ByteString ( ByteString )
+import Data.List  ( foldl' )
 
 -- | @uncurry 'mkStgBinding' . 'decomposeStgBinding' = id@
 decomposeStgBinding :: GenStgBinding bndr occ -> (RecFlag, [(bndr, GenStgRhs bndr occ)])
@@ -341,8 +342,8 @@ liftedIdsExpander = LiftM $ do
   -- These are not in the InScopeSet of @subst@ and extending the InScopeSet in
   -- @goodToLift@/@closureGrowth@ before passing it on to @expander@ is too much
   -- trouble.
-  let go fv set = case lookupVarEnv expansions fv of
+  let go set fv = case lookupVarEnv expansions fv of
         Nothing -> extendDVarSet set (noWarnLookupIdSubst fv subst) -- Not lifted
         Just fvs' -> unionDVarSet set fvs'
-  let expander fvs = foldDVarSet go emptyDVarSet fvs
+  let expander fvs = foldl' go emptyDVarSet (dVarSetElems fvs)
   pure expander

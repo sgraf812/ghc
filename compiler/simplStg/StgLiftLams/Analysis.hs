@@ -33,6 +33,8 @@ import Outputable
 import Util
 import VarEnv
 import VarSet
+import Name
+import Unique
 
 import Data.Maybe ( mapMaybe )
 
@@ -101,8 +103,8 @@ import Data.Maybe ( mapMaybe )
 -- <https://ghc.haskell.org/trac/ghc/wiki/LateLamLift wiki page>.
 
 llTrace :: String -> SDoc -> a -> a
-llTrace _ _ c = c
--- llTrace a b c = pprTrace a b c
+-- llTrace _ _ c = c
+llTrace a b c = pprTrace a b c
 
 freeVarsOfRhs :: GenStgRhs bndr occ -> [occ]
 freeVarsOfRhs (StgRhsCon _ _ args) = [ id | StgVarArg id <- args ]
@@ -383,6 +385,7 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
   , ("abstracts known local function", abstracts_known_local_fun)
   , ("args spill on stack", args_spill_on_stack)
   , ("increases allocation", inc_allocs)
+  , ("tmp", tmp)
   ] where
       decide deciders
         | not (fancy_or deciders)
@@ -402,6 +405,27 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
       infos = mapMaybe (binderInfoClosureInfo . fst) pairs
       bndrs_set = mkVarSet bndrs
       rhss = map snd pairs
+
+      tmp = any bad_bndr bndrs
+      -- tmp = (abstracts_join_ids || allocs > 0) && any bad_bndr bndrs
+      -- bad_bndr bndr = any (getOccString bndr ==) ["go1", "go2", "go7", "go8"]
+      -- bad_bndr bndr = all (getOccString bndr /=) ["go6"]
+      -- paraffins
+      -- bad_bndr bndr = any (show (getUnique bndr) ==) ["s7xQ", "s7yA", "s7zK", "s7yi", "s7ys", "s7zx"]
+      -- gen_regexp
+      -- bad_bndr bndr = any (show (getUnique bndr) ==) ["s7y6", "s7yg", "s7yo", "s7zl", "s7xE", "s7zF"]
+      -- fft2
+      -- bad_bndr bndr = any (show (getUnique bndr) ==) ["s3Of", "s5tC", "s5tM", "s5v4", "s5vb", "s5xq", "s5yn", "s5yM", "s5yV", "s5zg"]
+      -- cryptarithm1
+      -- bad_bndr bndr = any (show (getUnique bndr) ==) ["s6za", "s6yE"]
+      -- mate, pieceAtWith
+      -- bad_bndr bndr = any (show (getUnique bndr) ==) ["s5Qd", "s5PG", "s5Pr", "s5Pq"]
+      -- queens, go_s5Oj is reponsible for the huge reduction. Lifting gets rid
+      -- of 3 variables
+      -- bad_bndr bndr = any (show (getUnique bndr) ==) ["s5Oc", "s5Ot"]
+      -- Over command-line
+      bad_bndr bndr = any (show (getUnique bndr) ==) (liftLamsDont dflags)
+      -- bad_bndr bndr = False
 
       -- First objective: Calculate @abs_ids@, e.g. the former free variables
       -- the lifted binding would abstract over. We have to merge the free
@@ -475,7 +499,7 @@ goodToLift dflags top_lvl rec_flag expander pairs = decide
       -- under a multi-shot lambda.
       -- Also, abstracting over LNEs is unacceptable. LNEs might return
       -- unlifted tuples, which idClosureFootprint can't cope with.
-      inc_allocs = abstracts_join_ids || allocs > 0
+      inc_allocs = not (liftLamsAllocs dflags) && (abstracts_join_ids || allocs > 0)
       allocs = clo_growth + mkIntWithInf (negate closuresSize)
       -- We calculate and then add up the size of each binding's closure.
       -- GHC does not currently share closure environments, and we either lift
@@ -499,13 +523,12 @@ rhsLambdaBndrs (StgRhsClosure _ _ _ _ bndrs _) = map binderInfoBndr bndrs
 -- | The size in words of a function closure closing over the given 'Id's,
 -- including the header.
 closureSize :: DynFlags -> [Id] -> WordOff
-closureSize dflags ids = words
+closureSize dflags ids = words + sTD_HDR_SIZE dflags
+  -- We go through sTD_HDR_SIZE rather than fixedHdrSizeW so that we don't
+  -- optimise differently when profiling is enabled.
   where
     (words, _, _)
       -- Functions have a StdHeader (as opposed to ThunkHeader).
-      -- Note that mkVirtHeadOffsets will account for profiling headers, so
-      -- lifting decisions vary if we begin to profile stuff. Maybe we shouldn't
-      -- do this or deactivate profiling in @dflags@?
       = StgCmmLayout.mkVirtHeapOffsets dflags StgCmmLayout.StdHeader
       . StgCmmClosure.addIdReps
       . StgCmmClosure.nonVoidIds
