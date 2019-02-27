@@ -19,7 +19,7 @@ test('join004',
    # 2017-01-24   48146720    Join point rework
    # 2017-02-05   16130592    Do Worker/Wrapper for NOINLINE things
   compile_and_run,
-  [''])
+  ['-fno-stg-lift-lams'])
 
 test('join005', normal, compile, [''])
 test('join006', normal, compile, [''])
