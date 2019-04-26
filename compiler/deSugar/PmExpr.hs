@@ -60,6 +60,7 @@ refer to variables that are otherwise substituted away.
 -- | Lifted expressions for pattern match checking.
 data PmExpr = PmExprVar   Name
             | PmExprCon   ConLike [PmExpr]
+            | PmExprApp   Name [PmExpr]
             | PmExprLit   PmLit
             | PmExprEq    PmExpr PmExpr  -- Syntactic equality
             | PmExprOther (HsExpr GhcTc)  -- Note [PmExprOther in PmExpr]
@@ -216,6 +217,8 @@ substPmExpr x e1 e =
                 | otherwise -> (e, False)
     PmExprCon c ps -> let (ps', bs) = mapAndUnzip (substPmExpr x e1) ps
                       in  (PmExprCon c ps', or bs)
+    PmExprApp f ps -> let (ps', bs) = mapAndUnzip (substPmExpr x e1) ps
+                      in  (PmExprApp f ps', or bs)
     PmExprEq ex ey -> let (ex', bx) = substPmExpr x e1 ex
                           (ey', by) = substPmExpr x e1 ey
                       in  (PmExprEq ex' ey', bx || by)
@@ -240,6 +243,8 @@ lhsExprToPmExpr (dL->L _ e) = hsExprToPmExpr e
 
 hsExprToPmExpr :: HsExpr GhcTc -> PmExpr
 
+hsExprToPmExpr e
+  | Just pme <- collectApp [] e   = pme
 hsExprToPmExpr (HsVar        _ x) = PmExprVar (idName (unLoc x))
 hsExprToPmExpr (HsConLikeOut _ c) = PmExprVar (conLikeName c)
 
@@ -296,6 +301,15 @@ hsExprToPmExpr (HsCoreAnn      _ _ _ e) = lhsExprToPmExpr e
 hsExprToPmExpr (ExprWithTySig    _ e _) = lhsExprToPmExpr e
 hsExprToPmExpr (HsWrap           _ _ e) =  hsExprToPmExpr e
 hsExprToPmExpr e = PmExprOther e -- the rest are not handled by the oracle
+
+collectApp :: [PmExpr] -> HsExpr GhcTc -> Maybe PmExpr
+collectApp args (HsVar _ f) = Just (PmExprApp (idName (unLoc f)) args)
+collectApp args (HsApp _ f arg) = collectApp (lhsExprToPmExpr arg : args) (unLoc f)
+collectApp args (HsAppType _ f _) = collectApp args (unLoc f)
+collectApp args (HsPar _ f) = collectApp args (unLoc f)
+collectApp args (OpApp _ l op r) = collectApp (map lhsExprToPmExpr [l, r] ++ args) (unLoc op)
+collectApp args (SectionL _ l op) = collectApp (lhsExprToPmExpr l : args) (unLoc op)
+collectApp _ _ = Nothing
 
 stringExprToList :: SourceText -> FastString -> PmExpr
 stringExprToList src s = foldr cons nil (map charToPmExpr (unpackFS s))
@@ -403,6 +417,7 @@ pprPmExpr (PmExprVar x) = do
     Nothing   -> return underscore
 
 pprPmExpr (PmExprCon con args) = pprPmExprCon con args
+pprPmExpr (PmExprApp fun args) = (ppr fun <+>) . hcat <$> mapM pprPmExpr args
 pprPmExpr (PmExprLit l)        = return (ppr l)
 pprPmExpr (PmExprEq _ _)       = return underscore -- don't show
 pprPmExpr (PmExprOther _)      = return underscore -- don't show
@@ -412,6 +427,7 @@ needsParens (PmExprVar   {}) = False
 needsParens (PmExprLit    l) = isNegatedPmLit l
 needsParens (PmExprEq    {}) = False -- will become a wildcard
 needsParens (PmExprOther {}) = False -- will become a wildcard
+needsParens (PmExprApp _ as) = not (null as)
 needsParens (PmExprCon (RealDataCon c) es)
   | isTupleDataCon c
   || isConsDataCon c || null es = False

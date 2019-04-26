@@ -77,6 +77,7 @@ varIn :: Name -> PmExpr -> Bool
 varIn x e = case e of
   PmExprVar y    -> x == y
   PmExprCon _ es -> any (x `varIn`) es
+  PmExprApp f es -> x == f || any (x `varIn`) es
   PmExprLit _    -> False
   PmExprEq e1 e2 -> (x `varIn` e1) || (x `varIn` e2)
   PmExprOther _  -> False
@@ -93,6 +94,15 @@ type TmState = ([ComplexEq], TmOracleEnv)
 initialTmState :: TmState
 initialTmState = ([], (False, emptyNameEnv))
 
+-- | Signal that we couldn't handle a complex equality by setting the unhandled
+-- flag of the 'TmOracleEnv'.
+markUnhandled :: TmState -> TmState
+markUnhandled (standby, (_, subst)) = (standby, (True, subst))
+
+-- | Adds a 'ComplexEq' to a 'TmState's worklist.
+deferComplexEq :: ComplexEq -> TmState -> TmState
+deferComplexEq eq (standby, env) = (eq:standby, env)
+
 -- | Solve a complex equality (top-level).
 solveOneEq :: TmState -> ComplexEq -> Maybe TmState
 solveOneEq solver_env@(_,(_,env)) complex
@@ -106,25 +116,32 @@ solveOneEq solver_env@(_,(_,env)) complex
 --             it to the tmstate; the result may or may not be
 --             satisfiable
 solveComplexEq :: TmState -> ComplexEq -> Maybe TmState
-solveComplexEq solver_state@(standby, (unhandled, env)) eq@(e1, e2) = case eq of
+solveComplexEq solver_state eq@(e1, e2) = case eq of
   -- We cannot do a thing about these cases
-  (PmExprOther _,_)            -> Just (standby, (True, env))
-  (_,PmExprOther _)            -> Just (standby, (True, env))
+  (PmExprOther _,_)            -> Just (markUnhandled solver_state)
+  (_,PmExprOther _)            -> Just (markUnhandled solver_state)
 
   (PmExprLit l1, PmExprLit l2) -> case eqPmLit l1 l2 of
     -- See Note [Undecidable Equality for Overloaded Literals]
     True  -> Just solver_state
     False -> Nothing
 
+  (PmExprApp {}, PmExprApp {}) -> case simplifyEqExpr e1 e2 of
+    (e, True)
+      | isTruePmExpr e        -> Just solver_state
+      | isFalsePmExpr e       -> Nothing -- I don't think this will ever happen
+      | PmExprEq e1' e2' <- e -> solveComplexEq solver_state (e1', e2')
+    _ -> Just (deferComplexEq eq solver_state)
+
   (PmExprCon c1 ts1, PmExprCon c2 ts2)
     | c1 == c2  -> foldlM solveComplexEq solver_state (zip ts1 ts2)
     | otherwise -> Nothing
   (PmExprCon _ [], PmExprEq t1 t2)
     | isTruePmExpr e1  -> solveComplexEq solver_state (t1, t2)
-    | isFalsePmExpr e1 -> Just (eq:standby, (unhandled, env))
+    | isFalsePmExpr e1 -> Just (deferComplexEq eq solver_state)
   (PmExprEq t1 t2, PmExprCon _ [])
     | isTruePmExpr e2   -> solveComplexEq solver_state (t1, t2)
-    | isFalsePmExpr e2  -> Just (eq:standby, (unhandled, env))
+    | isFalsePmExpr e2  -> Just (deferComplexEq eq solver_state)
 
   (PmExprVar x, PmExprVar y)
     | x == y    -> Just solver_state
@@ -133,10 +150,10 @@ solveComplexEq solver_state@(standby, (unhandled, env)) eq@(e1, e2) = case eq of
   (PmExprVar x, _) -> extendSubstAndSolve x e2 solver_state
   (_, PmExprVar x) -> extendSubstAndSolve x e1 solver_state
 
-  (PmExprEq _ _, PmExprEq _ _) -> Just (eq:standby, (unhandled, env))
+  (PmExprEq _ _, PmExprEq _ _) -> Just (deferComplexEq eq solver_state)
 
   _ -> WARN( True, text "solveComplexEq: Catch all" <+> ppr eq )
-       Just (standby, (True, env)) -- I HATE CATCH-ALLS
+       Just (markUnhandled solver_state) -- I HATE CATCH-ALLS
 
 -- | Extend the substitution and solve the (possibly updated) constraints.
 extendSubstAndSolve :: Name -> PmExpr -> TmState -> Maybe TmState
@@ -155,10 +172,10 @@ extendSubstAndSolve x e (standby, (unhandled, env))
 -- `extendSubst` simply extends the substitution, unlike what
 -- `extendSubstAndSolve` does.
 extendSubst :: Id -> PmExpr -> TmState -> TmState
-extendSubst y e (standby, (unhandled, env))
+extendSubst y e solver_state@(standby, (unhandled, env))
   | isNotPmExprOther simpl_e
   = (standby, (unhandled, extendNameEnv env x simpl_e))
-  | otherwise = (standby, (True, env))
+  | otherwise = markUnhandled solver_state
   where
     x = idName y
     simpl_e = fst $ simplifyPmExpr $ exprDeepLookup env e
@@ -174,6 +191,8 @@ simplifyPmExpr :: PmExpr -> (PmExpr, Bool)
 simplifyPmExpr e = case e of
   PmExprCon c ts -> case mapAndUnzip simplifyPmExpr ts of
                       (ts', bs) -> (PmExprCon c ts', or bs)
+  PmExprApp f ts -> case mapAndUnzip simplifyPmExpr ts of
+                      (ts', bs) -> (PmExprApp f ts', or bs)
   PmExprEq t1 t2 -> simplifyEqExpr t1 t2
   _other_expr    -> (e, False) -- the others are terminals
 
@@ -208,11 +227,24 @@ simplifyEqExpr e1 e2 = case (e1, e2) of
             (ts2', bs2) = mapAndUnzip simplifyPmExpr ts2
             (tss, _bss) = zipWithAndUnzip simplifyEqExpr ts1' ts2'
             worst_case  = PmExprEq (PmExprCon c1 ts1') (PmExprCon c2 ts2')
-        in  if | not (or bs1 || or bs2) -> (worst_case, False) -- no progress
+        in  if | not (or bs1 || or bs2) -> (worst_case, False) -- no progress TODO: What do we need this case for? tss might still be all true or all false
                | all isTruePmExpr  tss  -> (truePmExpr, True)
                | any isFalsePmExpr tss  -> (falsePmExpr, True)
                | otherwise              -> (worst_case, False)
     | otherwise -> (falsePmExpr, True)
+
+  -- Function Applications
+  -- We only have congruence to take apart the equality, as opposed to
+  -- matchability for Constructors
+  (PmExprApp f1 ts1, PmExprApp f2 ts2)
+    | f1 == f2 ->
+        let (ts1', _bs1) = mapAndUnzip simplifyPmExpr ts1
+            (ts2', _bs2) = mapAndUnzip simplifyPmExpr ts2
+            (tss, _bss) = zipWithAndUnzip simplifyEqExpr ts1' ts2'
+            worst_case  = PmExprEq (PmExprApp f1 ts1') (PmExprApp f2 ts2')
+        in  if -- | not (or _bs1 || or _bs2) -> (worst_case, False) -- no progress TODO: What do we need this case for? tss might still be all true or all false
+               | all isTruePmExpr  tss  -> (truePmExpr, True)
+               | otherwise              -> (worst_case, False)
 
   -- We cannot do anything about the rest..
   _other_equality -> (original, False)
@@ -235,6 +267,7 @@ varDeepLookup env x
 exprDeepLookup :: PmVarEnv -> PmExpr -> PmExpr
 exprDeepLookup env (PmExprVar x)    = varDeepLookup env x
 exprDeepLookup env (PmExprCon c es) = PmExprCon c (map (exprDeepLookup env) es)
+exprDeepLookup env (PmExprApp f es) = PmExprApp f (map (exprDeepLookup env) es)
 exprDeepLookup env (PmExprEq e1 e2) = PmExprEq (exprDeepLookup env e1)
                                                (exprDeepLookup env e2)
 exprDeepLookup _   other_expr       = other_expr -- PmExprLit, PmExprOther
