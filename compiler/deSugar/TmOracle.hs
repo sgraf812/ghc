@@ -35,7 +35,9 @@ import MonadUtils
 import Util
 import Outputable
 
-import NameEnv
+import VarEnv
+import CoreSubst
+import CoreSyn
 
 {-
 %************************************************************************
@@ -45,21 +47,53 @@ import NameEnv
 %************************************************************************
 -}
 
--- | The type of substitutions.
-type PmVarEnv = NameEnv PmExpr
+-- | Simple term equality
+data SimpleEq = Smpl !Id !CoreExpr
 
--- | The environment of the oracle contains
---     1. A Bool (are there any constraints we cannot handle? (PmExprOther)).
---     2. A substitution we extend with every step and return as a result.
-type TmOracleEnv = (Bool, PmVarEnv)
+-- | Complex term equality
+data ComplexEq = Cplx !CoreExpr !CoreExpr
+
+-- | Lift a 'SimpleEq' to a 'ComplexEq'
+toComplex :: SimpleEq -> ComplexEq
+toComplex (Smpl x e) = Cplx (Var x) e
+
+type PmVarEnv = IdSubstEnv
+
+-- | The environment of the oracle.
+data TmOracleEnv = TOE
+  { toe_unhandled :: !Bool
+  -- ^ Are there any constraints we cannot handle?
+  , toe_subst     :: !PmVarEnv
+  -- ^ A substitution we extend with every step and return as a result
+  }
+
+-- | The solver_state of the term oracle.
+data TmState = TS
+  { ts_standby :: ![ComplexEq]
+  -- ^ Complex constraints that cannot progress unless we get more information.
+  , ts_env     :: !TmOracleEnv
+  -- ^ The current environment of the term oracle.
+  }
+
+-- | Initial solver_state of the oracle.
+initialTmState :: TmState
+initialTmState = TS [] (TOE False emptyVarEnv)
+
+-- | Set the 'toe_unhandled' flag in the 'TmState's 'ts_env'.
+markUnhandled :: TmState -> TmState
+markUnhandled st = st { ts_env = ts_env st { toe_unhandled = True } }
+
+-- | Prepends a 'ComplexEq' to 'ts_standby'.
+deferComplexEq :: ComplexEq -> TmState -> TmState
+deferComplexEq eq st = st { ts_standby = eq : ts_standby st }
 
 -- | Check whether a constraint (x ~ BOT) can succeed,
--- given the resulting state of the term oracle.
-canDiverge :: Name -> TmState -> Bool
-canDiverge x (standby, (_unhandled, env))
+-- given the resulting solver_state of the term oracle.
+canDiverge :: Var -> TmState -> Bool
+canDiverge x TS{ ts_standby = standby, ts_env = env }
   -- If the variable seems not evaluated, there is a possibility for
   -- constraint x ~ BOT to be satisfiable.
-  | PmExprVar y <- varDeepLookup env x -- seems not forced
+  | Var y <- varDeepLookup (toe_subst env) x -- seems not forced
   -- If it is involved (directly or indirectly) in any equality in the
   -- worklist, we can assume that it is already indirectly evaluated,
   -- as a side-effect of equality checking. If not, then we can assume
@@ -67,38 +101,24 @@ canDiverge x (standby, (_unhandled, env))
   = not $ any (isForcedByEq x) standby || any (isForcedByEq y) standby
   -- Variable x is already in WHNF so the constraint is non-satisfiable
   | otherwise = False
-
   where
     isForcedByEq :: Name -> ComplexEq -> Bool
     isForcedByEq y (e1, e2) = varIn y e1 || varIn y e2
 
 -- | Check whether a variable is in the free variables of an expression
-varIn :: Name -> PmExpr -> Bool
-varIn x e = case e of
-  PmExprVar y    -> x == y
-  PmExprCon _ es -> any (x `varIn`) es
-  PmExprLit _    -> False
-  PmExprEq e1 e2 -> (x `varIn` e1) || (x `varIn` e2)
-  PmExprOther _  -> False
+varIn :: Var -> CoreExpr -> Bool
+varIn x e = x `elemVarSet` exprFreeIds e
 
 -- | Flatten the DAG (Could be improved in terms of performance.).
 flattenPmVarEnv :: PmVarEnv -> PmVarEnv
-flattenPmVarEnv env = mapNameEnv (exprDeepLookup env) env
-
--- | The state of the term oracle (includes complex constraints that cannot
--- progress unless we get more information).
-type TmState = ([ComplexEq], TmOracleEnv)
-
--- | Initial state of the oracle.
-initialTmState :: TmState
-initialTmState = ([], (False, emptyNameEnv))
+flattenPmVarEnv env = mapVarEnv (exprDeepLookup env) env
 
 -- | Solve a complex equality (top-level).
 solveOneEq :: TmState -> ComplexEq -> Maybe TmState
-solveOneEq solver_env@(_,(_,env)) complex
-  = solveComplexEq solver_env -- do the actual *merging* with existing state
-  $ simplifyComplexEq               -- simplify as much as you can
-  $ applySubstComplexEq env complex -- replace everything we already know
+solveOneEq solver_state complex
+  = solveComplexEq solver_state                -- do the actual *merging* with existing solver_state
+  $ simplifyComplexEq                          -- simplify as much as you can
+  $ applySubstComplexEq (ts_env state) complex -- replace everything we already know
 
 -- | Solve a complex equality.
 -- Nothing => definitely unsatisfiable
@@ -106,10 +126,10 @@ solveOneEq solver_env@(_,(_,env)) complex
 --             it to the tmstate; the result may or may not be
 --             satisfiable
 solveComplexEq :: TmState -> ComplexEq -> Maybe TmState
-solveComplexEq solver_state@(standby, (unhandled, env)) eq@(e1, e2) = case eq of
+solveComplexEq solver_state eq@(Cplx e1 e2) = case (e1, e2) of
   -- We cannot do a thing about these cases
-  (PmExprOther _,_)            -> Just (standby, (True, env))
-  (_,PmExprOther _)            -> Just (standby, (True, env))
+  (PmExprOther _,_)            -> Just (markUnhandled solver_state)
+  (_,PmExprOther _)            -> Just (markUnhandled solver_state)
 
   (PmExprLit l1, PmExprLit l2) -> case eqPmLit l1 l2 of
     -- See Note [Undecidable Equality for Overloaded Literals]
@@ -121,10 +141,10 @@ solveComplexEq solver_state@(standby, (unhandled, env)) eq@(e1, e2) = case eq of
     | otherwise -> Nothing
   (PmExprCon _ [], PmExprEq t1 t2)
     | isTruePmExpr e1  -> solveComplexEq solver_state (t1, t2)
-    | isFalsePmExpr e1 -> Just (eq:standby, (unhandled, env))
+    | isFalsePmExpr e1 -> Just (deferComplexEq eq solver_state)
   (PmExprEq t1 t2, PmExprCon _ [])
     | isTruePmExpr e2   -> solveComplexEq solver_state (t1, t2)
-    | isFalsePmExpr e2  -> Just (eq:standby, (unhandled, env))
+    | isFalsePmExpr e2  -> Just (deferComplexEq eq solver_state)
 
   (PmExprVar x, PmExprVar y)
     | x == y    -> Just solver_state
@@ -133,39 +153,41 @@ solveComplexEq solver_state@(standby, (unhandled, env)) eq@(e1, e2) = case eq of
   (PmExprVar x, _) -> extendSubstAndSolve x e2 solver_state
   (_, PmExprVar x) -> extendSubstAndSolve x e1 solver_state
 
-  (PmExprEq _ _, PmExprEq _ _) -> Just (eq:standby, (unhandled, env))
+  (PmExprEq _ _, PmExprEq _ _) -> Just (deferComplexEq eq solver_state)
 
   _ -> WARN( True, text "solveComplexEq: Catch all" <+> ppr eq )
-       Just (standby, (True, env)) -- I HATE CATCH-ALLS
+       Just (markUnhandled solver_state) -- I HATE CATCH-ALLS
 
 -- | Extend the substitution and solve the (possibly updated) constraints.
-extendSubstAndSolve :: Name -> PmExpr -> TmState -> Maybe TmState
-extendSubstAndSolve x e (standby, (unhandled, env))
+extendSubstAndSolve :: Var -> CoreExpr -> TmState -> Maybe TmState
+extendSubstAndSolve x e state
   = foldlM solveComplexEq new_incr_state (map simplifyComplexEq changed)
   where
     -- Apply the substitution to the worklist and partition them to the ones
     -- that had some progress and the rest. Then, recurse over the ones that
     -- had some progress. Careful about performance:
     -- See Note [Representation of Term Equalities] in deSugar/Check.hs
-    (changed, unchanged) = partitionWith (substComplexEq x e) standby
-    new_incr_state       = (unchanged, (unhandled, extendNameEnv env x e))
+    (changed, unchanged) = partitionWith (substComplexEq x e) (ts_standby state)
+    env                  = ts_env ts
+    new_env              = env { toe_subst = extendVarEnv (toe_subst env) x e }
+    new_incr_state       = state { ts_standby = unchanged, ts_env = new_env }
 
 -- | When we know that a variable is fresh, we do not actually have to
 -- check whether anything changes, we know that nothing does. Hence,
 -- `extendSubst` simply extends the substitution, unlike what
 -- `extendSubstAndSolve` does.
 extendSubst :: Id -> PmExpr -> TmState -> TmState
-extendSubst y e (standby, (unhandled, env))
+extendSubst x e state
   | isNotPmExprOther simpl_e
-  = (standby, (unhandled, extendNameEnv env x simpl_e))
-  | otherwise = (standby, (True, env))
+  = state { ts_env = env { toe_subst = extendVarEnv (toe_subst env) x simpl_e))
+  | otherwise = markUnhandled state
   where
-    x = idName y
+    env = ts_env state
     simpl_e = fst $ simplifyPmExpr $ exprDeepLookup env e
 
 -- | Simplify a complex equality.
 simplifyComplexEq :: ComplexEq -> ComplexEq
-simplifyComplexEq (e1, e2) = (fst $ simplifyPmExpr e1, fst $ simplifyPmExpr e2)
+simplifyComplexEq (Cplx e1 e2) = Cplx (fst $ simplifyPmExpr e1) (fst $ simplifyPmExpr e2)
 
 -- | Simplify an expression. The boolean indicates if there has been any
 -- simplification or if the operation was a no-op.
@@ -225,16 +247,16 @@ applySubstComplexEq :: PmVarEnv -> ComplexEq -> ComplexEq
 applySubstComplexEq env (e1,e2) = (exprDeepLookup env e1, exprDeepLookup env e2)
 
 -- | Apply an (un-flattened) substitution to a variable.
-varDeepLookup :: PmVarEnv -> Name -> PmExpr
+varDeepLookup :: PmVarEnv -> Var -> CoreExpr
 varDeepLookup env x
   | Just e <- lookupNameEnv env x = exprDeepLookup env e -- go deeper
-  | otherwise                  = PmExprVar x          -- terminal
+  | otherwise                  = Var x          -- terminal
 {-# INLINE varDeepLookup #-}
 
 -- | Apply an (un-flattened) substitution to an expression.
-exprDeepLookup :: PmVarEnv -> PmExpr -> PmExpr
-exprDeepLookup env (PmExprVar x)    = varDeepLookup env x
+exprDeepLookup :: PmVarEnv -> CoreExpr -> CoreExpr
 exprDeepLookup env (PmExprCon c es) = PmExprCon c (map (exprDeepLookup env) es)
+exprDeepLookup env (Var x)    = varDeepLookup env x
 exprDeepLookup env (PmExprEq e1 e2) = PmExprEq (exprDeepLookup env e1)
                                                (exprDeepLookup env e2)
 exprDeepLookup _   other_expr       = other_expr -- PmExprLit, PmExprOther
