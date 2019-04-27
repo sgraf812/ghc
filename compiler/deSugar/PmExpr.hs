@@ -21,6 +21,7 @@ import GhcPrelude
 import BasicTypes (SourceText)
 import FastString (FastString, unpackFS)
 import HsSyn
+import HsDumpAst
 import Id
 import Name
 import NameSet
@@ -239,14 +240,19 @@ substComplexEq x e (ex, ey)
 -- ** Lift source expressions (HsExpr Id) to PmExpr
 
 lhsExprToPmExpr :: LHsExpr GhcTc -> PmExpr
-lhsExprToPmExpr (dL->L _ e) = hsExprToPmExpr e
+lhsExprToPmExpr (dL->L _ e) = pprTrace "lhsExpr" (ppr e $$ showAstData NoBlankSrcSpan e $$ ppr res $$ ppr (isNotPmExprOther res)) $ res
+  where
+    res = hsExprToPmExpr e
 
 hsExprToPmExpr :: HsExpr GhcTc -> PmExpr
 
 hsExprToPmExpr e
-  | Just pme <- collectApp [] e   = pme
-hsExprToPmExpr (HsVar        _ x) = PmExprVar (idName (unLoc x))
-hsExprToPmExpr (HsConLikeOut _ c) = PmExprVar (conLikeName c)
+  | pprTrace "hsExprToPmExpr" (ppr e $$ showAstData NoBlankSrcSpan e) False
+  = undefined
+hsExprToPmExpr e
+  | Just pme <- collectApp [] e      = pme
+hsExprToPmExpr e
+  | Just e' <- stripBoringWrappers e = hsExprToPmExpr e'
 
 -- Desugar literal strings as a list of characters. For other literal values,
 -- keep it as it is.
@@ -267,8 +273,6 @@ hsExprToPmExpr e@(NegApp _ (dL->L _ neg_expr) _)
     -- @RebindableSyntax@ enabled, (-(-x)) may not equals to x.
   = PmExprLit (PmOLit True olit)
   | otherwise = PmExprOther e
-
-hsExprToPmExpr (HsPar _ (dL->L _ e)) = hsExprToPmExpr e
 
 hsExprToPmExpr e@(ExplicitTuple _ ps boxity)
   | all tupArgPresent ps = mkPmExprData tuple_con tuple_args
@@ -292,24 +296,37 @@ hsExprToPmExpr e@(ExplicitList _  mb_ol elems)
 --   args <- mapM lhsExprToPmExpr (hsRecFieldsArgs binds)
 --   return (PmExprCon con args)
 hsExprToPmExpr e@(RecordCon {}) = PmExprOther e
-
-hsExprToPmExpr (HsTick           _ _ e) = lhsExprToPmExpr e
-hsExprToPmExpr (HsBinTick      _ _ _ e) = lhsExprToPmExpr e
-hsExprToPmExpr (HsTickPragma _ _ _ _ e) = lhsExprToPmExpr e
-hsExprToPmExpr (HsSCC          _ _ _ e) = lhsExprToPmExpr e
-hsExprToPmExpr (HsCoreAnn      _ _ _ e) = lhsExprToPmExpr e
-hsExprToPmExpr (ExprWithTySig    _ e _) = lhsExprToPmExpr e
-hsExprToPmExpr (HsWrap           _ _ e) =  hsExprToPmExpr e
-hsExprToPmExpr e = PmExprOther e -- the rest are not handled by the oracle
+hsExprToPmExpr e = pprTrace "giving up" (ppr e $$ showAstData NoBlankSrcSpan e) PmExprOther e -- the rest are not handled by the oracle
 
 collectApp :: [PmExpr] -> HsExpr GhcTc -> Maybe PmExpr
-collectApp args (HsVar _ f) = Just (PmExprApp (idName (unLoc f)) args)
-collectApp args (HsApp _ f arg) = collectApp (lhsExprToPmExpr arg : args) (unLoc f)
-collectApp args (HsAppType _ f _) = collectApp args (unLoc f)
-collectApp args (HsPar _ f) = collectApp args (unLoc f)
-collectApp args (OpApp _ l op r) = collectApp (map lhsExprToPmExpr [l, r] ++ args) (unLoc op)
-collectApp args (SectionL _ l op) = collectApp (lhsExprToPmExpr l : args) (unLoc op)
-collectApp _ _ = Nothing
+collectApp args e
+  | Just e' <- stripBoringWrappers e     = collectApp args e'
+collectApp args (HsVar _ f)              = pprTrace "yes" (ppr f $$ ppr args $$ ppr res) $ res
+  where
+    res = Just (PmExprApp (idName (unLoc f)) args)
+collectApp args (HsConLikeOut _ c)       = pprTrace "yes" (ppr c $$ ppr args $$ ppr res) $ res
+  where
+    res = Just (PmExprCon c args)
+collectApp args (HsApp _ f arg)          = collectApp (lhsExprToPmExpr arg : args) (unLoc f)
+collectApp args (OpApp _ l op r)         = collectApp (map lhsExprToPmExpr [l, r] ++ args) (unLoc op)
+collectApp args (SectionL _ l op)        = collectApp (lhsExprToPmExpr l : args) (unLoc op)
+collectApp _ e = pprTrace "collectApp" (ppr e $$ showAstData NoBlankSrcSpan e) $ Nothing
+
+stripBoringWrappers :: HsExpr GhcTc -> Maybe (HsExpr GhcTc)
+stripBoringWrappers = go False
+  where
+    go _     (HsAppType        _ e _) = go True (unLoc e)
+    go _     (HsPar              _ e) = go True (unLoc e)
+    go _     (HsTick           _ _ e) = go True (unLoc e)
+    go _     (HsBinTick      _ _ _ e) = go True (unLoc e)
+    go _     (HsTickPragma _ _ _ _ e) = go True (unLoc e)
+    go _     (HsSCC          _ _ _ e) = go True (unLoc e)
+    go _     (HsCoreAnn      _ _ _ e) = go True (unLoc e)
+    go _     (ExprWithTySig    _ e _) = go True (unLoc e)
+    go _     (HsWrap           _ _ e) = go True e
+    -- only return Just when we stripped at least one layer
+    go True  e                        = Just e
+    go False _                        = Nothing
 
 stringExprToList :: SourceText -> FastString -> PmExpr
 stringExprToList src s = foldr cons nil (map charToPmExpr (unpackFS s))
