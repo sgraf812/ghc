@@ -4,27 +4,20 @@ Author: George Karachalias <george.karachalias@cs.kuleuven.be>
 The term equality oracle. The main export of the module is function `tmOracle'.
 -}
 
-{-# LANGUAGE CPP, MultiWayIf #-}
+{-# LANGUAGE CPP, MultiWayIf, GeneralisedNewtypeDeriving, PatternSynonyms #-}
 
 module TmOracle (
 
-        -- re-exported from PmExpr
-        PmExpr(..), PmLit(..), SimpleEq, ComplexEq, PmVarEnv, falsePmExpr,
-        eqPmLit, filterComplex, isNotPmExprOther, runPmPprM, lhsExprToPmExpr,
-        hsExprToPmExpr, pprPmExprWithParens,
-
         -- the term oracle
-        tmOracle, TmState, initialTmState, solveOneEq, extendSubst, canDiverge,
+        tmOracle, TmState, initialTmState, solveComplexEq, extendSubst, canDiverge,
 
         -- misc.
-        toComplex, exprDeepLookup, pmLitType, flattenPmVarEnv
+        toComplex, exprDeepLookup, pmLitType, flattenFactEnv
     ) where
 
 #include "HsVersions.h"
 
 import GhcPrelude
-
-import PmExpr
 
 import Id
 import Name
@@ -35,9 +28,12 @@ import MonadUtils
 import Util
 import Outputable
 
+import FV
 import VarEnv
 import CoreSubst
+import CoreFVs
 import CoreSyn
+import CoreMap
 
 {-
 %************************************************************************
@@ -46,6 +42,14 @@ import CoreSyn
 %*                                                                      *
 %************************************************************************
 -}
+
+-- | Invariant: We map to the key with which we index the 'CoreMap' in order for
+-- 'foldTM' to provide us with the key. Yuck.
+type CoreSet = CoreMap CoreExpr
+
+coreSetFreeIdsList :: CoreSet -> [Id]
+coreSetFreeIdsList cs =
+  fvVarList $ filterFV isLocalId $ foldTM (unionFV . exprFVs) cs emptyFV
 
 -- | Simple term equality
 data SimpleEq = Smpl !Id !CoreExpr
@@ -57,17 +61,72 @@ data ComplexEq = Cplx !CoreExpr !CoreExpr
 toComplex :: SimpleEq -> ComplexEq
 toComplex (Smpl x e) = Cplx (Var x) e
 
-type PmVarEnv = IdSubstEnv
+-- | This is actually just an 'CoreSubst.IdSubstEnv', but we inlined the synonym
+-- for symmetry with 'RefutEnv'.
+type FactEnv  = IdEnv CoreExpr
+-- | Records refutable expressions for each identifier. We write \(x ~ E \in
+-- \Gamma \) when @E@ is in the 'CoreSet' of @x@ according to the 'RefutEnv'
+-- \(\Gamma\).
+type RefutEnv = IdEnv LiteralMap
+
+--
+-- * Indexing stuff
+--
+
+type Index = IdEnv IdSet
+
+addFreeIds :: Id -> [Id] -> Index -> Index
+addFreeIds x ids idx = foldr (\y idx -> modifyVarEnv idx (`extendVarSet` x) y) idx ids
+
+indexCoreExpr :: Id -> CoreExpr -> Index -> Index
+indexCoreExpr x e idx = addFreeIds (exprFreeIdsList e) idx
+
+indexCoreSet :: Id -> CoreSet -> Index -> Index
+indexCoreSet x cs idx = addFreeIds (coreSetFreeIdsList cs) idx
+
+type RepEnv = UniqFM CoreSet
 
 -- | The environment of the oracle.
 data TmOracleEnv = TOE
-  { toe_unhandled :: !Bool
-  -- ^ Are there any constraints we cannot handle?
-  , toe_subst     :: !PmVarEnv
-  -- ^ A substitution we extend with every step and return as a result
+  { toe_facts     :: !FactEnv
+  -- ^ A triangular substitution we extend when we brought a 'ComplexEq' from
+  -- 'ts_standby' into 'SimpleEq' form. This is an 'CoreSubst.IdSubstEnv', but
+  -- we inlined the synonym for symmetry with 'toe_refuts'.
+  -- TODO: This might not be enough for handling function applications. For
+  -- example, it's simultaneously possible for @x@ to be the result of @f 42@
+  -- and of @g 5@ (@f 41@, even). (Is it, though? Yes, imagine if/then/else).
+  -- For now we assume that we only record facts equating to *matchable*
+  -- expressions. This means we can't really record much at all apart from
+  -- literals and con apps... Maybe switch to 'IdEnv CoreSet' later? But what's
+  -- the point? We should probably have these contraints in the worklist...
+  , toe_refuts    :: !RefutEnv
+  -- ^ When \(x ~ E \in \Gamma\), then we can refute satisfiability as soon as
+  -- we can prove that \(x ~ E\). This tracks negative equalities occuring in
+  -- case splits. E.g., after the clause guarded by @Nothing <- x@, we know that
+  -- @x@ can't be @Nothing@, so we have \(x ~ Nothing \in \Gamma\).
+  -- TODO: Is this really Reader-like state? I.e. don't we want to take some
+  -- refutations we learned with us when we leave scope?
+  , toe_us        :: !UniqSupply
+  , toe_reps      :: !RepEnv
+  , toe_in_scope  :: !InScopeSet
+  -- ^ The variables currently in scope. Should agree with 'toe_facts' and
+  -- 'toe_refuts', i.e. when a new variable shadows we have to remove it from
+  -- the substitutions. TODO: We should not really discard old entries, as they
+  -- might be useful when we leave the scope again (in which case we also have
+  -- to prune any equations involving out-of-scope binders)
+  -- TODO: Removing from the substitution doesn't work, unless we are willing
+  -- to index all data structures for free ids. Also it's unnecessary, as the
+  -- information is perfectly valid, it just so happens that the name is taken.
+  -- Instead, we should thread around an RnEnv and substitute shadowing occs
+  -- accordingly.
   }
 
 -- | The solver_state of the term oracle.
+-- TODO: Check that if after we have 'toe_refuts', 'SimpleEq' only (see Note
+-- [Representation of Term Equalities]) becomes viable again.
+-- Is 2. in that note even accurate? Why can't we have 'ComplexEq' in triangular
+-- form by introducing new variables as necessary? It's surely OK to just go
+-- through 'toe_facts' when needed?
 data TmState = TS
   { ts_standby :: ![ComplexEq]
   -- ^ Complex constraints that cannot progress unless we get more information.
@@ -76,12 +135,8 @@ data TmState = TS
   }
 
 -- | Initial solver_state of the oracle.
-initialTmState :: TmState
-initialTmState = TS [] (TOE False emptyVarEnv)
-
--- | Set the 'toe_unhandled' flag in the 'TmState's 'ts_env'.
-markUnhandled :: TmState -> TmState
-markUnhandled st = st { ts_env = ts_env st { toe_unhandled = True } }
+initialTmState :: InScopeSet -> TmState
+initialTmState in_scope = TS [] (TOE emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv in_scope)
 
 -- | Prepends a 'ComplexEq' to 'ts_standby'.
 deferComplexEq :: ComplexEq -> TmState -> TmState
@@ -93,7 +148,7 @@ canDiverge :: Var -> TmState -> Bool
 canDiverge x TS{ ts_standby = standby, ts_env = env }
   -- If the variable seems not evaluated, there is a possibility for
   -- constraint x ~ BOT to be satisfiable.
-  | Var y <- varDeepLookup (toe_subst env) x -- seems not forced
+  | Var y <- varDeepLookup (toe_facts env) x -- seems not forced
   -- If it is involved (directly or indirectly) in any equality in the
   -- worklist, we can assume that it is already indirectly evaluated,
   -- as a side-effect of equality checking. If not, then we can assume
@@ -103,60 +158,58 @@ canDiverge x TS{ ts_standby = standby, ts_env = env }
   | otherwise = False
   where
     isForcedByEq :: Name -> ComplexEq -> Bool
-    isForcedByEq y (e1, e2) = varIn y e1 || varIn y e2
+    isForcedByEq y (Cplx e1 e2) = varIn y e1 || varIn y e2
 
 -- | Check whether a variable is in the free variables of an expression
 varIn :: Var -> CoreExpr -> Bool
 varIn x e = x `elemVarSet` exprFreeIds e
 
--- | Flatten the DAG (Could be improved in terms of performance.).
-flattenPmVarEnv :: PmVarEnv -> PmVarEnv
-flattenPmVarEnv env = mapVarEnv (exprDeepLookup env) env
+-- | Determine if the given variable is rigid and if so, return its solution.
+isRigid_maybe :: FactEnv -> Var -> Maybe CoreExpr
+isRigid_maybe = lookupVarEnv
 
--- | Solve a complex equality (top-level).
-solveOneEq :: TmState -> ComplexEq -> Maybe TmState
-solveOneEq solver_state complex
-  = solveComplexEq solver_state                -- do the actual *merging* with existing solver_state
-  $ simplifyComplexEq                          -- simplify as much as you can
-  $ applySubstComplexEq (ts_env state) complex -- replace everything we already know
-
--- | Solve a complex equality.
+-- | Attempt to solve a complex equality.
 -- Nothing => definitely unsatisfiable
 -- Just tms => I have added the complex equality and added
 --             it to the tmstate; the result may or may not be
 --             satisfiable
 solveComplexEq :: TmState -> ComplexEq -> Maybe TmState
+solveComplexEq solver_state (Cplx e1 e2)
+  | let in_scope = toe_in_scope (ts_env solver_state)
+  , Just (con1, _tys, args1) <- exprIsConApp_maybe in_scope e1
+  , Just (con2, _tys, args2) <- exprIsConApp_maybe in_scope e2
+  = if con1 == con2
+      then foldlM solveComplexEq solver_state (zipWith Cplx ts1 ts2)
+      else unsat
 solveComplexEq solver_state eq@(Cplx e1 e2) = case (e1, e2) of
-  -- We cannot do a thing about these cases
-  (PmExprOther _,_)            -> Just (markUnhandled solver_state)
-  (_,PmExprOther _)            -> Just (markUnhandled solver_state)
+  (Lit l1, Lit l2)
+    | l1 == l2  -> solved
+    | otherwise -> unsat
 
-  (PmExprLit l1, PmExprLit l2) -> case eqPmLit l1 l2 of
-    -- See Note [Undecidable Equality for Overloaded Literals]
-    True  -> Just solver_state
-    False -> Nothing
+  (Var x, Var y)
+    | x == y    -> solved
+  (Var x, _)
+    | Just e1' <- isRigid_maybe (toe_facts (ts_env solver_state)) x
+    -> solveComplexEq e1' e2
+    | otherwise
+    -> extendSubstAndSolve x e2 solver_state
+  (_, Var _)    -> symmetric
 
-  (PmExprCon c1 ts1, PmExprCon c2 ts2)
-    | c1 == c2  -> foldlM solveComplexEq solver_state (zip ts1 ts2)
-    | otherwise -> Nothing
-  (PmExprCon _ [], PmExprEq t1 t2)
-    | isTruePmExpr e1  -> solveComplexEq solver_state (t1, t2)
-    | isFalsePmExpr e1 -> Just (deferComplexEq eq solver_state)
-  (PmExprEq t1 t2, PmExprCon _ [])
-    | isTruePmExpr e2   -> solveComplexEq solver_state (t1, t2)
-    | isFalsePmExpr e2  -> Just (deferComplexEq eq solver_state)
+  _
+    | cheapEqExpr' (const True) e1 e2 -> solved
+    | otherwise                       -> defer
+  where
+    solved    = Just solver_state
+    defer     = Just (deferComplexEq eq solver_state)
+    unsat     = Nothing
+    symmetric = solveComplexEq solver_state (Cplx e2 e1)
 
-  (PmExprVar x, PmExprVar y)
-    | x == y    -> Just solver_state
-    | otherwise -> extendSubstAndSolve x e2 solver_state
-
-  (PmExprVar x, _) -> extendSubstAndSolve x e2 solver_state
-  (_, PmExprVar x) -> extendSubstAndSolve x e1 solver_state
-
-  (PmExprEq _ _, PmExprEq _ _) -> Just (deferComplexEq eq solver_state)
-
-  _ -> WARN( True, text "solveComplexEq: Catch all" <+> ppr eq )
-       Just (markUnhandled solver_state) -- I HATE CATCH-ALLS
+-- Compute the fixpoint of the given function by repeatedly applying it to an
+-- initial set until the series stabilises.
+fixVarSet :: (Var -> VarSet) -> VarSet -> VarSet
+fixVarSet f s = fst $ head $ dropWhile (uncurry (/=)) $ zip series (tail series)
+  where
+    series = iterate (mapUnionVarSet f . nonDetEltsUfm) s
 
 -- | Extend the substitution and solve the (possibly updated) constraints.
 extendSubstAndSolve :: Var -> CoreExpr -> TmState -> Maybe TmState
@@ -169,82 +222,29 @@ extendSubstAndSolve x e state
     -- See Note [Representation of Term Equalities] in deSugar/Check.hs
     (changed, unchanged) = partitionWith (substComplexEq x e) (ts_standby state)
     env                  = ts_env ts
-    new_env              = env { toe_subst = extendVarEnv (toe_subst env) x e }
+    new_env              = env { toe_facts = extendVarEnv (toe_facts env) x e }
     new_incr_state       = state { ts_standby = unchanged, ts_env = new_env }
+
+    idx_facts            = toe_idx_facts env
+    transitive_changes   = fixVarSet (lookupIndex idx_facts) (unitVarSet x)
+    might_refute         = lookupIndex (toe_idx_refuts)
+    new_idx_facts        = indexCoreExpr x e (toe_idx_facts env)
+    new_idx_refuts       = indexCoreExpr x e (toe_idx_refuts env)
 
 -- | When we know that a variable is fresh, we do not actually have to
 -- check whether anything changes, we know that nothing does. Hence,
 -- `extendSubst` simply extends the substitution, unlike what
 -- `extendSubstAndSolve` does.
-extendSubst :: Id -> PmExpr -> TmState -> TmState
-extendSubst x e state
-  | isNotPmExprOther simpl_e
-  = state { ts_env = env { toe_subst = extendVarEnv (toe_subst env) x simpl_e))
-  | otherwise = markUnhandled state
+extendSubst :: Id -> CoreExpr -> TmState -> TmState
+extendSubst x e state = state { ts_env = new_env }
   where
     env = ts_env state
+    new_env = env { toe_facts = extendVarEnv (toe_facts env) x simpl_e }
     simpl_e = fst $ simplifyPmExpr $ exprDeepLookup env e
 
--- | Simplify a complex equality.
-simplifyComplexEq :: ComplexEq -> ComplexEq
-simplifyComplexEq (Cplx e1 e2) = Cplx (fst $ simplifyPmExpr e1) (fst $ simplifyPmExpr e2)
-
--- | Simplify an expression. The boolean indicates if there has been any
--- simplification or if the operation was a no-op.
-simplifyPmExpr :: PmExpr -> (PmExpr, Bool)
--- See Note [Deep equalities]
-simplifyPmExpr e = case e of
-  PmExprCon c ts -> case mapAndUnzip simplifyPmExpr ts of
-                      (ts', bs) -> (PmExprCon c ts', or bs)
-  PmExprEq t1 t2 -> simplifyEqExpr t1 t2
-  _other_expr    -> (e, False) -- the others are terminals
-
--- | Simplify an equality expression. The equality is given in parts.
-simplifyEqExpr :: PmExpr -> PmExpr -> (PmExpr, Bool)
--- See Note [Deep equalities]
-simplifyEqExpr e1 e2 = case (e1, e2) of
-  -- Varables
-  (PmExprVar x, PmExprVar y)
-    | x == y -> (truePmExpr, True)
-
-  -- Literals
-  (PmExprLit l1, PmExprLit l2) -> case eqPmLit l1 l2 of
-    -- See Note [Undecidable Equality for Overloaded Literals]
-    True  -> (truePmExpr,  True)
-    False -> (falsePmExpr, True)
-
-  -- Can potentially be simplified
-  (PmExprEq {}, _) -> case (simplifyPmExpr e1, simplifyPmExpr e2) of
-    ((e1', True ), (e2', _    )) -> simplifyEqExpr e1' e2'
-    ((e1', _    ), (e2', True )) -> simplifyEqExpr e1' e2'
-    ((e1', False), (e2', False)) -> (PmExprEq e1' e2', False) -- cannot progress
-  (_, PmExprEq {}) -> case (simplifyPmExpr e1, simplifyPmExpr e2) of
-    ((e1', True ), (e2', _    )) -> simplifyEqExpr e1' e2'
-    ((e1', _    ), (e2', True )) -> simplifyEqExpr e1' e2'
-    ((e1', False), (e2', False)) -> (PmExprEq e1' e2', False) -- cannot progress
-
-  -- Constructors
-  (PmExprCon c1 ts1, PmExprCon c2 ts2)
-    | c1 == c2 ->
-        let (ts1', bs1) = mapAndUnzip simplifyPmExpr ts1
-            (ts2', bs2) = mapAndUnzip simplifyPmExpr ts2
-            (tss, _bss) = zipWithAndUnzip simplifyEqExpr ts1' ts2'
-            worst_case  = PmExprEq (PmExprCon c1 ts1') (PmExprCon c2 ts2')
-        in  if | not (or bs1 || or bs2) -> (worst_case, False) -- no progress
-               | all isTruePmExpr  tss  -> (truePmExpr, True)
-               | any isFalsePmExpr tss  -> (falsePmExpr, True)
-               | otherwise              -> (worst_case, False)
-    | otherwise -> (falsePmExpr, True)
-
-  -- We cannot do anything about the rest..
-  _other_equality -> (original, False)
-
-  where
-    original = PmExprEq e1 e2 -- reconstruct equality
-
 -- | Apply an (un-flattened) substitution to a simple equality.
-applySubstComplexEq :: PmVarEnv -> ComplexEq -> ComplexEq
-applySubstComplexEq env (e1,e2) = (exprDeepLookup env e1, exprDeepLookup env e2)
+applySubstComplexEq :: FactEnv -> ComplexEq -> ComplexEq
+applySubstComplexEq env (Cplx e1 e2) = Cplx (exprDeepLookup env e1) (exprDeepLookup env e2)
 
 -- | Apply an (un-flattened) substitution to a variable.
 varDeepLookup :: PmVarEnv -> Var -> CoreExpr
@@ -264,11 +264,6 @@ exprDeepLookup _   other_expr       = other_expr -- PmExprLit, PmExprOther
 -- | External interface to the term oracle.
 tmOracle :: TmState -> [ComplexEq] -> Maybe TmState
 tmOracle tm_state eqs = foldlM solveOneEq tm_state eqs
-
--- | Type of a PmLit
-pmLitType :: PmLit -> Type -- should be in PmExpr but gives cyclic imports :(
-pmLitType (PmSLit   lit) = hsLitType   lit
-pmLitType (PmOLit _ lit) = overLitType lit
 
 {- Note [Deep equalities]
 ~~~~~~~~~~~~~~~~~~~~~~~~~
