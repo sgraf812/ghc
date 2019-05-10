@@ -21,7 +21,7 @@ module TrieMap(
 
    -- * Things helpful for adding additional Instances.
    (>.>), (|>), (|>>), XT,
-   foldMaybe,
+   foldMaybe, unionWithMaybe,
    -- * Map for leaf compression
    GenMap,
    lkG, xtG, mapG, fdG,
@@ -39,6 +39,7 @@ import qualified Data.Map    as Map
 import qualified Data.IntMap as IntMap
 import Outputable
 import Control.Monad( (>=>) )
+import Control.Applicative ( (<|>) )
 
 {-
 This module implements TrieMaps, which are finite mappings
@@ -75,6 +76,8 @@ class TrieMap m where
       -- The unusual argument order here makes
       -- it easy to compose calls to foldTM;
       -- see for example fdE below
+
+   unionWithTM :: (a -> a -> a) -> m a -> m a -> m a
 
 insertTM :: TrieMap m => Key m -> a -> m a -> m a
 insertTM k v m = alterTM k (\_ -> Just v) m
@@ -121,6 +124,7 @@ instance TrieMap IntMap.IntMap where
   alterTM = xtInt
   foldTM k m z = IntMap.foldr k z m
   mapTM f m = IntMap.map f m
+  unionWithTM = IntMap.unionWith
 
 xtInt :: Int -> XT a -> IntMap.IntMap a -> IntMap.IntMap a
 xtInt k f m = IntMap.alter f k m
@@ -132,6 +136,7 @@ instance Ord k => TrieMap (Map.Map k) where
   alterTM k f m = Map.alter f k m
   foldTM k m z = Map.foldr k z m
   mapTM f m = Map.map f m
+  unionWithTM = Map.unionWith
 
 
 {-
@@ -208,6 +213,7 @@ instance TrieMap UniqDFM where
   alterTM k f m = alterUDFM f m k
   foldTM k m z = foldUDFM k z m
   mapTM f m = mapUDFM f m
+  unionWithTM f a b = plusUDFM_C f a b
 
 {-
 ************************************************************************
@@ -224,11 +230,12 @@ data MaybeMap m a = MM { mm_nothing  :: Maybe a, mm_just :: m a }
 
 instance TrieMap m => TrieMap (MaybeMap m) where
    type Key (MaybeMap m) = Maybe (Key m)
-   emptyTM  = MM { mm_nothing = Nothing, mm_just = emptyTM }
-   lookupTM = lkMaybe lookupTM
-   alterTM  = xtMaybe alterTM
-   foldTM   = fdMaybe
-   mapTM    = mapMb
+   emptyTM     = MM { mm_nothing = Nothing, mm_just = emptyTM }
+   lookupTM    = lkMaybe lookupTM
+   alterTM     = xtMaybe alterTM
+   foldTM      = fdMaybe
+   mapTM       = mapMb
+   unionWithTM = uwMaybe
 
 mapMb :: TrieMap m => (a->b) -> MaybeMap m a -> MaybeMap m b
 mapMb f (MM { mm_nothing = mn, mm_just = mj })
@@ -248,6 +255,11 @@ fdMaybe :: TrieMap m => (a -> b -> b) -> MaybeMap m a -> b -> b
 fdMaybe k m = foldMaybe k (mm_nothing m)
             . foldTM k (mm_just m)
 
+uwMaybe :: TrieMap m => (a -> a -> a) -> MaybeMap m a -> MaybeMap m a -> MaybeMap m a
+uwMaybe f a b
+  = MM { mm_nothing = unionWithMaybe f (mm_nothing a) (mm_nothing b)
+       , mm_just = unionWithTM f (mm_just a) (mm_just b) }
+
 {-
 ************************************************************************
 *                                                                      *
@@ -262,11 +274,12 @@ data ListMap m a
 
 instance TrieMap m => TrieMap (ListMap m) where
    type Key (ListMap m) = [Key m]
-   emptyTM  = LM { lm_nil = Nothing, lm_cons = emptyTM }
-   lookupTM = lkList lookupTM
-   alterTM  = xtList alterTM
-   foldTM   = fdList
-   mapTM    = mapList
+   emptyTM     = LM { lm_nil = Nothing, lm_cons = emptyTM }
+   lookupTM    = lkList lookupTM
+   alterTM     = xtList alterTM
+   foldTM      = fdList
+   mapTM       = mapList
+   unionWithTM = uwList
 
 instance (TrieMap m, Outputable a) => Outputable (ListMap m a) where
   ppr m = text "List elts" <+> ppr (foldTM (:) m [])
@@ -290,9 +303,18 @@ fdList :: forall m a b. TrieMap m
 fdList k m = foldMaybe k          (lm_nil m)
            . foldTM    (fdList k) (lm_cons m)
 
+uwList :: TrieMap m => (a -> a -> a) -> ListMap m a -> ListMap m a -> ListMap m a
+uwList f a b
+  = LM { lm_nil = unionWithMaybe f (lm_nil a) (lm_nil b)
+       , lm_cons = unionWithTM (unionWithTM f) (lm_cons a) (lm_cons b) }
+
 foldMaybe :: (a -> b -> b) -> Maybe a -> b -> b
 foldMaybe _ Nothing  b = b
 foldMaybe k (Just a) b = k a b
+
+unionWithMaybe :: (a -> a -> a) -> Maybe a -> Maybe a -> Maybe a
+unionWithMaybe f (Just a) (Just b) = Just (f a b)
+unionWithMaybe _ ma       mb       = ma <|> mb
 
 {-
 ************************************************************************
@@ -349,11 +371,12 @@ instance (Outputable a, Outputable (m a)) => Outputable (GenMap m a) where
 -- TODO undecidable instance
 instance (Eq (Key m), TrieMap m) => TrieMap (GenMap m) where
    type Key (GenMap m) = Key m
-   emptyTM  = EmptyMap
-   lookupTM = lkG
-   alterTM  = xtG
-   foldTM   = fdG
-   mapTM    = mapG
+   emptyTM     = EmptyMap
+   lookupTM    = lkG
+   alterTM     = xtG
+   foldTM      = fdG
+   mapTM       = mapG
+   unionWithTM = uwG
 
 --We want to be able to specialize these functions when defining eg
 --tries over (GenMap CoreExpr) which requires INLINEABLE
@@ -403,3 +426,11 @@ fdG :: TrieMap m => (a -> b -> b) -> GenMap m a -> b -> b
 fdG _ EmptyMap = \z -> z
 fdG k (SingletonMap _ v) = \z -> k v z
 fdG k (MultiMap m) = foldTM k m
+
+{-# INLINEABLE uwG #-}
+uwG :: (Eq (Key m), TrieMap m) => (a -> a -> a) -> GenMap m a -> GenMap m a -> GenMap m a
+uwG _ EmptyMap r = r
+uwG _ l EmptyMap = l
+uwG f (MultiMap l) (MultiMap r) = MultiMap (unionWithTM f l r)
+uwG f (SingletonMap k v) r = alterTM k (unionWithMaybe f (Just v)) r
+uwG f l (SingletonMap k v) = alterTM k (unionWithMaybe (flip f) (Just v)) l

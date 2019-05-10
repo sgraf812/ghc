@@ -132,6 +132,7 @@ instance TrieMap LabelMap where
   alterTM k f m = mapAlter f k m
   foldTM k m z = mapFoldr k z m
   mapTM f m = mapMap f m
+  unionWithTM f a b = mapUnionWithKey (const f) a b
 
 -----------------------------------------------------------------------------
 -- FactBase

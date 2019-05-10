@@ -319,6 +319,7 @@ Library
         CoreUnfold
         CoreUtils
         CoreMap
+        CoreSet
         CoreSeq
         CoreStats
         MkCore
@@ -537,6 +538,7 @@ Library
         BufWrite
         Digraph
         Encoding
+        Equivalence
         FastFunctions
         FastMutInt
         FastString

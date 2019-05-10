@@ -123,6 +123,9 @@ instance TrieMap StgArgMap where
     foldTM k m = foldTM k (sam_var m) . foldTM k (sam_lit m)
     mapTM f (SAM {sam_var = varm, sam_lit = litm}) =
         SAM { sam_var = mapTM f varm, sam_lit = mapTM f litm }
+    unionWithTM f a b =
+        SAM { sam_var = unionWithTM f (sam_var a) (sam_var b)
+            , sam_lit = unionWithTM f (sam_lit a) (sam_lit b) }
 
 newtype ConAppMap a = CAM { un_cam :: DNameEnv (ListMap StgArgMap a) }
 
@@ -134,6 +137,7 @@ instance TrieMap ConAppMap where
         m { un_cam = un_cam m |> xtDNamed dataCon |>> alterTM args f }
     foldTM k = un_cam >.> foldTM (foldTM k)
     mapTM f  = un_cam >.> mapTM (mapTM f) >.> CAM
+    unionWithTM f (CAM a) (CAM b) = CAM (unionWithTM (unionWithTM f) a b)
 
 -----------------
 -- The CSE Env --

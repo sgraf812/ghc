@@ -153,6 +153,7 @@ instance TrieMap CoreMap where
     alterTM k f (CoreMap m) = CoreMap (alterTM (deBruijnize k) f m)
     foldTM k (CoreMap m) = foldTM k m
     mapTM f (CoreMap m) = CoreMap (mapTM f m)
+    unionWithTM f (CoreMap a) (CoreMap b) = CoreMap (unionWithTM f a b)
 
 -- | @CoreMapG a@ is a map from @DeBruijn CoreExpr@ to @a@.  The extended
 -- key makes it suitable for recursive traversal, since it can track binders,
@@ -227,11 +228,12 @@ emptyE = CM { cm_var = emptyTM, cm_lit = emptyTM
 
 instance TrieMap CoreMapX where
    type Key CoreMapX = DeBruijn CoreExpr
-   emptyTM  = emptyE
-   lookupTM = lkE
-   alterTM  = xtE
-   foldTM   = fdE
-   mapTM    = mapE
+   emptyTM     = emptyE
+   lookupTM    = lkE
+   alterTM     = xtE
+   foldTM      = fdE
+   mapTM       = mapE
+   unionWithTM = uwE
 
 --------------------------
 mapE :: (a->b) -> CoreMapX a -> CoreMapX b
@@ -342,6 +344,21 @@ xtE (D env (Case e b ty as))     f m
                                                  |>> let env1 = extendCME env b
                                                      in xtList (xtA env1) as f }
 
+uwE :: (a -> a -> a) -> CoreMapX a -> CoreMapX a -> CoreMapX a
+uwE f a b
+  = CM { cm_var = unionWithTM f (cm_var a) (cm_var b)
+       , cm_lit = unionWithTM f (cm_lit a) (cm_lit b)
+       , cm_co  = unionWithTM f (cm_co a) (cm_co b)
+       , cm_type = unionWithTM f (cm_type a) (cm_type b)
+       , cm_cast = unionWithTM (unionWithTM f) (cm_cast a) (cm_cast b)
+       , cm_app = unionWithTM (unionWithTM f) (cm_app a) (cm_app b)
+       , cm_lam = unionWithTM (unionWithTM f) (cm_lam a) (cm_lam b)
+       , cm_letn = unionWithTM (unionWithTM (unionWithTM f)) (cm_letn a) (cm_letn b)
+       , cm_letr = unionWithTM (unionWithTM (unionWithTM f)) (cm_letr a) (cm_letr b)
+       , cm_case = unionWithTM (unionWithTM f) (cm_case a) (cm_case b)
+       , cm_ecase = unionWithTM (unionWithTM f) (cm_ecase a) (cm_ecase b)
+       , cm_tick = unionWithTM (unionWithTM f) (cm_tick a) (cm_tick b) }
+
 -- TODO: this seems a bit dodgy, see 'eqTickish'
 type TickishMap a = Map.Map (Tickish Id) a
 lkTickish :: Tickish Id -> TickishMap a -> Maybe a
@@ -358,13 +375,14 @@ data AltMap a   -- A single alternative
 
 instance TrieMap AltMap where
    type Key AltMap = CoreAlt
-   emptyTM  = AM { am_deflt = emptyTM
-                 , am_data = emptyDNameEnv
-                 , am_lit  = emptyTM }
-   lookupTM = lkA emptyCME
-   alterTM  = xtA emptyCME
-   foldTM   = fdA
-   mapTM    = mapA
+   emptyTM     = AM { am_deflt = emptyTM
+                    , am_data = emptyDNameEnv
+                    , am_lit  = emptyTM }
+   lookupTM    = lkA emptyCME
+   alterTM     = xtA emptyCME
+   foldTM      = fdA
+   mapTM       = mapA
+   unionWithTM = uwA
 
 instance Eq (DeBruijn CoreAlt) where
   D env1 a1 == D env2 a2 = go a1 a2 where
@@ -403,6 +421,12 @@ fdA k m = foldTM k (am_deflt m)
         . foldTM (foldTM k) (am_data m)
         . foldTM (foldTM k) (am_lit m)
 
+uwA :: (a -> a -> a) -> AltMap a -> AltMap a -> AltMap a
+uwA f a b
+  = AM { am_deflt = unionWithTM f (am_deflt a) (am_deflt b)
+       , am_data = unionWithTM (unionWithTM f) (am_data a) (am_data b)
+       , am_lit = unionWithTM (unionWithTM f) (am_lit a) (am_lit b) }
+
 {-
 ************************************************************************
 *                                                                      *
@@ -422,6 +446,7 @@ instance TrieMap CoercionMap where
    alterTM k f (CoercionMap m) = CoercionMap (alterTM (deBruijnize k) f m)
    foldTM k    (CoercionMap m) = foldTM k m
    mapTM f     (CoercionMap m) = CoercionMap (mapTM f m)
+   unionWithTM f (CoercionMap a) (CoercionMap b) = CoercionMap (unionWithTM f a b)
 
 type CoercionMapG = GenMap CoercionMapX
 newtype CoercionMapX a = CoercionMapX (TypeMapX a)
@@ -433,6 +458,7 @@ instance TrieMap CoercionMapX where
   alterTM  = xtC
   foldTM f (CoercionMapX core_tm) = foldTM f core_tm
   mapTM f (CoercionMapX core_tm)  = CoercionMapX (mapTM f core_tm)
+  unionWithTM f (CoercionMapX a) (CoercionMapX b) = CoercionMapX (unionWithTM f a b)
 
 instance Eq (DeBruijn Coercion) where
   D env1 co1 == D env2 co2
@@ -495,11 +521,12 @@ trieMapView _ = Nothing
 
 instance TrieMap TypeMapX where
    type Key TypeMapX = DeBruijn Type
-   emptyTM  = emptyT
-   lookupTM = lkT
-   alterTM  = xtT
-   foldTM   = fdT
-   mapTM    = mapT
+   emptyTM     = emptyT
+   lookupTM    = lkT
+   alterTM     = xtT
+   foldTM      = fdT
+   mapTM       = mapT
+   unionWithTM = uwT
 
 instance Eq (DeBruijn Type) where
   env_t@(D env t) == env_t'@(D env' t')
@@ -598,6 +625,15 @@ fdT k m = foldTM k (tm_var m)
         . foldTyLit k (tm_tylit m)
         . foldMaybe k (tm_coerce m)
 
+uwT :: (a -> a -> a) -> TypeMapX a -> TypeMapX a -> TypeMapX a
+uwT f a b
+  = TM { tm_var = unionWithTM f (tm_var a) (tm_var b)
+       , tm_app = unionWithTM (unionWithTM f) (tm_app a) (tm_app b)
+       , tm_tycon = unionWithTM f (tm_tycon a) (tm_tycon b)
+       , tm_forall = unionWithTM (unionWithTM f) (tm_forall a) (tm_forall b)
+       , tm_tylit = unionWithTM f (tm_tylit a) (tm_tylit b)
+       , tm_coerce = unionWithMaybe f (tm_coerce a) (tm_coerce b) }
+
 ------------------------
 data TyLitMap a = TLM { tlm_number :: Map.Map Integer a
                       , tlm_string :: Map.Map FastString a
@@ -605,11 +641,12 @@ data TyLitMap a = TLM { tlm_number :: Map.Map Integer a
 
 instance TrieMap TyLitMap where
    type Key TyLitMap = TyLit
-   emptyTM  = emptyTyLitMap
-   lookupTM = lkTyLit
-   alterTM  = xtTyLit
-   foldTM   = foldTyLit
-   mapTM    = mapTyLit
+   emptyTM     = emptyTyLitMap
+   lookupTM    = lkTyLit
+   alterTM     = xtTyLit
+   foldTM      = foldTyLit
+   mapTM       = mapTyLit
+   unionWithTM = uwTyLit
 
 emptyTyLitMap :: TyLitMap a
 emptyTyLitMap = TLM { tlm_number = Map.empty, tlm_string = Map.empty }
@@ -634,6 +671,11 @@ foldTyLit :: (a -> b -> b) -> TyLitMap a -> b -> b
 foldTyLit l m = flip (Map.foldr l) (tlm_string m)
               . flip (Map.foldr l) (tlm_number m)
 
+uwTyLit :: (a -> a -> a) -> TyLitMap a -> TyLitMap a -> TyLitMap a
+uwTyLit f a b
+  = TLM { tlm_number = Map.unionWith f (tlm_number a) (tlm_number b)
+        , tlm_string = Map.unionWith f (tlm_string a) (tlm_string b) }
+
 -------------------------------------------------
 -- | @TypeMap a@ is a map from 'Type' to @a@.  If you are a client, this
 -- is the type you want. The keys in this map may have different kinds.
@@ -657,6 +699,7 @@ instance TrieMap TypeMap where
     alterTM k f m = xtTT (deBruijnize k) f m
     foldTM k (TypeMap m) = foldTM (foldTM k) m
     mapTM f (TypeMap m) = TypeMap (mapTM (mapTM f) m)
+    unionWithTM f (TypeMap a) (TypeMap b) = TypeMap (unionWithTM (unionWithTM f) a b)
 
 foldTypeMap :: (a -> b -> b) -> b -> TypeMap a -> b
 foldTypeMap k z m = foldTM k m z
@@ -697,6 +740,7 @@ instance TrieMap LooseTypeMap where
   alterTM k f (LooseTypeMap m) = LooseTypeMap (alterTM (deBruijnize k) f m)
   foldTM f (LooseTypeMap m) = foldTM f m
   mapTM f (LooseTypeMap m) = LooseTypeMap (mapTM f m)
+  unionWithTM f (LooseTypeMap a) (LooseTypeMap b) = LooseTypeMap (unionWithTM f a b)
 
 {-
 ************************************************************************
@@ -772,11 +816,12 @@ data VarMap a = VM { vm_bvar   :: BoundVarMap a  -- Bound variable
 
 instance TrieMap VarMap where
    type Key VarMap = Var
-   emptyTM  = VM { vm_bvar = IntMap.empty, vm_fvar = emptyDVarEnv }
-   lookupTM = lkVar emptyCME
-   alterTM  = xtVar emptyCME
-   foldTM   = fdVar
-   mapTM    = mapVar
+   emptyTM     = VM { vm_bvar = IntMap.empty, vm_fvar = emptyDVarEnv }
+   lookupTM    = lkVar emptyCME
+   alterTM     = xtVar emptyCME
+   foldTM      = fdVar
+   mapTM       = mapVar
+   unionWithTM = uwVar
 
 mapVar :: (a->b) -> VarMap a -> VarMap b
 mapVar f (VM { vm_bvar = bv, vm_fvar = fv })
@@ -795,6 +840,11 @@ xtVar env v f m
 fdVar :: (a -> b -> b) -> VarMap a -> b -> b
 fdVar k m = foldTM k (vm_bvar m)
           . foldTM k (vm_fvar m)
+
+uwVar :: (a -> a -> a) -> VarMap a -> VarMap a -> VarMap a
+uwVar f a b
+  = VM { vm_bvar = unionWithTM f (vm_bvar a) (vm_bvar b)
+       , vm_fvar = unionWithTM f (vm_fvar a) (vm_fvar b) }
 
 lkDFreeVar :: Var -> DVarEnv a -> Maybe a
 lkDFreeVar var env = lookupDVarEnv env var
