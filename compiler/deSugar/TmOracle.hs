@@ -58,27 +58,70 @@ toComplex (Smpl x e) = Cplx (Var x) e
 
 type RepEnv = UniqFM CoreSet
 
+type Class = (Maybe CoreExpr, CoreSet)
+
 data Equalities = E
-  { e_eq   :: !(Equivalence CoreSet)
+  { e_eq   :: !(Equivalence Class)
   , e_reps :: !(CoreMap Rep)
   }
 
 emptyEqualities :: UniqSupply -> Equalities
 emptyEqualities us = E (Equivalence.empty us) emptyTM
 
-addEquality :: ComplexEq -> Equalities -> Equalities
-addEquality (Cplx l r) es@E{ e_eq = eq, e_reps = reps } =
-  case (lookupTM reps l, lookupTM reps r) of
-    (Just rl, Just rr) -> es { e_eq = Equivalence.equate unionCoreSet rl rr eq }
-    (Just rl, Nothing) -> add_to_equiv r rl
-    (Nothing, Just rr) -> add_to_equiv l rr
+mergeClasses :: Class -> Class -> (Maybe ComplexEq, Class)
+mergeClasses (soll, setl) (solr, setr) = (meq, (sol, set))
+  where
+    set        = unionCoreSet setl setr
+    -- caveat: When soll and solr contradict each other, <|> will forget this.
+    --         In that case we return a new ComplexEq premise.
+    sol        = soll <|> solr
+    meq
+      | Just el <- soll
+      , Just er <- solr
+      , not (cheapEqExpr el er)
+      -- The solutions of both equivalence classes aren't obviously equal.
+      -- We have to pass them on to the solver and just pretend they are equal
+      -- for now.
+      = Just (Cplx el er)
+      | otherwise
+      = Nothing
+
+unitClass :: CoreExpr -> Class
+unitClass e = (exprIsValue_maybe e, mkCoreSet [e])
+
+-- TODO: Here is some abstraction waiting to be freed. Find out which.
+
+-- | Adds a 'ComplexEq' to our knowledge base by merging equivalence classes,
+-- creating them if needed. Also takes care of detecting contradictory
+-- solutions, in which case a residual 'ComplexEq' is returned that is a
+-- necessary condition to the satisfiability of the returned model.
+addSolveEquality :: ComplexEq -> Equalities -> (Maybe ComplexEq, Equalities)
+addSolveEquality (Cplx l r) es@E{ e_eq = eq, e_reps = reps } =
+  case (lookupCoreMap reps l, lookupCoreMap reps r) of
+    (Just rl, Just rr) ->
+      let (cl, eq1)    = Equivalence.lookup rl eq
+          (cr, eq2)    = Equivalence.lookup rr eq1
+          -- the lookups should be for free when Equivalence.equate is inlined
+          (mcplx, cls) = mergeClasses cl cr
+          eq3          = Equivalence.equate (\_ _ -> cls) rl rr eq2
+      in (mcplx, es { e_eq = eq3 })
+    (Just rl, Nothing) -> (Nothing, add_to_equiv r rl)
+    (Nothing, Just rr) -> (Nothing, add_to_equiv l rr)
     (Nothing, Nothing) ->
-      let (rep, eq') = Equivalence.newClass (mkCoreSet [l, r]) eq
-          reps'      = reps `extendCoreMap` l rep `extendCoreMap` r rep
-      in es { e_eq = eq, e_reps = reps }
+      let cl           = unitClass l
+          cr           = unitClass r
+          (mcplx, cls) = mergeClasses cl cr
+          (rep, eq')   = Equivalence.newClass cls eq
+          reps'        = reps `extendCoreMap` l rep `extendCoreMap` r rep
+      in (mcplx, es { e_eq = eq', e_reps = reps' })
   where
     add_to_equiv e r =
-      es { e_reps = extendCoreMap reps e r, e_eq = Equivalence.modify (`extendCoreSet` e) r eq }
+      let (c1, eq1)    = Equivalence.lookup r eq
+          reps'        = extendCoreMap reps e r
+          c2           = unitClass e
+          (mcplx, cls) = mergeClasses c1 c2
+          eq2          = Equivalence.modify (const cls) r eq1
+      in (mcplx, es { e_reps = reps', e_eq = eq2 })
 
 -- | Check if we have knowledge that the given term is surely terminating.
 -- For that to be true, it's sufficient to check its equivalence class has any
@@ -94,6 +137,23 @@ exprSurelyTerminates e TS{ ts_reps = reps, ts_eqs = es } =
           terminating (Var _) = False
           terminating e = exprIsCheap e
       in any terminating equal_exprs
+
+-- | Not quite the same as 'exprIsHNF'... Only literals and saturated
+-- constructor applications, modulo ticks and coercions, are considered values
+exprIsValue :: InScopeSet -> CoreExpr -> Bool
+exprIsValue in_scope e
+  | Just _ <- exprIsConApp_maybe in_scope e
+  = True
+exprIsValue _ (Tick t e)     = exprIsValue e
+exprIsValue _ (Cast c e)     = exprIsValue e
+exprIsValue _ (App e Type{}) = exprIsValue e
+exprIsValue _ (Lit _)        = True
+exprIsValue _ _              = False
+
+exprIsValue :: InScopeSet -> CoreExpr -> Maybe CoreExpr
+exprIsValue_maybe in_scope e
+  | exprIsValue in_scope e = Just e
+  | otherwise              = Nothing
 
 -- | This is actually just an 'CoreSubst.IdSubstEnv', but we inlined the synonym
 -- for symmetry with 'RefutEnv'.
@@ -158,8 +218,9 @@ varIn :: Var -> CoreExpr -> Bool
 varIn x e = x `elemVarSet` exprFreeIds e
 
 -- | Determine if the given variable is rigid and if so, return its solution.
-isRigid_maybe :: FactEnv -> Var -> Maybe CoreExpr
-isRigid_maybe = lookupVarEnv
+isRigid_maybe :: Equalities -> Var -> Maybe CoreExpr
+isRigid_maybe es@E{ es_eq = eq, es_reps = reps } x =
+  fst . flip Equivalence.lookup eq <$> lookupVarEnv reps x
 
 -- | Attempt to solve a complex equality.
 -- Nothing => definitely unsatisfiable
