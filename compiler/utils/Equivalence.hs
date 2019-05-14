@@ -7,8 +7,10 @@ module Equivalence (
 import GhcPrelude hiding (lookup)
 
 import Control.Arrow (first)
+import Control.Monad (when)
 import Control.Monad.Trans.State.Strict hiding (modify)
 import Data.Coerce
+import Maybes
 import Unique
 import UniqSupply
 import UniqFM

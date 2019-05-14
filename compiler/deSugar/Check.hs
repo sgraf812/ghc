@@ -44,6 +44,7 @@ import DataCon
 import PatSyn
 import HscTypes (CompleteMatch(..))
 
+import CoreSyn
 import DsMonad
 import TcSimplify    (tcCheckSatisfiability)
 import TcType        (isStringTy)
@@ -157,7 +158,7 @@ data PmPat :: PatTy -> * where
   PmNLit :: { pm_lit_id   :: Id
             , pm_lit_not  :: [PmLit] } -> PmPat 'VA
   PmGrd  :: { pm_grd_pv   :: PatVec
-            , pm_grd_expr :: PmExpr } -> PmPat 'PAT
+            , pm_grd_expr :: CoreExpr } -> PmPat 'PAT
   -- | A fake guard pattern (True <- _) used to represent cases we cannot handle.
   PmFake :: PmPat 'PAT
 
@@ -977,11 +978,16 @@ translatePat fam_insts pat = case pat of
   BangPat _ p  -> translatePat fam_insts (unLoc p)
 
   AsPat _ lid p -> do
+    ps <- translatePat fam_insts (unLoc p)
+    return (PmVar (unLoc lid) : ps)
+{-
+    -- With the smarter TmOracle I don't think we need this any longer
      -- Note [Translating As Patterns]
     ps <- translatePat fam_insts (unLoc p)
     let [e] = map vaToPmExpr (coercePatVec ps)
         g   = PmGrd [PmVar (unLoc lid)] e
     return (ps ++ [g])
+-}
 
   SigPat _ p _ty -> translatePat fam_insts (unLoc p)
 
@@ -1666,11 +1672,10 @@ mkOneConFull x con = do
 mkGuard :: PatVec -> HsExpr GhcTc -> DsM Pattern
 mkGuard pv e = do
   res <- allM cantFailPattern pv
-  let expr = hsExprToPmExpr e
+  dflags <- getDynFlags
+  expr <- simpleOptExpr dflags <$> dsExpr e
   tracePmD "mkGuard" (vcat [ppr pv, ppr e, ppr res, ppr expr])
-  if | res                    -> pure (PmGrd pv expr)
-     | PmExprOther {} <- expr -> pure PmFake
-     | otherwise              -> pure (PmGrd pv expr)
+  pure (PmGrd pv expr)
 
 -- | Create a term equality of the form: `(False ~ (x ~ lit))`
 mkNegEq :: Id -> PmLit -> ComplexEq
@@ -1718,12 +1723,16 @@ mkPmId2Forms ty = do
 -- * Converting between Value Abstractions, Patterns and PmExpr
 
 -- | Convert a value abstraction an expression
-vaToPmExpr :: ValAbs -> PmExpr
-vaToPmExpr (PmCon  { pm_con_con = c, pm_con_args = ps })
-  = PmExprCon c (map vaToPmExpr ps)
-vaToPmExpr (PmVar  { pm_var_id  = x }) = PmExprVar (idName x)
-vaToPmExpr (PmLit  { pm_lit_lit = l }) = PmExprLit l
-vaToPmExpr (PmNLit { pm_lit_id  = x }) = PmExprVar (idName x)
+vaToCoreExpr :: ValAbs -> PmExpr
+vaToCoreExpr (PmCon  { pm_con_con = c
+                     , pm_con_arg_tys = arg_tys
+                     , pm_con_tvs     = ex_tvs
+                     , pm_con_dicts   = dicts
+                     , pm_con_args = args })
+  = PmExprCon c (map vaToCoreExpr ps)
+vaToCoreExpr (PmVar  { pm_var_id  = x }) = PmExprVar (idName x)
+vaToCoreExpr (PmLit  { pm_lit_lit = l }) = PmExprLit l
+vaToCoreExpr (PmNLit { pm_lit_id  = x }) = PmExprVar (idName x)
 
 -- | Convert a pattern vector to a list of value abstractions by dropping the
 -- guards (See Note [Translating As Patterns])
@@ -2054,7 +2063,7 @@ pmcheckHd :: Pattern -> PatVec -> [PatVec] -> ValAbs -> ValVec
 -- Var
 pmcheckHd (PmVar x) ps guards va (ValVec vva delta)
   | Just tm_state <- solveOneEq (delta_tm_cs delta)
-                                (PmExprVar (idName x), vaToPmExpr va)
+                                (Cplx (Var x) (vaToCoreExpr va))
   = ucon va <$> pmcheckI ps guards (ValVec vva (delta {delta_tm_cs = tm_state}))
   | otherwise = return mempty
 
@@ -2156,7 +2165,7 @@ pmcheckHd p@PmLit{} ps guards va@PmCon{} (ValVec vva delta)
        -- abstraction on possible literals. We do so by introducing a fresh
        -- variable that is equated to the constructor. LitVar will then take
        -- care of the case split by resorting to NLit.
-       let tm_state = extendSubst y (vaToPmExpr va) (delta_tm_cs delta)
+       let tm_state = extendSubst y (vaToCoreExpr va) (delta_tm_cs delta)
            delta'   = delta { delta_tm_cs = tm_state }
        pmcheckHdI p ps guards (PmVar y) (ValVec vva delta')
 
@@ -2404,10 +2413,15 @@ genCaseTmCs2 :: Maybe (LHsExpr GhcTc) -- Scrutinee
              -> DsM (Bag SimpleEq)
 genCaseTmCs2 Nothing _ _ = return emptyBag
 genCaseTmCs2 (Just scr) [p] [var] = do
+  dflags <- getDynFlags
+  scr_e <- simpleOptExpr <$> dsExpr scr
   fam_insts <- dsGetFamInstEnvs
-  [e] <- map vaToPmExpr . coercePatVec <$> translatePat fam_insts p
-  let scr_e = lhsExprToPmExpr scr
-  return $ listToBag [(var, e), (var, scr_e)]
+  -- TODO: I don't think we need to add an equality for 'pat' at all, because
+  --       that will be handled by singleMatchPatVar. But that's only a hypothesis.
+  --       Note that we can't faithfully translate the abstraction back into Core
+  --       This is genCaseTmCs1, basically
+  -- pat <- translatePat fam_insts p
+  return $ listToBag [Smpl var scr_e]
 genCaseTmCs2 _ _ _ = panic "genCaseTmCs2: HsCase"
 
 -- | Generate a simple equality when checking a case expression:
@@ -2485,7 +2499,7 @@ instance Outputable ValVec where
 -- | Apply a term substitution to a value vector abstraction. All VAs are
 -- transformed to PmExpr (used only before pretty printing).
 substInValAbs :: PmVarEnv -> [ValAbs] -> [PmExpr]
-substInValAbs subst = map (exprDeepLookup subst . vaToPmExpr)
+substInValAbs subst = map ({-TODO exprDeepLookup subst . -}vaToCoreExpr)
 
 -- | Wrap up the term oracle's state once solving is complete. Drop any
 -- information about unhandled constraints (involving HsExprs) and flatten

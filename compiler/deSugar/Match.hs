@@ -745,7 +745,10 @@ matchWrapper ctxt mb_scr (MG { mg_alts = (dL->L _ matches)
       = do { dflags <- getDynFlags
            ; let upats = map (unLoc . decideBangHood dflags) pats
                  dicts = collectEvVarsPats upats
-           ; tm_cs <- genCaseTmCs2 mb_scr upats vars
+           -- Calling genCaseTmCs2 with a scrutinee but non-singleton lists of
+           -- upats and vars would panic. Was this ever called?!
+           ; when (pprTrace "mk_eqn_info" (vcat [ppr mb_scr, ppr upats, ppr vars]) (return ())
+           -- ; tm_cs <- genCaseTmCs2 mb_scr upats vars
            ; match_result <- addDictsDs dicts $ -- See Note [Type and Term Equality Propagation]
                              addTmCsDs tm_cs  $ -- See Note [Type and Term Equality Propagation]
                              dsGRHSs ctxt grhss rhs_ty

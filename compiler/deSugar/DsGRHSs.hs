@@ -23,7 +23,7 @@ import MkCore
 import CoreSyn
 import CoreUtils (bindNonRec)
 
-import Check (genCaseTmCs2)
+import Check (genCaseTmCs1)
 import DsMonad
 import DsUtils
 import Type   ( Type )
@@ -122,12 +122,12 @@ matchGuards (BindStmt _ pat bind_rhs _ _ : stmts) ctx rhs rhs_ty = do
     let upat = unLoc pat
         dicts = collectEvVarsPat upat
     match_var <- selectMatchVar upat
-    tm_cs <- genCaseTmCs2 (Just bind_rhs) [upat] [match_var]
+    core_rhs <- dsLExpr bind_rhs
+    tm_cs <- genCaseTmCs1 (Just core_rhs) [match_var]
     match_result <- addDictsDs dicts $
                     addTmCsDs tm_cs  $
                       -- See Note [Type and Term Equality Propagation] in Check
                     matchGuards stmts ctx rhs rhs_ty
-    core_rhs <- dsLExpr bind_rhs
     match_result' <- matchSinglePatVar match_var (StmtCtxt ctx) pat rhs_ty
                                        match_result
     pure $ adjustMatchResult (bindNonRec match_var core_rhs) match_result'
